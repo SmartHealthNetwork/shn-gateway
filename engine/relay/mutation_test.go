@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package relay
 
 import (

@@ -1,0 +1,33 @@
+# SHN gateway metrics to Splunk Enterprise or Splunk Cloud Platform (HTTP Event Collector, a metrics index).
+# Gateway: OTEL_METRICS_EXPORTER=otlp, OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318.
+# Collector env: SPLUNK_HEC_TOKEN (secret), SPLUNK_HEC_URL (for example https://splunk.example:8088/services/collector),
+#                SPLUNK_METRICS_INDEX (a metrics index).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+
+exporters:
+  splunk_hec:
+    token: ${env:SPLUNK_HEC_TOKEN}
+    endpoint: ${env:SPLUNK_HEC_URL}
+    index: ${env:SPLUNK_METRICS_INDEX}
+    source: shn-gateway
+    sourcetype: otel
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [splunk_hec]

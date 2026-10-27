@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // pas_correlation_reuse_test.go — a correlation id is the requester's own

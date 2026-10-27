@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // pas_ledger_write_test.go — a record this payer gateway could not write never

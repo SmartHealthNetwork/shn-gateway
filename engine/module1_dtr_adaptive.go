@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_dtr_adaptive.go — the provider-side drive of an SDC ADAPTIVE questionnaire
 // (sdc-questionnaire-questionnaireAdaptive): $questionnaire-package delivers the first
 // group(s); every later, enableWhen-gated group is handed out by the payer's

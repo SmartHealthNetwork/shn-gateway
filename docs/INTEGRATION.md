@@ -324,7 +324,9 @@ For a legacy or non-FHIR system of record (HL7v2, X12, SQL, SOAP), implement the
 [`connectors/scaffold/README.md`](../connectors/scaffold/README.md) for the
 step-by-step: copy `scaffold.go`, fill the read methods against your backend
 (obtaining the network's opaque patient identifier from `shnsdk.ResolvePCI`), and wire your
-connector through the already-public `engine.Config.SoR` seam.
+connector through the already-public `engine.Config.SoR` seam. This is a Go
+integration: the Go APIs carry no compatibility promise
+([`STABILITY.md`](../STABILITY.md)), so pin the gateway version you build against.
 
 ## System-of-record read failures
 
@@ -476,10 +478,11 @@ binary's environment variables expose. `Config.Adjudicator` (`shnsdk.Adjudicator
 same interface the standalone SDK `shnsdk.Responder` uses) is declared for source
 compatibility but is **no longer read by anything**: setting it alone does nothing;
 wrap it in your own `LegResponder` implementation if you want the engine to call it. See
-[`STABILITY.md`](../STABILITY.md) for the supported `engine` seams.
+[`STABILITY.md`](../STABILITY.md): the Go APIs, `engine` among them, are SHN-internal.
 
-> **Note:** The `engine.LegResponder` interface is an **internal, unstable 0.x
-> seam** — it may change in any minor version. Do not depend on it directly.
+> **Note:** The `engine.LegResponder` interface, like every Go API of the
+> gateway, carries no compatibility promise — it may change in any release. Do
+> not depend on it directly.
 
 ## Native-forward payer mode
 
@@ -492,11 +495,12 @@ records, or, if it keeps no system of record (`FHIR_DATA_URL` unset, from v0.58.
 `501` "coverage eligibility is not offered by this payer". A native-forward payer may leave
 `FHIR_DATA_URL` unset: its gateway then binds each member from the request that names it,
 as it binds any member a system of record does not hold. `PAYER_DAVINCI_PAS_NATIVE`
-still parses (back-compat) but is a no-op: PAS forwarding was never independently
-optional-off, since the in-process fallback it used to gate is deleted. From
-shn-gateway v0.60.0, setting it to any value only prints a notice that PAS forwards
-regardless, and leaving it unset prints nothing; v0.39.0 through v0.59.x print a
-similar notice whenever it is not `true`, unset included.
+is no longer read: PAS forwarding was never independently optional-off, since the
+in-process fallback it used to gate is deleted. From shn-gateway v1.0.0, setting it
+to any value only logs `gateway: WARNING: PAYER_DAVINCI_PAS_NATIVE is set but no
+longer read` at boot, and leaving it unset logs nothing. Earlier releases printed a
+notice that PAS forwards regardless: v0.60.0 through v0.63.x when it was set,
+v0.39.0 through v0.59.x whenever it was not `true`, unset included.
 
 See [CONFIGURATION.md](CONFIGURATION.md#native-forward-payer-mode-payer_davinci_)
 for the full field reference, including the exactly-one-mode credential rule, and
@@ -575,30 +579,47 @@ request). What the FHIR check covers, per leg:
   your gateway supports: first the line the leg was sent at (the payer's declared
   line, or your gateway's own line when the payer declared none), then the lines
   the answer's versioned `meta.profile` names, then the lines its structural
-  markers point to, then 2.2, 2.1 and 2.0 where your gateway can validate them. It
-  is valid if it conforms to any, refused only when it conforms to none, and one
+  markers claim, then 2.2, 2.1 and 2.0 where your gateway can validate them. What
+  the answer claims is read as claims, each a set of lines met when any one of them
+  is judged: a versioned `meta.profile` claims its line, and a structural marker
+  (`qr-context`, `qr-coverage`, `extension-certificationType` or
+  `extension-serviceItemRequestType`) claims the lines whose IG packages define it
+  where it sits. From v1.0.0, `qr-coverage` claims 2.2 and the other three claim
+  every line, so they decide nothing on their own; no other extension claims a line.
+  It is valid if it conforms to any line (from v1.0.0, not while the line the leg
+  was sent at, or a claim none of whose lines was judged, has a default validator
+  lane that has not qualified yet: the check is then unavailable), refused only when
+  it conforms to none, and one
   finding records the line the leg was sent at and each line tried with its
   verdict (a finding that the answer was valid only on another line is not a
-  defect). If no line is valid and the line the leg was sent at, or a line the
-  answer names, could not be checked, the check is unavailable: recorded at
+  defect). If no line is valid and the line the leg was sent at could not be
+  checked, or a claim the answer makes was met by none of its lines, the check is
+  unavailable: recorded at
   `observe` and `structural`, refused at `strict`. Each line beyond the one the leg
   was sent at gets at most 2 seconds; one that does not answer in time is recorded
   as unavailable for that line. An answer that names a supported line your gateway
   has no validator for is recorded rather than refused at `structural`, because that
   line could not be checked. When your gateway has no validator for the line the leg
   was sent at, the first line it actually checks gets the same 2-second bound. At `strict` an answer whose check cannot run
-  is refused. SHN's reference payers, identified by payer identity
+  is refused. No payer is exempt (from shn-gateway v1.0.0; before, a gateway on the
+  `provider-data` or `demo` lane did not validate SHN's reference payers' answers). To
+  tolerate a payer's known defects, list it in `CONFORMANCE_TOLERATE_PEERS`
+  (CONFIGURATION.md): a defect this check would refuse is then recorded and the answer
+  carried, the finding marked `tolerated`; the content rules on the answer still refuse,
+  and a check that cannot run is still refused.
+  SHN's reference payers, identified by payer identity
   (`urn:oid:2.16.840.1.113883.6.300` `00001`, `00300`, `00301`, and SHN's two
-  bridging-demo payers under `urn:shn:demo-payer`, which front `00001`), answering a
-  gateway on the `provider-data` or `demo` lane are the exception: their answers
-  are not validated, because their packages do not yet conform (the 2.0 reference
-  payer's DTR package fails DTR 2.0.1). Judging a payer's confirmed line alone,
-  more strictly, may be introduced later.
+  bridging-demo payers under `urn:shn:demo-payer`, which front `00001`), do not yet
+  conform at every request (the 2.0 reference payer's DTR package to a request with no
+  order fails DTR 2.0.1), so a gateway at `structural` or `strict` that originates to them
+  lists them to carry their answers. Judging a payer's confirmed line alone, more
+  strictly, may be introduced later.
 - From shn-gateway v0.63.0, a payer's answer to a PAS submission, amendment or inquiry your
   provider gateway carries for your own system through its Da Vinci ingress (`$submit`,
   `$inquire`) is validated the same way, at the same lines and level: refused `502`
   ("ingress validation failed") where it would be refused, and `500` at `strict` when the
-  check cannot run. No reference payer's carried answer is exempt. Before v0.63.0 such an
+  check cannot run. No payer's carried answer is exempt, and from v1.0.0 the payers listed
+  in `CONFORMANCE_TOLERATE_PEERS` are tolerated here too. Before v0.63.0 such an
   answer was read only by the content rules (its answer graph and its patient linkage), so
   one that conformed to no IG line was carried at every level.
 - Of coverage eligibility, the payer's gateway validates the request, and both gateways
@@ -615,12 +636,13 @@ request). What the FHIR check covers, per leg:
 A level applies only to what these checks cover. Whether they run, and what a
 defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
 
-- `none`: no payload conformance check runs and no finding is recorded. The message
+- `none` (from v1.0.0, the default when the variable is unset): no payload
+  conformance check runs and no finding is recorded. The message
   relays as sent, apart from the gateway's registered edits (the callback removed,
   prefetch and coverage obtained when the provider opts in with
   `ENRICH_NATIVE_REQUESTS=true`, and payer identity mapping; participant protocol
   §7a.4).
-- `observe` (the default when the variable is unset): every check runs and each
+- `observe` (the default when the variable is unset, before v1.0.0): every check runs and each
   defect is recorded as a finding — it does not stop the message, which is carried
   as sent, apart from the gateway's registered edits. A validator that cannot be
   reached is recorded the same way. From v0.60.0 a check that can only record

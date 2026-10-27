@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -34,7 +36,7 @@ func TestBuildWiresPublishedPayerIdentitiesToNativeResponder(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 // export_test.go re-exports the in-package test fixtures for the EXTERNAL test

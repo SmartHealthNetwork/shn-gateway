@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // testRequestingProvider is the participant record a prior-authorization request

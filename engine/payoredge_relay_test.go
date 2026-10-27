@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -207,14 +209,15 @@ func pasSubmitResponder(t *testing.T, opts ...NativeOption) (*nativeResponder, *
 	p := newStubPartner(t)
 	p.respByPath["/Claim/$submit"] = fixturePASResponse(t,
 		[]byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`), true)
-	return NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", newCensusSoR(), fixedClock, opts...), p
+	return NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock,
+		append([]NativeOption{WithCRDService("order-sign"), WithPASStore(newCensusSoR())}, opts...)...), p
 }
 
 func crdResponder(t *testing.T, opts ...NativeOption) (*nativeResponder, *stubPartner) {
 	t.Helper()
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = crdPartnerCoverageCard
-	return NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, opts...), p
+	return NewNativeResponder(p.srv.Client(), p.srv.URL, nil, append([]NativeOption{WithCRDService("order-sign")}, opts...)...), p
 }
 
 func handlePAS(t *testing.T, n *nativeResponder, body []byte) LegResult {
@@ -293,7 +296,7 @@ func TestPayorEdge_NoOpByteIdentical(t *testing.T) {
 			t.Fatalf("status %d: %s", res.Status, res.Message)
 		}
 		assertSent(t, p, signed)
-		pl, _ := requestOwnership(t, n, signed, payorEdgePASBundle)
+		pl, _ := requestOwnership(t, n, signed, payorEdgeClaimBundle)
 		if pl.Ownership() != relay.OwnershipRelayed {
 			t.Fatalf("ownership %v, want relayed", pl)
 		}
@@ -321,7 +324,7 @@ func TestPayorEdge_EditTouchesOnlyIdentityTokens(t *testing.T) {
 		tokenEdit{pasCoverageInlineSystem, payorMapped.System},
 		tokenEdit{pasCoverageInlineValue, payorMapped.Value},
 	))
-	pl, _ := requestOwnership(t, n, body, payorEdgePASBundle)
+	pl, _ := requestOwnership(t, n, body, payorEdgeClaimBundle)
 	if pl.Ownership() != relay.OwnershipEdited || !slices.Equal(pl.Edits(), []relay.EditID{relay.EditPayorEdgeRestamp}) {
 		t.Fatalf("payload %v, want edited by the payer-identity mapping only", pl)
 	}
@@ -493,7 +496,7 @@ func TestPayorEdge_ResolvesSiblingTarget(t *testing.T) {
 			`{"name":"coverage","resource":` + string(cov) + `},` +
 			`{"name":"referenced","resource":{"resourceType":"Organization","id":"sib-payer","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}}]}`)
 		n, _ := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
-		pl, lr := requestOwnership(t, n, params, payorEdgeDTRParameters)
+		pl, lr := requestOwnership(t, n, params, payorEdgeParametersCoverage)
 		if lr.Status != 0 {
 			t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 		}
@@ -712,7 +715,7 @@ func TestPayorEdge_CRDWithoutCoverage(t *testing.T) {
 
 	t.Run("refused: a request that is not an object", func(t *testing.T) {
 		for _, root := range []string{`[]`, `null`, `"prefetch"`} {
-			ops, err := locatePayorEdge(payorDoc(t, []byte(root)), payorEdgeCRDRequest,
+			ops, err := locatePayorEdge(payorDoc(t, []byte(root)), payorEdgeCDSHooksPrefetch,
 				[]shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity}, payorMapped, nil)
 			var refused *payorEdgeRefused
 			if ops != nil || !errors.As(err, &refused) || refused.status != http.StatusBadRequest ||
@@ -743,7 +746,7 @@ func TestPayorEdge_CRDWithoutCoverage(t *testing.T) {
 	// no Coverage is still refused.
 	t.Run("refused: a PAS Bundle with no Coverage", func(t *testing.T) {
 		n, _ := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
-		_, lr := requestOwnership(t, n, []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`), payorEdgePASBundle)
+		_, lr := requestOwnership(t, n, []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`), payorEdgeClaimBundle)
 		if lr.Status != http.StatusBadRequest || !strings.Contains(lr.Message, "inbound Coverage carries no resolvable payor identifier") {
 			t.Fatalf("got %d %q", lr.Status, lr.Message)
 		}
@@ -760,7 +763,7 @@ func TestPayorEdge_RepeatedDTRCoverages(t *testing.T) {
 	s, _ := d.Span(nodeAt(t, d, "parameter"))
 	body := slices.Concat(fixture[:s+1], second, fixture[s+1:])
 	n, _ := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
-	pl, lr := requestOwnership(t, n, body, payorEdgeDTRParameters)
+	pl, lr := requestOwnership(t, n, body, payorEdgeParametersCoverage)
 	if lr.Status != 0 {
 		t.Fatalf("refused: %d %s", lr.Status, lr.Message)
 	}
@@ -779,21 +782,21 @@ func TestPayorEdge_RepeatedDTRCoverages(t *testing.T) {
 	t.Run("coverages naming two payers are refused", func(t *testing.T) {
 		mixed := replaceValue(t, body, []byte(`"00002"`), jsonPath("parameter.0.resource.payor.0.identifier.value")...)
 		n, _ := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
-		_, lr := requestOwnership(t, n, mixed, payorEdgeDTRParameters)
+		_, lr := requestOwnership(t, n, mixed, payorEdgeParametersCoverage)
 		if lr.Status != http.StatusUnprocessableEntity || !strings.Contains(lr.Message, "name more than one payer") {
 			t.Fatalf("got %d %q", lr.Status, lr.Message)
 		}
 	})
 	t.Run("a coverage naming another payer is refused, not skipped", func(t *testing.T) {
 		n, _ := crdResponder(t, WithPayorEdgeIdentity(payorNPI, payorMapped))
-		_, lr := requestOwnership(t, n, body, payorEdgeDTRParameters)
+		_, lr := requestOwnership(t, n, body, payorEdgeParametersCoverage)
 		if lr.Status != http.StatusBadRequest {
 			t.Fatalf("got %d %q", lr.Status, lr.Message)
 		}
 	})
 	t.Run("no coverage parameter is sent exactly", func(t *testing.T) {
 		none := []byte(`{"resourceType":"Parameters","parameter":[{"name":"questionnaire","valueCanonical":"http://example.org/q"}]}`)
-		pl, lr := requestOwnership(t, n, none, payorEdgeDTRParameters)
+		pl, lr := requestOwnership(t, n, none, payorEdgeParametersCoverage)
 		if lr.Status != 0 || pl.Ownership() != relay.OwnershipRelayed {
 			t.Fatalf("got %v %d %q", pl, lr.Status, lr.Message)
 		}

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // eligibility_bundle_test.go — the Bundle forms of

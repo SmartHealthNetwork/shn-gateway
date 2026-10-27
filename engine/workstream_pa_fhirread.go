@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_fhirread.go — self-contained json-level FHIR subject readers for the (C)
 // outbound fence (fenceResponseSubject). These were originally added to the
 // LOCAL sdk/ module but the gateway's standalone Docker build resolves

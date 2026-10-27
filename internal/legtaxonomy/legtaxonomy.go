@@ -36,7 +36,10 @@ const (
 type Taxonomy struct {
 	Workstream      string `json:"workstream"`
 	TaxonomyVersion int    `json:"taxonomyVersion"`
-	Legs            []Leg  `json:"legs"`
+	// Contracts are the contract families the workstream's messages are built
+	// to, each with its lines, as the network publishes them in discovery.
+	Contracts map[string][]string `json:"contracts,omitempty"`
+	Legs      []Leg               `json:"legs"`
 }
 
 // Leg is one row.

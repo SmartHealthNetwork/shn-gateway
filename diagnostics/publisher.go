@@ -108,6 +108,10 @@ type publishResult struct {
 
 var errEvidenceExpired = errors.New("diagnostics: evidence publication expired")
 
+// lastHeartbeatWait bounds the heartbeat sent after the drain at stop, which
+// counts what was left: a step of the gateway's documented stop budget.
+const lastHeartbeatWait = time.Second
+
 func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 	if q == nil {
 		return errors.New("diagnostics: nil queue")
@@ -343,7 +347,7 @@ func RunPublisher(ctx context.Context, q *Queue, cfg PublisherConfig) error {
 	draining, drainEnd = true, cfg.Clock().Add(cfg.Drain)
 	_ = deliver(drainCtx)
 	q.dropRemaining(stopped)
-	last, cancelLast := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	last, cancelLast := context.WithTimeout(context.WithoutCancel(ctx), lastHeartbeatWait)
 	defer cancelLast()
 	sendHeartbeat(last, time.Time{})
 	return ctx.Err()

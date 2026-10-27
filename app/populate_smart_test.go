@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 // populate_smart_test.go: the PROVIDER_DTR_POPULATE_* SMART Backend Services
@@ -303,9 +305,16 @@ func TestProviderDTRPopulateTokenFetch_MissingKeyReplays(t *testing.T) {
 	}
 }
 
-// buildProviderForPopulate boots a ROLE=provider gateway through build() with
-// the given PROVIDER_DTR_POPULATE_* variables and returns build's stdout.
+// buildProviderForPopulate boots a ROLE=provider gateway running module 1 (the
+// demo profile, which the operated $populate serves) through build() with the
+// given PROVIDER_DTR_POPULATE_* variables and returns build's stdout.
 func buildProviderForPopulate(t *testing.T, populate map[string]string) (built, string, error) {
+	t.Helper()
+	return buildRoleForPopulate(t, "provider", populate)
+}
+
+// buildRoleForPopulate is buildProviderForPopulate for a gateway of any role.
+func buildRoleForPopulate(t *testing.T, role string, populate map[string]string) (built, string, error) {
 	t.Helper()
 	fhirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/metadata") {
@@ -324,7 +333,7 @@ func buildProviderForPopulate(t *testing.T, populate map[string]string) (built, 
 	}))
 	t.Cleanup(keys.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
 
@@ -333,16 +342,17 @@ func buildProviderForPopulate(t *testing.T, populate map[string]string) (built, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := shnsdk.WriteBundle(dir, id, "provider", "https://holder.example"); err != nil {
+	if err := shnsdk.WriteBundle(dir, id, role, "https://holder.example"); err != nil {
 		t.Fatal(err)
 	}
 
 	env := map[string]string{
-		"ROLE":               "provider",
-		"SHN_SECRETS":        dir,
-		"SHN_DISCOVERY_URL":  disc.URL,
-		"SHN_FAKE_VALIDATOR": "1",
-		"FHIR_DATA_URL":      fhirSrv.URL,
+		"ROLE":                role,
+		"ORIGINATION_PROFILE": "demo",
+		"SHN_SECRETS":         dir,
+		"SHN_DISCOVERY_URL":   disc.URL,
+		"SHN_FAKE_VALIDATOR":  "1",
+		"FHIR_DATA_URL":       fhirSrv.URL,
 	}
 	for k, v := range populate {
 		env[k] = v
@@ -399,6 +409,44 @@ func TestBuild_ProviderDTRPopulateUnauthenticatedWarning(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "populate client key") {
 			t.Fatalf("build err = %v, want the populate key-load failure", err)
+		}
+	})
+}
+
+// TestBuild_ResponderProfileWiresNoOperatedPopulate: only a provider originates,
+// so a payer's or facility's gateway that sets an origination profile, with no
+// PROVIDER_DTR_POPULATE_URL, boots without the operated $populate populator and
+// without the UNAUTHENTICATED warning. A provider with the endpoint wires it.
+func TestBuild_ResponderProfileWiresNoOperatedPopulate(t *testing.T) {
+	for _, row := range []struct {
+		role string
+		env  map[string]string
+	}{
+		{"payer", map[string]string{"PAYER_DAVINCI_BASE_URL": "http://127.0.0.1:1/fhir"}},
+		{"facility", nil},
+	} {
+		t.Run(row.role, func(t *testing.T) {
+			b, out, err := buildRoleForPopulate(t, row.role, row.env)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if b.operatedPopulate {
+				t.Errorf("ROLE=%s ORIGINATION_PROFILE=demo wired the operated $populate populator; only a provider originates", row.role)
+			}
+			if strings.Contains(out, populateUnauthWarning) {
+				t.Errorf("stdout = %q, want no populate warning on ROLE=%s", out, row.role)
+			}
+		})
+	}
+	t.Run("provider", func(t *testing.T) {
+		b, _, err := buildProviderForPopulate(t, map[string]string{
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		})
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if !b.operatedPopulate {
+			t.Error("ROLE=provider ORIGINATION_PROFILE=demo with PROVIDER_DTR_POPULATE_URL wired no operated $populate populator")
 		}
 	})
 }

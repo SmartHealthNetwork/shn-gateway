@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate_wait.go — what the provider gateway's OWN originator flows do when a
 // payer pends a prior authorization.
 //
@@ -198,6 +200,10 @@ type pasFollowInputs struct {
 	orderRef     string
 	orderJSON    []byte
 	supplierJSON []byte
+	// requester is the records the order's requester leads to, read from the
+	// participant's own system once, before any leg (pasOriginationBeforeAnyLeg).
+	// Every PAS request about the order carries them (carryOrderRequester).
+	requester [][]byte
 	// memberSystem is the namespace the participant's own system names this
 	// member under, carried from the one reading of their Patient.
 	memberSystem string
@@ -218,7 +224,7 @@ type pasFollowInputs struct {
 // read as a prior-authorization answer at all. An approval, a denial and a pend
 // all come back as a PASDecision with status 0.
 func (g *Gateway) submitClaimAndFollow(ctx context.Context, r *http.Request, in pasFollowInputs) (PASDecision, int, string, error) {
-	sub, status, msg, err := g.submitPASClaim(ctx, r, in.pci, in.orderJSON, in.supplierJSON, in.source, in.coverage, in.insurer, in.patientRef, in.coverageRef, in.member, in.memberSystem, in.payer, in.recipient)
+	sub, status, msg, err := g.submitPASClaim(ctx, r, in.pci, in.orderJSON, in.supplierJSON, in.requester, in.source, in.coverage, in.insurer, in.patientRef, in.coverageRef, in.member, in.memberSystem, in.payer, in.recipient)
 	if status != 0 {
 		return PASDecision{}, status, msg, err
 	}
@@ -777,12 +783,14 @@ func orderServiceDate(order []byte) string {
 // complaint from deep inside it, with no reference to look at — and the one
 // persona seeded to exercise this path named a Practitioner, so the path was
 // broken and unreadable at the same time.
-// held are records this flow ALREADY holds for the order it is about — the
-// dispatched supplier is the one case: the dispatch step read (or, on the demo
-// lane whose order this gateway authored, built) that Organization before the
-// prior authorization began, and the request carries those same bytes. Looking
-// there first is not a fallback identity: the reference must still name that
-// record, and anything else goes to the participant's system as before.
+// held are records this flow ALREADY holds for the order it is about: the
+// dispatched supplier, which the dispatch step read (or, on the demo lane whose
+// order this gateway authored, built) before the prior authorization began, and
+// the records the order's requester leads to, read once before any leg
+// (orderRequesterRecords). The request carries those same bytes, so the provider
+// it names is the record it carries, not a second reading of it. Looking there
+// first is not a fallback identity: the reference must still name that record,
+// and anything else goes to the participant's system as before.
 func (g *Gateway) pasProvider(ctx context.Context, order []byte, held ...[]byte) (ref string, resource []byte, status int, msg string) {
 	ref, resource, err := shnsdk.SelectPASProvider(order, func(reference string) ([]byte, bool, error) {
 		for _, rec := range held {
@@ -867,8 +875,8 @@ func pasResourceID(resource []byte) string {
 // pasProviderOrFail is pasProvider for a scenario handler: it writes the refusal
 // itself, so every originator flow refuses an order naming no carryable provider
 // in the same words rather than each inventing its own.
-func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, order []byte) ([]byte, bool) {
-	_, provider, status, msg := g.pasProvider(r.Context(), order)
+func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, order []byte, held ...[]byte) ([]byte, bool) {
+	_, provider, status, msg := g.pasProvider(r.Context(), order, held...)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return nil, false

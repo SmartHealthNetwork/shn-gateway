@@ -108,7 +108,7 @@ func TestSlotlessCaptureKeepsNoOversizedOrMissingProof(t *testing.T) {
 			t.Errorf("%s: the proof was the only header, yet the headers are not complete", name)
 		}
 	}
-	// The bound is 2 KiB, as STABILITY.md states it.
+	// The bound is 2 KiB, as CHANGELOG.md states it.
 	if maxSlotlessTraceBytes != 2048 {
 		t.Fatalf("maxSlotlessTraceBytes = %d, want 2048", maxSlotlessTraceBytes)
 	}

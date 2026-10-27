@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -20,7 +22,7 @@ func TestCompletePatient_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(g, "/scenario/uc07/complete", "")))
 	st := pendState{scenario: "uc07", srJSON: []byte(`{"resourceType":"ServiceRequest","status":"active"}`)} // no id
 
-	if ok := g.completePatient(w, r, st, ""); ok {
+	if ok := g.completePatient(w, r, st, "42"); ok {
 		t.Fatalf("completePatient returned ok=true for an order without an id; want fail-closed")
 	}
 	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "carries no identity in the system of record") {
@@ -42,7 +44,7 @@ func TestCompleteClinician_ProviderData_RejectsOrderWithoutID(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(g, "/scenario/uc06/complete", "")))
 	st := pendState{scenario: "uc06", srJSON: []byte(`{"resourceType":"ServiceRequest","status":"active"}`)} // no id
 
-	if ok := g.completeClinician(w, r, st, "", ""); ok {
+	if ok := g.completeClinician(w, r, st, "42"); ok {
 		t.Fatalf("completeClinician returned ok=true for an order without an id; want fail-closed")
 	}
 	if w.Code != http.StatusBadGateway {

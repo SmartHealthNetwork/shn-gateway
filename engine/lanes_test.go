@@ -1,65 +1,220 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
+// Callers that arrive while an attempt runs share it: one qualifier call, and
+// none once the lane is ready.
 func TestDiscoveredLaneQualification(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(map[bool]string{false: "ready", true: "terminal failure"}[fail], func(t *testing.T) {
-			v := shnsdk.NewFakeValidator()
-			d := NewDiscoveredLane("2.1", "http://validator/fhir", v)
-			if d.Ready() {
-				t.Fatal("new lane is ready")
+	v := shnsdk.NewFakeValidator()
+	d := NewDiscoveredLane("2.1", "http://validator/fhir", v)
+	if d.Ready() {
+		t.Fatal("new lane is ready")
+	}
+	if _, err := d.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), ""); err == nil {
+		t.Fatal("unqualified lane validated")
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	q := func(ctx context.Context, base, line string) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return nil
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := d.Qualify(context.Background(), q); err != nil {
+				t.Errorf("qualification error=%v", err)
 			}
-			if _, err := d.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), ""); err == nil {
-				t.Fatal("unqualified lane validated")
-			}
-			started, release := make(chan struct{}), make(chan struct{})
-			var calls atomic.Int32
-			q := func(ctx context.Context, base, line string) error {
-				calls.Add(1)
-				close(started)
-				<-release
-				if fail {
-					return errors.New("negative control passed")
-				}
-				return nil
-			}
-			var wg sync.WaitGroup
-			for i := 0; i < 8; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					err := d.Qualify(context.Background(), q)
-					if (err != nil) != fail {
-						t.Errorf("qualification error=%v", err)
-					}
-				}()
-			}
-			<-started
-			if d.Ready() {
-				t.Fatal("warming lane ready")
-			}
-			close(release)
-			wg.Wait()
-			if d.Ready() == fail || calls.Load() != 1 {
-				t.Fatalf("ready=%v calls=%d", d.Ready(), calls.Load())
-			}
-			_ = d.Qualify(context.Background(), q)
-			if calls.Load() != 1 {
-				t.Fatal("terminal qualifier retried")
-			}
-		})
+		}()
+	}
+	<-started
+	if d.Ready() {
+		t.Fatal("warming lane ready")
+	}
+	close(release)
+	wg.Wait()
+	if !d.Ready() || calls.Load() != 1 {
+		t.Fatalf("ready=%v calls=%d", d.Ready(), calls.Load())
+	}
+	_ = d.Qualify(context.Background(), q)
+	if calls.Load() != 1 || d.State().Attempts != 1 {
+		t.Fatalf("a ready lane qualified again: calls=%d attempts=%d", calls.Load(), d.State().Attempts)
+	}
+}
+
+// A failed qualification is not final: the lane stays unqualified and
+// says why, and the next attempt that passes makes it ready, with no restart.
+func TestDiscoveredLaneFailedQualificationIsRetried(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	fail := errors.New("qualification corpus did not pass")
+	var calls atomic.Int32
+	q := func(context.Context, string, string) error {
+		if calls.Add(1) == 1 {
+			return fail
+		}
+		return nil
+	}
+	if err := d.Qualify(context.Background(), q); !errors.Is(err, fail) {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if st := d.State(); st.Ready || st.Attempts != 1 || st.Failures != 1 || !errors.Is(st.Err, fail) {
+		t.Fatalf("after a failure: %+v", st)
+	}
+	if _, err := d.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), ""); err == nil {
+		t.Fatal("a lane that failed its qualification validated")
+	}
+	if err := d.Qualify(context.Background(), q); err != nil {
+		t.Fatalf("second attempt: %v", err)
+	}
+	if st := d.State(); !st.Ready || st.Attempts != 2 || st.Failures != 0 || st.Err != nil {
+		t.Fatalf("after a pass: %+v", st)
+	}
+	if _, err := d.Validate(context.Background(), []byte(`{"resourceType":"Patient"}`), ""); err != nil {
+		t.Fatalf("a lane that qualified on a retry does not validate: %v", err)
+	}
+}
+
+// The rejection row: a lane whose attempts keep failing never becomes ready.
+func TestDiscoveredLaneNeverReadyOnFailure(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	for i := 1; i <= 3; i++ {
+		if err := d.Qualify(context.Background(), func(context.Context, string, string) error { return errors.New("down") }); err == nil {
+			t.Fatal("a failing qualifier passed")
+		}
+		if st := d.State(); st.Ready || st.Failures != i {
+			t.Fatalf("attempt %d: %+v", i, st)
+		}
+	}
+}
+
+func TestLaneBackoffDoublesToItsCap(t *testing.T) {
+	b := LaneBackoff{Base: 15 * time.Second, Max: 5 * time.Minute}
+	for failures, want := range map[int]time.Duration{1: 15 * time.Second, 2: 30 * time.Second, 3: time.Minute, 5: 4 * time.Minute, 6: 5 * time.Minute, 40: 5 * time.Minute} {
+		if got := b.Wait(failures); got != want {
+			t.Errorf("Wait(%d) = %v, want %v", failures, got, want)
+		}
+	}
+	if got := DefaultLaneBackoff(nil).Wait(1); got != 15*time.Second {
+		t.Errorf("default first wait %v", got)
+	}
+}
+
+// Jitter spreads lanes that failed together over the upper half of the step,
+// so gateways restarted by one deploy do not retry in lockstep.
+func TestLaneBackoffJitterSpreadsLockstepRetries(t *testing.T) {
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 10; i++ {
+		u := float64(i) / 10
+		b := LaneBackoff{Base: 15 * time.Second, Max: 5 * time.Minute, Jitter: func() float64 { return u }}
+		w := b.Wait(2)
+		if w < 15*time.Second || w > 30*time.Second {
+			t.Fatalf("jittered wait %v outside [15s, 30s]", w)
+		}
+		seen[w] = true
+	}
+	if len(seen) != 10 {
+		t.Fatalf("ten jitter draws gave %d distinct waits", len(seen))
+	}
+}
+
+// KeepQualifying retries on the backoff until an attempt passes, logs state
+// changes only, counts every attempt, and stops when its context ends.
+func TestKeepQualifyingRetriesUntilReady(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	var calls atomic.Int32
+	q := func(context.Context, string, string) error {
+		if calls.Add(1) < 4 {
+			return errors.New("qualification corpus did not pass")
+		}
+		return nil
+	}
+	var waits []time.Duration
+	var changes []string
+	var attempts []bool
+	s := LaneSchedule{
+		Backoff: LaneBackoff{Base: 15 * time.Second, Max: 5 * time.Minute},
+		After: func(w time.Duration) <-chan time.Time {
+			waits = append(waits, w)
+			c := make(chan time.Time, 1)
+			c <- time.Time{}
+			return c
+		},
+		Changed: func(st LaneState, next time.Duration) {
+			changes = append(changes, fmt.Sprintf("ready=%v attempts=%d next=%v", st.Ready, st.Attempts, next))
+		},
+		Attempted: func(ready bool) { attempts = append(attempts, ready) },
+	}
+	if err := d.KeepQualifying(context.Background(), q, s); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Ready() || calls.Load() != 4 {
+		t.Fatalf("ready=%v calls=%d", d.Ready(), calls.Load())
+	}
+	if want := []time.Duration{15 * time.Second, 30 * time.Second, time.Minute}; fmt.Sprint(waits) != fmt.Sprint(want) {
+		t.Errorf("waits %v, want %v", waits, want)
+	}
+	if want := []string{"ready=false attempts=1 next=15s", "ready=true attempts=4 next=0s"}; fmt.Sprint(changes) != fmt.Sprint(want) {
+		t.Errorf("state changes %q, want %q (one per change, not per attempt)", changes, want)
+	}
+	if fmt.Sprint(attempts) != "[false false false true]" {
+		t.Errorf("attempts %v", attempts)
+	}
+}
+
+func TestKeepQualifyingStopsWithItsContext(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	ctx, cancel := context.WithCancel(context.Background())
+	s := LaneSchedule{
+		Backoff: LaneBackoff{Base: time.Hour, Max: time.Hour},
+		After:   func(time.Duration) <-chan time.Time { cancel(); return make(chan time.Time) },
+	}
+	err := d.KeepQualifying(ctx, func(context.Context, string, string) error { return errors.New("down") }, s)
+	if !errors.Is(err, context.Canceled) || d.Ready() {
+		t.Fatalf("err=%v ready=%v", err, d.Ready())
+	}
+}
+
+// A failure whose reason changes is a state change of its own; the same
+// reason again is not.
+func TestKeepQualifyingLogsAReasonChange(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	errs := []error{
+		fmt.Errorf("%w: down", lanequalify.ErrCorpus), fmt.Errorf("%w: down", lanequalify.ErrCorpus),
+		&lanequalify.MetadataStatusError{Status: 503}, nil,
+	}
+	var calls atomic.Int32
+	var changes int
+	s := LaneSchedule{
+		Backoff: LaneBackoff{Base: time.Second, Max: time.Second},
+		After:   func(time.Duration) <-chan time.Time { c := make(chan time.Time, 1); c <- time.Time{}; return c },
+		Changed: func(LaneState, time.Duration) { changes++ },
+	}
+	if err := d.KeepQualifying(context.Background(), func(context.Context, string, string) error { return errs[calls.Add(1)-1] }, s); err != nil {
+		t.Fatal(err)
+	}
+	if changes != 3 {
+		t.Fatalf("%d state changes, want 3: the first failure, the new reason, ready", changes)
 	}
 }
 
@@ -219,5 +374,40 @@ func TestNoDefaultLanesShapeRefusesPAAtTheAliasedLine(t *testing.T) {
 	}
 	if g.validatorForContractLine("x.single", "2.1") == nil {
 		t.Error("the single-line contract lost its canonical alias")
+	}
+}
+
+// A zero backoff waits the default steps, never a tight loop.
+func TestLaneBackoffZeroIsTheDefault(t *testing.T) {
+	if got := (LaneBackoff{}).Wait(1); got != 15*time.Second {
+		t.Fatalf("zero backoff first wait %v, want 15s", got)
+	}
+	if got := (LaneBackoff{}).Wait(40); got != 5*time.Minute {
+		t.Fatalf("zero backoff cap %v, want 5m", got)
+	}
+}
+
+// A qualifier that panics still ends its attempt: the lane records a failure
+// and the next caller is not left waiting on it.
+func TestDiscoveredLaneSurvivesAPanickingQualifier(t *testing.T) {
+	d := NewDiscoveredLane("2.2", "http://validator/fhir", shnsdk.NewFakeValidator())
+	func() {
+		defer func() { _ = recover() }()
+		_ = d.Qualify(context.Background(), func(context.Context, string, string) error { panic("qualifier bug") })
+	}()
+	if st := d.State(); st.Ready || st.Attempts != 1 || st.Failures != 1 {
+		t.Fatalf("after a panic: %+v", st)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- d.Qualify(context.Background(), func(context.Context, string, string) error { return nil })
+	}()
+	select {
+	case err := <-done:
+		if err != nil || !d.Ready() {
+			t.Fatalf("after a panic, a passing attempt: %v ready=%v", err, d.Ready())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a caller after a panicked attempt is blocked")
 	}
 }

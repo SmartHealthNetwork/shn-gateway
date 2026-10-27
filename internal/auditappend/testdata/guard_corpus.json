@@ -1,0 +1,2461 @@
+{
+  "recordIds": [
+    "00000000000000000000000000",
+    "0000000001040G2081040G2081",
+    "01KVEJTS00B9D5MPJTB9D5MPJT",
+    "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"
+  ],
+  "signPub": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+  "signed": [
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "provider-tpo",
+      "scope": "pas-bundle",
+      "outcome": "authored",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+      "version": 2,
+      "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+      "module": {
+        "body": "request",
+        "leg": "pa.pas-claim",
+        "ownership": "authored",
+        "builder": "sdk-pas-submit",
+        "edits": [],
+        "lineFrom": "",
+        "lineTo": "",
+        "loss": []
+      },
+      "signatures": [
+        "Nw/4BpTaeI/JdTEMnT13jX/1BDvL/Z18LEwM7WgGqf3qRRfE5tLDvLo6wqNlWSVpJbGcNp2KdTRMFaNPy3UPDQ=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "provider-tpo",
+      "scope": "pas-bundle",
+      "outcome": "edited",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+      "version": 2,
+      "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+      "module": {
+        "body": "request",
+        "leg": "pa.pas-claim",
+        "ownership": "edited",
+        "builder": "sdk-pas-submit",
+        "edits": [
+          "E-09"
+        ],
+        "lineFrom": "2.1",
+        "lineTo": "2.2",
+        "loss": [
+          {
+            "kind": "carried",
+            "path": "Claim.item.extension"
+          }
+        ]
+      },
+      "signatures": [
+        "M/CqMlx/Rg2QkJMnoeWbHd/R8BTMGGUG+bVYfN37jg0ix0W8o3G9Twl4wO/XQavvTBZeEbIolxEhBeZOaF4YCQ=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "provider-tpo",
+      "scope": "questionnaire-only",
+      "outcome": "edited",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+      "version": 2,
+      "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+      "module": {
+        "body": "answer",
+        "leg": "pa.dtr-questionnaire-fetch",
+        "ownership": "edited",
+        "builder": "",
+        "edits": [
+          "E-08"
+        ],
+        "lineFrom": "",
+        "lineTo": "",
+        "loss": []
+      },
+      "signatures": [
+        "qZwLUPhRUEMGdysCqc1dB+kNGpntd+dIKfIUc8b0sHs2klLAquTablh8CDwv34BD+rPgeQame9bkoaCjzKnhCg=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "provider-a",
+      "transactionType": "gateway-start",
+      "authorityFrame": "",
+      "scope": "",
+      "outcome": "started",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+      "version": 2,
+      "gateway": {
+        "version": "v1.0.0",
+        "wireVersions": [
+          "1.1.0",
+          "2.0.0"
+        ],
+        "modules": [
+          "conformance",
+          "on-behalf"
+        ]
+      },
+      "signatures": [
+        "dRA7jEq3oIqgzOCMkP4fqSq+AgGDHSPtbZ9FZJ3pGWOPZ2SwURZ0CSi8bOTJ7J6ekFBdAzJ+4sND+k4Rrt4JAw=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "",
+      "scope": "",
+      "outcome": "authored",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+      "version": 2,
+      "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+      "module": {
+        "body": "request",
+        "leg": "pa.pas-claim",
+        "ownership": "authored",
+        "builder": "sdk-pas-submit",
+        "edits": [],
+        "lineFrom": "",
+        "lineTo": "",
+        "loss": []
+      },
+      "signatures": [
+        "LK0HKEh1ijv83z+L8Wc5jlwbFXdeYQnTF5rSemfSUIOcbBdayMPjVUQ1uOg5FT6NAXKNjQZbWGP4BEge76OaAw=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00.123456789Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "provider-tpo",
+      "scope": "pas-bundle",
+      "outcome": "authored",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+      "version": 2,
+      "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+      "module": {
+        "body": "request",
+        "leg": "pa.pas-claim",
+        "ownership": "authored",
+        "builder": "sdk-pas-submit",
+        "edits": [],
+        "lineFrom": "",
+        "lineTo": "",
+        "loss": []
+      },
+      "signatures": [
+        "195p9iExkYkO4dzwyGCXuWJhL+e6enAH9HND8D6Nqev94r14Ye2+UInLi8pPW8iaf1RAW4+57a0s9lpUigBjCg=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "payer-b",
+      "transactionType": "module-details",
+      "authorityFrame": "provider-tpo",
+      "scope": "pas-bundle",
+      "outcome": "authored",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+      "version": 2,
+      "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+      "module": {
+        "body": "request",
+        "leg": "pa.pas-claim",
+        "ownership": "authored",
+        "builder": "sdk-pas-submit",
+        "edits": null,
+        "lineFrom": "",
+        "lineTo": "",
+        "loss": null
+      },
+      "signatures": [
+        "Nw/4BpTaeI/JdTEMnT13jX/1BDvL/Z18LEwM7WgGqf3qRRfE5tLDvLo6wqNlWSVpJbGcNp2KdTRMFaNPy3UPDQ=="
+      ]
+    },
+    {
+      "timestamp": "2026-06-04T00:00:00Z",
+      "sender": "provider-a",
+      "recipient": "provider-a",
+      "transactionType": "gateway-start",
+      "authorityFrame": "",
+      "scope": "",
+      "outcome": "started",
+      "consentRef": "",
+      "subjectPCI": "",
+      "payloadBundleHash": "",
+      "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+      "version": 2,
+      "gateway": {
+        "version": "v1.0.0",
+        "wireVersions": null,
+        "modules": null
+      },
+      "signatures": [
+        "+TzIQ91Tv3pjk9252zVzpuJedMHp1WIGdnKQ1i5BhYjDKRP71MUz+W19A6/2pdUyTHo9mlZypLY/Ufb8BLCJCw=="
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "module-details authored (SDK vector)",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module-details bridged (SDK vector)",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "Claim.item.extension"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "module-details edited, no builder",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": [
+            "E-08"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "gateway-start (SDK vector)",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "module-details with no frames",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module-details timestamp with nanoseconds",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00.123456789Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module-details with nil lists",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": null,
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": null
+        }
+      }
+    },
+    {
+      "name": "gateway-start with nil lists",
+      "holder": "provider-a",
+      "accept": true,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": null,
+          "modules": null
+        }
+      }
+    },
+    {
+      "name": "version 1",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "version 3",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 3,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "sender is another holder",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-z",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "an exchange record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "pa.pas-claim",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a"
+      }
+    },
+    {
+      "name": "a conformance-finding record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "conformance-finding",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "relayed",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "finding": {
+          "kind": "fhir-ingress",
+          "level": "observe",
+          "whose": "peer",
+          "line": "",
+          "profile": "",
+          "rule": "",
+          "verdict": "",
+          "issueCount": 0
+        }
+      }
+    },
+    {
+      "name": "oversized sender",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recipient": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "oversized recipient",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "oversized authorityFrame",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "scope with a space",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "scope with a control character",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas\nbundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "no recordId",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "lowercase recordId",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01jzx5a7b8c9d0e1f2g3h4ja03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "recordId overflowing 128 bits",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "81JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "timestamp with an offset",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00+01:00",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "timestamp not a time",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "yesterday",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "correlationId not bounded",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "payloadBundleHash in capitals",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2E7C9A1F4B6D8E0A3C5F7B9D1E3A5C7F9B2D4E6A8C0F1B3D5E7A9C2E4B6D8F0A",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "a subjectPCI",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "pci-1",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "an involvement",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "involvement": "responder-held",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "a consentRef",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "consent-1",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "resends",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "resends": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "a finding on a module record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "finding": {
+          "kind": "fhir-ingress",
+          "level": "observe",
+          "whose": "peer",
+          "line": "",
+          "profile": "",
+          "rule": "",
+          "verdict": "",
+          "issueCount": 0
+        },
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "a gateway on a module record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        },
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a module on a start record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        },
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "no module",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a"
+      }
+    },
+    {
+      "name": "outcome relayed",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "relayed",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "ownership differs from outcome",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "recipient is the sender",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "no payloadBundleHash",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "no correlationId",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module.body outside its set",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "response",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module.leg flat",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "coverage-eligibility",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "module.leg unknown",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.no-such-leg",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "17 edits",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": [
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08",
+            "E-08"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "an edit outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": [
+            "E-8"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "builder outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "SDK PAS",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "authored with an edit",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-08"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "authored with no builder",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "edited with no edit",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": null,
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "builder on another edit (SDK refused vector)",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "sdk-dtr-package",
+          "edits": [
+            "E-08"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "lineFrom without lineTo",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "Claim.item.extension"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a line outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2 2",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "Claim.item.extension"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "lines without a line-bridge edit",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": [
+            "E-08"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": []
+        }
+      }
+    },
+    {
+      "name": "loss without lines",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "questionnaire-only",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "answer",
+          "leg": "pa.dtr-questionnaire-fetch",
+          "ownership": "edited",
+          "builder": "",
+          "edits": [
+            "E-08"
+          ],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "33 losses",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            },
+            {
+              "kind": "carried",
+              "path": "Claim.item"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a loss kind outside its set",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": [
+            {
+              "kind": "dropped",
+              "path": "Claim.item.extension"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a loss path outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": [
+            {
+              "kind": "carried",
+              "path": "1bad path"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a truncated loss not last",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "edited",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "4a6c8e0b2d4f6a8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b1d3f5a7c",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA04",
+        "version": 2,
+        "correlationId": "8e3f5a7b9c1d2e4f6a8b0c3d5e7f9a1b",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "edited",
+          "builder": "sdk-pas-submit",
+          "edits": [
+            "E-09"
+          ],
+          "lineFrom": "2.1",
+          "lineTo": "2.2",
+          "loss": [
+            {
+              "kind": "truncated",
+              "path": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "no gateway",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2
+      }
+    },
+    {
+      "name": "start outcome not started",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "start recipient another holder",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "start with a leg member",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "start with a frame",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "provider-tpo",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "gateway.version outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "9 wire versions",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.0.0",
+            "1.1.0",
+            "1.2.0",
+            "1.3.0",
+            "1.4.0",
+            "1.5.0",
+            "1.6.0",
+            "1.7.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a wire version outside its shape",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "2.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a module outside its set",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "pdex"
+          ]
+        }
+      }
+    },
+    {
+      "name": "modules unsorted",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "on-behalf",
+            "conformance"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a module twice",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "conformance"
+          ]
+        }
+      }
+    }
+  ]
+}

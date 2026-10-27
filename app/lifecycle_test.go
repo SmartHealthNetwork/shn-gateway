@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -58,7 +60,7 @@ func lifecycleEnv(t *testing.T, failBuild bool) (map[string]string, <-chan struc
 		body, status := `{}`, http.StatusOK
 		switch r.URL.Path {
 		case "/discovery":
-			body = `{"endpoints":{},"authzPublicKeyURL":"http://fixture.test/key","hubTransportKeyURL":"http://fixture.test/key"}`
+			body = `{` + acceptingWire + `"endpoints":{},"authzPublicKeyURL":"http://fixture.test/key","hubTransportKeyURL":"http://fixture.test/key"}`
 		case "/key":
 			body = fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(make([]byte, 32)))
 		case "/registrar/holders":

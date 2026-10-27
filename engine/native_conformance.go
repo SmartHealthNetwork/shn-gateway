@@ -21,9 +21,15 @@ func (n *nativeResponder) ConformanceLevelForTest() ConformanceEnforcement {
 }
 
 // module is the responder's module 3: the level WithConformancePolicy gave
-// it (the app passes the gateway's own), strict with none. Every payload
-// conformance check of the responder asks it.
-func (n *nativeResponder) module() conformanceModule { return n.conformance }
+// it (the app passes the gateway's own), strict with none, or absent when the
+// responder opted out of loading it. Every payload conformance check of the
+// responder asks it.
+func (n *nativeResponder) module() conformanceModule {
+	if n.moduleAbsent {
+		return newAbsentModule()
+	}
+	return n.conformance
+}
 
 // bindFindingEmitter receives the engine's finding emitter after engine.New
 // builds the gateway. It cannot be a NativeOption: NewNativeResponder runs

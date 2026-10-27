@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_dtr_ingress.go — the DTR $questionnaire-package ingress: the EHR's own
 // operation input (its Parameters) is carried to the payer exactly, or, when
 // the participant opts in to enrichment, with the registered edits that add,
@@ -13,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -513,35 +516,40 @@ func (g *Gateway) dtrPayorRefs(ctx context.Context, prepared *dtrIngressRequest)
 // dtrIngressRecipient routes a prepared request by every coverage it
 // carries: each must name a registered payer, and all of them the same one
 // (422 otherwise). Each payor Organization is looked up as dtrPayorRefs
-// says.
-func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRequest) (string, int, string) {
+// says. payers is the payer identities the coverages named, each once: the
+// identity the exchange is routed by, which decides whose answer it is.
+func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRequest) (string, []shnsdk.PayerIdentifier, int, string) {
 	refs, unresolved, readErr := g.dtrPayorRefs(ctx, &prepared)
 	recipient := ""
+	var payers []shnsdk.PayerIdentifier
 	for _, cov := range prepared.coverages {
-		holder, status, msg := g.recipientForCoverages([][]byte{cov}, refs)
+		holder, pid, status, msg := g.recipientForCoverages([][]byte{cov}, refs)
 		if *readErr != nil {
 			status, msg := SoRFailureResponse(*readErr)
-			return "", status, msg
+			return "", nil, status, msg
 		}
 		if msg == noPayerIdentifier {
 			// An Organization reference nothing resolved names the remedy
 			// that resolves it (unresolvedPayor); another kind of payor
 			// keeps the bare text. A resolved payor with no payer
 			// identifier already says why (recipientForCoverages).
-			return "", status, unresolved.refusal(msg)
+			return "", nil, status, unresolved.refusal(msg)
 		}
 		if status != 0 {
-			return "", status, msg
+			return "", nil, status, msg
 		}
 		if recipient != "" && holder != recipient {
-			return "", http.StatusUnprocessableEntity, "coverages name more than one payer"
+			return "", nil, http.StatusUnprocessableEntity, "coverages name more than one payer"
 		}
 		recipient = holder
+		if !slices.Contains(payers, pid) {
+			payers = append(payers, pid)
+		}
 	}
 	if recipient == "" {
-		return "", http.StatusUnprocessableEntity, "no coverage in request or system of record"
+		return "", nil, http.StatusUnprocessableEntity, "no coverage in request or system of record"
 	}
-	return recipient, 0, ""
+	return recipient, payers, 0, ""
 }
 
 // keptPayorResolver resolves a payor Organization that a coverage the EHR

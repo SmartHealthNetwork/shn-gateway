@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -23,16 +25,6 @@ const oswestryLinkID = "functional-status-oswestry"
 // $questionnaire-package.
 const hhaFunctionalStatusLinkID = "3.2"
 
-// defaultHHAFunctionalLimitations is the operator-supplied free-text functional-status narrative for
-// the provider-data UC-06 clinician attestation when none is provided (the free-text analog of the
-// retired stub's Oswestry "42"; D-2RI-1 — operator-supplied, NOT derived from a clinical SoR fact).
-const defaultHHAFunctionalLimitations = "Impaired ambulation and reduced lower-extremity strength limiting independent mobility; skilled physical therapy indicated."
-
-// defaultHHAFunctionalLimitationsPatient is the operator-supplied free-text functional-status narrative
-// for provider-data UC-07 when the patient provides none (the patient analog of the clinician default;
-// D-2RI-1 — operator-supplied, NOT a real patient's authored value, which is DEF-9/OIDC-LOCAL).
-const defaultHHAFunctionalLimitationsPatient = "I have trouble walking and standing without help and need physical therapy to regain my strength and mobility."
-
 // pendState is the provider's own in-flight PA workflow state for a PENDED
 // attestation scenario (UC-06/UC-07), held under an opaque resume token between
 // the run-to-PENDED step and the resume-to-APPROVED step. It is the provider's
@@ -53,8 +45,12 @@ type pendState struct {
 	// like the rest of pendState.
 	questionnaireJSON []byte
 	srJSON            []byte
-	patientRef        string
-	coverageRef       string
+	// requester is the records the pended order's requester leads to, read once
+	// at origination: the resume ClaimUpdate carries the same records rather
+	// than reading the clinician a second time.
+	requester   [][]byte
+	patientRef  string
+	coverageRef string
 	// coverage is the member's OWN Coverage record the pended submit named, pinned
 	// at run-to-PENDED: the resume ClaimUpdate is made under the SAME policy, and a
 	// payer that stored the authorization under one coverage and is amended under
@@ -93,7 +89,7 @@ type pendState struct {
 	// — pasRestoreCarriedExtensions cannot itself tell "never carried" from
 	// "carried, then stripped". Additive: empty for every flow this build
 	// originates today (no SHN builder emits a 2.2-only top-level Claim
-	// extension — transform_pas.go's pas22OnlyClaimExtensions note), so the
+	// extension — workstream_pa_transform_pas.go's pas22OnlyClaimExtensions note), so the
 	// guard is a no-op with zero cost on every existing path.
 	carriedEntries []shnsdk.LossEntry
 	// claimFacts are the request facts the pended submission's request stated
@@ -109,6 +105,10 @@ type pendState struct {
 
 // moduleOnePending is module 1's in-flight pend state: the resume tokens of
 // the two-phase /scenario/* routes, per process. Its zero value is empty.
+// storePending, loadPending, dropPending and pendingForPatient need the state
+// New installs (moduleOneState) and panic without it: only module 1's own
+// handlers call them, on a gateway New built, so a missing state is a bug.
+// Reset alone runs without it.
 type moduleOnePending struct {
 	mu      sync.Mutex
 	byToken map[string]pendState
@@ -117,32 +117,37 @@ type moduleOnePending struct {
 // storePending saves st under a fresh opaque resume token and returns it.
 func (g *Gateway) storePending(st pendState) string {
 	token := newCorrelationID() // crypto-random hex (16 bytes)
-	g.pending.mu.Lock()
-	defer g.pending.mu.Unlock()
-	if g.pending.byToken == nil {
-		g.pending.byToken = map[string]pendState{}
+	p := &g.moduleOneState().pending
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.byToken == nil {
+		p.byToken = map[string]pendState{}
 	}
-	g.pending.byToken[token] = st
+	p.byToken[token] = st
 	return token
 }
 
 // loadPending returns the state for token, if present.
 func (g *Gateway) loadPending(token string) (pendState, bool) {
-	g.pending.mu.Lock()
-	defer g.pending.mu.Unlock()
-	st, ok := g.pending.byToken[token]
+	p := &g.moduleOneState().pending
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st, ok := p.byToken[token]
 	return st, ok
 }
 
 // dropPending deletes token's state (idempotent).
 func (g *Gateway) dropPending(token string) {
-	g.pending.mu.Lock()
-	defer g.pending.mu.Unlock()
-	delete(g.pending.byToken, token)
+	p := &g.moduleOneState().pending
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.byToken, token)
 }
 
 // Reset clears the pending-scenario store (POST /scenario/reset calls it, so a
-// fresh demo run starts with no stale in-flight PAs).
+// fresh demo run starts with no stale in-flight PAs). A gateway assembled
+// without New keeps no pend state (moduleOneState), so only the store half
+// below runs on one.
 //
 // The two halves have different reach, by design. The pending map is per-process demo
 // session state (the two-phase /scenario/* routes), so a reset clears it at the replica
@@ -164,9 +169,11 @@ func (g *Gateway) dropPending(token string) {
 // fail, it is what the demo session needs, and leaving it stale would add a second
 // failure to the one being reported; a retry re-runs both halves.
 func (g *Gateway) Reset() error {
-	g.pending.mu.Lock()
-	g.pending.byToken = nil
-	g.pending.mu.Unlock()
+	if st := g.moduleOneState(); st != nil {
+		st.pending.mu.Lock()
+		st.pending.byToken = nil
+		st.pending.mu.Unlock()
+	}
 	// The store reset runs outside the pend lock, which guards only the pend
 	// state: holding it across a durable store's round trip would stall every
 	// in-flight pend and resolve for its duration. A fresh demo run starts with
@@ -177,10 +184,11 @@ func (g *Gateway) Reset() error {
 // pendingForPatient returns the resume token of a pended scenario for (scenario,
 // pci), if any. Read-only over the same store the two-phase start/complete use.
 func (g *Gateway) pendingForPatient(scenario, pci string) (string, bool) {
-	g.pending.mu.Lock()
-	defer g.pending.mu.Unlock()
+	p := &g.moduleOneState().pending
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	// Assumes at most one in-flight pend per (scenario, pci); returns an arbitrary match otherwise (map iteration order).
-	for token, st := range g.pending.byToken {
+	for token, st := range p.byToken {
 		if st.scenario == scenario && st.pci == pci {
 			return token, true
 		}

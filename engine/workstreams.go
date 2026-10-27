@@ -26,6 +26,10 @@ type workstream interface {
 	// ingressRoutes are the workstream's ingress handlers, by the route each
 	// exchange record names (ExchangeRoutes).
 	ingressRoutes() map[string]ingressHandler
+	// ingressOperations are the operations the workstream's ingress records
+	// name beside the leg (ExchangeRecord.Operation), or nil. The frame
+	// operations its legs declare come from its catalog.
+	ingressOperations() []string
 	// canonicalContractVersion is the contract-version token the deployment's
 	// canonical validator (Config.Validator, FHIR_VALIDATE_URL) resolves for the
 	// workstream, or "" when the workstream names none.
@@ -52,8 +56,9 @@ type workstream interface {
 	ownershipRows() map[relay.Key]relay.Rule
 	// certifiedBuilds are the workstream's builder and line pairs that
 	// build-time certification proves, each with the make validate test that
-	// proves it (certifiedbuilds.go), or nil.
-	certifiedBuilds() map[certifiedBuild]string
+	// proves it and the shn-sdk release it holds from (certifiedbuilds.go), or
+	// nil.
+	certifiedBuilds() map[certifiedBuild]certification
 	// certification is the workstream's part in certifying its legs'
 	// payloads (certificationAdapter, species.go), or nil when it certifies
 	// none.
@@ -74,22 +79,65 @@ type workstream interface {
 	// as given, or nil. New refuses to construct a gateway on any.
 	checkStore(s Store) error
 	// newGatewayState is the workstream's own state on a new gateway g, or
-	// nil for a workstream that keeps none there.
-	newGatewayState(g *Gateway) gatewayState
+	// nil for a workstream that keeps none there; an error refuses the
+	// gateway's configuration, and New refuses with it.
+	newGatewayState(g *Gateway) (gatewayState, error)
+	// newNativeState is the workstream's own forward state on a new native
+	// responder n, or nil for a workstream that keeps none there. It runs
+	// before the responder's options, so an option the workstream declares
+	// writes into it.
+	newNativeState(n *nativeResponder) nativeState
+	// lineBridge is the workstream's contribution to module 2 (IG-line
+	// translation): its rows of the compatibility manifest and the legs and
+	// answers its chain treats specially (lineBridgeRows); the zero value for
+	// a workstream that contributes none.
+	lineBridge() lineBridgeRows
+	// relayEdits are the registered edits on the workstream's legs
+	// (relay.Edit rows); every leg each names is a leg of its catalog.
+	relayEdits() []relayEdit
 }
 
-// gatewayState is one workstream's own state on a gateway
-// (workstream.newGatewayState). The workstream that made it is the one that
-// reads it.
+// gatewayState is one workstream's or module's own state on a gateway
+// (workstream.newGatewayState, gatewayModule.newGatewayState). The workstream
+// or module that made it is the one that reads it.
 type gatewayState any
 
-// workstreams are the workstreams compiled into this build: Prior
-// Authorization (workstream_pa.go) and Federated Query Services
-// (workstream_fqs.go). Another workstream is a sibling adapter with its own
-// taxonomy and catalog. Only the lookups in this file read it. Each entry is
-// an adapter variable that holds its catalog, so Go initializes every catalog
-// before the registry (a call through the interface would order nothing).
-var workstreams = append([]workstream{paAdapter, fqsAdapter}, profileWorkstreams()...)
+// nativeState is one workstream's own forward state on a native responder
+// (workstream.newNativeState). The workstream that made it is the one that
+// reads it.
+type nativeState any
+
+// workstreams are the workstreams compiled into this build: the zones'
+// (zoneWorkstreams: Prior Authorization and Federated Query Services, none in
+// the core-only profile) and a test profile's. Another workstream is a sibling
+// adapter with its own taxonomy and catalog. Only the lookups in this file
+// read it. Each entry is an adapter variable that holds its catalog, so Go
+// initializes every catalog before the registry (a call through the interface
+// would order nothing).
+var workstreams = append(zoneWorkstreams(), profileWorkstreams()...)
+
+// gatewayModule is one module compiled into this gateway that is not a
+// workstream: a client of the network the participant's gateway runs for it,
+// such as on-behalf building (module 1), which builds and sends a
+// participant's requests for a system that cannot. The core builds the
+// module's state and mounts its routes through it and names none of its code.
+type gatewayModule interface {
+	// id names the module's own state on a gateway (Gateway.moduleStates).
+	id() string
+	// newGatewayState is the module's own state on a new gateway g, built
+	// after New's options, or nil for a module that keeps none there; an
+	// error refuses the gateway's configuration, and New refuses with it.
+	newGatewayState(g *Gateway) (gatewayState, error)
+	// routes are the module's routes on g. role is the gateway's own
+	// (routes() passes cfg.Role); a module may declare its routes once, for
+	// that role, as New builds its state, and return what it declared.
+	routes(g *Gateway, role string) []mountedRoute
+}
+
+// modules are the modules compiled into this build (zoneModules: on-behalf
+// building, none in the core-only profile). Only the lookups in this file
+// read it.
+var modules = zoneModules()
 
 // catalogFor is the leg catalog of the compiled-in workstream whose content is
 // tagged workstreamType; ok is false when this build serves no such
@@ -110,12 +158,38 @@ func catalogFor(workstreamType string) (catalog map[string]legSpec, ok bool) {
 // catalogs, and so are the request and response operations a leg's authority
 // is bound to (TestWorkstreams_LegsAreUniqueAcrossCatalogs).
 func legSpecFor(transactionType string) (legSpec, bool) {
+	leg, _ := canonicalLeg(transactionType)
 	for _, w := range workstreams {
-		if s, ok := w.catalog()[transactionType]; ok {
+		if s, ok := w.catalog()[leg]; ok {
 			return s, true
 		}
 	}
 	return legSpec{}, false
+}
+
+// canonicalLeg is the leg a stated transaction-type name names, in either
+// form: the flat name (wire protocol 1.1.0, "pas-claim") or the prefixed one
+// (2.0.0, "pa.pas-claim"). A name no leg has is returned as stated, unknown,
+// and is refused where a leg is looked up, as it always was.
+func canonicalLeg(stated string) (string, bool) {
+	for _, w := range workstreams {
+		for tx, s := range w.catalog() {
+			if tx == stated || (s.WireName != "" && s.WireName == stated) {
+				return tx, true
+			}
+		}
+	}
+	return stated, false
+}
+
+// wireName is the name this gateway sends for the leg txType: its prefixed
+// name. A leg whose catalog row has none (a test's own row) keeps its flat
+// name.
+func wireName(txType string) string {
+	if s, ok := legSpecFor(txType); ok && s.WireName != "" {
+		return s.WireName
+	}
+	return txType
 }
 
 // legAnswerCheck certifies an answer at the routed line and this gateway's own
@@ -177,11 +251,45 @@ func workstreamMemStates() map[string]memState {
 
 // workstreamGatewayStates is each compiled-in workstream's own state on a new
 // gateway g, by workstream id; a workstream that keeps none there has no
-// entry.
-func workstreamGatewayStates(g *Gateway) map[string]gatewayState {
+// entry. The first workstream's refusal is returned instead.
+func workstreamGatewayStates(g *Gateway) (map[string]gatewayState, error) {
 	out := map[string]gatewayState{}
 	for _, w := range workstreams {
-		if st := w.newGatewayState(g); st != nil {
+		st, err := w.newGatewayState(g)
+		if err != nil {
+			return nil, err
+		}
+		if st != nil {
+			out[w.id()] = st
+		}
+	}
+	return out, nil
+}
+
+// moduleGatewayStates is each compiled-in module's own state on a new gateway
+// g, by module id; a module that keeps none there has no entry. The first
+// module's refusal is returned instead.
+func moduleGatewayStates(g *Gateway) (map[string]gatewayState, error) {
+	out := map[string]gatewayState{}
+	for _, m := range modules {
+		st, err := m.newGatewayState(g)
+		if err != nil {
+			return nil, err
+		}
+		if st != nil {
+			out[m.id()] = st
+		}
+	}
+	return out, nil
+}
+
+// workstreamNativeStates is each compiled-in workstream's own forward state
+// on a new native responder n, by workstream id; a workstream that keeps none
+// there has no entry.
+func workstreamNativeStates(n *nativeResponder) map[string]nativeState {
+	out := map[string]nativeState{}
+	for _, w := range workstreams {
+		if st := w.newNativeState(n); st != nil {
 			out[w.id()] = st
 		}
 	}
@@ -197,6 +305,46 @@ func workstreamStoreFault(s Store) error {
 		}
 	}
 	return nil
+}
+
+// workstreamCompatSteps are the compiled-in workstreams' compatibility
+// manifest rows, in registry order (compatManifest).
+func workstreamCompatSteps() []CompatStep {
+	var out []CompatStep
+	for _, w := range workstreams {
+		out = append(out, w.lineBridge().steps...)
+	}
+	return out
+}
+
+// workstreamLegSet is the set of legs rows names across the compiled-in
+// workstreams' module 2 contributions (envelopeEgressLegs, verbatimChainLegs).
+func workstreamLegSet(rows func(lineBridgeRows) []string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range workstreams {
+		for _, leg := range rows(w.lineBridge()) {
+			out[leg] = true
+		}
+	}
+	return out
+}
+
+// answerBridges are the answers the compiled-in workstreams' module 2
+// contributions edit, by relay key (AdaptAnswer); set at package init.
+var answerBridges map[relay.Key]answerBridge
+
+// init derives module 2's tables from the compiled-in workstreams' lineBridge
+// rows. It runs after every package-level variable is set: E-08's bridge walks
+// the manifest (chainFor), so the tables cannot be initializers of their own
+// without an initialization cycle.
+func init() {
+	compatManifest = workstreamCompatSteps()
+	envelopeEgressLegs = workstreamLegSet(func(r lineBridgeRows) []string { return r.envelopeEgressLegs })
+	verbatimChainLegs = workstreamLegSet(func(r lineBridgeRows) []string { return r.verbatimChainLegs })
+	answerBridges = map[relay.Key]answerBridge{}
+	for _, w := range workstreams {
+		maps.Copy(answerBridges, w.lineBridge().answers)
+	}
 }
 
 // workstreamFor is the compiled-in workstream whose catalog declares leg.
@@ -236,6 +384,45 @@ func init() {
 		panic(err)
 	}
 	relay.RegisterOwnership(legs, rows)
+}
+
+// relayEdits is the closed edit registry: every compiled-in
+// workstream's edits, in the relay package's id order.
+var relayEdits = mustRelayEdits(workstreamRelayEdits(workstreams))
+
+func mustRelayEdits(edits []relayEdit, err error) []relayEdit {
+	if err != nil {
+		panic(err)
+	}
+	return edits
+}
+
+// workstreamRelayEdits is the edits ws's adapters register, in the relay
+// package's id order. An edit naming a leg no catalog of its own adapter
+// declares is refused here; an id outside the relay package's closed set, or
+// an id two edits declare, is refused by relay.ValidateEdits.
+func workstreamRelayEdits(ws []workstream) ([]relayEdit, error) {
+	order := map[relay.EditID]int{}
+	for i, id := range relay.EditIDs() {
+		order[id] = i
+	}
+	var out []relayEdit
+	for _, w := range ws {
+		catalog := w.catalog()
+		for _, e := range w.relayEdits() {
+			for _, leg := range e.Legs {
+				if _, ok := catalog[leg]; !ok {
+					return nil, fmt.Errorf("workstream %q: edit %s names %q, no leg of its catalog", w.id(), e.ID, leg)
+				}
+			}
+			out = append(out, e)
+		}
+	}
+	if err := relay.ValidateEdits(out); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b relayEdit) int { return order[a.ID] - order[b.ID] })
+	return out, nil
 }
 
 // workstreamOwnership is the legs of ws's catalogs and the ownership rows
@@ -288,6 +475,34 @@ func workstreamIngressRouteNames() []string {
 	return out
 }
 
+// workstreamOperations are the operations an exchange record names on the
+// compiled-in workstreams' legs (operationsOf).
+func workstreamOperations() []string { return operationsOf(workstreams) }
+
+// operationsOf are the operations an exchange record names on ws's legs:
+// each workstream's ingress operations, then the frame operations its
+// catalog's legs declare, by transaction type, each value once.
+func operationsOf(ws []workstream) []string {
+	var out []string
+	add := func(op string) {
+		if !slices.Contains(out, op) {
+			out = append(out, op)
+		}
+	}
+	for _, w := range ws {
+		for _, op := range w.ingressOperations() {
+			add(op)
+		}
+		catalog := w.catalog()
+		for _, leg := range slices.Sorted(maps.Keys(catalog)) {
+			for _, op := range catalog[leg].FrameOperations {
+				add(op)
+			}
+		}
+	}
+	return out
+}
+
 // certificationAdapters are the compiled-in workstreams' certification
 // adapters, in registry order.
 func certificationAdapters() []certificationAdapter {
@@ -332,10 +547,10 @@ func profileFor(species, line, leg string) (string, bool) {
 }
 
 // answerLineClaims is the order of lines to judge an answer on contract at
-// and the lines the answer itself points to, by the adapter of the
-// workstream that declares contract; none when that workstream certifies
-// nothing.
-func answerLineClaims(contract string, payload []byte) ([]string, map[string]bool) {
+// and what the answer itself points to (each claim a set of lines), by the
+// adapter of the workstream that declares contract; none when that workstream
+// certifies nothing.
+func answerLineClaims(contract string, payload []byte) ([]string, []claimSet) {
 	for _, w := range workstreams {
 		a := w.certification()
 		if a == nil || !declaresContract(w, contract) {
@@ -343,7 +558,21 @@ func answerLineClaims(contract string, payload []byte) ([]string, map[string]boo
 		}
 		return a.lineClaims(payload)
 	}
-	return nil, map[string]bool{}
+	return nil, nil
+}
+
+// answerCandidateGroups is the compiled-in workstream's candidate groups for a
+// payer's answer of contract (certificationAdapter.candidateGroups); nil when
+// no workstream restricts them.
+func answerCandidateGroups(contract string, payload []byte) [][]string {
+	for _, w := range workstreams {
+		a := w.certification()
+		if a == nil || !declaresContract(w, contract) {
+			continue
+		}
+		return a.candidateGroups(contract, payload)
+	}
+	return nil
 }
 
 // declaresContract reports whether w builds a line of contract natively.
@@ -368,11 +597,11 @@ func certificationExcuse(errs []fhirIssue, body []byte, line, profile string) {
 
 // certifiedBuilds is the union of the compiled-in workstreams' certified
 // builder and line pairs (workstream.certifiedBuilds, certifiedbuilds.go).
-var certifiedBuilds = func() map[certifiedBuild]string {
-	out := map[certifiedBuild]string{}
+var certifiedBuilds = func() map[certifiedBuild]certification {
+	out := map[certifiedBuild]certification{}
 	for _, w := range workstreams {
-		for pair, test := range w.certifiedBuilds() {
-			out[pair] = test
+		for pair, c := range w.certifiedBuilds() {
+			out[pair] = c
 		}
 	}
 	return out
@@ -426,6 +655,15 @@ func (g *Gateway) workstreamRoutes(role string) (out []mountedRoute) {
 	return out
 }
 
+// moduleRoutes are every compiled-in module's routes for role on g, in
+// registry order.
+func (g *Gateway) moduleRoutes(role string) (out []mountedRoute) {
+	for _, m := range modules {
+		out = append(out, m.routes(g, role)...)
+	}
+	return out
+}
+
 // legSpec is the per-leg-type contract the origination and inbound sides both
 // read. ReqFrame is the originator's authority frame ("provider-tpo" for every
 // PA leg today); RespFrame is the responder's. Op/RespOp
@@ -448,14 +686,18 @@ type legSpec struct {
 	// bespoke patient-dtr JSON) and is never filtered or stamped. Every adapter
 	// row states it explicitly (pinned for PA by TestPACatalog_Contracts).
 	Contract string
-	// OperationHeader reports that the leg's request frame may name the
-	// operation its body is the input of: the taxonomy declares frame
-	// operations for it. Which operation values are served is the leg's own
+	// FrameOperations are the operations the taxonomy declares the leg's
+	// request frame may name as the one its body is the input of, or nil for
+	// a leg whose frame names none. Which of them are served is the leg's own
 	// decision.
-	OperationHeader bool
+	FrameOperations []string
 	// Seam names where the leg's inbound request is judged, on the findings
 	// its checks record (gatewayConformance.certify's seam strings).
 	Seam string
+	// WireName is the leg's name on the wire from wire protocol 2.0.0: the
+	// transaction type with its workstream's prefix (the taxonomy's
+	// stagedName, "pa.pas-claim"). The catalog stays keyed by the flat name.
+	WireName string
 }
 
 // legDetail is what a workstream adapter adds to one routable leg of its
@@ -496,11 +738,14 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 		if d.Seam == "" {
 			return nil, fmt.Errorf("workstream %q: leg %q: the adapter row names no seam", t.Workstream, l.TransactionType)
 		}
+		if want := t.Workstream + "." + l.TransactionType; l.StagedName != want {
+			return nil, fmt.Errorf("workstream %q: leg %q: its prefixed name is %q, not %q", t.Workstream, l.TransactionType, l.StagedName, want)
+		}
 		catalog[l.TransactionType] = legSpec{
 			ReqFrame: l.Request.Frame, RespFrame: l.Response.Frame,
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
-			OperationHeader: len(l.FrameOperations) > 0, Seam: d.Seam,
+			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
 		}
 	}
 	for _, tx := range slices.Sorted(maps.Keys(detail)) {
@@ -509,6 +754,15 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 		}
 	}
 	return catalog, nil
+}
+
+// frameOperations are the frame operations the taxonomy declares for l, or
+// nil when it declares none.
+func frameOperations(l legtaxonomy.Leg) []string {
+	if len(l.FrameOperations) == 0 {
+		return nil
+	}
+	return slices.Clone(l.FrameOperations)
 }
 
 // mustCatalog is catalogFromTaxonomy for a compiled-in workstream: a catalog

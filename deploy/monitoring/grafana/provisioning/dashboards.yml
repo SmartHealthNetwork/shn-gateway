@@ -1,0 +1,8 @@
+# Grafana dashboard provider for the example stack (compose.yml): loads shn-gateway.json.
+apiVersion: 1
+providers:
+  - name: shn-gateway
+    type: file
+    folder: SHN
+    options:
+      path: /var/lib/grafana/dashboards

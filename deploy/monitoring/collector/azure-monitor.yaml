@@ -1,0 +1,28 @@
+# SHN gateway metrics to Azure Monitor (Application Insights).
+# Gateway: OTEL_METRICS_EXPORTER=otlp, OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318.
+# Collector env: APPLICATIONINSIGHTS_CONNECTION_STRING (secret).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+
+exporters:
+  azuremonitor:
+    connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [azuremonitor]

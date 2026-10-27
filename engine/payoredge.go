@@ -12,14 +12,14 @@
 //     refused with a legible 400-class LegResult, never a bare error (which the engine
 //     would answer with an opaque 500); Coverages naming different payers, and a
 //     Coverage payor reference that resolves to no resource or to several, are refused
-//     with a 422. A prior-authorization Claim's insurer reference that resolves to no
+//     with a 422. A Claim's insurer reference (on a Claim Bundle) that resolves to no
 //     resource or to several is the request's own content (RuleInsurer): not checked
 //     at none, recorded at observe and left as sent, refused at strict with the same 422.
 //   - It changes only the payer identifier's system and value strings (inline on the
-//     Coverage's routing payor, payor[0], or on the Organization it references) and, for
-//     a prior-authorization request, the Claim insurer's when it names this payer (an
+//     Coverage's routing payor, payor[0], or on the Organization it references) and, on
+//     a Claim Bundle, the Claim insurer's when it names this payer (an
 //     insurer naming another identity is left as sent). The
-//     edit is the registered payer-identity edit (relayedit.go), made by relay.Apply:
+//     edit is the registered payer-identity edit (E-03, a PA row in pa/paedits), made by relay.Apply:
 //     every other byte of the request is sent exactly as it arrived, and an edit that
 //     would change signed content is refused (422) rather than made.
 //   - A mapping to the identity the request already carries makes no edit: the request
@@ -28,16 +28,14 @@
 //     sent exactly: the network already routed it to this payer, and this payer's own
 //     system answers it. On a CDS Hooks request the mapping refuses a Coverage it
 //     cannot read or that names another payer, never the absence of one. A
-//     questionnaire request with no coverage parameter is sent exactly too. A
-//     prior-authorization Bundle names its payer on its Coverage, so one without a
-//     Coverage is refused.
+//     Parameters request with no coverage parameter is sent exactly too. A Claim
+//     Bundle names its payer on its Coverage, so one without a Coverage is refused.
 //
-// Coverage carriage spans the legs this mapping covers: both CRD legs,
-// crd-order-select and crd-order-dispatch (prefetch.coverage, a bare Coverage or a
-// Bundle), dtr-questionnaire-fetch (the request's coverage), and
-// pas-claim/pas-claim-update/pas-claim-inquire (every Coverage entry of the
-// request Bundle, and each Claim.insurer — an inquiry Bundle carries both, so it
-// maps on the same carrier as a submission).
+// The mapping knows three containers (payorEdgeCarrier, relaylocate.go): a Claim
+// Bundle, a Parameters' coverage parameters and a CDS Hooks prefetch. Which legs
+// map, and on which container, is the workstream's choice: the workstream's own
+// forwards call it (the PA adapter's legs are listed in
+// workstream_pa_native_state.go).
 package engine
 
 import (

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_inquire.go — the Da Vinci prior-authorization inquiry leg (pas-claim-inquire):
 // how a requester asks a payer for the decision on an authorization the payer
 // pended, and how a payer gateway answers.
@@ -53,6 +55,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -484,7 +487,7 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // this gateway.
 func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -499,7 +502,7 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 	// this responder as a struct literal and skip the constructor's defaults;
 	// behaviour is unchanged unless WithPASBaseURL was applied.
 	inquireURL := n.resolvedURL(ctx, contract, n.pasBase(), "/Claim/$inquire")
-	up, bad, err := n.post(ctx, inquireURL, "", forward, "pas-claim-inquire", "PAS inquiry")
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerPAS)), inquireURL, "", forward, "pas-claim-inquire", "PAS inquiry")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500
 	}
@@ -915,7 +918,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	// Routed by the inquiry's OWN Coverage, the same rule the submit ingress
 	// follows: a Coverage naming no resolvable payer fails closed rather than
 	// defaulting to one.
-	recipient, _, status, msg := g.pasRecipient(body)
+	recipient, payer, status, msg := g.pasRecipient(body)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -990,7 +993,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		}
 		unread = RulePatientAnswer
 	}
-	if g.carriedAnswerRefused(answerCtx, w, answer, shnsdk.LineOf(observedTarget)) {
+	if g.carriedAnswerRefused(answerCtx, w, answer, shnsdk.LineOf(observedTarget), "pa.pas", "", []shnsdk.PayerIdentifier{payer}) {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		return
 	}

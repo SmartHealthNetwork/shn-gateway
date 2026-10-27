@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 import (
@@ -9,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 )
@@ -21,17 +25,31 @@ import (
 var _ engine.IngressKeyStore = (*IngressKeyStore)(nil)
 
 const (
-	ingressKeyRotation = 24 * time.Hour   // a new signing key this often
-	ingressKeyRefresh  = 30 * time.Second // background reload cadence (RunRefresh)
-	reloadThrottle     = time.Second      // at most one miss-driven reload per second
-	negCacheTTL        = time.Minute
-	negCacheMax        = 1024
+	// ingressKeyRotation is a key's signing life: past this age it is no longer
+	// selected, and a new key is due. It is an hour shorter than the day ingressKeyLife
+	// is sized from, so a rotation that stalls (the store unreachable when the key falls
+	// due) leaves the current key that hour of grace-signing, and the stall shows in the
+	// key's remaining life and age about an hour before /oauth/token answers 503.
+	ingressKeyRotation = 23 * time.Hour
+	// ingressKeyLife is a key's whole verification life, fixed at creation as its
+	// not_after: a day, plus a bearer's TTL and a minute of skew, so a bearer signed in
+	// the last second a key may sign (grace included: not_after - IngressBearerTTL)
+	// still verifies for its whole TTL. It does not depend on ingressKeyRotation.
+	ingressKeyLife    = 24*time.Hour + engine.IngressBearerTTL + time.Minute
+	ingressKeyRefresh = 30 * time.Second // background reload cadence (RunRefresh)
+	reloadThrottle    = time.Second      // at most one miss-driven reload per second
+	negCacheTTL       = time.Minute
+	negCacheMax       = 1024
 )
 
 type cachedKey struct {
 	key      *ecdsa.PrivateKey
 	created  time.Time
 	notAfter time.Time
+	// gen is cacheGen as this process's own adoption put the key in the cache (insertLocked),
+	// and zero for a key a reload's snapshot carried. A reload keeps a cached key its snapshot
+	// lacks only when gen is above the cacheGen it read before its SELECT (reloadQuery).
+	gen uint64
 }
 
 // keyDB is the narrow pool surface the key store uses. *pgxpool.Pool satisfies it; tests
@@ -208,6 +226,12 @@ type IngressKeyStore struct {
 	// miss trusts a snapshot only when reloadDone has passed the reloadStarted it arrived
 	// at: that reload's SELECT ran after the request did.
 	reloadStarted, reloadDone uint64
+	// cacheGen is bumped on every insert of this process's own adoption into keys
+	// (insertLocked). A reload reads it before its SELECT, so a cached key whose gen is
+	// above that reading entered the cache after the SELECT was issued: the snapshot may
+	// predate the key's commit. Any other cached key had committed before the SELECT, so a
+	// snapshot that lacks it means the row was deleted.
+	cacheGen uint64
 	// reloadEpoch is closed and replaced whenever a reload wrapper releases reloadMu,
 	// including a throttled decline. Release and replacement share mu so a cold miss
 	// cannot read a new epoch while the completed reload still holds reloadMu. It
@@ -244,6 +268,36 @@ type IngressKeyStore struct {
 	// a wall clock that flakes under -race.
 	coldWaitBound time.Duration
 	onColdWait    func()
+
+	// rotation is the signing life this store selects by: ingressKeyRotation, set by the
+	// constructor. Only a test changes it, before the store serves requests, to stand in
+	// for a replica of an earlier release that rotated at a different age (a rolling
+	// deploy's mixed fleet). Every key's not_after is ingressKeyLife whatever it is.
+	rotation time.Duration
+
+	// deferLogged and deferCount rate-limit SigningKey's "rotation deferred" line: a
+	// stall can grace-sign for up to an hour, and a line per signing would be thousands
+	// per replica. The line is written at most once per ingressKeyRefresh and carries the
+	// number of signings the store's failure deferred since the previous one; the first
+	// deferral of a stall logs at once. Guarded by signMu, which SigningKey's slow path and rotateIfDueSince hold.
+	deferLogged time.Time
+	deferCount  int
+	// lastCreateErr is the last creator transaction's failure (selectOrCreateKey), nil
+	// once a key is signing again. When only writes fail, every reload succeeds, so a
+	// throttled signing reads this to tell the stall from a healthy throttle window.
+	// Guarded by signMu.
+	lastCreateErr error
+	// createFailedAt is when the creator attempt that set lastCreateErr began. Inside
+	// one ingressKeyRefresh of it the request path makes no new attempt (creatorBackedOff):
+	// a write that hangs costs one store timeout per window, not one per token request.
+	// Guarded by signMu.
+	createFailedAt time.Time
+	// requestFailedAt is when a token request's own creator attempt (SigningKey's slow
+	// path, not the refresh tick's) last failed, and requestFailures counts those
+	// failures: the tick does not start a second attempt straight after one
+	// (rotateIfDueSince). Guarded by signMu.
+	requestFailedAt time.Time
+	requestFailures uint64
 }
 
 // reloadLatch is one in-flight reload's completion signal AND its result: err is
@@ -261,7 +315,7 @@ func NewIngressKeyStore(pool keyDB, holderID string, clock func() time.Time) *In
 		clock = time.Now
 	}
 	return &IngressKeyStore{
-		pool: pool, holderID: holderID, now: clock,
+		pool: pool, holderID: holderID, now: clock, rotation: ingressKeyRotation,
 		keys: map[string]cachedKey{}, negCache: map[string]time.Time{},
 		negRing:     make([]string, negCacheMax),
 		wake:        make(chan struct{}, 1),
@@ -314,38 +368,158 @@ func (s *IngressKeyStore) SigningKey(now time.Time) (string, *ecdsa.PrivateKey, 
 		s.signing = kid
 		key := s.keys[kid].key
 		s.mu.Unlock()
+		s.endDeferral()
 		return kid, key, nil
 	}
 	s.mu.Unlock()
 	if err != nil && !throttled {
 		if kid, key, ok := s.graceSign(now); ok {
-			log.Printf("pgstore: ingress key rotation deferred (reload: %v); signing with %s inside its slack", err, kid)
+			s.noteDeferral(now, kid, err)
 			return kid, key, nil
 		}
 		return "", nil, err
 	}
 	if throttled {
 		if kid, key, ok := s.graceSign(now); ok {
+			// Inside the throttle the reason is the last reload's: a failed one is a
+			// stall, recorded like any other deferral; a healthy one (a miss reload just
+			// ran, refresh has not rotated yet) is not.
+			s.noteDeferral(now, kid, s.storeFailure())
 			return kid, key, nil
 		}
-		return "", nil, fmt.Errorf("ingress key rotation due and the current key's slack is exhausted (refresh has not rotated it): %w", err)
+		s.mu.RLock()
+		reloadErr := s.lastReloadErr
+		s.mu.RUnlock()
+		if reloadErr != nil {
+			return "", nil, fmt.Errorf("ingress key rotation due and the current key's slack is exhausted (refresh has not rotated it): %w", err)
+		}
+		// The reload inside this throttle window succeeded, so the cache is that fresh
+		// snapshot and holds no key this replica may sign with: the signing key's row was
+		// deleted and left the cache at that reload, or the signing key is past its grace
+		// ceiling and refresh has not rotated yet, or no key was ever eligible. The store
+		// answers, so adopt or create one now rather than answer 503 until the window
+		// closes; with the store failing, the 503 above stands.
+	}
+	// A creator transaction failed less than a refresh interval ago: start no new one
+	// (creatorBackedOff). A write that hangs would otherwise hold signMu for a store
+	// timeout on every token request in turn. The refresh tick retries every interval;
+	// without the refresh loop this path retries once per window. Grace-sign at once,
+	// or past the slack answer the stored error.
+	if s.creatorBackedOff(now) {
+		if gkid, key, ok := s.graceSign(now); ok {
+			s.noteDeferral(now, gkid, s.lastCreateErr)
+			return gkid, key, nil
+		}
+		return "", nil, fmt.Errorf("ingress key rotation due, the last key write failed and no held key can grace-sign: %w", s.lastCreateErr)
 	}
 	kid, c, err := s.selectOrCreateKey(now) // DB round trip: no cache lock held
 	if err != nil {
+		// The store reads but its creator transaction failed (a lock timeout, a
+		// read-only failover, a full disk). Nothing was published here: a transaction
+		// that failed changed nothing, and one whose commit landed but whose answer was
+		// lost is adopted by the next read. Bridge it exactly as a failed reload is
+		// bridged: grace-sign with the key this replica already signs with, under the
+		// same ceiling, or answer the error (a cold replica has none to bridge with).
+		s.lastCreateErr, s.createFailedAt, s.requestFailedAt = err, now, now
+		s.requestFailures++
+		if gkid, key, ok := s.graceSign(now); ok {
+			s.noteDeferral(now, gkid, err)
+			return gkid, key, nil
+		}
 		return "", nil, err
 	}
 	s.mu.Lock()
-	s.keys[kid] = c
+	s.insertLocked(kid, c)
 	s.signing = kid
 	s.mu.Unlock()
+	s.endDeferral()
 	return kid, c.key, nil
 }
 
+// noteDeferral records one grace signing the store's failure forced (reloadErr) and
+// writes the "rotation deferred" line if none was written in the last ingressKeyRefresh
+// (or the clock has stepped back behind the last one), carrying the signings deferred
+// since the previous line. A throttled caller passes the last reload's outcome, so a
+// flood that keeps the throttle armed cannot silence the line for a whole stall. With no
+// failure (a healthy miss reload just armed the throttle and refresh has not rotated
+// yet) the grace signing is a routine bridge: neither counted nor logged, so a healthy
+// rotation never reads as a stall. Requires signMu.
+func (s *IngressKeyStore) noteDeferral(now time.Time, kid string, reloadErr error) {
+	if reloadErr == nil {
+		return
+	}
+	s.deferCount++
+	if !now.Before(s.deferLogged.Add(ingressKeyRefresh)) || now.Before(s.deferLogged) {
+		log.Printf("pgstore: ingress key rotation deferred (store error: %s); signing with %s inside its slack (%d signings deferred since the last line)", errClass(reloadErr), kid, s.deferCount)
+		s.deferLogged, s.deferCount = now, 0
+	}
+}
+
+// storeFailure is the store's latest failure as a throttled signing sees it: the most
+// recent completed reload's error, else the last creator transaction's (reads can succeed
+// while writes fail). Nil means the store is healthy. Requires signMu.
+func (s *IngressKeyStore) storeFailure() error {
+	s.mu.RLock()
+	err := s.lastReloadErr
+	s.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	return s.lastCreateErr
+}
+
+// creatorBackedOff reports whether a creator transaction failed less than one
+// ingressKeyRefresh ago, inside which the request path starts no new one. It compares
+// against the request's own clock reading, taken before it waited on signMu, so a
+// request that queued behind the tick's failing attempt is inside the window even though
+// it read the clock first. A clock that steps back by D stretches the window by D: with
+// the refresh loop running, the tick's next creator attempt re-stamps it within an
+// interval or two (a tick that falls in its skip window waits one more); without the
+// loop, the request path waits it out, signing with grace inside the slack.
+// Requires signMu.
+func (s *IngressKeyStore) creatorBackedOff(now time.Time) bool {
+	return s.lastCreateErr != nil && now.Before(s.createFailedAt.Add(ingressKeyRefresh))
+}
+
+// errClass names a store error by its kind for a log line, never by its text: a driver
+// error can quote a host, a user or a statement.
+func errClass(err error) string {
+	var pgErr *pgconn.PgError
+	var connErr *pgconn.ConnectError
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.As(err, &pgErr):
+		return "postgres " + pgErr.Code
+	case errors.As(err, &connErr), errors.As(err, &netErr):
+		return "unreachable"
+	default:
+		return "other"
+	}
+}
+
+// endDeferral closes a run of deferred signings once an eligible key is signing again:
+// the signings deferred since the last "rotation deferred" line are written out, so the
+// count is never lost, and the last creator failure is cleared. The next stall cannot
+// start before the new key falls due, far more than one ingressKeyRefresh away, so its
+// first deferral logs at once. Requires signMu.
+func (s *IngressKeyStore) endDeferral() {
+	if s.deferCount > 0 {
+		log.Printf("pgstore: ingress key rotation resumed (%d signings deferred since the last line)", s.deferCount)
+	}
+	s.deferCount, s.lastCreateErr = 0, nil
+}
+
 // graceSign is the current signing key while a bearer minted now with it stays
-// inside its verification lifetime: now+IngressBearerTTL before not_after (the 1-minute
-// slack past rotation+TTL). Used when rotation is due but the store cannot be reached
-// (or was reached within the throttle), so a blip does not become a 503; past the slack
-// the store error surfaces.
+// inside its verification lifetime: now+IngressBearerTTL before not_after. That slack
+// is the hour and a minute from ingressKeyRotation to ingressKeyLife - IngressBearerTTL.
+// Used when rotation is due but the store cannot be reached (or was reached within the
+// throttle), so a blip does not become a 503 and a stall has an hour to be seen; past
+// the slack the store error surfaces. Inside the throttle after a reload that succeeded,
+// SigningKey adopts or creates a key instead of surfacing anything.
 func (s *IngressKeyStore) graceSign(now time.Time) (string, *ecdsa.PrivateKey, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -363,10 +537,42 @@ func (s *IngressKeyStore) currentSigning(now time.Time) (string, *ecdsa.PrivateK
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	c, ok := s.keys[s.signing]
-	if !ok || !now.Before(c.created.Add(ingressKeyRotation)) {
+	if !ok || !now.Before(c.created.Add(s.rotation)) {
 		return "", nil, false
 	}
 	return s.signing, c.key, true
+}
+
+// IngressKeyTimes is what the ingress key gauges read (MON-R45), from the
+// cache the 30 s refresh keeps: the current signing key's not_after, and the
+// creation time of the newest key held. A rotation that stalls shows as the
+// first counting down and the second ageing past the rotation interval. With
+// rotation due an hour before the slack runs out (ingressKeyRotation against
+// ingressKeyLife), that shows about an hour before the token endpoint answers
+// 503. A value this replica does not have yet (no signing key chosen, no key
+// loaded) is not set, so it reads as unknown and never as zero (MON-R15).
+type IngressKeyTimes struct {
+	SigningNotAfter time.Time
+	HasSigning      bool
+	NewestCreated   time.Time
+	HasNewest       bool
+}
+
+// KeyTimes reads IngressKeyTimes from the cache, without a database round
+// trip.
+func (s *IngressKeyStore) KeyTimes() IngressKeyTimes {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out IngressKeyTimes
+	if c, ok := s.keys[s.signing]; ok && s.signing != "" {
+		out.SigningNotAfter, out.HasSigning = c.notAfter, true
+	}
+	for _, c := range s.keys {
+		if !out.HasNewest || c.created.After(out.NewestCreated) {
+			out.NewestCreated, out.HasNewest = c.created, true
+		}
+	}
+	return out
 }
 
 // VerificationKey resolves kid at now: (key, true, nil) for a kid inside its
@@ -509,12 +715,16 @@ func (s *IngressKeyStore) resolveCold(kid string, now time.Time) (*ecdsa.PublicK
 			tick := s.now()
 			// The caller's own round trip gets what is LEFT of its bound, never a fresh
 			// storeTimeout: the deadline is one for the whole call, the query included.
+			// So a caller that parked nearly to its bound and then won the reload slot can
+			// answer a slow but healthy store as unavailable. Only an embedder without the
+			// refresh loop reaches this branch, and that is the ruling: no floor on the
+			// own query, so the cold ceiling stays one store timeout.
 			ran, err := s.reloadIfDueNoWaitWithin(tick, min(remaining, storeTimeout))
 			if ran {
 				if err != nil {
 					// Logged once, by the goroutine that ran it; every waiter that
 					// answers from this outcome reads it from lastReloadErr in silence.
-					log.Printf("pgstore: ingress key reload: %v", err)
+					log.Printf("pgstore: ingress key reload failed (store error: %s)", errClass(err))
 					if !time.Now().Before(deadline) {
 						return nil, false, errColdReloadWait // the bound cut the query short
 					}
@@ -598,7 +808,7 @@ func (s *IngressKeyStore) kickReload() {
 func (s *IngressKeyStore) attempt(kid string, now time.Time) (*ecdsa.PublicKey, bool, bool, error) {
 	ran, err := s.reloadIfDueNoWait(now)
 	if err != nil && !errors.Is(err, errReloadThrottled) && !errors.Is(err, errReloadInFlight) {
-		log.Printf("pgstore: ingress key reload: %v", err)
+		log.Printf("pgstore: ingress key reload failed (store error: %s)", errClass(err))
 		return nil, false, ran, err
 	}
 	pub, ok, _ := s.lookup(kid, now)
@@ -689,7 +899,7 @@ func (s *IngressKeyStore) RunRefresh(ctx context.Context, onErr func(store strin
 	// rolling deploy, refuse traffic. Run starts this before the listener. Rotation stays
 	// on the tick: this is a read, so a fleet restarting together mints nothing.
 	if err := s.reload(s.now()); err != nil {
-		log.Printf("pgstore: ingress key warm-up reload: %v", err)
+		log.Printf("pgstore: ingress key warm-up reload failed (store error: %s)", errClass(err))
 		if onErr != nil {
 			onErr(storeNameIngressKey)
 		}
@@ -724,7 +934,7 @@ func (s *IngressKeyStore) wakeTick(ctx context.Context, onErr func(store string)
 		}
 	}
 	if err := s.reload(s.now()); err != nil {
-		log.Printf("pgstore: ingress key reload (out of band): %v", err)
+		log.Printf("pgstore: ingress key reload (out of band) failed (store error: %s)", errClass(err))
 		if onErr != nil {
 			onErr(storeNameIngressKey)
 		}
@@ -755,10 +965,42 @@ func (s *IngressKeyStore) throttleRemaining(now time.Time) time.Duration {
 // counting those here as well would report one outage as two.
 func (s *IngressKeyStore) refreshTick(now time.Time, onErr func(store string)) {
 	if err := s.refreshOnce(now); err != nil {
-		log.Printf("pgstore: ingress key refresh: %v", err)
+		log.Printf("pgstore: ingress key refresh failed: %s", refreshFailure(err))
 		if onErr != nil {
 			onErr(storeNameIngressKey)
 		}
+	}
+}
+
+// rotateError is rotateIfDueSince's failure: the creator transaction's error, or, with
+// skipped set, the token request's failed key write the tick did not retry straight after.
+// Its text is what callers have always read; refreshFailure reads the fields instead.
+type rotateError struct {
+	skipped bool
+	err     error
+}
+
+func (e *rotateError) Error() string {
+	if e.skipped {
+		return "rotate: a token request's key write failed moments ago, not retrying straight after it: " + e.err.Error()
+	}
+	return "rotate: " + e.err.Error()
+}
+
+func (e *rotateError) Unwrap() error { return e.err }
+
+// refreshFailure names a refresh failure for the log by its stage and the store error's
+// class, never the error's text: a driver error can quote a host, a user, a database name
+// or a statement.
+func refreshFailure(err error) string {
+	var re *rotateError
+	switch {
+	case errors.As(err, &re) && re.skipped:
+		return "rotate skipped straight after a token request's failed key write (store error: " + errClass(re.err) + ")"
+	case errors.As(err, &re):
+		return "rotate (store error: " + errClass(re.err) + ")"
+	default:
+		return "reload (store error: " + errClass(err) + ")"
 	}
 }
 
@@ -769,35 +1011,77 @@ func (s *IngressKeyStore) refreshTick(now time.Time, onErr func(store string)) {
 // token request on the grace branch until the slack ran out. With this, the request
 // path's grace is a bridge of at most ingressKeyRefresh.
 func (s *IngressKeyStore) refreshOnce(now time.Time) error {
+	// Read before the reload: a token request that takes signMu while this tick reloads
+	// and fails its own creator attempt shows as a newer count (see rotateIfDueSince).
+	failures := s.requestFailureCount()
 	if err := s.reload(now); err != nil {
 		return err
 	}
-	return s.rotateIfDue(now)
+	return s.rotateIfDueSince(now, failures)
+}
+
+// requestFailureCount reads requestFailures under signMu.
+func (s *IngressKeyStore) requestFailureCount() uint64 {
+	s.signMu.Lock()
+	defer s.signMu.Unlock()
+	return s.requestFailures
 }
 
 // rotateIfDue adopts or creates a committed signing key when no cached key is
 // eligible. signMu serializes this process; the transaction lock coordinates holders'
 // concurrent creators across processes.
 func (s *IngressKeyStore) rotateIfDue(now time.Time) error {
+	return s.rotateIfDueSince(now, s.requestFailureCount())
+}
+
+// rotateIfDueSince is rotateIfDue for a tick that read requestFailures (failures) before
+// its reload.
+func (s *IngressKeyStore) rotateIfDueSince(now time.Time, failures uint64) error {
 	s.signMu.Lock()
 	defer s.signMu.Unlock()
 	s.mu.Lock()
 	if kid := s.newestLiveLocked(now); kid != "" {
 		s.signing = kid
 		s.mu.Unlock()
+		s.endDeferral()
 		return nil
 	}
 	s.mu.Unlock()
+	// A token request's creator attempt failed moments ago: this tick does not run a
+	// second one back to back, which would leave a request waiting out two store
+	// timeouts. Only a request's failure counts (the tick's own never suppresses the next
+	// tick's retry). "Moments ago" is either a failure since this tick began (the count
+	// moved: a request took signMu while the tick reloaded, whatever the two clock
+	// readings say) or one stamped from half a refresh interval before the tick's reading
+	// to a store timeout after it, so the tick retries at the latest one tick later. The
+	// later edge covers a request that took signMu between the tick's clock reading and
+	// its count read: that read waited out the request's attempt, so the count has not
+	// moved, and the attempt began after the reading. A clock that steps back further
+	// behind the failure, with no request failing during the tick, ends the skip.
+	recent := now.Add(storeTimeout).After(s.requestFailedAt) && now.Before(s.requestFailedAt.Add(ingressKeyRefresh/2))
+	if s.lastCreateErr != nil && (s.requestFailures != failures || recent) {
+		return &rotateError{skipped: true, err: s.lastCreateErr}
+	}
 	kid, c, err := s.selectOrCreateKey(now) // DB round trip: no cache lock held
 	if err != nil {
-		return fmt.Errorf("rotate: %w", err)
+		s.lastCreateErr, s.createFailedAt = err, now
+		return &rotateError{err: err}
 	}
 	s.mu.Lock()
-	s.keys[kid] = c
+	s.insertLocked(kid, c)
 	s.signing = kid
 	s.mu.Unlock()
+	s.endDeferral()
 	log.Printf("pgstore: ingress signing key adopted by refresh: %s", kid)
 	return nil
+}
+
+// insertLocked caches a key this process's own adoption committed, stamped with a fresh
+// cacheGen so a reload already past its SELECT keeps it (see reloadQuery). Requires mu.
+func (s *IngressKeyStore) insertLocked(kid string, c cachedKey) {
+	s.cacheGen++
+	c.gen = s.cacheGen
+	s.keys[kid] = c
 }
 
 // reload runs one reload unconditionally (the refresh loop only: refreshOnce and
@@ -922,6 +1206,7 @@ func (s *IngressKeyStore) reloadLockedWithin(now time.Time, timeout time.Duratio
 	s.inflight = l
 	s.reloadStarted++ // the SELECT is about to be issued: a request that reads this
 	// count from here on cannot be satisfied by this reload's snapshot
+	since := s.cacheGen // every key cached by now committed before the SELECT
 	s.mu.Unlock()
 	defer func() {
 		// The result is written BEFORE the close: closing the channel is the
@@ -939,12 +1224,12 @@ func (s *IngressKeyStore) reloadLockedWithin(now time.Time, timeout time.Duratio
 		s.mu.Unlock()
 		close(l.done)
 	}()
-	return s.reloadQuery(now, timeout)
+	return s.reloadQuery(now, timeout, since)
 }
 
 // reloadQuery is reloadLocked's round trip + cache swap (split out so the stamping and
 // latch bookkeeping above read as one block), bounded by timeout. Requires reloadMu.
-func (s *IngressKeyStore) reloadQuery(now time.Time, timeout time.Duration) error {
+func (s *IngressKeyStore) reloadQuery(now time.Time, timeout time.Duration, since uint64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	rows, err := s.pool.Query(ctx, `SELECT kid, private_key_pem, created_at, not_after FROM gw_ingress_key WHERE holder_id=$1 AND not_after > $2`, s.holderID, now)
@@ -987,14 +1272,19 @@ func (s *IngressKeyStore) reloadQuery(now time.Time, timeout time.Duration) erro
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Merge, do not replace. A reload that took its snapshot before this process's own
-	// adoption committed does not carry that key, and a wholesale swap landing after
-	// SigningKey wrote it into the cache would drop it: s.signing would name an absent
-	// kid and the next SigningKey would answer 503 until the following reload. Keep any
-	// cached key the snapshot missed that is still inside its not_after — the same
-	// liveness the query itself filters on, so an expired key is never resurrected.
+	// Replace, keeping only what the snapshot could not have seen. A reload that took its
+	// snapshot before this process's own adoption committed does not carry that key, and
+	// dropping it would leave s.signing naming an absent kid, so the next SigningKey would
+	// answer 503 until the following reload. Such a key entered the cache after this
+	// reload read cacheGen (gen > since) and is kept while inside its not_after, the same
+	// liveness the query filters on. Every other cached key committed before the SELECT,
+	// so its absence means its row was deleted: it leaves the cache here, never surviving
+	// to its not_after. A replica that adopted the key while its row was being deleted
+	// keeps it through this one reload and drops it at the next. The rule relies on the
+	// pool reading from the primary that took the commit: a lagging read replica, or a
+	// failover that loses a committed row, would make a committed key look deleted.
 	for kid, c := range s.keys {
-		if _, ok := fresh[kid]; !ok && now.Before(c.notAfter) {
+		if _, ok := fresh[kid]; !ok && c.gen > since && now.Before(c.notAfter) {
 			fresh[kid] = c
 		}
 	}
@@ -1015,7 +1305,7 @@ func (s *IngressKeyStore) reloadQuery(now time.Time, timeout time.Duration) erro
 func (s *IngressKeyStore) newestLiveLocked(now time.Time) string {
 	best := ""
 	for kid, c := range s.keys {
-		if !now.Before(c.created.Add(ingressKeyRotation)) || !now.Before(c.notAfter) {
+		if !now.Before(c.created.Add(s.rotation)) || !now.Before(c.notAfter) {
 			continue // past its signing or verification life
 		}
 		if best == "" || c.created.After(s.keys[best].created) || (c.created.Equal(s.keys[best].created) && kid > best) {

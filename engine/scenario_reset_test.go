@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -23,17 +25,20 @@ func TestScenarioResetRoute(t *testing.T) {
 		name        string
 		role        string
 		payerNative bool
+		profile     string
 		wantStatus  int
 	}{
-		{"provider (internal, the whole /scenario/* surface lives here)", "provider", false, http.StatusOK},
-		{"native-forward payer (the PUBLIC fhir.<apex> front door): removed", "payer", true, http.StatusNotFound},
-		{"payer running a partner's own responder (also public): removed", "payer", false, http.StatusNotFound},
-		{"facility", "facility", false, http.StatusNotFound},
-		{"phg", "phg", false, http.StatusNotFound},
+		{"provider (internal, the whole /scenario/* surface lives here)", "provider", false, "demo", http.StatusOK},
+		{"provider with module 1 off (no origination profile): not mounted", "provider", false, "", http.StatusNotFound},
+		{"native-forward payer (the PUBLIC fhir.<apex> front door): removed", "payer", true, "", http.StatusNotFound},
+		{"payer running a partner's own responder (also public): removed", "payer", false, "", http.StatusNotFound},
+		{"facility", "facility", false, "", http.StatusNotFound},
+		{"phg", "phg", false, "", http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &Gateway{cfg: Config{Role: tc.role, PayerDavinciNative: tc.payerNative}}
+			declareOriginationProfile(g, tc.profile)
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/scenario/reset", nil)
 			g.Handler().ServeHTTP(rec, req)
@@ -47,14 +52,14 @@ func TestScenarioResetRoute(t *testing.T) {
 // A refused payer reset must leave both shared exchange and local session state intact.
 func TestScenarioReset_PayerRefusalPreservesState(t *testing.T) {
 	fake := &fakeExchangeStore{mem: NewInMemoryExchangeStore(time.Hour, time.Now)}
-	g := &Gateway{cfg: Config{Role: "payer", PayerDavinciNative: true}, exchanges: fake}
-	g.pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
+	g := withModuleOne(&Gateway{cfg: Config{Role: "payer", PayerDavinciNative: true}, exchanges: fake})
+	g.moduleOneState().pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
 	rec := httptest.NewRecorder()
 	g.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/reset", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("payer reset: got %d, want 404", rec.Code)
 	}
-	if fake.resets != 0 || len(g.pending.byToken) != 1 {
+	if fake.resets != 0 || len(g.moduleOneState().pending.byToken) != 1 {
 		t.Fatal("refused payer reset changed state")
 	}
 }
@@ -75,11 +80,12 @@ func TestGatewayReset_StoreFailureIs503AndCounted(t *testing.T) {
 		cfg:       Config{Role: "provider", StoreErrorMetric: func(s string) { stores = append(stores, s) }},
 		exchanges: fake,
 	}
-	g.pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
+	declareOriginationProfile(g, "demo")
+	g.moduleOneState().pending.byToken = map[string]pendState{"tok": {scenario: "uc06"}}
 	if err := g.Reset(); err == nil {
 		t.Fatal("Reset must return the store's error, not log it and report success")
 	}
-	if len(g.pending.byToken) != 0 {
+	if len(g.moduleOneState().pending.byToken) != 0 {
 		t.Fatal("the pending map must still be cleared when the store half fails")
 	}
 	if len(stores) != 1 || stores[0] != storeErrExchange {

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_dtr_inbound.go — the payer-side DTR questionnaire responder and the shared (C)
 // outbound subject fence. Part of package gateway (the Smart Gateway runs every
 // holder role; this file is the payer-adjudication surface). The conformant PAS

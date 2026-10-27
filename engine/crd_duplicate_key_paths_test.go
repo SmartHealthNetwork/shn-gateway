@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -16,23 +18,28 @@ import (
 )
 
 // A CDS Hooks answer that repeats a member name is refused on message
-// integrity wherever a CRD answer is certified, at every level: the payer's
-// own answer on its native responder (forwardCRD), a payer's answer on the
-// provider's Da Vinci ingress (crdAnswerOutcome), and the answer to a CRD leg
-// the provider's gateway originates (OriginateLeg, through the PA
-// workstream's originatedAnswerCheck). Each row asserts at the guard: the
+// integrity wherever a CRD answer is certified, at every level and with
+// module 3 absent: the payer's own answer on its native responder
+// (forwardCRD), a payer's answer on the provider's Da Vinci ingress
+// (crdAnswerOutcome), and the answer to a CRD leg the provider's gateway
+// originates (OriginateLeg, through the PA workstream's
+// originatedAnswerCheck). Each row asserts at the guard: the
 // refusal the exchange records is the integrity rule, with no finding, and
 // the answer goes no further.
 func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 	const member = `the JSON member "cards" in the top-level object`
 	paths := []struct {
 		name string
-		run  func(t *testing.T, level ConformanceEnforcement, x *exchangeRecorder) (status int, message string, relayed bool)
+		run  func(t *testing.T, c conformanceColumn, x *exchangeRecorder) (status int, message string, relayed bool)
 	}{
-		{"own answer on the native responder", func(t *testing.T, level ConformanceEnforcement, x *exchangeRecorder) (int, string, bool) {
+		{"own answer on the native responder", func(t *testing.T, c conformanceColumn, x *exchangeRecorder) (int, string, bool) {
 			p := newCDSPayer(t, referencePayerServices...)
 			p.respond(http.StatusOK, "application/json", []byte(`{"cards":[],"cards":[]}`))
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithConformancePolicy(NewConformancePolicy(level)))
+			opts := []NativeOption{WithConformancePolicy(NewConformancePolicy(c.level))}
+			if c.absent {
+				opts = append(opts, withoutConformanceModule())
+			}
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, opts...)
 			ctx := context.WithValue(context.Background(), exchangeRecorderKey{}, x)
 			res, err := n.Handle(ctx, "crd-order-select", "corr", "pci", cdsRequest("order-sign"))
 			if err != nil {
@@ -45,10 +52,10 @@ func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 			}
 			return res.Status, res.Message, res.Response.Ownership() != 0
 		}},
-		{"peer answer on the provider's ingress", func(t *testing.T, level ConformanceEnforcement, x *exchangeRecorder) (int, string, bool) {
+		{"peer answer on the provider's ingress", func(t *testing.T, c conformanceColumn, x *exchangeRecorder) (int, string, bool) {
 			answer := bytes.Replace(realCRDAnswer(t), []byte(`{`), []byte(`{"cards":[],`), 1)
 			env := newInProcessExchange(t)
-			env.originator.cfg.ConformanceEnforcement = level
+			c.configure(&env.originator.cfg)
 			env.payerReturns(LegResult{Response: testResponse(answer)})
 			req := httptest.NewRequest(http.MethodPost, "/cds-services/shn-order-select", bytes.NewReader(conformantCRDRequest("MBR-COVERED")))
 			req.SetPathValue("id", "shn-order-select")
@@ -57,7 +64,7 @@ func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 			env.originator.handleCRDIngress(rec, req)
 			return rec.Code, rec.Body.String(), bytes.Contains(rec.Body.Bytes(), answer)
 		}},
-		{"answer to an originated CRD leg", func(t *testing.T, level ConformanceEnforcement, x *exchangeRecorder) (int, string, bool) {
+		{"answer to an originated CRD leg", func(t *testing.T, c conformanceColumn, x *exchangeRecorder) (int, string, bool) {
 			sor, _ := originSystem(t, prefetchMember)
 			_, _, order := originRecords(prefetchMember)
 			var answer []byte
@@ -65,7 +72,7 @@ func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 				answer = []byte(`{"cards":[],` + strings.TrimPrefix(string(payerAnswerFor(t, order, shnsdk.CoveredCovered, shnsdk.PANeededNoAuth, "")), "{"))
 				return 0, answer
 			})
-			g.cfg.ConformanceEnforcement = level
+			c.configure(&g.cfg)
 			req := httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", "")))
 			req = req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x))
 			rec := httptest.NewRecorder()
@@ -77,10 +84,10 @@ func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 		}},
 	}
 	for _, path := range paths {
-		for _, level := range allLevels {
-			t.Run(path.name+"/"+level.String(), func(t *testing.T) {
+		for _, c := range everyLevelAndAbsent {
+			t.Run(path.name+"/"+c.String(), func(t *testing.T) {
 				x := &exchangeRecorder{}
-				status, message, relayed := path.run(t, level, x)
+				status, message, relayed := path.run(t, c, x)
 				if status != http.StatusBadGateway {
 					t.Fatalf("status %d, want 502: %s", status, message)
 				}
@@ -100,6 +107,38 @@ func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// conformanceColumn is one column of a row that must come out the same
+// whatever the participant chose about payload conformance: a level, or
+// module 3 absent (configured strict, so the opt-out is what a column
+// measures, not the level).
+type conformanceColumn struct {
+	level  ConformanceEnforcement
+	absent bool
+}
+
+// everyLevelAndAbsent is each level, then module 3 absent.
+var everyLevelAndAbsent = append(func() (cs []conformanceColumn) {
+	for _, l := range allLevels {
+		cs = append(cs, conformanceColumn{level: l})
+	}
+	return cs
+}(), conformanceColumn{level: EnforcementStrict, absent: true})
+
+func (c conformanceColumn) String() string {
+	if c.absent {
+		return "module-absent"
+	}
+	return c.level.String()
+}
+
+// configure sets cfg to the column.
+func (c conformanceColumn) configure(cfg *Config) {
+	cfg.ConformanceEnforcement = c.level
+	if c.absent {
+		disableConformanceModule(cfg)
 	}
 }
 

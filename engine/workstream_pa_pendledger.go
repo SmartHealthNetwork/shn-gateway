@@ -1,9 +1,11 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pendledger.go — the engine's side of the payer pend ledger, which moved to
 // package pend (github.com/SmartHealthNetwork/shn-gateway/pa/pend). The engine
-// keeps its names as deprecated aliases and forwarders until v1.0.0, so a
-// store whose method signatures name the engine's types still implements the
-// ledger. LedgerOf and FallbackDecision stay here: they read the engine's
-// Store.
+// keeps its names as deprecated aliases and forwarders until a later minor
+// release removes them, so a store whose method signatures name the engine's
+// types still implements the ledger. LedgerOf and FallbackDecision stay here:
+// they read the engine's Store.
 package engine
 
 import (

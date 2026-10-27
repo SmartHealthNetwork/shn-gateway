@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // originate_homeoxygen_test.go — hermetic unit test for handleHomeOxygen, the
 // provider-data order-dispatch origination handler.
 //
@@ -248,7 +250,7 @@ func (s *homeOxygenSubstrate) handleAuthorize(body []byte) (*http.Response, erro
 }
 
 func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}
@@ -430,11 +432,10 @@ func TestHandleHomeOxygen(t *testing.T) {
 		SoR:                sor,
 		Store:              base,
 		Clock:              clock,
-		NPI:                "1234567890",
+		NPI:                "1234567893",
 		OriginationProfile: "provider-data",
-		Populator:          fakePopulator{canonical: canonical},
 		Client:             &http.Client{Transport: stub},
-	})
+	}, WithPopulator(fakePopulator{canonical: canonical}))
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
@@ -559,9 +560,10 @@ func TestHandler_HomeOxygenRouteRegistered(t *testing.T) {
 			EncPub:   encPub,
 			EncPriv:  encPriv,
 		},
-		SoR:       stub,
-		Store:     stub,
-		Validator: shnsdk.NewFakeValidator(),
+		SoR:                stub,
+		Store:              stub,
+		Validator:          shnsdk.NewFakeValidator(),
+		OriginationProfile: "demo",
 	})
 	h := gw.Handler()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))

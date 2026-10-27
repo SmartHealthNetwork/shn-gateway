@@ -34,10 +34,20 @@ RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-6.
  && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
  && echo "be5c3f0a7f82e072b40739e05fb68f3e58e44c9bd040cd901b1b55c62f23dca2  hl7.fhir.uv.sdc-3.0.0.tgz" | sha256sum -c
 
+# The runtime base's JVM trust store without the four eMudhra emSign roots
+# (CVE-2026-114820): the JRE reads lib/security/cacerts through links to
+# /etc/ssl/certs/java/cacerts, and the runtime stage copies this edited store
+# over it. The store comes from the same pinned base as the runtime stage.
+FROM eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7 AS truststore
+COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e /etc/ssl/certs/java/cacerts /in/cacerts
+COPY validator/truststore/drop-emsign-roots.sh /truststore/drop-emsign-roots.sh
+RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacerts
+
 # The backported WAR on the pinned distroless Java base upstream builds HAPI on
 # (same JRE and env), without upstream's unused bundled jars.
 FROM gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e
 USER 65532:65532
+COPY --from=truststore /out/cacerts /etc/ssl/certs/java/cacerts
 WORKDIR /app
 # The HAPI starter serves an MCP server by default (/mcp/messages, /sse), a second way into
 # the FHIR server that nothing here uses: it stays off.

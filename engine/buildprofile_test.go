@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -53,13 +55,15 @@ var unixGOOS = map[string]bool{"aix": true, "android": true, "darwin": true, "dr
 	"illumos": true, "ios": true, "linux": true, "netbsd": true, "openbsd": true, "solaris": true}
 
 // knownBuildTag reports whether inThisBuild can decide tag: an operating
-// system or architecture, "unix", or a build profile tag. Any other tag
+// system or architecture, "unix", or a build profile tag (the core-only
+// profile's among them: no engine test binary is built with it yet, so it
+// reads false and the zones' files are in). Any other tag
 // (cgo, a release tag, a custom one) stops the test rather than reading as
 // false, which the compiler might not agree with.
 func knownBuildTag(tag string) bool {
 	return unixGOOS[tag] || tag == "unix" || tag == "windows" || tag == "js" || tag == "wasip1" || tag == "plan9" ||
 		slices.Contains([]string{"386", "amd64", "arm", "arm64", "loong64", "mips", "mips64", "mips64le", "mipsle", "ppc64", "ppc64le", "riscv64", "s390x", "wasm"}, tag) ||
-		tag == "shn_toyworkstream"
+		tag == "shn_toyworkstream" || tag == "shn_testdouble" || tag == "shn_coreonly"
 }
 
 // catalogLegs are the legs of every compiled-in workstream's catalog, sorted:

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 import (
@@ -73,11 +75,11 @@ func TestIngressKeyPg_RotatesAfterIntervalAndOldKidStillVerifies(t *testing.T) {
 	if kid2 == kid1 {
 		t.Fatal("did not rotate at the interval")
 	}
-	// kid1 stays verifiable until its not_after (rotation + bearer TTL + 1 min skew).
+	// kid1 stays verifiable until its not_after (ingressKeyLife from its creation).
 	if _, ok, err := s.VerificationKey(kid1, now()); !ok || err != nil {
 		t.Fatalf("previous key must verify right after rotation (ok=%v err=%v)", ok, err)
 	}
-	advance(engine.IngressBearerTTL + time.Minute)
+	advance(ingressKeyLife - ingressKeyRotation)
 	if _, ok, err := s.VerificationKey(kid1, now()); ok || err != nil {
 		t.Fatalf("previous key past its not_after = ok:%v err:%v; want false,nil", ok, err)
 	}
@@ -398,30 +400,6 @@ func TestIngressKeyPg_DBErrorIsReportedAsUnavailableNotUnknown(t *testing.T) {
 	}
 }
 
-// Rotation is due but the DB is unreachable: a bearer minted now with the current key
-// stays verifiable everywhere while now+IngressBearerTTL is inside that key's not_after
-// (the 1-minute slack past rotation+TTL), so the store keeps signing with it instead of
-// answering 503 for a blip; past the slack the error surfaces.
-func TestIngressKeyPg_RotationDueOnDBErrorSignsWithCurrentKeyInsideSlack(t *testing.T) {
-	pool := testPool(t)
-	now, advance := fixedClock(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
-	s := NewIngressKeyStore(pool, "holder", now)
-	kid1, _, err := s.SigningKey(now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	advance(ingressKeyRotation) // rotation due
-	pool.Close()
-	kid, _, err := s.SigningKey(now())
-	if err != nil || kid != kid1 {
-		t.Fatalf("inside the slack the current key must still sign: kid=%q err=%v", kid, err)
-	}
-	advance(time.Minute) // now + IngressBearerTTL == not_after: a bearer minted now could outlive the key
-	if _, _, err := s.SigningKey(now()); err == nil {
-		t.Fatal("past the slack SigningKey must error (the caller answers 503)")
-	}
-}
-
 // Cached-kid verification never waits on Postgres: with the DB hung (a connection that
 // never answers), a live kid still verifies while a reload is parked mid-query.
 func TestIngressKeyPg_CachedKidVerifiesWhileTheDBHangs(t *testing.T) {
@@ -579,7 +557,7 @@ func TestIngressKeyPg_UnreadableKeyRowIsIsolated(t *testing.T) {
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO gw_ingress_key (holder_id, kid, private_key_pem, created_at, not_after) VALUES ($1,$2,$3,$4,$5)`,
 		"holder", bad, "-----BEGIN PRIVATE KEY-----\nbm90IGEga2V5\n-----END PRIVATE KEY-----\n",
-		now(), now().Add(ingressKeyRotation+engine.IngressBearerTTL+time.Minute)); err != nil {
+		now(), now().Add(ingressKeyLife)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.refreshOnce(now()); err != nil {
@@ -752,9 +730,9 @@ func TestIngressKeyPg_SignsWithASiblingsLiveKeyWhenItsOwnReloadErrors(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Past B's key's rotation AND past its slack, so grace-signing with it is not an
-	// option (a bearer minted now would outlive the key at its siblings).
-	advance(ingressKeyRotation + 10*time.Minute)
+	// Past B's key's rotation AND its slack (at its not_after), so grace-signing with it
+	// is not an option (a bearer minted now would outlive the key at its siblings).
+	advance(ingressKeyLife)
 
 	// A, on a healthy pool, mints the holder's live key.
 	a := NewIngressKeyStore(pool, "holder", now)
@@ -845,7 +823,7 @@ func TestIngressKeyPg_MissDuringAnInFlightReloadAnswersAtOnceAndResolvesNext(t *
 		t.Fatal(err)
 	}
 	// A rotates: past B's key's rotation interval, A mints a SECOND key that B has never
-	// seen. B's own key stays live (not_after is rotation + bearer TTL + a minute), so B
+	// seen. B's own key stays live (not_after is ingressKeyLife from its creation), so B
 	// is still a warm replica missing exactly one sibling kid.
 	advance(ingressKeyRotation)
 	a := NewIngressKeyStore(pool, "holder", now)
@@ -1655,7 +1633,7 @@ func TestIngressKeyPg_ColdOutageCostsOneQueryAndOneLogLinePerThrottleSlot(t *tes
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(prev) })
-	reloadLines := func() int { return strings.Count(buf.String(), "pgstore: ingress key reload:") }
+	reloadLines := func() int { return strings.Count(buf.String(), "pgstore: ingress key reload failed") }
 
 	const perSlot = 5
 	for slot := 1; slot <= 2; slot++ {
@@ -2740,7 +2718,7 @@ func TestIngressKeyPg_WrongCurveRowDegradesOnlyThatKid(t *testing.T) {
 	const badKid = "0123456789abcdef0123456789abcdef"
 	advance(time.Minute) // strictly newer than the good row
 	insertRawKeyRow(t, pool, "holder", badKid, string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		now(), now().Add(ingressKeyRotation))
+		now(), now().Add(ingressKeyLife))
 
 	// The background refresh reads it and must NOT fail: one bad row is not an outage.
 	if err := s.refreshOnce(now()); err != nil {

@@ -165,18 +165,18 @@ func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
 var validateCallSites = map[string]string{
 	"gateway.go:judgeLines":                            "choke",
 	"workstream_pa_crd_inbound.go:validateCRDEmbedded": "observational",
-	"certify.go:collectCertification":                  "observational",
+	"module3_certify.go:collectCertification":          "observational",
 	// The boot warm-up (gateway/app) discards every verdict: it only reaches
 	// the certification endpoint before a real certification has to.
 	"../app/certifywarm.go:warmCertificationEndpoint": "observational",
-	"lanes.go:Validate":       "delegating",
-	"certifylane.go:Validate": "delegating",
-	"observer.go:Validate":    "delegating",
-	"lanehealth.go:Validate":  "delegating",
+	"lanes.go:Validate":               "delegating",
+	"module3_certifylane.go:Validate": "delegating",
+	"observer.go:Validate":            "delegating",
+	"lanehealth.go:Validate":          "delegating",
 	// E-08's source evidence: an answer valid at its own DTR line is renamed,
 	// any other is carried as sent; the renamed answer's check and a carried
 	// answer's report both go through judgeLines.
-	"dtr_answer_bridge.go:dtrAnswerValidAt": "edit-evidence",
+	"workstream_pa_dtr_answer_bridge.go:dtrAnswerValidAt": "edit-evidence",
 }
 
 // validateFHIREntryPoints are the wrappers that reach the choke point, keyed
@@ -212,8 +212,8 @@ var validateFHIREntryPoints = []string{
 // site in TestEveryValidateCallIsClassified.
 func TestValidateFHIRCallSiteFloor(t *testing.T) {
 	const (
-		wantTotal       = 37
-		wantDelegations = 2 // the wrappers' own internal delegations, both in gateway.go
+		wantTotal       = 36
+		wantDelegations = 1 // the wrappers' own internal delegation, in gateway.go (validateFHIRPayerIngress's candidate check calls the choke point directly, through the participant's module 3)
 	)
 	_, files := engineFiles(t, ".")
 	total, delegations := 0, 0
@@ -346,7 +346,7 @@ func TestEveryValidateFHIREntryPointReachesTheChokePoint(t *testing.T) {
 			}
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
-				case "validateGoverned", "validateGovernedLines", "judgeLines", "validateFHIRAtProfile", "validateFHIRForContract", "validatePayerAnswerAtCandidates":
+				case "validateGoverned", "validateGovernedLines", "validateGovernedLinesBy", "judgeLines", "validateFHIRAtProfile", "validateFHIRForContract", "validatePayerAnswerAtCandidates":
 					reaches = true
 				}
 			}
@@ -387,7 +387,7 @@ var moduleBuildSites = map[string]struct{ sites, checked int }{
 //     reach their legs through it as listed.
 func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
 	fset, files := engineFiles(t)
-	passOn := map[string]bool{"validateGoverned": true, "validateGovernedLines": true}
+	passOn := map[string]bool{"validateGoverned": true, "validateGovernedLines": true, "validateGovernedLinesBy": true}
 	certifyCallers := map[string]int{}
 	adaptCallers := map[string]int{}
 	buildCallers := map[string]int{}
@@ -411,11 +411,11 @@ func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
 				}
 				pos := fset.Position(call.Pos())
 				switch sel.Sel.Name {
-				case "validateGoverned", "validateGovernedLines", "judgeLines":
-					// judgeLines is also given module 3, ahead of the
-					// finding context.
+				case "validateGoverned", "validateGovernedLines", "validateGovernedLinesBy", "judgeLines":
+					// judgeLines and validateGovernedLinesBy are also given
+					// module 3, ahead of the finding context.
 					at := 7
-					if sel.Sel.Name == "judgeLines" {
+					if sel.Sel.Name == "judgeLines" || sel.Sel.Name == "validateGovernedLinesBy" {
 						at = 8
 					}
 					if len(call.Args) <= at {
@@ -490,7 +490,7 @@ func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
 	if assigned != sites {
 		t.Errorf("%d of %d egressBuild calls assign their four results: a call that drops them acts on nothing it checked", assigned, sites)
 	}
-	wantCertify := map[string]int{"modulebuild.go:egressBuild": 1, "dtr_answer_bridge.go:carryDTRAnswer": 1}
+	wantCertify := map[string]int{"modulebuild.go:egressBuild": 1, "workstream_pa_dtr_answer_bridge.go:carryDTRAnswer": 1}
 	if fmt.Sprint(certifyCallers) != fmt.Sprint(wantCertify) {
 		t.Errorf("Certify is asked by %v, want %v", certifyCallers, wantCertify)
 	}
@@ -519,8 +519,8 @@ func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
 // payerAnswerIngressSites are the call lines of validateFHIRPayerIngress: the
 // ingress check of a payer's answer (DTR package, next-question, PAS
 // ClaimResponse) on a leg this gateway originated. Each passes the payer identity
-// the member's Coverage named, because whether the check is skipped depends on
-// whose answer it is. A new site must be added here deliberately.
+// the member's Coverage named, because whether the participant tolerates the
+// answer depends on whose answer it is. A new site must be added here deliberately.
 var payerAnswerIngressSites = map[string]int{
 	"module1_originate.go":            8,
 	"module1_originate_homeoxygen.go": 1,
@@ -530,11 +530,12 @@ var payerAnswerIngressSites = map[string]int{
 }
 
 // TestPayerAnswerUnskippedCallers pins who may call validatePayerAnswerAtCandidates,
-// the payer-answer check without the reference-payer skip: validateFHIRPayerIngress,
-// which adds the skip for the legs this gateway originates, and carriedAnswerRefused,
-// the provider ingress's check of the answers it carries for its own participant's
-// system, which judges every payer's answer. A new caller would judge, or skip, a
-// payer's answer by a rule no one chose, so it must be added here deliberately.
+// the payer-answer check: validateFHIRPayerIngress, for the legs this gateway
+// originates, and carriedAnswerRefused, the provider ingress's check of the answers
+// it carries for its own participant's system. Each passes the payer identities the
+// exchange was routed by, which decide the participant's tolerance. A new caller
+// would judge, or tolerate, a payer's answer by a rule no one chose, so it must be
+// added here deliberately.
 func TestPayerAnswerUnskippedCallers(t *testing.T) {
 	fset, files := engineFiles(t)
 	want := map[string]bool{"gateway.go:validateFHIRPayerIngress": true, "workstream_pa_ingress.go:carriedAnswerRefused": true}
@@ -572,8 +573,8 @@ func TestPayerAnswerUnskippedCallers(t *testing.T) {
 // validateFHIRPayerIngress call passes, as its payer, the flow's own routed payer
 // identity — a variable or field named payer, carried from the member's Coverage —
 // never a literal identity or a package-level value such as
-// shnsdk.CMSPayerIdentity, so the reference-payer skip is decided by the payer the
-// leg was actually routed by.
+// shnsdk.CMSPayerIdentity, so the participant's tolerance is decided by the payer
+// the leg was actually routed by.
 func TestPayerAnswerIngressNamesTheRoutedPayer(t *testing.T) {
 	fset, files := engineFiles(t)
 	counts := map[string]int{}

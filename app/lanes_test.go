@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -18,11 +20,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/checks"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/testrecord"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
+
+// fastLaneRetry retries a default lane every few milliseconds and gives boot a
+// short budget, so a test of a lane that fails does not wait out the real
+// schedule.
+func fastLaneRetry() *laneRetry {
+	b := engine.LaneBackoff{Base: 5 * time.Millisecond, Max: 5 * time.Millisecond}
+	return &laneRetry{startup: 300 * time.Millisecond, attempt: 2 * time.Second, backoff: &b}
+}
+
+// waitForAttempts waits until d has finished n qualification attempts.
+func waitForAttempts(t *testing.T, d *engine.DiscoveredLane, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for d.State().Attempts < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("lane %s: %d attempts, want %d", d.Line(), d.State().Attempts, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
@@ -58,7 +81,10 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 					if base != engine.DefaultLaneURL(line) {
 						t.Errorf("address=%s", base)
 					}
-					entered <- struct{}{}
+					select {
+					case entered <- struct{}{}:
+					default: // a retry after a failure
+					}
 					if strings.Contains(strings.Join(declared, ","), "pa.crd@2.2") {
 						if fail {
 							return errors.New("wrong-line verdict")
@@ -75,7 +101,7 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{}, engine.DefaultLaneURL, qualifier)
+				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, declared, canonical, config{laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, qualifier)
 				if declared[0] == "pa.crd@2.2" && fail {
 					if err == nil || !strings.Contains(err.Error(), "2.2") || !strings.Contains(err.Error(), "wrong-line verdict") {
 						t.Fatalf("boot error=%v", err)
@@ -98,7 +124,12 @@ func TestLanesDiscoveredAtDefaultAddresses(t *testing.T) {
 						t.Fatal("PDex fallback lost before qualification")
 					}
 					close(release)
-					m.workers.Wait()
+					if fail {
+						// A failing lane keeps retrying, unqualified.
+						waitForAttempts(t, m.defaults["2.1"], 2)
+					} else {
+						m.workers.Wait()
+					}
 					if m.defaults["2.1"].Ready() == fail {
 						t.Fatal("wrong readiness")
 					}
@@ -388,7 +419,7 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 			old := log.Writer()
 			log.SetOutput(&out)
 			defer log.SetOutput(old)
-			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.1"}, shnsdk.NewFakeValidator(), config{FHIRValidateURL22: "http://explicit.test/fhir"}, engine.DefaultLaneURL, func(context.Context, string, string) error {
+			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@2.1"}, shnsdk.NewFakeValidator(), config{FHIRValidateURL22: "http://explicit.test/fhir", laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, func(context.Context, string, string) error {
 				if fail {
 					return errors.New("private outcome payload must not be logged")
 				}
@@ -407,17 +438,25 @@ func TestQualificationEventsDescribeTerminalState(t *testing.T) {
 			for i, record := range records {
 				_, raw, ok := strings.Cut(record, "gateway: validator_qualification ")
 				var event struct {
-					Version  int     `json:"version"`
-					Line     string  `json:"line"`
-					Base     string  `json:"base"`
-					Host     string  `json:"host"`
-					State    string  `json:"state"`
-					Reason   string  `json:"reason"`
-					At       string  `json:"at"`
-					Duration float64 `json:"duration_ms"`
+					Version    int     `json:"version"`
+					Line       string  `json:"line"`
+					Base       string  `json:"base"`
+					Host       string  `json:"host"`
+					State      string  `json:"state"`
+					Reason     string  `json:"reason"`
+					Attempts   int     `json:"attempts"`
+					NextRetryS float64 `json:"next_retry_s"`
+					At         string  `json:"at"`
+					Duration   float64 `json:"duration_ms"`
 				}
 				if !ok || json.Unmarshal([]byte(raw), &event) != nil {
 					t.Fatalf("invalid event %q", record)
+				}
+				// A lane that keeps failing the same way logs its first failure
+				// once, with the attempt and the wait before the next one, not
+				// every retry.
+				if i == 1 && (event.Attempts != 1 || (fail && event.NextRetryS <= 0) || (!fail && event.NextRetryS != 0)) {
+					t.Fatalf("event=%+v", event)
 				}
 				want := "started"
 				if i == 1 {
@@ -502,7 +541,7 @@ func TestNoDefaultLanesCertificationNamesTheMissingLane(t *testing.T) {
 	cfg := config{DefaultValidatorLanes: defaultValidatorLanesNone, FHIRCertifyURL22: "http://validator-2-2.hosted.internal:8080/fhir"}
 	var mu sync.Mutex
 	var probed []string
-	vs := certificationValidators(func(string) string { return "" }, cfg, "http://validator.hosted.internal:8080/fhir", nil, func(ctx context.Context, base, _ string) error {
+	vs := certValidators(t, func(string) string { return "" }, cfg, "http://validator.hosted.internal:8080/fhir", nil, func(ctx context.Context, base, _ string) error {
 		mu.Lock()
 		probed = append(probed, base)
 		mu.Unlock()
@@ -530,7 +569,7 @@ func TestNoDefaultLanesCertificationNamesTheMissingLane(t *testing.T) {
 	}
 	// Default lanes kept: an unconfigured line with no default gets no client,
 	// as before.
-	if vs := certificationValidators(func(string) string { return "" }, config{}, "http://validator:8080/fhir", nil, nil); vs["2.1"] != nil {
+	if vs := certValidators(t, func(string) string { return "" }, config{}, "http://validator:8080/fhir", nil, nil); vs["2.1"] != nil {
 		t.Fatal("unset changed the default-lane behavior")
 	}
 }
@@ -602,5 +641,138 @@ func TestNoDefaultLanesKeepsSingleLineAliasesFallbacks(t *testing.T) {
 	m.Close()
 	if m.fallbacks["2.1"] {
 		t.Fatal("a configured 2.1 lane was marked a fallback")
+	}
+}
+
+// A default lane that fails its qualification keeps retrying and qualifies on
+// a later attempt with no restart; its /internal/checks result and its gauge
+// follow it. Before the fix the first failure was final: the lane
+// stayed unqualified for the life of the task.
+func TestDefaultLaneQualifiesAfterAFailureWithoutARestart(t *testing.T) {
+	var passing atomic.Bool
+	var attempts atomic.Int32
+	qualify := func(_ context.Context, _, line string) error {
+		if line != "2.2" {
+			return nil
+		}
+		attempts.Add(1)
+		if passing.Load() {
+			return nil
+		}
+		return fmt.Errorf("%w: down", lanequalify.ErrCorpus)
+	}
+	// pa.pas@2.0 alone: no lane is waited for at boot, so 2.2 qualifies in the
+	// background, as on the preview gateways whose 2.2 lane latched.
+	_, m, err := discoverValidatorLanes(context.Background(), env(nil), []string{"pa.pas@2.0"}, shnsdk.NewFakeValidator(), config{laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, qualify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	lane := m.defaults["2.2"]
+	var outcomes sync.Map
+	hook := func(line string, ready bool) { outcomes.Store(fmt.Sprintf("%s %v", line, ready), true) }
+	m.attempted.Store(&hook)
+	waitForAttempts(t, lane, 3)
+	var report checks.Target
+	for _, target := range m.checkTargets() {
+		if target.ID == "validator-lane-2.2" {
+			report = target
+		}
+	}
+	if report.Kind != checks.KindValidatorLane || report.URL != engine.DefaultLaneURL("2.2") {
+		t.Fatalf("no validator-lane-2.2 check: %+v", m.checkTargets())
+	}
+	if ok, hint := report.LaneState(); ok || !strings.HasPrefix(hint, "failed, retrying (") || !strings.HasSuffix(hint, "attempts): qualification corpus did not pass") {
+		t.Fatalf("a failing lane reports ok=%v %q", ok, hint)
+	}
+	if g := laneGauges(m, nil, true); fmt.Sprint(g) != fmt.Sprint([]laneGauge{{"2.1", "routing", true}, {"2.2", "routing", false}}) {
+		t.Fatalf("gauges while 2.2 fails: %v", g)
+	}
+	passing.Store(true)
+	m.workers.Wait() // a worker returns once its lane qualifies
+	if !lane.Ready() {
+		t.Fatal("the lane did not qualify on a retry")
+	}
+	if ok, hint := report.LaneState(); !ok || hint != "" {
+		t.Fatalf("a qualified lane reports ok=%v %q", ok, hint)
+	}
+	if g := laneGauges(m, nil, true); fmt.Sprint(g) != fmt.Sprint([]laneGauge{{"2.1", "routing", true}, {"2.2", "routing", true}}) {
+		t.Fatalf("gauges once 2.2 qualified: %v", g)
+	}
+	if _, failed := outcomes.Load("2.2 false"); !failed {
+		t.Error("no failed attempt was counted")
+	}
+	if _, ready := outcomes.Load("2.2 true"); !ready {
+		t.Error("the passing attempt was not counted")
+	}
+}
+
+// A lane on its first attempt says so; the report never carries the
+// qualifier's own error text.
+func TestLaneReportNamesStateNotOutput(t *testing.T) {
+	if ok, hint := laneReport(engine.LaneState{}); ok || hint != "qualifying (attempt 1)" {
+		t.Fatalf("first attempt: %v %q", ok, hint)
+	}
+	ok, hint := laneReport(engine.LaneState{Attempts: 4, Failures: 4, Err: fmt.Errorf("%w: %w", lanequalify.ErrCorpus, errors.New("private validator outcome"))})
+	if ok || hint != "failed, retrying (4 attempts): qualification corpus did not pass" {
+		t.Fatalf("failing lane: %v %q", ok, hint)
+	}
+}
+
+// A lane boot waits for retries inside the startup budget: it fails twice,
+// passes on the third attempt, and boot succeeds with the lane ready.
+// Before, the first failure refused boot.
+func TestBootLaneRetriesInsideTheStartupBudget(t *testing.T) {
+	for _, level := range checkingLevels {
+		var attempts atomic.Int32
+		qualify := func(_ context.Context, _, line string) error {
+			if line != "2.2" || attempts.Add(1) > 2 {
+				return nil
+			}
+			return fmt.Errorf("%w: down", lanequalify.ErrCorpus)
+		}
+		_, m, err := discoverValidatorLanes(context.Background(), env(nil), []string{"pa.pas@2.0", "pa.pas@2.2"}, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: level, laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, qualify)
+		if err != nil {
+			t.Fatalf("%v: boot refused a lane that passed on a retry: %v", level, err)
+		}
+		if st := m.defaults["2.2"].State(); !st.Ready || st.Attempts != 3 {
+			t.Errorf("%v: lane %+v, want ready after 3 attempts", level, st)
+		}
+		m.Close()
+	}
+}
+
+// A background lane keeps retrying past the startup budget, for the gateway's
+// life: it qualifies even when its first pass comes after the budget a lane
+// boot waits for has run out.
+func TestBackgroundLaneOutlivesTheStartupBudget(t *testing.T) {
+	retry := fastLaneRetry()
+	start := time.Now()
+	qualify := func(_ context.Context, _, line string) error {
+		if line != "2.2" || time.Since(start) > 2*retry.startup {
+			return nil
+		}
+		return fmt.Errorf("%w: down", lanequalify.ErrCorpus)
+	}
+	_, m, err := discoverValidatorLanes(context.Background(), env(nil), []string{"pa.pas@2.0"}, shnsdk.NewFakeValidator(), config{laneRetry: retry}, engine.DefaultLaneURL, qualify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	m.workers.Wait()
+	if !m.defaults["2.2"].Ready() || time.Since(start) <= retry.startup {
+		t.Fatalf("ready=%v after %v: a background lane must keep retrying past the %v startup budget", m.defaults["2.2"].Ready(), time.Since(start), retry.startup)
+	}
+}
+
+// Where certification never runs (none), no certification client starts, so
+// none is reported: a gauge stuck at 0 would read as a lane left unqualified.
+func TestLaneGaugesReportCertificationOnlyWhereItRuns(t *testing.T) {
+	cert := map[string]shnsdk.Validator{"2.2": engine.NewGatedCertificationValidator(engine.NewDiscoveredLane("2.2", engine.DefaultLaneURL("2.2"), nil), nil, "not configured")}
+	if g := laneGauges(nil, cert, false); len(g) != 0 {
+		t.Fatalf("at none: %v, want no gauge", g)
+	}
+	if g := laneGauges(nil, cert, true); fmt.Sprint(g) != fmt.Sprint([]laneGauge{{"2.2", "certification", false}}) {
+		t.Fatalf("where certification runs: %v", g)
 	}
 }

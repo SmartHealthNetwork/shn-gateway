@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_ingress.go — the DaVinciIngress origination driver: the second origination driver over
 // OriginateLeg. Terminates the three inbound Da Vinci protocols, resolves+inlines prefetch
 // (CRD), drives OriginateLeg per call through the ExchangeStore seam, and wraps each response
@@ -90,7 +92,7 @@ func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRe
 		// resources do not answer is read only to route (sentPayorResolver).
 		refs.next, unresolved, fhirStatus, fhirMsg, readErr = g.sentPayorResolver(ctx, prepared.sentPayor)
 	}
-	recipient, status, msg := g.recipientForCoverages(coverageResources(coverage), refs)
+	recipient, _, status, msg := g.recipientForCoverages(coverageResources(coverage), refs)
 	if *readErr != nil {
 		status, msg := SoRFailureResponse(*readErr)
 		return "", status, msg
@@ -237,7 +239,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// relays bytes the PARTNER built, so OriginateLeg's arm-1-only backfill would
 	// normally be the honest posture (its own comment: an arm-2/3 token would
 	// mis-stamp already-built bytes). For pa.crd that rationale is VACUOUS: pa.crd
-	// bytes are LINE-INERT by verified derivation — compat.go's 2.0->2.1 and
+	// bytes are LINE-INERT by verified derivation — workstream_pa_compat.go's 2.0->2.1 and
 	// 2.1->2.2 rows are identity, live-re-derived against the real CRD
 	// StructureDefinitions — so stamping the routed line is exactly as truthful
 	// for partner-built CDS Hooks JSON as for our own. RE-ADJUDICATION TRIGGER —
@@ -343,10 +345,12 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 // one patient, the request is routed by every coverage it carries (or, when
 // it carries none, by the one its system of record holds), a payer that does not
 // accept framed DTR operations is refused before anything is sent, and the
-// payer's answer is relayed to the EHR exactly, or, from a payer answering in
-// another DTR line's names and with module 2 on, carried across to this
-// gateway's one declared line (adaptAnswer, E-08). The ingress does not invoke
-// the Populator: the EHR's own DTR application populates.
+// payer's answer is checked at this gateway's conformance level against the
+// candidate lines (carriedAnswerRefused) and relayed to the EHR exactly, or,
+// from a payer answering in another DTR line's names and with module 2 on,
+// carried across to this gateway's one declared line (adaptAnswer, E-08). The
+// ingress does not invoke the Populator: the EHR's own DTR application
+// populates.
 func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	const legType = "dtr-questionnaire-fetch"
 	w, scope := g.withScope(w, relay.RoleRequester)
@@ -375,7 +379,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Route by every coverage the request carries (FR-G40; no default).
-	recipient, status, msg := g.dtrIngressRecipient(r.Context(), prepared)
+	recipient, payers, status, msg := g.dtrIngressRecipient(r.Context(), prepared)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -452,6 +456,15 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	// The payer's answer is judged as the PAS answers this ingress carries are,
+	// whether or not module 2 then renames it (D48): payload conformance at
+	// this gateway's level, every payer alike. An empty answer (a 204, or a 2xx
+	// with no body) carries no package to judge and is carried as sent.
+	answerCtx := withFindingContext(r.Context(), findingContext{LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
+	if len(bytes.TrimSpace(pkgJSON)) > 0 && g.carriedAnswerRefused(answerCtx, w, pkgJSON, shnsdk.LineOf(route.Token), "pa.dtr", dtrOutputParametersProfile, payers) {
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
+		return
+	}
 	// The answer reaches the EHR as it arrived, or, from a payer on another
 	// DTR line and with module 2 on, under this gateway's line's parameter
 	// names (E-08).
@@ -525,7 +538,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// (Finding 1): a conformant $submit carries the payor Org as a sibling bundle entry (br-payer's
 	// findInBundle form), NOT in the provider SoR; bundleref.go says which entry a reference
 	// names. Contained / inline payor forms still route without hitting resolveRef.
-	recipient, _, status, msg := g.pasRecipient(body)
+	recipient, payer, status, msg := g.pasRecipient(body)
 	if status != 0 {
 		exchangeOf(r.Context()).routed(status)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -669,7 +682,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		}
 		unread = RulePatientAnswer
 	}
-	if g.carriedAnswerRefused(answerCtx, w, crJSON, shnsdk.LineOf(observedTarget)) {
+	if g.carriedAnswerRefused(answerCtx, w, crJSON, shnsdk.LineOf(observedTarget), "pa.pas", "", []shnsdk.PayerIdentifier{payer}) {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		return
 	}
@@ -695,11 +708,15 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 }
 
 // carriedAnswerRefused is the ingress check of a payer's answer to a PAS
-// submit, update or inquiry this gateway carried for its own participant's
-// system: the answer is certified against the candidate lines, the routed line
-// first, as on its own originated PAS legs, but for every payer. Unlike those legs
-// it skips no reference payer's answer: a participant that asks its gateway to
-// judge what it receives has every answer judged. It is payload
+// submit, update or inquiry, or to a DTR questionnaire package request, this
+// gateway carried for its own participant's system (contract names which): the
+// answer is certified against the candidate lines, the routed line first, as on
+// its own originated legs, but for every payer, against profile ("" for the
+// profiles it declares; a DTR package answer is judged against the operation's
+// output Parameters profile, which it need not declare). payers is the payer
+// identities the exchange was routed by; a participant that tolerates every
+// one of them (CONFORMANCE_TOLERATE_PEERS) has a defect its level would refuse
+// recorded instead. It is payload
 // conformance, the participant's own opt-in at its gateway's level: none runs
 // nothing, observe records a finding and relays, structural refuses a
 // structural defect and strict refuses every defect, and a check that could
@@ -708,8 +725,8 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 // 502, as the provider ingress refuses its other carried answers; a check that
 // could not run is the gateway's own failure, 500. It reports whether it wrote
 // the refusal.
-func (g *Gateway) carriedAnswerRefused(ctx context.Context, w http.ResponseWriter, answer []byte, line string) bool {
-	status, msg := g.validatePayerAnswerAtCandidates(ctx, answer, line, "pa.pas")
+func (g *Gateway) carriedAnswerRefused(ctx context.Context, w http.ResponseWriter, answer []byte, line, contract, profile string, payers []shnsdk.PayerIdentifier) bool {
+	status, msg := g.validatePayerAnswerAtCandidates(ctx, answer, line, contract, profile, payers)
 	if status == 0 {
 		return false
 	}

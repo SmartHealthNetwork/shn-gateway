@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // continuation.go — the durable half of the prior-authorization continuation
 // store (engine.ContinuationStore).
 //

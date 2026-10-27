@@ -1,0 +1,395 @@
+# Unit tests for alerts.yml: `promtool test rules alerts_test.yml`. Each alert fires on
+# synthetic series, and each has a case that must not fire. A test pinned to an alarm names the
+# CloudWatch alarm SHN is adding on its own gateways with the same condition, so the two change
+# together.
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Backend error ratio: 10 timeouts a minute against 60 good calls is 14% (fires); 3xx, 4xx
+  # and cancelled calls are not errors, so a second replica with only those never fires.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="a",shn_exchange="pas-claim",shn_backend_class="ok"}'
+        values: '0+60x30'
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="a",shn_exchange="pas-claim",shn_backend_class="timeout"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="b",shn_exchange="pas-claim",shn_backend_class="ok"}'
+        values: '0+60x30'
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="b",shn_exchange="pas-claim",shn_backend_class="http-4xx"}'
+        values: '0+20x30'
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="b",shn_exchange="pas-claim",shn_backend_class="http-3xx"}'
+        values: '0+20x30'
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="b",shn_exchange="pas-claim",shn_backend_class="cancelled"}'
+        values: '0+20x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ShnGatewayBackendErrorRatio
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ShnGatewayBackendErrorRatio
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a}
+            exp_annotations:
+              summary: "More than 5% of calls to your own system fail on a"
+              description: "14.29% of backend calls over the last 5 minutes got no usable answer. The shn_backend_class attribute names the failure."
+
+  # Backend error ratio under the traffic floor: one failed call every 3 minutes is 100% of
+  # calls, but fewer than one call a minute does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_backend_calls_total{job="gw",instance="a",shn_exchange="pas-claim",shn_backend_class="http-5xx"}'
+        values: '0 0 0 1 1 1 2 2 2 3 3 3 4 4 4 5 5 5 6 6 6 7 7 7 8 8 8 9 9 9 10'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ShnGatewayBackendErrorRatio
+        exp_alerts: []
+
+  # P95 near the leg budget, explicit buckets: every exchange takes 26-30 s (fires); another
+  # kind at 20 s does not.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="pas-claim",le="20"}'
+        values: '0+0x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="pas-claim",le="25"}'
+        values: '0+0x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="pas-claim",le="30"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="pas-claim",le="+Inf"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",le="20"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",le="25"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",le="30"}'
+        values: '0+10x30'
+      - series: 'shn_gateway_exchange_duration_seconds_bucket{job="gw",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ShnGatewayP95NearLegBudget
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ShnGatewayP95NearLegBudget
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_direction: inbound, shn_exchange: pas-claim}
+            exp_annotations:
+              summary: "P95 of pas-claim (inbound) is near the 30 s leg budget on a"
+              description: "P95 over the last 5 minutes is 29.75s. The leg budget is 30 s and the gateway's deadline for your system is 25 s: callers start to see 504s past it."
+
+  # P95 near the leg budget, exponential (native) histograms: ten observations a minute in the
+  # bucket (16, 32] s at schema 0 (fires).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_exchange_duration_seconds{job="gw",instance="a",shn_direction="ingress",shn_exchange="pas-claim"}'
+        values: '{{schema:0 sum:0 count:0 buckets:[0]}}+{{sum:280 count:10 offset:5 buckets:[10]}}x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ShnGatewayP95NearLegBudget
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_direction: ingress, shn_exchange: pas-claim}
+            exp_annotations:
+              summary: "P95 of pas-claim (ingress) is near the 30 s leg budget on a"
+              description: "P95 over the last 5 minutes is 30.91s. The leg budget is 30 s and the gateway's deadline for your system is 25 s: callers start to see 504s past it."
+
+  # Audit drops: one record dropped fires at once; a reason with no drops does not.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_audit_drops_total{job="gw",instance="a",shn_reason="overflow"}'
+        values: '0 0 0 0 0 1 1 1 1 1'
+      - series: 'shn_gateway_audit_drops_total{job="gw",instance="a",shn_reason="refused"}'
+        values: '0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ShnGatewayAuditDrops
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShnGatewayAuditDrops
+        exp_alerts:
+          - exp_labels: {severity: page, job: gw, instance: a, shn_reason: overflow}
+            exp_annotations:
+              summary: "a dropped audit records (overflow)"
+              description: "Audit records dropped in the last 10 minutes, reason overflow: 1."
+
+  # Export failures: failed exports fire; ok exports never do.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_telemetry_exports_total{job="gw",instance="a",shn_outcome="ok"}'
+        values: '0+1x20'
+      - series: 'shn_gateway_telemetry_exports_total{job="gw",instance="a",shn_outcome="failed"}'
+        values: '0 0 0 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ShnGatewayTelemetryExportFailures
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ShnGatewayTelemetryExportFailures
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_outcome: failed}
+            exp_annotations:
+              summary: "a's OTLP exports are failed"
+              description: "Exports failed in the last 15 minutes: 6. GET /internal/checks (telemetry-export) names the reason."
+
+  # Validator lane down: unqualified for 10 minutes fires; a lane that qualifies does not.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_validator_lane_qualified{job="gw",instance="a",shn_ig_line="2.2",shn_lane="routing"}'
+        values: '0x20'
+      - series: 'shn_gateway_validator_lane_qualified{job="gw",instance="a",shn_ig_line="2.1",shn_lane="routing"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShnGatewayValidatorLaneDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ShnGatewayValidatorLaneDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_ig_line: "2.2", shn_lane: routing}
+            exp_annotations:
+              summary: "a's routing validator lane for IG line 2.2 has not qualified"
+              description: "The lane has stayed unqualified for 10 minutes. GET /internal/checks names its last attempt's reason."
+
+  # Certificate expiry: a server certificate with 20 days left fires; a self certificate with 22
+  # days does not; a trust root with 5 days never does (a bundle can carry roots nothing uses).
+  # Pinned to SHN's alarm gateway_cert_expiry (CertificateExpiryMin, the soonest server or self,
+  # Minimum < 1814400 s, warning).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_certificate_expiry_seconds{job="gw",instance="a",shn_cert_role="server",shn_endpoint_kind="hub",shn_ig_line="none"}'
+        values: '1728000x20'
+      - series: 'shn_gateway_certificate_expiry_seconds{job="gw",instance="a",shn_cert_role="self",shn_endpoint_kind="ingress",shn_ig_line="none"}'
+        values: '1900800x20'
+      - series: 'shn_gateway_certificate_expiry_seconds{job="gw",instance="a",shn_cert_role="trust-root",shn_endpoint_kind="trust-root",shn_ig_line="none"}'
+        values: '432000x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ShnGatewayCertificateExpiry
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ShnGatewayCertificateExpiry
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_cert_role: server, shn_endpoint_kind: hub, shn_ig_line: none}
+            exp_annotations:
+              summary: "a's server certificate for hub expires in under 21 days"
+              description: "It expires in 20d 0h 0m 0s. A server certificate is what that endpoint presented; self is the gateway's own."
+
+  # Ingress key slack: under an hour fires at once; just over an hour does not. Pinned to SHN's
+  # alarm gateway_ingress_key_overdue (IngressKeyRemaining, Minimum < 3600 s over one minute,
+  # critical).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_ingress_key_remaining_seconds{job="gw",instance="a"}'
+        values: '3000x10'
+      - series: 'shn_gateway_ingress_key_remaining_seconds{job="gw",instance="b"}'
+        values: '3700x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ShnGatewayIngressKeySlack
+        exp_alerts:
+          - exp_labels: {severity: page, job: gw, instance: a}
+            exp_annotations:
+              summary: "a's ingress signing key expires in under an hour"
+              description: "It expires in 50m 0s: the key's rotation has stalled. shn_gateway_ingress_key_age_seconds shows how old the newest key is."
+
+  # Registrar feed stale: an age growing past 300 s fires once it has stayed there 3 minutes; a feed
+  # just under 300 s never does. Pinned to SHN's alarm gateway_registrar_feed_stale
+  # (DependencyAgeMax > 300 s in three of five one-minute periods, warning: the age only grows while
+  # stale, so that is three minutes on end).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_dependency_age_seconds{job="gw",instance="a",shn_dependency="registrar-feed"}'
+        values: '0+60x15'
+      - series: 'shn_gateway_dependency_age_seconds{job="gw",instance="b",shn_dependency="registrar-feed"}'
+        values: '290x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ShnGatewayRegistrarFeedStale
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: ShnGatewayRegistrarFeedStale
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, instance: a, shn_dependency: registrar-feed}
+            exp_annotations:
+              summary: "a has not read the registrar feed for over five minutes"
+              description: "Its last successful read was 9m 0s ago. The feed carries registrations and revocations: until it is read again, a revocation since then does not reach this gateway, and a newly registered peer is not known to it."
+
+  # Refused by rule, fidelity and audit (one refusal in the last 5 minutes): a lone fidelity refusal
+  # fires at once and clears five minutes later (gwa); an audit series whose first sample holds its
+  # first refusal fires (gwb); a fidelity counter at three that restarts and reports one fires
+  # (gwc); a fidelity counter holding four old refusals whose samples stop for 12 minutes and resume
+  # with no new refusal does not fire (gwd). Pinned to SHN's alarm gateway_refused_by_rule
+  # (ExchangeRefusedByRule per service and rule, Sum >= 1 for fidelity and audit in one 300 s
+  # period, warning).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gwa",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
+        values: '0x20 1x40'
+      - series: 'shn_gateway_refusals_total{job="gwb",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="audit"}'
+        values: '_x30 1x30'
+      - series: 'shn_gateway_refusals_total{job="gwc",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
+        values: '3x40 1x20'
+      - series: 'shn_gateway_refusals_total{job="gwd",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
+        values: '4x10 _x11 4x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gwa, shn_refusal_rule: fidelity}
+            exp_annotations:
+              summary: "gwa refused an exchange under the fidelity rule in the last 5 minutes"
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - eval_time: 25m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gwa, shn_refusal_rule: fidelity}
+            exp_annotations:
+              summary: "gwa refused an exchange under the fidelity rule in the last 5 minutes"
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - eval_time: 26m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gwb, shn_refusal_rule: audit}
+            exp_annotations:
+              summary: "gwb refused an exchange under the audit rule in the last 5 minutes"
+              description: "At least one audit refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - eval_time: 36m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gwc, shn_refusal_rule: fidelity}
+            exp_annotations:
+              summary: "gwc refused an exchange under the fidelity rule in the last 5 minutes"
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - eval_time: 46m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts: []
+
+  # Refused by rule, integrity and routing (three refusals in a 5-minute period): integrity refusals
+  # split over two replicas of one gateway, two and one in each of two periods, add up to three and
+  # fire (gw); two routing refusals a period never fire (gw2); authority refusals, however many, are
+  # not watched (gw3). Pinned to SHN's alarm gateway_refused_by_rule (ExchangeRefusedByRule per
+  # service and rule, Sum >= 3 for integrity and routing in two of three 300 s periods, warning).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gw",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '0x5 2x5 4x20'
+      - series: 'shn_gateway_refusals_total{job="gw",instance="b",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '0x5 1x5 2x20'
+      - series: 'shn_gateway_refusals_total{job="gw2",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="routing"}'
+        values: '0x5 2x5 4x20'
+      - series: 'shn_gateway_refusals_total{job="gw3",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="authorization-framework",shn_refusal_rule="authority"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, shn_refusal_rule: integrity}
+            exp_annotations:
+              summary: "gw refused exchanges under the integrity rule in two of the last three 5-minute periods"
+              description: "At least three integrity refusals in each of two of the last three 5-minute periods. One integrity refusal can be a partner's bad signature; a run of them points at keys or envelopes. Routing refusals mean the Hub, the registry or discovery could not route or address the exchange. shn_refusal_by names who refused."
+      - eval_time: 25m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []
+
+  # Refused by rule, integrity and routing on new and restarted counters: a routing series whose
+  # first sample holds three refusals, then three more in the next period, fires (gw4); an integrity
+  # counter at ten that restarts and reports three, then three more in the next period, fires (gw5).
+  # Pinned to SHN's alarm gateway_refused_by_rule (Sum >= 3 for integrity and routing in two of
+  # three 300 s periods, warning).
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gw4",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="routing"}'
+        values: '_x5 3x4 6x21'
+      - series: 'shn_gateway_refusals_total{job="gw5",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '10x25 3x5 6x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw4, shn_refusal_rule: routing}
+            exp_annotations:
+              summary: "gw4 refused exchanges under the routing rule in two of the last three 5-minute periods"
+              description: "At least three routing refusals in each of two of the last three 5-minute periods. One integrity refusal can be a partner's bad signature; a run of them points at keys or envelopes. Routing refusals mean the Hub, the registry or discovery could not route or address the exchange. shn_refusal_by names who refused."
+      - eval_time: 35m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw5, shn_refusal_rule: integrity}
+            exp_annotations:
+              summary: "gw5 refused exchanges under the integrity rule in two of the last three 5-minute periods"
+              description: "At least three integrity refusals in each of two of the last three 5-minute periods. One integrity refusal can be a partner's bad signature; a run of them points at keys or envelopes. Routing refusals mean the Hub, the registry or discovery could not route or address the exchange. shn_refusal_by names who refused."
+
+  # Refused by rule, integrity after a gap: an integrity counter holding ten old refusals whose
+  # samples stop for 12 minutes, then three new ones in one period, counts three in one period only,
+  # not its history, and does not fire (gwf). Pinned to SHN's alarm gateway_refused_by_rule, which
+  # counts each 300 s period's refusals alone.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gwf",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '10x20 _x11 10x7 13x20'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []
+
+  # Refused by rule, over who refused: three routing refusals a period, two refused by the Hub and
+  # one by the payer's gateway, add up and fire. Pinned to SHN's alarm gateway_refused_by_rule,
+  # whose ExchangeRefusedByRule line has no party.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gw",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="routing"}'
+        values: '0x5 2x5 4x20'
+      - series: 'shn_gateway_refusals_total{job="gw",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="routing"}'
+        values: '0x5 1x5 2x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gw, shn_refusal_rule: routing}
+            exp_annotations:
+              summary: "gw refused exchanges under the routing rule in two of the last three 5-minute periods"
+              description: "At least three routing refusals in each of two of the last three 5-minute periods. One integrity refusal can be a partner's bad signature; a run of them points at keys or envelopes. Routing refusals mean the Hub, the registry or discovery could not route or address the exchange. shn_refusal_by names who refused."
+
+  # Refused by rule, replicas that stop reporting: replica a's one fidelity refusal is its last
+  # sample before it goes stale (a failed scrape, or a replica scaled away), and it still fires
+  # (gwg). An integrity counter on two exchanges of one gateway, each holding four old refusals,
+  # whose samples stop for over an hour and which then gain one refusal each in successive periods
+  # does not fire: one refusal a period is under three (gwh). Pinned to SHN's alarm
+  # gateway_refused_by_rule, which counts each refusal when it is written.
+  - interval: 1m
+    input_series:
+      - series: 'shn_gateway_refusals_total{job="gwg",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
+        values: '0x2 1 stale'
+      - series: 'shn_gateway_refusals_total{job="gwh",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '4x10 _x70 5x30'
+      - series: 'shn_gateway_refusals_total{job="gwh",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="hub",shn_refusal_rule="integrity"}'
+        values: '4x10 _x75 5x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShnGatewayRefusedFidelityOrAudit
+        exp_alerts:
+          - exp_labels: {severity: warning, job: gwg, shn_refusal_rule: fidelity}
+            exp_annotations:
+              summary: "gwg refused an exchange under the fidelity rule in the last 5 minutes"
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - eval_time: 90m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []
+      - eval_time: 95m
+        alertname: ShnGatewayRefusedIntegrityOrRouting
+        exp_alerts: []

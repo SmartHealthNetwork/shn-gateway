@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -6,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -37,13 +40,16 @@ func carriedAnswerLegs() []carriedAnswerLeg {
 // carriedAnswerRun serves leg at level with validator judging the payer's answer,
 // and returns the EHR's answer, the payer answer's ingress findings and the
 // exchange record.
-func carriedAnswerRun(t *testing.T, leg carriedAnswerLeg, level ConformanceEnforcement, profile string, validator shnsdk.Validator) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding, ExchangeRecord, []byte) {
+func carriedAnswerRun(t *testing.T, leg carriedAnswerLeg, level ConformanceEnforcement, profile string, validator shnsdk.Validator, tune ...func(*Gateway)) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding, ExchangeRecord, []byte) {
 	t.Helper()
 	answer := leg.answer(t)
 	env := newInProcessExchange(t)
 	env.originator.cfg.ConformanceEnforcement = level
-	env.originator.cfg.OriginationProfile = profile
+	declareOriginationProfile(env.originator, profile)
 	env.originator.cfg.Validator = validator
+	for _, f := range tune {
+		f(env.originator)
+	}
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 	var mu sync.Mutex
 	var findings []ConformanceFinding
@@ -140,13 +146,12 @@ func TestPASIngress_CarriedConformantAnswerIsCarriedAtEveryLevel(t *testing.T) {
 	}
 }
 
-// The carried check skips no reference payer's answer, on an origination lane that
-// relays reference-payer bytes too: unlike the answers to the legs the gateway
-// originates for itself, a participant that asks its gateway to judge what it
-// receives has every payer's answer judged. The submit names payer 00001, a
-// reference payer identity.
+// The carried check judges a reference payer's answer, on an origination lane that
+// relays reference-payer bytes too, as it judges every payer's: a participant that
+// asks its gateway to judge what it receives has every answer judged, unless it
+// lists the payer. The submit names payer 00001, a reference payer identity.
 func TestPASIngress_CarriedAnswerSkipsNoReferencePayer(t *testing.T) {
-	if !isReferencePayer(shnsdk.PayerIdentifier{System: referencePayerSystem, Value: "00001"}) || !relaysReferencePayerBytes("demo") {
+	if !slices.Contains(ReferencePayerIdentities(), shnsdk.PayerIdentifier{System: referencePayerSystem, Value: "00001"}) || !relaysReferencePayerBytes("demo") {
 		t.Fatal("fixture: 00001 must be a reference payer and demo a lane that relays its bytes")
 	}
 	for _, leg := range carriedAnswerLegs() {

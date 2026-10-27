@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -38,13 +40,15 @@ var (
 )
 
 // routeConditions is one combination of the configuration that gates a route.
+// module1 is a declared origination profile: without one, module 1 mounts no
+// /scenario route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL bool
+	ingress, ingressAuth, baseURL, module1 bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1} {
 		if set {
 			on = append(on, name)
 		}
@@ -56,11 +60,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the three conditions.
+// everyRouteCondition is every combination of the four conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 8 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0})
+	for bits := range 16 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0})
 	}
 	return out
 }
@@ -70,8 +74,10 @@ func wantRoutes(role string, c routeConditions) []string {
 	var want []string
 	switch role {
 	case "provider":
-		want = append(want, originatingRoutes...)
-		want = append(want, localScenarioRoutes...)
+		if c.module1 {
+			want = append(want, originatingRoutes...)
+			want = append(want, localScenarioRoutes...)
+		}
 		if c.ingress {
 			want = append(want, ingressRoutePatterns...)
 			if c.ingressAuth {
@@ -100,8 +106,9 @@ func everyKnownRoute() []string {
 	return slices.Compact(all)
 }
 
-// routeGateway is a gateway with only what mounting its routes reads: role
-// and the gating configuration. Nothing is served through it.
+// routeGateway is a gateway with only what mounting its routes reads: role,
+// the gating configuration, and module 1's state built from them, as New
+// builds it. Nothing is served through it.
 func routeGateway(role string, c routeConditions) *Gateway {
 	g := &Gateway{cfg: Config{Role: role, IngressEnabled: c.ingress}}
 	if c.ingressAuth {
@@ -110,7 +117,10 @@ func routeGateway(role string, c routeConditions) *Gateway {
 	if c.baseURL {
 		g.cfg.IngressBaseURL = "https://provider.example"
 	}
-	return g
+	if c.module1 {
+		g.cfg.OriginationProfile = "demo"
+	}
+	return withModuleOne(g)
 }
 
 // probeRequest is a request that names the route pattern p, with each

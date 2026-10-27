@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pasgraph.go — the engine's names for the PAS response-graph
 // REFERENCE-CLOSURE RULE (FR-G28), which lives in internal/pasgraph so that
 // the Prior Authorization workstream's readers of a native PAS answer

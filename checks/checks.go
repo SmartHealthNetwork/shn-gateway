@@ -58,6 +58,19 @@ type Result struct {
 	// Present only on an authenticated probe; ADDITIVE on the wire, like
 	// Capability.
 	Anonymous *AnonymousRead `json:"anonymous,omitempty"`
+	// Advisory marks a check whose failure is the participant's own concern
+	// and never the gateway's readiness: its monitoring checks
+	// (telemetry-config, telemetry-export), so a monitoring vendor's outage
+	// or a bad monitoring setting never makes a gateway read as unhealthy.
+	// Set from Target.Advisory; absent on every other check. ADDITIVE on the
+	// wire, like Capability.
+	Advisory bool `json:"advisory,omitempty"`
+	// NoProbe marks a result that ran no probe: one read from the gateway's
+	// own state (KindLocal, KindValidatorLane), an endpoint discovery does
+	// not name (KindUndiscovered), or a probe the run deadline starved.
+	// Nothing was contacted, so it has no latency (latencyMs is 0). Absent on
+	// every probe that ran. ADDITIVE on the wire, like Advisory.
+	NoProbe bool `json:"noProbe,omitempty"`
 }
 
 // AnonymousRead is what an unauthenticated read of an authenticated target's
@@ -218,8 +231,8 @@ const (
 	// timeout (both non-StatusError closure errors), so operator copy
 	// must never say the PARTNER rejected the credential.
 	FailCredentialRejected = "credential-rejected"
-	// FailNotChecked: the run deadline starved this probe; nothing was
-	// probed.
+	// FailNotChecked: nothing was probed: the run deadline starved this
+	// probe, or (telemetry-export) no metrics export has run yet.
 	FailNotChecked = "not-checked"
 	// FailInternal: a bug, not a network condition — URL parse /
 	// request-build failure on a boot-validated URL, or an unknown probe
@@ -235,6 +248,21 @@ const (
 	// undecodable). Distinct from absence, which is OK — HRex publication is
 	// optional.
 	FailInvalidDavinciConfiguration = "invalid-davinci-configuration"
+	// FailEndpointUnknown: the network's discovery names no endpoint for this
+	// target, so the gateway has nowhere to send to it (the audit endpoint:
+	// its records are queued, not sent). Nothing was probed.
+	FailEndpointUnknown = "endpoint-unknown"
+	// FailLaneUnqualified: a default validator lane has not passed its
+	// qualification yet: it is still qualifying, or its attempts are failing
+	// and it is retrying. Hint says which, with the attempt count and
+	// the last failure's kind.
+	FailLaneUnqualified = "lane-unqualified"
+	// FailInvalidTelemetryConfiguration: a monitoring setting is not valid.
+	// Detail says, per setting, what the gateway did instead: a setting that
+	// tunes export keeps its default and export continues; one that decides
+	// where metrics go or how they authenticate turns OTLP export off. The
+	// gateway serves as before. Hint names the settings, never their values.
+	FailInvalidTelemetryConfiguration = "invalid-telemetry-configuration"
 )
 
 // Kind selects how a Target is probed.
@@ -247,6 +275,17 @@ const (
 	// KindDavinciConfig: GET <base>/.well-known/davinci-configuration;
 	// absence (404) tolerated
 	KindDavinciConfig Kind = "davinci-config"
+	// KindUndiscovered: a target the network's discovery did not name. It
+	// fails endpoint-unknown without probing anything.
+	KindUndiscovered Kind = "undiscovered"
+	// KindValidatorLane reports a default validator lane's qualification from
+	// the gateway's own state (Target.LaneState): it dials nothing and never
+	// starts an attempt.
+	KindValidatorLane Kind = "validator-lane"
+	// KindLocal reports the gateway's own state (Target.Local), such as its
+	// monitoring configuration and its newest metrics export: it dials
+	// nothing, and a POST re-reads it rather than contacting anything.
+	KindLocal Kind = "local"
 )
 
 // Target is one probe the runner executes. TokenFetch is set only for
@@ -274,6 +313,20 @@ type Target struct {
 	// token endpoint's error text. nil ⇒ the probe reads anonymously, as
 	// the gateway's calls to an unauthenticated partner do.
 	AuthClient *http.Client
+	// Client, when set, is the plain client the probes of this target use in
+	// place of the runner's: the same client with the target's endpoint
+	// kind on its transport, so a probe's handshake is recorded as that
+	// endpoint's (MON-R25). nil ⇒ the runner's client.
+	Client *http.Client
+	// LaneState is set only for KindValidatorLane: the app layer's closure
+	// over the lane's qualification. ok is whether it has qualified; hint is
+	// the redaction-safe state of one that has not (never validator output).
+	LaneState func() (ok bool, hint string)
+	// Local is set only for KindLocal: the app layer's closure over the
+	// state it reports. Detail and the Failure obey the REDACTION RULE.
+	Local func() (ok bool, detail string, failure *Failure)
+	// Advisory marks the target's results advisory (Result.Advisory).
+	Advisory bool
 }
 
 // ErrCredential is an AuthClient's report that it could not obtain its
@@ -411,6 +464,8 @@ func (r *Runner) Run(ctx context.Context) ([]Result, error) {
 				Detail:    "not checked — run deadline exceeded",
 				Failure:   &Failure{Code: FailNotChecked},
 				CheckedAt: r.now(),
+				Advisory:  t.Advisory,
+				NoProbe:   true,
 			})
 			continue
 		}
@@ -427,20 +482,36 @@ func (r *Runner) Run(ctx context.Context) ([]Result, error) {
 }
 
 // Last returns the newest results; ok=false before the first run completes.
+// A validator-lane or local result is read afresh from its state (it dials
+// nothing), so a lane that qualified after the last run, or an export that
+// failed since, reads as it is now rather than as it was then.
 func (r *Runner) Last() ([]Result, time.Time, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastAt.IsZero() {
 		return nil, time.Time{}, false
 	}
-	return append([]Result(nil), r.last...), r.lastAt, true
+	out := append([]Result(nil), r.last...)
+	for i, t := range r.targets {
+		if (t.Kind != KindValidatorLane && t.Kind != KindLocal) || i >= len(out) || out[i].ID != t.ID {
+			continue
+		}
+		res := Result{ID: t.ID, Target: targetOf(t.URL), CheckedAt: r.now(), Advisory: t.Advisory, NoProbe: true}
+		if t.Kind == KindLocal {
+			res.OK, res.Detail, res.Failure = probeLocal(t)
+		} else {
+			res.OK, res.Detail, res.Failure = probeValidatorLane(t)
+		}
+		out[i] = res
+	}
+	return out, r.lastAt, true
 }
 
 // targetOf renders raw for display: scheme://host only, dropping userinfo,
 // path, and query — the redaction rule. Unparseable URLs render "".
 func targetOf(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || raw == "" {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
@@ -473,7 +544,7 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 	defer cancel()
 
 	start := r.now()
-	res := Result{ID: t.ID, Target: targetOf(t.URL), CheckedAt: start}
+	res := Result{ID: t.ID, Target: targetOf(t.URL), CheckedAt: start, Advisory: t.Advisory}
 
 	switch t.Kind {
 	case KindFHIRMetadata:
@@ -484,13 +555,54 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 		res.OK, res.Detail, res.Failure = r.probeReachable(pctx, t)
 	case KindDavinciConfig:
 		res.OK, res.Detail, res.Failure, res.Capability = r.probeDavinciConfig(pctx, t)
+	case KindUndiscovered:
+		res.NoProbe = true
+		res.OK, res.Detail = false, "discovery names no endpoint"
+		res.Failure = &Failure{Code: FailEndpointUnknown}
+	case KindValidatorLane:
+		res.NoProbe = true
+		res.OK, res.Detail, res.Failure = probeValidatorLane(t)
+	case KindLocal:
+		res.NoProbe = true
+		res.OK, res.Detail, res.Failure = probeLocal(t)
 	default:
 		res.OK, res.Detail = false, fmt.Sprintf("unknown probe kind %q", t.Kind)
 		res.Failure = &Failure{Code: FailInternal, Hint: fmt.Sprintf("unknown probe kind %q", t.Kind)}
 	}
 
-	res.LatencyMS = r.now().Sub(start).Milliseconds()
+	if !res.NoProbe {
+		res.LatencyMS = r.now().Sub(start).Milliseconds()
+	}
 	return res
+}
+
+// probeValidatorLane reads a default validator lane's qualification from the
+// target's LaneState. Nothing is dialed.
+func probeValidatorLane(t Target) (bool, string, *Failure) {
+	if t.LaneState == nil {
+		return false, "no lane state", &Failure{Code: FailInternal, Hint: "no lane state"}
+	}
+	ok, hint := t.LaneState()
+	if ok {
+		return true, "qualified", nil
+	}
+	return false, "not qualified: " + hint, &Failure{Code: FailLaneUnqualified, Hint: hint}
+}
+
+// probeLocal reads the gateway's own state from the target's Local. Nothing
+// is dialed.
+func probeLocal(t Target) (bool, string, *Failure) {
+	if t.Local == nil {
+		return false, "no local state", &Failure{Code: FailInternal, Hint: "no local state"}
+	}
+	ok, detail, f := t.Local()
+	if !ok && f == nil {
+		f = &Failure{Code: FailInternal}
+	}
+	if ok {
+		f = nil
+	}
+	return ok, detail, f
 }
 
 // probeFHIRMetadata GETs <base>/metadata and expects a CapabilityStatement.
@@ -499,11 +611,11 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 // is recorded, and named in Detail when the two disagree.
 func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string, *Failure, *Capability, *AnonymousRead) {
 	if t.AuthClient == nil {
-		ok, detail, failure, cap := r.readMetadata(ctx, t, r.client)
+		ok, detail, failure, cap := r.readMetadata(ctx, t, r.plain(t))
 		return ok, detail, failure, cap, nil
 	}
 	ok, detail, failure, cap := r.readMetadata(ctx, t, t.AuthClient)
-	aok, adetail, afailure, _ := r.readMetadata(ctx, t, r.client)
+	aok, adetail, afailure, _ := r.readMetadata(ctx, t, r.plain(t))
 	switch {
 	case ok && !aok && refusesAnonymous(afailure):
 		detail += fmt.Sprintf("; the base answers /metadata only when authenticated (anonymous: %s)", adetail)
@@ -521,6 +633,15 @@ func (r *Runner) probeFHIRMetadata(ctx context.Context, t Target) (bool, string,
 // refusing a caller without a credential (HTTP 401 or 403).
 func refusesAnonymous(f *Failure) bool {
 	return f != nil && f.Code == FailHTTPStatus && (f.Hint == "HTTP 401" || f.Hint == "HTTP 403")
+}
+
+// plain is the client t's unauthenticated probes use: t.Client, else the
+// runner's.
+func (r *Runner) plain(t Target) *http.Client {
+	if t.Client != nil {
+		return t.Client
+	}
+	return r.client
 }
 
 // readMetadata is one GET <base>/metadata through client.
@@ -647,7 +768,7 @@ func (r *Runner) probeDavinciConfig(ctx context.Context, t Target) (bool, string
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}, nil
 	}
 	t.withHeaders(req)
-	resp, err := r.client.Do(req)
+	resp, err := r.plain(t).Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s/.well-known/davinci-configuration: %v", redacted, redactErr(err)),
 			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}, nil
@@ -747,7 +868,7 @@ func (r *Runner) probeReachable(ctx context.Context, t Target) (bool, string, *F
 			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
 	}
 	t.withHeaders(req)
-	resp, err := r.client.Do(req)
+	resp, err := r.plain(t).Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
 			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}

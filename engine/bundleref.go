@@ -372,9 +372,10 @@ func coverageResources(coverage []byte) [][]byte {
 // refused with refs' reason, and one that resolved to a resource naming no
 // payer identifier with the reason organizationMiss gives (as a PAS
 // Bundle's is); any other payor without one keeps the bare refusal.
-func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string, int, string) {
+func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string, shnsdk.PayerIdentifier, int, string) {
+	none := shnsdk.PayerIdentifier{}
 	if g.cfg.PayerRouter == nil {
-		return "", http.StatusUnprocessableEntity, "no payer router configured"
+		return "", none, http.StatusUnprocessableEntity, "no payer router configured"
 	}
 	var first shnsdk.PayerIdentifier
 	for i, c := range covs {
@@ -382,26 +383,26 @@ func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string,
 		pid, err := shnsdk.ParseCoveragePayer(c, refs.resolve)
 		switch {
 		case err != nil && refs.disagreed:
-			return "", http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree
 		case err != nil && refs.resolved != nil:
 			if why := organizationMiss(refs.resolved, "the payor Organization"); why != "" {
-				return "", http.StatusUnprocessableEntity, noPayerIdentifier + ": " + why
+				return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + why
 			}
-			return "", http.StatusUnprocessableEntity, noPayerIdentifier
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
 		case err != nil:
-			return "", http.StatusUnprocessableEntity, noPayerIdentifier
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
 		case i > 0 && pid != first:
-			return "", http.StatusUnprocessableEntity, "ambiguous coverage for routing: the coverage names more than one payer"
+			return "", none, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the coverage names more than one payer"
 		}
 		first = pid
 	}
 	if len(covs) == 0 {
-		return "", http.StatusUnprocessableEntity, noPayerIdentifier
+		return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(first)
 	if !ok {
-		return "", http.StatusUnprocessableEntity,
+		return "", none, http.StatusUnprocessableEntity,
 			fmt.Sprintf("no registered payer for identifier %s|%s", first.System, first.Value)
 	}
-	return holder, 0, ""
+	return holder, first, 0, ""
 }

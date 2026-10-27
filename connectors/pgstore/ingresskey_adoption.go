@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 import (
@@ -10,8 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"time"
-
-	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 )
 
 // ingressKeyLockID coordinates creators even when the holder has no rows. Its
@@ -57,7 +57,7 @@ ORDER BY created_at DESC, kid DESC`, s.holderID, now)
 			rows.Close()
 			return "", cachedKey{}, err
 		}
-		if kid != "" || !now.Before(created.Add(ingressKeyRotation)) {
+		if kid != "" || !now.Before(created.Add(s.rotation)) {
 			continue
 		}
 		key, err := parsePKCS8EC(pemStr)
@@ -86,7 +86,7 @@ ORDER BY created_at DESC, kid DESC`, s.holderID, now)
 			return "", cachedKey{}, err
 		}
 		pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
-		notAfter := now.Add(ingressKeyRotation + engine.IngressBearerTTL + time.Minute)
+		notAfter := now.Add(ingressKeyLife)
 		if _, err := tx.Exec(ctx, `DELETE FROM gw_ingress_key WHERE holder_id=$1 AND not_after <= $2`, s.holderID, now); err != nil {
 			return "", cachedKey{}, err
 		}

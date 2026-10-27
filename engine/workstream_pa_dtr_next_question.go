@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_dtr_next_question.go — the PA adapter's reads of an SDC
 // $next-question exchange: the payer's answer (the delivered tree) and a framed
 // input's subject. The DTR inbound responder reads both, and the provider-side

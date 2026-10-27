@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_continuation.go — the server-held prior-authorization continuation: what a
 // provider gateway keeps about an authorization a payer pended, so the same
 // decision can be asked for again later.

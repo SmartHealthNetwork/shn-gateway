@@ -1,0 +1,178 @@
+# Prometheus alert rules for the SHN Smart Gateway's metrics, as Prometheus stores them from
+# OTLP push (its OTLP receiver) or from the gateway's pull listener (GET /metrics). Every rule
+# but two groups by job and instance, which both paths set: one alert per gateway replica. The
+# refusal rules group by job alone, so refusals spread over a gateway's replicas add up.
+#
+# Thresholds are starting points: tune them to your traffic. The rules are an example, outside
+# the gateway's stability promise; the metric names and attributes they read are inside it.
+groups:
+  - name: shn-gateway
+    rules:
+      # Calls to your own system (FHIR server, payer system) that got no usable answer, the
+      # classes the gateway's BackendError metric counts: a timeout, a connection or TLS failure,
+      # auth (a token it could not obtain, or a 401 or 403), a 5xx, an unreadable or malformed
+      # answer, or a failure it could not classify. A 3xx, another 4xx and a cancelled call (the
+      # requester went away) are not errors. Fires only while there is traffic, at least one call
+      # a minute.
+      - alert: ShnGatewayBackendErrorRatio
+        expr: |
+          (
+            sum by (job, instance) (rate(shn_gateway_backend_calls_total{shn_backend_class=~"timeout|connect|tls|auth|http-5xx|read|malformed|other"}[5m]))
+            /
+            sum by (job, instance) (rate(shn_gateway_backend_calls_total[5m]))
+          ) > 0.05
+          and
+          sum by (job, instance) (rate(shn_gateway_backend_calls_total[5m])) > 1/60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of calls to your own system fail on {{ $labels.instance }}"
+          description: "{{ $value | humanizePercentage }} of backend calls over the last 5 minutes got no usable answer. The shn_backend_class attribute names the failure."
+
+      # An exchange's time from arrival to answer, at P95 per exchange kind, near the leg budget:
+      # the requester gives a leg 30 s, and the gateway's own deadline for your system is 25 s,
+      # so this fires before callers start to see 504s. It reads explicit-bucket and exponential
+      # (native) histograms alike.
+      - alert: ShnGatewayP95NearLegBudget
+        expr: |
+          (
+            histogram_quantile(0.95, sum by (job, instance, shn_direction, shn_exchange, le) (rate(shn_gateway_exchange_duration_seconds_bucket[5m])))
+            or
+            histogram_quantile(0.95, sum by (job, instance, shn_direction, shn_exchange) (rate(shn_gateway_exchange_duration_seconds[5m])))
+          ) > 25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 of {{ $labels.shn_exchange }} ({{ $labels.shn_direction }}) is near the 30 s leg budget on {{ $labels.instance }}"
+          description: "P95 over the last 5 minutes is {{ $value | humanizeDuration }}. The leg budget is 30 s and the gateway's deadline for your system is 25 s: callers start to see 504s past it."
+
+      # Audit records the gateway dropped: records the network's Audit Plane will never receive.
+      # Any drop pages. The shn_reason attribute says why (overflow, refused, invalid, conflict,
+      # store, stopped). As of v1.0.0 nothing appends to the gateway's audit outbox yet, so this
+      # alert cannot fire until a release that writes audit records: its silence until then means
+      # not measured, not no drops.
+      - alert: ShnGatewayAuditDrops
+        expr: sum by (job, instance, shn_reason) (increase(shn_gateway_audit_drops_total[10m])) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.instance }} dropped audit records ({{ $labels.shn_reason }})"
+          description: "Audit records dropped in the last 10 minutes, reason {{ $labels.shn_reason }}: {{ $value | humanize }}."
+
+      # OTLP exports that failed, or that the receiver accepted with data points rejected. A push
+      # that fails cannot report its own failure over that push: this rule fires where the export
+      # self-metric reaches Prometheus another way, such as the gateway's pull listener or a second
+      # exporter. The telemetry-export check in GET /internal/checks shows the same outcome.
+      - alert: ShnGatewayTelemetryExportFailures
+        expr: sum by (job, instance, shn_outcome) (increase(shn_gateway_telemetry_exports_total{shn_outcome=~"failed|dropped"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}'s OTLP exports are {{ $labels.shn_outcome }}"
+          description: "Exports {{ $labels.shn_outcome }} in the last 15 minutes: {{ $value | humanize }}. GET /internal/checks (telemetry-export) names the reason."
+
+      # A validator lane that has not qualified: the gateway cannot validate that IG line's
+      # payloads on that lane (routing: a lane conformance routing admits; certification: a lane
+      # the certification evidence qualifies).
+      - alert: ShnGatewayValidatorLaneDown
+        expr: shn_gateway_validator_lane_qualified == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}'s {{ $labels.shn_lane }} validator lane for IG line {{ $labels.shn_ig_line }} has not qualified"
+          description: "The lane has stayed unqualified for 10 minutes. GET /internal/checks names its last attempt's reason."
+
+      # A certificate that expires within 21 days: what an endpoint the gateway calls presented
+      # (server), or the gateway's own (self). A trust-root reading is left out: a bundle can
+      # carry roots nothing uses. One alert per replica for the soonest certificate of each endpoint
+      # kind, role and IG line.
+      - alert: ShnGatewayCertificateExpiry
+        expr: shn_gateway_certificate_expiry_seconds{shn_cert_role=~"server|self"} < 21 * 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}'s {{ $labels.shn_cert_role }} certificate for {{ $labels.shn_endpoint_kind }} expires in under 21 days"
+          description: "It expires in {{ $value | humanizeDuration }}. A server certificate is what that endpoint presented; self is the gateway's own."
+
+      # The ingress signing key's remaining time below an hour. The shared key rotates about an
+      # hour before it expires, so a healthy gateway never falls under 3600 s: this is a rotation
+      # that has stalled, and callers' token requests start failing once under five minutes
+      # remain. Pages.
+      - alert: ShnGatewayIngressKeySlack
+        expr: shn_gateway_ingress_key_remaining_seconds < 3600
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.instance }}'s ingress signing key expires in under an hour"
+          description: "It expires in {{ $value | humanizeDuration }}: the key's rotation has stalled. shn_gateway_ingress_key_age_seconds shows how old the newest key is."
+
+      # The registrar feed not read successfully for over five minutes, for three minutes on end
+      # (the CloudWatch alarm SHN is adding on its own gateways' DependencyAgeMax has the same
+      # threshold and three of five one-minute periods). The gateway reads the feed every few
+      # seconds. The feed carries registrations and revocations, so while it is stale a revocation
+      # does not reach this gateway: hence a warning, not just a dashboard line.
+      - alert: ShnGatewayRegistrarFeedStale
+        expr: shn_gateway_dependency_age_seconds{shn_dependency="registrar-feed"} > 300
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} has not read the registrar feed for over five minutes"
+          description: "Its last successful read was {{ $value | humanizeDuration }} ago. The feed carries registrations and revocations: until it is read again, a revocation since then does not reach this gateway, and a newly registered peer is not known to it."
+
+      # Exchanges refused under a rule whose refusals mean the network's own machinery is failing,
+      # not a partner. Fidelity (the gateway's own edit of a message was refused) and audit (the
+      # exchange's audit could not be recorded) fire on a single refusal in the last 5 minutes.
+      # Integrity (one can be a partner's bad signature, a run points at keys or envelopes) and
+      # routing (the Hub, the registry or discovery could not route or address it) fire when each of
+      # two of the last three 5-minute periods holds three. Both sum over the gateway's replicas,
+      # directions, exchanges and who refused (the CloudWatch alarms SHN is adding on its own
+      # gateways' ExchangeRefusedByRule have the same thresholds, per gateway service). Authority
+      # and consent refusals are often the right outcome, authentication and replay are a caller's,
+      # and conformance and limit are not network faults, so none of them alerts.
+      #
+      # Each 5-minute window counts the refusals between its two ends: a counter's last value in the
+      # window against its last value before it, looking back up to a day, so neither a gap in the
+      # samples nor a replica that stopped reporting in the window loses a refusal. A counter new in
+      # the window, or with no value in the day before it, counts in full. A restart shows only
+      # where a value in the window falls below that last one before it: then the window counts the
+      # refusals since the restart, and not those before it in the same window. A restart whose
+      # first value is no lower is not seen, as with increase(). A refusal carries the time of the
+      # export (OTLP push) or scrape (pull) that reports it, so one near a period's end can count in
+      # the next period.
+      - alert: ShnGatewayRefusedFidelityOrAudit
+        expr: |
+          sum by (job, shn_refusal_rule) (
+            (
+              (last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m]) - last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[1d] offset 5m))
+              unless min_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m]) < last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[1d] offset 5m)
+            )
+            or last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m])
+          ) >= 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} refused an exchange under the {{ $labels.shn_refusal_rule }} rule in the last 5 minutes"
+          description: "At least one {{ $labels.shn_refusal_rule }} refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+      - alert: ShnGatewayRefusedIntegrityOrRouting
+        expr: |
+          count_over_time(
+            (
+              sum by (job, shn_refusal_rule) (
+                (
+                  (last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"integrity|routing"}[5m]) - last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"integrity|routing"}[1d] offset 5m))
+                  unless min_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"integrity|routing"}[5m]) < last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"integrity|routing"}[1d] offset 5m)
+                )
+                or last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"integrity|routing"}[5m])
+              ) >= 3
+            )[15m:5m]
+          ) >= 2
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} refused exchanges under the {{ $labels.shn_refusal_rule }} rule in two of the last three 5-minute periods"
+          description: "At least three {{ $labels.shn_refusal_rule }} refusals in each of two of the last three 5-minute periods. One integrity refusal can be a partner's bad signature; a run of them points at keys or envelopes. Routing refusals mean the Hub, the registry or discovery could not route or address the exchange. shn_refusal_by names who refused."

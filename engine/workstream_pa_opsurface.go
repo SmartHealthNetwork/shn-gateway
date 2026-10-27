@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_opsurface.go — read-only export of the PA workstream catalog's operation
 // bindings. The other trust domains keep independent copies of these bindings
 // by design (the Hub is payload-blind and must not import this engine; the

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -139,7 +141,7 @@ func TestServiceSelectedByHook(t *testing.T) {
 	for _, hook := range []string{"order-select", "order-sign", "order-dispatch"} {
 		t.Run(hook, func(t *testing.T) {
 			p := newCDSPayer(t, referencePayerServices...)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 			req := cdsRequest(hook)
 			res, err := n.Handle(context.Background(), legFor(hook), "corr", "pci", req)
 			if err != nil || res.Status != 0 {
@@ -157,7 +159,7 @@ func TestServiceSelectedByHook(t *testing.T) {
 	t.Run("the listing is read once and reused", func(t *testing.T) {
 		p := newCDSPayer(t, referencePayerServices...)
 		now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, func() time.Time { return now })
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, func() time.Time { return now })
 		for range 2 {
 			if res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign")); err != nil || res.Status != 0 {
 				t.Fatalf("Handle: %v %+v", err, res)
@@ -176,7 +178,7 @@ func TestServiceSelectedByHook(t *testing.T) {
 	})
 	t.Run("a configured service for the request's hook is used", func(t *testing.T) {
 		p := newCDSPayer(t, append(slices.Clone(referencePayerServices), CDSService{ID: "pa-sign", Hook: "order-sign"})...)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "pa-sign", nil, nil, WithCRDDispatchService("order-dispatch-crd"))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("pa-sign"), WithCRDDispatchService("order-dispatch-crd"))
 		for _, hook := range []string{"order-sign", "order-dispatch"} {
 			if res, err := n.Handle(context.Background(), legFor(hook), "c", "pci", cdsRequest(hook)); err != nil || res.Status != 0 {
 				t.Fatalf("%s: %v %+v", hook, err, res)
@@ -197,7 +199,7 @@ func TestServiceSelectedByHook(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			p := newCDSPayer(t, referencePayerServices...)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 			res, err := n.Handle(context.Background(), row.leg, "c", "pci", cdsRequest(row.hook))
 			if err != nil || res.Status != row.status || !strings.Contains(res.Message, row.msg) {
 				t.Fatalf("got %v %d %q, want %d %q", err, res.Status, res.Message, row.status, row.msg)
@@ -216,7 +218,7 @@ func TestServiceSelectedByHook(t *testing.T) {
 				}
 				t.Error("a request was sent without a readable listing")
 			}))
-			n := NewNativeResponder(srv.Client(), srv.URL, "order-sign-crd", nil, nil)
+			n := NewNativeResponder(srv.Client(), srv.URL, nil, WithCRDService("order-sign-crd"))
 			res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
 			srv.Close()
 			if err != nil || res.Status != http.StatusBadGateway || res.Message != "payer CDS service listing unavailable" {
@@ -250,7 +252,7 @@ func TestServiceSelectedByHook_FailedListingReadAgain(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	n := NewNativeResponder(srv.Client(), srv.URL, "", nil, func() time.Time { return now })
+	n := NewNativeResponder(srv.Client(), srv.URL, func() time.Time { return now })
 	handle := func() LegResult {
 		t.Helper()
 		res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
@@ -279,7 +281,7 @@ func TestServiceSelectedByHook_FailedListingReadAgain(t *testing.T) {
 
 func TestServiceSelectedByHook_NoServiceForHookRefusedWithOffered(t *testing.T) {
 	p := newCDSPayer(t, CDSService{ID: "sign", Hook: "order-sign"}, CDSService{ID: "dispatch", Hook: "order-dispatch"}, CDSService{ID: "sign-2", Hook: "order-sign"})
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 	res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-select"))
 	if err != nil || res.Status != http.StatusUnprocessableEntity {
 		t.Fatalf("got %v %+v", err, res)
@@ -295,7 +297,7 @@ func TestServiceSelectedByHook_NoServiceForHookRefusedWithOffered(t *testing.T) 
 		t.Fatal("the refused request reached the payer")
 	}
 	t.Run("a configured service the payer does not list", func(t *testing.T) {
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "retired-service", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("retired-service"))
 		res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
 		if err != nil || res.Status != http.StatusUnprocessableEntity {
 			t.Fatalf("got %v %+v", err, res)
@@ -333,7 +335,7 @@ func TestServiceSelectedByHook_NoServiceForHookRefusedWithOffered(t *testing.T) 
 
 func TestServiceSelectedByHook_SeveralServicesForHookAmbiguous(t *testing.T) {
 	p := newCDSPayer(t, CDSService{ID: "a", Hook: "order-sign"}, CDSService{ID: "b", Hook: "order-sign"})
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 	res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
 	if err != nil || res.Status != http.StatusUnprocessableEntity || res.Message != "payer offers several CDS services for hook order-sign" {
 		t.Fatalf("got %v %+v", err, res)
@@ -342,7 +344,7 @@ func TestServiceSelectedByHook_SeveralServicesForHookAmbiguous(t *testing.T) {
 		t.Fatal("an ambiguous request reached the payer")
 	}
 	t.Run("a configured service settles it", func(t *testing.T) {
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "b", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("b"))
 		if res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign")); err != nil || res.Status != 0 {
 			t.Fatalf("got %v %+v", err, res)
 		}
@@ -362,7 +364,7 @@ func TestServiceSelectedByHook_OverrideHookMismatchRefused(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			p := newCDSPayer(t, referencePayerServices...)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, row.override, nil, nil, WithCRDDispatchService(row.dispatch))
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService(row.override), WithCRDDispatchService(row.dispatch))
 			res, err := n.Handle(context.Background(), legFor(row.hook), "c", "pci", cdsRequest(row.hook))
 			if err != nil || res.Status != http.StatusUnprocessableEntity {
 				t.Fatalf("got %v %+v", err, res)

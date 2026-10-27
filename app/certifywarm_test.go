@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -132,7 +134,7 @@ func TestWarmCertification_SendsOneBundlePerConfiguredEndpoint(t *testing.T) {
 	}
 	defer engine.CloseCertificationClients(validators)
 
-	warmCertification(t.Context(), validators)
+	warmCertification(t.Context(), validators, nil)
 
 	for line, l := range map[string]*recordedLane{"2.0": l20, "2.1": l21, "2.2": l22} {
 		version := map[string]string{"2.0": "2.0.1", "2.1": "2.1.0", "2.2": "2.2.1"}[line]
@@ -160,10 +162,10 @@ func TestWarmCertification_SendsOneBundlePerConfiguredEndpoint(t *testing.T) {
 func TestWarmCertification_SkipsAddressesQualifiedByTheCorpus(t *testing.T) {
 	logs := captureWarmLog(t)
 	l20, l21, l22 := newRecordedLane(t, nil, "lane-2.0-certify-warm"), newWarmLane(t, answers), newWarmLane(t, answers)
-	validators := certificationValidators(env(nil), config{FHIRCertifyURL21: l21.URL + "/fhir", FHIRValidateURL22: l22.URL + "/fhir"}, l20.URL+"/fhir", nil, nil)
+	validators := certValidators(t, env(nil), config{FHIRCertifyURL21: l21.URL + "/fhir", FHIRValidateURL22: l22.URL + "/fhir"}, l20.URL+"/fhir", nil, nil)
 	defer engine.CloseCertificationClients(validators)
 
-	warmCertification(t.Context(), validators)
+	warmCertification(t.Context(), validators, nil)
 
 	if got := l20.posts.Load(); got != 1 {
 		t.Errorf("2.0 validator got %d warm-up requests, want 1", got)
@@ -191,7 +193,7 @@ func TestWarmCertification_RetriesUntilAnsweredAtMostThreeTimes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureWarmLog(t)
 			lane := newWarmLane(t, tc.status)
-			warmCertification(t.Context(), map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")})
+			warmCertification(t.Context(), map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")}, nil)
 			if got := len(lane.got()); got != tc.requests {
 				t.Fatalf("%d requests, want %d", got, tc.requests)
 			}
@@ -223,7 +225,7 @@ func TestWarmCertification_UsesItsOwnClientAndSkipsDefaultLanes(t *testing.T) {
 	validators := map[string]shnsdk.Validator{"2.0": engine.NewLineFakeValidator("2.0"), "2.1": engineClient, "2.2": gated}
 	defer engine.CloseCertificationClients(validators)
 
-	warmCertification(t.Context(), validators)
+	warmCertification(t.Context(), validators, nil)
 
 	if got := len(configured.got()); got != 1 {
 		t.Fatalf("configured endpoint got %d requests, want 1 through the warm-up's own client", got)
@@ -254,7 +256,7 @@ func TestWarmCertification_ShutdownInterruptsARequestInFlight(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		warmCertification(ctx, map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")})
+		warmCertification(ctx, map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")}, nil)
 	}()
 	select {
 	case <-received:
@@ -279,7 +281,7 @@ func TestWarmCertification_StopsWhenItsContextEnds(t *testing.T) {
 	lane := newWarmLane(t, answers)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	warmCertification(ctx, map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")})
+	warmCertification(ctx, map[string]shnsdk.Validator{"2.1": engine.NewCertificationOperationValidator(lane.URL + "/fhir")}, nil)
 	if got := lane.got(); len(got) != 0 {
 		t.Fatalf("sent %+v after shutdown", got)
 	}

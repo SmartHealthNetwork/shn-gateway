@@ -62,6 +62,11 @@ type AccessLine struct {
 	// Stages is the time an inbound leg's answer spent in each stage
 	// (engine.LegStages); absent on an ingress call.
 	Stages *AccessStages `json:"stages,omitempty"`
+	// Network is the time an ingress call waited on the Hub and its peer
+	// (engine.ExchangeRecord.Network); absent on an inbound leg and on an
+	// ingress call that handed nothing to the transport for the Hub.
+	// Evolving.
+	Network *AccessNetwork `json:"network,omitempty"`
 	// AnswerError is why an inbound leg's answer (the participant's, or the
 	// gateway's own refusal) could not be authorized (engine.AnswerErrorClasses):
 	// cancelled, timeout, auth, unreachable or other; absent otherwise.
@@ -110,6 +115,16 @@ type AccessStages struct {
 	SealMs     int64 `json:"sealMs"`
 	LedgerMs   int64 `json:"ledgerMs"`
 	WriteMs    int64 `json:"writeMs"`
+}
+
+// AccessNetwork is the time an ingress call waited on the network, in
+// milliseconds: from handing each sealed request to the transport for the Hub
+// to reading the Hub's answer, timed once while requests overlap, so it is at
+// most LatencyMs; the rest is the gateway's own time. Calls counts the
+// requests handed to the transport.
+type AccessNetwork struct {
+	LatencyMs int64 `json:"latencyMs"`
+	Calls     int   `json:"calls"`
 }
 
 // RelayEditsDetail is the Detail of a captured transmit that applied

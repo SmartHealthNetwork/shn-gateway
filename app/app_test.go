@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -44,8 +46,9 @@ func env(m map[string]string) func(string) string {
 // boot gate, which supplies a real bundle + a validator-less /discovery.
 
 // No validator URL + no fake opt-in ⇒ error (FR-36 fail-closed) at every level
-// that checks, the unset default (observe) included; the refusal names both
-// remedies, a validator or the level that checks nothing.
+// that checks; the refusal names both remedies, a validator or the level that
+// checks nothing. The unset default is none (D116), which checks nothing, so it
+// is not among them (TestSelectValidator_NoneNeedsNoValidator).
 func TestSelectValidator_FailsClosed(t *testing.T) {
 	for _, level := range []engine.ConformanceEnforcement{engine.EnforcementObserve, engine.EnforcementStructural, engine.EnforcementStrict} {
 		_, err := selectValidator(env(map[string]string{}), "", level)
@@ -246,11 +249,12 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		// THE default: absent means observe. Every check runs, each defect
-		// is recorded and nothing is refused for conformance. Every gate pins
-		// its level explicitly instead (test/invariants'
-		// TestInvariant_EveryGateRunsStrict).
-		{"", engine.EnforcementObserve},
+		// THE default: absent means none (D116). No payload check runs and
+		// nothing is recorded; a participant opts in to observe, structural or
+		// strict. Every SHN gateway pins its level explicitly instead
+		// (test/invariants' TestInvariant_EveryGateRunsStrict and
+		// TestInvariant_EverySHNGatewayStatesItsLevel).
+		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
 		{"observe", engine.EnforcementObserve},
 		{"strict", engine.EnforcementStrict},
@@ -266,6 +270,9 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		}
 		if cfg.ConformanceEnforcement != tc.want {
 			t.Errorf("CONFORMANCE_ENFORCEMENT=%q loaded as %v, want %v", tc.env, cfg.ConformanceEnforcement, tc.want)
+		}
+		if unset := tc.env == ""; cfg.ConformanceEnforcementUnset != unset {
+			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: ConformanceEnforcementUnset=%v, want %v", tc.env, cfg.ConformanceEnforcementUnset, unset)
 		}
 	}
 }
@@ -299,7 +306,7 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		{"", engine.EnforcementObserve},
+		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
 		{"observe", engine.EnforcementObserve},
 		{"strict", engine.EnforcementStrict},
@@ -324,9 +331,9 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 // "gwCfg.RequireKnownMembers = cfg.RequireKnownMembers" line, or the env read in
 // loadConfig, leaves the "true" row red. That the engine honors the field is
 // proven in internal/fhirseed/public_door_integration_test.go and the engine's
-// subject-binding rows. The deprecated SHN_ACCEPT_UNKNOWN_MEMBERS only warns; a
-// value outside true/false, or the alias beside REQUIRE_KNOWN_MEMBERS=true,
-// refuses to boot.
+// subject-binding rows. A value outside true/false refuses to boot. The retired
+// alias SHN_ACCEPT_UNKNOWN_MEMBERS is not read: it only warns, beside
+// REQUIRE_KNOWN_MEMBERS=true too, which then governs alone.
 func TestBuildWiresKnownMemberOptInToGateway(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -338,10 +345,9 @@ func TestBuildWiresKnownMemberOptInToGateway(t *testing.T) {
 		{name: "unset carries unknown members"},
 		{name: "false carries unknown members", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "false"}},
 		{name: "true opts in", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "true"}, want: true, wantLog: "REQUIRE_KNOWN_MEMBERS=true"},
-		{name: "deprecated alias only warns", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1"}, wantLog: "SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated"},
+		{name: "the retired alias only warns", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1"}, wantLog: acceptUnknownLeftoverLine},
 		{name: "other value refuses to boot", env: map[string]string{"REQUIRE_KNOWN_MEMBERS": "yes"}, wantErr: "REQUIRE_KNOWN_MEMBERS must be true or false"},
-		{name: "alias beside opt-in refuses to boot", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1", "REQUIRE_KNOWN_MEMBERS": "true"}, wantErr: "contradict"},
-		{name: "a false alias beside opt-in only warns", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "false", "REQUIRE_KNOWN_MEMBERS": "true"}, want: true, wantLog: "SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated"},
+		{name: "the retired alias beside opt-in only warns, and the opt-in governs", env: map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "1", "REQUIRE_KNOWN_MEMBERS": "true"}, want: true, wantLog: acceptUnknownLeftoverLine},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
@@ -608,7 +614,7 @@ func TestBuildWiresConformanceEnforcementToNativeResponder(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 
@@ -616,11 +622,12 @@ func TestBuildWiresConformanceEnforcementToNativeResponder(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		{"", engine.EnforcementObserve},
+		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
-		// The none and strict rows keep this a fence in every direction:
-		// without them, hardcoding the responder's policy to observe would
-		// pass the absent row.
+		// The observe and strict rows keep this a fence in every direction:
+		// without them, hardcoding the responder's policy to none would pass
+		// the absent and none rows.
+		{"observe", engine.EnforcementObserve},
 		{"strict", engine.EnforcementStrict},
 	} {
 		dir := t.TempDir()
@@ -681,7 +688,7 @@ func TestResolveDiscovery_AnchorKeyURLOverride(t *testing.T) {
 	defer override.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /discovery doc points the anchor key URLs at a DIFFERENT (unused) place.
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":"http://unused.invalid/pubkey","hubTransportKeyURL":%q}`, override.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":"http://unused.invalid/pubkey","hubTransportKeyURL":%q}`, override.URL)
 	}))
 	defer disc.Close()
 
@@ -709,7 +716,7 @@ func TestResolveDiscovery_ResolvesTrustPlanes(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{"consent":"http://consent.invalid","audit":"http://audit.invalid","phg":"http://phg.invalid"},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{"consent":"http://consent.invalid","audit":"http://audit.invalid","phg":"http://phg.invalid"},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 
@@ -742,7 +749,7 @@ func TestResolveDiscovery_HubAcceptsInvolved(t *testing.T) {
 		{`,"hubAccepts":["somethingElse"]`, false},
 	} {
 		disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"authzPublicKeyURL":%q,"hubTransportKeyURL":%q%s}`, keys.URL, keys.URL, tc.hubAccepts)
+			fmt.Fprintf(w, `{`+acceptingWire+`"authzPublicKeyURL":%q,"hubTransportKeyURL":%q%s}`, keys.URL, keys.URL, tc.hubAccepts)
 		}))
 		_, ep, err := resolveDiscovery(context.Background(), shnsdk.NewClient(), config{DiscoveryURL: disc.URL})
 		disc.Close()
@@ -791,10 +798,12 @@ func TestResolveDiscovery_SurfacesFHIRValidate(t *testing.T) {
 	defer keys.Close()
 	discSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(shnsdk.Discovery{ //nolint:errcheck
-			Endpoints:          shnsdk.DiscoveryEndpoints{Registrar: "https://reg.example", Hub: "https://hub.example", Authz: "https://authz.example"},
-			AuthzPublicKeyURL:  keys.URL,
-			HubTransportKeyURL: keys.URL,
-			FHIRValidateURL:    wantURL,
+			WireProtocolVersion:          "1.1.0",
+			WireProtocolVersionsAccepted: []string{"1.1.0", "2.0.0"},
+			Endpoints:                    shnsdk.DiscoveryEndpoints{Registrar: "https://reg.example", Hub: "https://hub.example", Authz: "https://authz.example"},
+			AuthzPublicKeyURL:            keys.URL,
+			HubTransportKeyURL:           keys.URL,
+			FHIRValidateURL:              wantURL,
 		})
 	}))
 	defer discSrv.Close()
@@ -973,9 +982,6 @@ func TestLoadConfig_PayorEdgeIdentity(t *testing.T) {
 func TestDemoEgressNativeLinesEnv(t *testing.T) {
 	baseEnv := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
-		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
-		// load, which requires the operated $populate endpoint.
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 
 	t.Run("empty is unset", func(t *testing.T) {
@@ -1039,7 +1045,7 @@ func TestDemoEgressNativeLinesEnv(t *testing.T) {
 
 // SHN_DEMO_EDGE_CAPTURE: unset ⇒ false; "true" WITH OBSERVER_ADDR set ⇒
 // true; any other value ⇒ false — the ordinary loadConfig bool idiom
-// (`== "true"`), matching every other config bool (PayerDavinciStrictExtensions
+// (`== "true"`), matching every other config bool (ProviderDTRNative
 // et al.); unlike SHN_FAKE_VALIDATOR (build()-only, "1"), this one is a
 // loadConfig-literal field like the rest. "true" WITHOUT OBSERVER_ADDR
 // gates the EFFECTIVE field back to false — the capture store is only ever
@@ -1054,9 +1060,6 @@ func TestDemoEgressNativeLinesEnv(t *testing.T) {
 func TestDemoEdgeCaptureEnv(t *testing.T) {
 	baseEnv := map[string]string{
 		"ROLE": "provider", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
-		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
-		// load, which requires the operated $populate endpoint.
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 
 	t.Run("unset is false", func(t *testing.T) {
@@ -1164,10 +1167,6 @@ func baseProviderEnv() map[string]string {
 		"SHN_SECRETS":              "/etc/shn",
 		"SHN_DISCOVERY_URL":        "https://disc.test",
 		"PROVIDER_DAVINCI_INGRESS": "1",
-		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
-		// load, which requires the operated $populate endpoint like any other
-		// demo/provider-data config.
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 }
 
@@ -1299,23 +1298,29 @@ func TestLoadConfig_IngressValid(t *testing.T) {
 
 // ---- provider-data origination config tests ----
 
-// TestLoadConfig_ProviderDataRequiresPopulateURL: ORIGINATION_PROFILE=provider-data
-// without PROVIDER_DTR_POPULATE_URL is a boot error (the operated $populate endpoint
-// is the crux of the provider-data lane).
+// TestLoadConfig_ProviderDataRequiresPopulateURL: on a provider's gateway,
+// ORIGINATION_PROFILE=provider-data or demo without PROVIDER_DTR_POPULATE_URL is a
+// boot error (the operated $populate endpoint is the crux of both lanes).
 func TestLoadConfig_ProviderDataRequiresPopulateURL(t *testing.T) {
-	e := map[string]string{
-		"ROLE":                "provider",
-		"SHN_SECRETS":         "/x",
-		"SHN_DISCOVERY_URL":   "https://d",
-		"ORIGINATION_PROFILE": "provider-data",
-		// PROVIDER_DTR_POPULATE_URL deliberately unset.
-	}
-	_, err := loadConfig(func(k string) string { return e[k] })
-	if err == nil {
-		t.Fatal("want error: ORIGINATION_PROFILE=provider-data without PROVIDER_DTR_POPULATE_URL")
-	}
-	if !strings.Contains(err.Error(), "PROVIDER_DTR_POPULATE_URL") {
-		t.Fatalf("error should reference PROVIDER_DTR_POPULATE_URL, got: %v", err)
+	// An unset ROLE is a provider's gateway, so it refuses too.
+	for _, role := range []string{"provider", ""} {
+		for _, profile := range []string{"provider-data", "demo"} {
+			e := map[string]string{
+				"ROLE":                role,
+				"SHN_SECRETS":         "/x",
+				"SHN_DISCOVERY_URL":   "https://d",
+				"ORIGINATION_PROFILE": profile,
+				// PROVIDER_DTR_POPULATE_URL deliberately unset.
+			}
+			_, err := loadConfig(func(k string) string { return e[k] })
+			if err == nil {
+				t.Errorf("ROLE=%q: want error: ORIGINATION_PROFILE=%s without PROVIDER_DTR_POPULATE_URL", role, profile)
+				continue
+			}
+			if !strings.Contains(err.Error(), "PROVIDER_DTR_POPULATE_URL") {
+				t.Errorf("ROLE=%q ORIGINATION_PROFILE=%s: error should reference PROVIDER_DTR_POPULATE_URL, got: %v", role, profile, err)
+			}
+		}
 	}
 }
 
@@ -1341,28 +1346,70 @@ func TestLoadConfig_ProviderDataWithPopulateURLIsOK(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_UnsetOriginationProfileNormalizesToDemo: an absent ORIGINATION_PROFILE
-// must normalize to the canonical "demo" at
-// the config boundary — this package's own OriginationProfile doc comment already
-// declares "" and "demo" the SAME lane, so every downstream predicate (isDemoProfile,
-// targetsBrPayer's callers, relaysReferencePayerBytes) must see exactly one value for
-// it, never a third undeclared one. PROVIDER_DTR_POPULATE_URL is required here BECAUSE
-// of the normalization: operatedPopulateProfile("demo") is true, exactly as an explicit
-// ORIGINATION_PROFILE=demo would require — this is itself part of what the test pins.
-func TestLoadConfig_UnsetOriginationProfileNormalizesToDemo(t *testing.T) {
+// TestLoadConfig_ResponderProfileNeedsNoPopulateURL: only a provider originates, so a
+// payer's or facility's gateway that sets an origination profile boots without
+// PROVIDER_DTR_POPULATE_URL. The provider still refuses without it
+// (TestLoadConfig_ProviderDataRequiresPopulateURL).
+func TestLoadConfig_ResponderProfileNeedsNoPopulateURL(t *testing.T) {
+	for _, role := range []string{"payer", "facility"} {
+		for _, profile := range []string{"demo", "provider-data"} {
+			e := map[string]string{
+				"ROLE":                role,
+				"SHN_SECRETS":         "/x",
+				"SHN_DISCOVERY_URL":   "https://d",
+				"ORIGINATION_PROFILE": profile,
+				// PROVIDER_DTR_POPULATE_URL deliberately unset.
+			}
+			cfg, err := loadConfig(func(k string) string { return e[k] })
+			if err != nil {
+				t.Errorf("ROLE=%s ORIGINATION_PROFILE=%s without PROVIDER_DTR_POPULATE_URL: %v", role, profile, err)
+				continue
+			}
+			if cfg.OriginationProfile != profile {
+				t.Errorf("ROLE=%s: OriginationProfile = %q, want %q", role, cfg.OriginationProfile, profile)
+			}
+		}
+	}
+}
+
+// TestRequiresOperatedPopulate_ProviderOnly pins the predicate both the boot check and
+// the populate wiring read.
+func TestRequiresOperatedPopulate_ProviderOnly(t *testing.T) {
+	for _, row := range []struct {
+		role, profile string
+		want          bool
+	}{
+		{"provider", "demo", true},
+		{"provider", "provider-data", true},
+		{"provider", "", false},
+		{"payer", "demo", false},
+		{"payer", "provider-data", false},
+		{"facility", "demo", false},
+		{"phg", "provider-data", false},
+	} {
+		if got := requiresOperatedPopulate(row.role, row.profile); got != row.want {
+			t.Errorf("requiresOperatedPopulate(%q, %q) = %v, want %v", row.role, row.profile, got, row.want)
+		}
+	}
+}
+
+// TestLoadConfig_UnsetOriginationProfileIsModuleOneOff: a provider that
+// declares no ORIGINATION_PROFILE runs no module 1, so it boots with no module 1
+// configuration at all: no profile, no operated $populate, no NPI and no
+// /scenario callers. Its profile stays unset; before v1.0.0 it was normalized to
+// "demo", which required PROVIDER_DTR_POPULATE_URL of every provider.
+func TestLoadConfig_UnsetOriginationProfileIsModuleOneOff(t *testing.T) {
 	e := map[string]string{
-		"ROLE":                      "provider",
-		"SHN_SECRETS":               "/x",
-		"SHN_DISCOVERY_URL":         "https://d",
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
-		// ORIGINATION_PROFILE deliberately unset — the case this test pins.
+		"ROLE":              "provider",
+		"SHN_SECRETS":       "/x",
+		"SHN_DISCOVERY_URL": "https://d",
 	}
 	cfg, err := loadConfig(func(k string) string { return e[k] })
 	if err != nil {
-		t.Fatalf("valid config with unset ORIGINATION_PROFILE: %v", err)
+		t.Fatalf("a provider with no module 1 configuration: %v", err)
 	}
-	if cfg.OriginationProfile != "demo" {
-		t.Fatalf("OriginationProfile = %q, want %q (the normalized default)", cfg.OriginationProfile, "demo")
+	if cfg.OriginationProfile != "" {
+		t.Fatalf("OriginationProfile = %q, want unset (module 1 off)", cfg.OriginationProfile)
 	}
 }
 
@@ -1400,12 +1447,11 @@ func TestLoadConfig_RefusesUnknownOriginationProfile(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_AcceptedOriginationProfilesBoot: the accepted values, and unset, still
-// load on every role — unset on ROLE=provider as the normalized "demo", unset on any
-// other role as unset (those roles originate nothing).
+// TestLoadConfig_AcceptedOriginationProfilesBoot: the accepted values, and unset, load
+// on every role, as given: unset is module 1 off, on every role.
 func TestLoadConfig_AcceptedOriginationProfilesBoot(t *testing.T) {
 	for _, tc := range []struct{ role, value, want string }{
-		{"provider", "", "demo"},
+		{"provider", "", ""},
 		{"provider", "demo", "demo"},
 		{"provider", "provider-data", "provider-data"},
 		{"payer", "", ""},
@@ -1440,13 +1486,12 @@ func TestLoadConfig_AcceptedOriginationProfilesBoot(t *testing.T) {
 }
 
 // TestLoadConfig_SetButEmptyOriginationProfileIsUnset documents ORIGINATION_PROFILE set
-// to the empty string: "demo" on ROLE=provider, unset on every other role, never
-// refused. getenv cannot tell set-but-empty from unset (the binary reads its
+// to the empty string: unset, module 1 off, on every role, never refused. getenv cannot tell set-but-empty from unset (the binary reads its
 // environment with os.Getenv, which returns "" for both), so this is the unset rule
 // stated for the deployment that writes ORIGINATION_PROFILE= explicitly.
 func TestLoadConfig_SetButEmptyOriginationProfileIsUnset(t *testing.T) {
 	for _, tc := range []struct{ role, want string }{
-		{"provider", "demo"},
+		{"provider", ""},
 		{"payer", ""},
 	} {
 		t.Run(tc.role+"/set-but-empty", func(t *testing.T) {
@@ -1703,10 +1748,11 @@ func TestPollFeed_RecordsCell(t *testing.T) {
 
 	cell := health.NewPollerCell("registrar-poller", time.Minute)
 	reg := shnsdk.NewRegistry()
+	feed := newFeedFreshness(time.Now)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollFeed(ctx, srv.Client(), srv.URL, reg, 5*time.Millisecond, cell)
+		pollFeed(ctx, srv.Client(), srv.URL, reg, 5*time.Millisecond, cell, feed)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -1720,6 +1766,10 @@ func TestPollFeed_RecordsCell(t *testing.T) {
 		c := cell.Check(context.Background())
 		if !sawError && c.Status == health.StatusDegraded && c.LastError != "" {
 			sawError = true
+			// MON-R26: a failed read leaves the feed with no fresh read.
+			if _, _, ok := feed.read(); ok {
+				t.Fatal("the feed's freshness recorded a failed read")
+			}
 			close(allowSuccess)
 		}
 		if c.LastSuccess != "" && c.HolderCount == 1 {
@@ -1736,6 +1786,9 @@ func TestPollFeed_RecordsCell(t *testing.T) {
 	}
 	if _, ok := reg.Lookup("h1"); !ok {
 		t.Fatal("h1 missing from registry after pollFeed converged")
+	}
+	if _, peers, ok := feed.read(); !ok || peers != 1 {
+		t.Fatalf("feed freshness = ok %v peers %d, want the success with 1 holder", ok, peers)
 	}
 }
 
@@ -1838,13 +1891,6 @@ func buildEnvWithBundle(t *testing.T, bundleRole, envRole string) map[string]str
 	}
 	return map[string]string{
 		"ROLE": envRole, "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": "http://127.0.0.1:1",
-		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
-		// load, which requires the operated $populate endpoint — set unconditionally
-		// here so a non-provider
-		// envRole (payer/facility/phg) is unaffected (normalization is ROLE=provider
-		// scoped) and every provider-role caller of this helper still reaches the
-		// check it actually wants to test, past loadConfig's populate-URL gate.
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 }
 
@@ -1989,7 +2035,7 @@ func TestApp_ChecksEndpoint_TokenGatedAndHealthUnaffected(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 
@@ -2117,7 +2163,7 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 
@@ -2473,7 +2519,7 @@ func TestBuild_NoDSN_StatesInProcessStateAndNoRefresh(t *testing.T) {
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	env := map[string]string{
@@ -2826,7 +2872,7 @@ func TestBuildWiresEligibilityURLToNativeResponder(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	for _, tc := range []struct {
@@ -2965,7 +3011,7 @@ func TestPayer_ServesNoPatientAccessRoutes(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	for _, leftover := range []string{"", "on", "off"} {
@@ -3031,19 +3077,22 @@ func TestPayer_ServesNoPatientAccessRoutes(t *testing.T) {
 	}
 }
 
-// The boot warnings for the settings shn-gateway v0.63.0 stopped reading
+// The boot warnings for the settings the gateway no longer reads
 // (ignoredSettings): one per setting still set, on a gateway of any role.
 const (
-	patientAccessLeftoverLine = "gateway: WARNING: PATIENT_ACCESS_API is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API\n"
-	auditURLLeftoverLine      = "gateway: WARNING: AUDIT_URL is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API's audit record\n"
-	phgURLLeftoverLine        = "gateway: WARNING: PHG_URL is set but no longer read: shn-gateway v0.63.0 removed the provider gateway's read of the PHG's denial view\n"
+	patientAccessLeftoverLine    = "gateway: WARNING: PATIENT_ACCESS_API is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API\n"
+	auditURLLeftoverLine         = "gateway: WARNING: AUDIT_URL is set but no longer read: shn-gateway v0.63.0 removed the Patient Access API's audit record\n"
+	phgURLLeftoverLine           = "gateway: WARNING: PHG_URL is set but no longer read: shn-gateway v0.63.0 removed the provider gateway's read of the PHG's denial view\n"
+	pasNativeLeftoverLine        = "gateway: WARNING: PAYER_DAVINCI_PAS_NATIVE is set but no longer read: shn-gateway v0.39.0 removed its switch: PAS submit and update always forward to the payer's own system\n"
+	strictExtensionsLeftoverLine = "gateway: WARNING: PAYER_DAVINCI_STRICT_EXTENSIONS is set but no longer read: shn-gateway v1.0.0 removed the strict-extensions overlay it reserved, which switched nothing\n"
+	acceptUnknownLeftoverLine    = "gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read: shn-gateway v1.0.0 removed the alias of carrying members the system of record does not hold, which is the default (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)\n"
 )
 
 // TestProvider_IgnoredSettingsWarnOnceEach: the warnings are not the payer's
 // alone. A provider gateway boots with any of the settings left over and logs
 // each one's line once, in a fixed order, and no line for a setting not set.
 func TestProvider_IgnoredSettingsWarnOnceEach(t *testing.T) {
-	all := []string{patientAccessLeftoverLine, auditURLLeftoverLine, phgURLLeftoverLine}
+	all := []string{patientAccessLeftoverLine, auditURLLeftoverLine, phgURLLeftoverLine, pasNativeLeftoverLine, strictExtensionsLeftoverLine, acceptUnknownLeftoverLine}
 	for _, tc := range []struct {
 		name string
 		set  map[string]string
@@ -3053,7 +3102,11 @@ func TestProvider_IgnoredSettingsWarnOnceEach(t *testing.T) {
 		{"PATIENT_ACCESS_API", map[string]string{"PATIENT_ACCESS_API": "on"}, []string{patientAccessLeftoverLine}},
 		{"AUDIT_URL", map[string]string{"AUDIT_URL": "http://audit:8082"}, []string{auditURLLeftoverLine}},
 		{"PHG_URL", map[string]string{"PHG_URL": "http://phg:8084"}, []string{phgURLLeftoverLine}},
-		{"all three", map[string]string{"PATIENT_ACCESS_API": "off", "AUDIT_URL": "http://audit:8082", "PHG_URL": "http://phg:8084"}, all},
+		{"PAYER_DAVINCI_PAS_NATIVE", map[string]string{"PAYER_DAVINCI_PAS_NATIVE": "false"}, []string{pasNativeLeftoverLine}},
+		{"PAYER_DAVINCI_STRICT_EXTENSIONS", map[string]string{"PAYER_DAVINCI_STRICT_EXTENSIONS": "true"}, []string{strictExtensionsLeftoverLine}},
+		{"SHN_ACCEPT_UNKNOWN_MEMBERS", map[string]string{"SHN_ACCEPT_UNKNOWN_MEMBERS": "0"}, []string{acceptUnknownLeftoverLine}},
+		{"all six", map[string]string{"PATIENT_ACCESS_API": "off", "AUDIT_URL": "http://audit:8082", "PHG_URL": "http://phg:8084",
+			"PAYER_DAVINCI_PAS_NATIVE": "true", "PAYER_DAVINCI_STRICT_EXTENSIONS": "false", "SHN_ACCEPT_UNKNOWN_MEMBERS": "1"}, all},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			extra := map[string]string{"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate"}
@@ -3093,7 +3146,7 @@ func TestProvider_IgnoredSettingsWarnOnceEach(t *testing.T) {
 // The engine's on-miss registry refresh reads the registrar feed into the
 // gateway's registry, as the poller does; without a registrar there is none.
 func TestRegistryRefresh_ReadsTheFeed(t *testing.T) {
-	if registryRefresh(http.DefaultClient, "", shnsdk.NewRegistry()) != nil {
+	if registryRefresh(http.DefaultClient, "", shnsdk.NewRegistry(), nil) != nil {
 		t.Fatal("a refresh was wired without a registrar")
 	}
 	var enc [32]byte
@@ -3104,15 +3157,26 @@ func TestRegistryRefresh_ReadsTheFeed(t *testing.T) {
 	}))
 	defer srv.Close()
 	reg := shnsdk.NewRegistry()
-	if err := registryRefresh(http.DefaultClient, srv.URL, reg)(context.Background()); err != nil {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	feed := newFeedFreshness(func() time.Time { return now })
+	if err := registryRefresh(http.DefaultClient, srv.URL, reg, feed)(context.Background()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if _, ok := reg.Lookup("provider-new"); !ok {
 		t.Fatal("the refresh did not read the newly registered holder")
 	}
+	// MON-R26: the on-miss read counts as a fresh read; a failed one does not.
+	if last, peers, ok := feed.read(); !ok || !last.Equal(now) || peers != 1 {
+		t.Fatalf("feed freshness = %v %d %v, want the refresh's read", last, peers, ok)
+	}
 	srv.Close()
-	if err := registryRefresh(http.DefaultClient, srv.URL, reg)(context.Background()); err == nil {
+	read := now
+	now = now.Add(time.Minute)
+	if err := registryRefresh(http.DefaultClient, srv.URL, reg, feed)(context.Background()); err == nil {
 		t.Fatal("a refresh against an unreachable registrar reported success")
+	}
+	if last, _, _ := feed.read(); !last.Equal(read) {
+		t.Fatalf("a failed refresh moved the feed's last read to %v", last)
 	}
 }
 
@@ -3134,7 +3198,7 @@ func TestBuildWiresSharedLineOptInToNativeResponder(t *testing.T) {
 	}))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	dir := t.TempDir()
@@ -3165,5 +3229,42 @@ func TestBuildWiresSharedLineOptInToNativeResponder(t *testing.T) {
 	}
 	if !reader.RequireSharedLineForTest() || !b.requireSharedLine {
 		t.Fatalf("REQUIRE_SHARED_LINE=true reached the responder %v, the gateway %v; want both", reader.RequireSharedLineForTest(), b.requireSharedLine)
+	}
+}
+
+// TestLoadConfig_NPI: NPI has no default. Unset, the gateway states no
+// clinician of its own; set, it must be a ten-digit NPI with a valid check
+// digit, or boot refuses naming the value. Every NPI SHN's own provider
+// gateways configure is in the accepted rows.
+func TestLoadConfig_NPI(t *testing.T) {
+	const refused = `gateway: NPI must be a ten-digit NPI with a valid check digit, got %q`
+	for _, c := range []struct {
+		raw string
+		ok  bool
+	}{
+		{"", true},
+		{"1000000012", true}, // the demo provider (preview, compose, the Kit, the demo binaries)
+		{"1000000020", true}, // the provider-data provider (preview, two-RI, the Kit, the evaluation bundle)
+		{"1234567893", true},
+		{"1234567890", false}, // the retired default: its check digit is wrong
+		{"1000000013", false},
+		{"123456789", false},
+		{"12345678930", false},
+		{"12345678a3", false},
+		{" 1234567893", false},
+	} {
+		e := baseProviderEnv()
+		delete(e, "PROVIDER_DAVINCI_INGRESS")
+		e["NPI"] = c.raw
+		cfg, err := loadConfig(func(k string) string { return e[k] })
+		if !c.ok {
+			if err == nil || err.Error() != fmt.Sprintf(refused, c.raw) {
+				t.Errorf("NPI=%q: err %v, want %q", c.raw, err, fmt.Sprintf(refused, c.raw))
+			}
+			continue
+		}
+		if err != nil || cfg.NPI != c.raw {
+			t.Errorf("NPI=%q: cfg.NPI %q err %v, want it as given", c.raw, cfg.NPI, err)
+		}
 	}
 }

@@ -15,9 +15,9 @@ Four containers, wired together with one shared cert volume:
 
 | Service | Role |
 |---|---|
-| `hapi` | A FHIR server, pre-loaded with the US Core, SDC and Da Vinci CDex, HRex, CRD, DTR and PAS implementation guides, standing in for your provider system of record and validating what the gateway sends, its QuestionnaireResponses against DTR's profile included. It carries the 2.0 line's guides: a payer self-test against a payer on another line sees the gateway's QuestionnaireResponse profile reported as unknown (a finding at the default `observe`, a refusal at `strict`). Seeded on boot with realistic member and order data. |
+| `hapi` | A FHIR server, pre-loaded with the US Core, SDC and Da Vinci CDex, HRex, CRD, DTR and PAS implementation guides, standing in for your provider system of record and validating what the gateway sends, its QuestionnaireResponses against DTR's profile included. It carries the 2.0 line's guides: a payer self-test against a payer on another line sees the gateway's QuestionnaireResponse profile reported as unknown (a finding at `observe`, a refusal at `strict`). Seeded on boot with realistic member and order data. |
 | `gateway` | The real `shn-gateway` image, configured with `ROLE=provider`, pointed at the seeded `hapi` for both data and DTR questionnaire population. |
-| `br-provider` | A reference Da Vinci requester application (HL7-DaVinci's `br-provider`, built from pinned upstream source) that originates prior-authorization requests through the gateway's Da Vinci ingress, so you can see the conformant lane work with a real client, not just synthetic calls. |
+| `br-provider` | A reference Da Vinci requester application (HL7-DaVinci's `br-provider`, the pinned upstream commit's build, plus SHN's trust-store edit: four emSign roots removed) that originates prior-authorization requests through the gateway's Da Vinci ingress, so you can see the conformant lane work with a real client, not just synthetic calls. |
 | `gencerts` | A one-shot init step that generates the certificate pair `br-provider` and the gateway's ingress use to authenticate each other. Generated fresh on first boot — no key material is ever committed to this repository. |
 
 The gateway originates through the real Hub to a hosted evaluation payer
@@ -68,6 +68,20 @@ gateway at boot, naming the file.
 
 **Step 1 — build the reference requester.** This clones and builds
 `br-provider` from pinned upstream source; there's no published image to pull.
+The image `br-provider:43a4806` is the pinned upstream commit's build, plus SHN's
+trust-store edit (four emSign roots removed): one layer, its JVM trust store
+without the four eMudhra emSign root certificates of CVE-2026-114820, checked in
+the built image (`../validator/truststore/wrap-image.sh`). The upstream build
+alone is kept as `br-provider:43a4806-upstream`.
+
+The upstream build is upstream's own Dockerfile, built from the pinned commit's
+tree as upstream builds it, with upstream's `.dockerignore` applied. It pins the
+images of the build's tools (bun, Python and Maven) by digest, so a new release
+of one cannot break the build, though the docs stage's pip install of
+mkdocs-material names no version and still floats. The final image's base,
+the distroless Java 17 runtime, is not pinned, so each build takes its current
+Java patches.
+
 The clone is kept in `/tmp/br-provider` (set `BRPROVIDER_CLONE_DIR` to keep it
 elsewhere). If your system's `/tmp` cleanup has emptied or pruned it, the
 script moves it aside to `/tmp/br-provider.broken-<time>-<pid>-<n>` and clones
@@ -97,6 +111,10 @@ shn send-test --gateway http://127.0.0.1:8080 --discovery https://accounts.shn-p
   --scenario-key ./scenario-caller-send-test.sign --bundle /abs/path/to/my-provider-bundle
 ```
 
+Use `shn` from shn-sdk v1.0.0 or later: it states the UC-06 and UC-07 attestation answers,
+which this gateway requires, and an earlier `shn` fails both scenarios with
+`422 answer is required`.
+
 **A pend is a valid answer.** The evaluation payer pends some prior authorizations
 when they're submitted and decides them later, as a real payer may. A
 scenario route answers with the payer's first answer: for a pend, that's
@@ -117,7 +135,8 @@ To call one route with any HTTP client, `shn scenario-sign` prints the
 `X-Holder-Assertion` header that signs it. An assertion is for one request,
 valid for a minute, and the body you send must be the body you signed. Each
 route takes the persona the network's descriptor states for it, which
-`persona_body.sh` reads:
+`persona_body.sh` reads. UC-06 and UC-07 also take the attestation's free-text
+`"answer"`, which the descriptor does not state; a request without one is refused (422):
 
 ```sh
 curl -fsS https://accounts.shn-preview.org/discovery -o discovery.json
@@ -191,10 +210,26 @@ PAS_PENDED_RESOLUTION_DELAY_SECONDS: "600"
 
 The hosted evaluation payer's delay is fixed by SHN; to hold a pend, use your own payer bundle.
 
+## The ordering clinician
+
+A CRD request and an attestation the gateway builds for your provider name the clinician who
+ordered the service, in the CRD request's `userId` and in the attestation. The clinician comes
+from your own records first (the order's requester), and the gateway's `NPI` setting fills in
+only where they name none; it has no default, and a CRD request or attestation no source names a
+clinician for is refused. An eligibility request names `NPI` as its provider when it is set, and
+no provider otherwise. The bundle's test records name no ordering clinician on most orders, so
+the bundle sets `NPI` to a synthetic clinician NPI (`1000000020`, valid check digit). With your
+own records, name each order's requester (a `Practitioner` with its NPI), or set `NPI` to your own
+clinician's NPI. The UC-06 and UC-07 attestations take their answer from the request, and the
+gateway supplies none: `shn send-test` states the clinician's functional status for UC-06 and the
+patient's for UC-07.
+
 ## Conformance enforcement in this bundle
 
 The bundle passes `CONFORMANCE_ENFORCEMENT` through from your own environment, and sets
-nothing itself — so with nothing set the gateway runs the published default, `observe`. At
+nothing itself — so with nothing set the gateway runs the published default of the release
+you downloaded: `none` from v1.0.0, which checks no payload and records nothing, and
+`observe` before it. Set `observe` to have the gateway check and record. At
 `observe` every message is checked against its FHIR profile — and a payer's CDS Hooks answer
 against the CDS Hooks response rules — each defect is recorded as a finding in the gateway's
 log and observer stream, and the message relays as sent, apart from the gateway's registered
@@ -218,9 +253,15 @@ SHN_SECRETS=/abs/path/to/my-provider-bundle CONFORMANCE_ENFORCEMENT=none \
   docker compose -f compose.eval.yml up --build
 ```
 
-Set `strict` instead if you want a message with a defect refused. `none`, `observe` and
-`strict` are the only accepted values; any other refuses to boot. It is the same setting on
+Set `strict` instead if you want a message with a defect refused. `none`, `observe`,
+`structural` and `strict` are the only accepted values; any other refuses to boot. It is the same setting on
 the gateway you run in production — see [CONFIGURATION.md](../../docs/CONFIGURATION.md).
+
+The bundle passes `CONFORMANCE_TOLERATE_PEERS` through the same way, and sets nothing itself,
+so it tolerates no payer. If you list a payer there (identities as `<system>|<value>`,
+comma-separated), a DTR or PAS answer from it that your level would refuse for a FHIR profile
+defect is carried instead, and the defect is recorded as a tolerated finding. Every other check,
+and every network rule, still refuses. See [CONFIGURATION.md](../../docs/CONFIGURATION.md).
 
 ## Production cutover
 

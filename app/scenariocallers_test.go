@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,16 +38,18 @@ func TestLoadConfig_ScenarioCallersFile(t *testing.T) {
 		}
 		return p
 	}
-	load := func(role, path string) (config, error) {
+	loadProfile := func(role, profile, path string) (config, error) {
 		env := map[string]string{
 			"ROLE":                      role,
 			"SHN_SECRETS":               "/etc/shn/bundles/" + role,
 			"SHN_DISCOVERY_URL":         "http://accounts:8088/discovery",
 			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+			"ORIGINATION_PROFILE":       profile,
 			"SCENARIO_CALLERS_FILE":     path,
 		}
 		return loadConfig(func(k string) string { return env[k] })
 	}
+	load := func(role, path string) (config, error) { return loadProfile(role, "demo", path) }
 
 	cfg, err := load("provider", write("good.json", `[{"label":"monitor","public_key":"`+key+`"}]`))
 	if err != nil {
@@ -88,6 +93,27 @@ func TestLoadConfig_ScenarioCallersFile(t *testing.T) {
 	// No other role serves /scenario: naming callers there is a mistake.
 	if _, err := load("payer", write("payer.json", `[]`)); err == nil || !strings.Contains(err.Error(), "provider-only") {
 		t.Errorf("a payer with SCENARIO_CALLERS_FILE: err = %v, want refused as provider-only", err)
+	}
+	// Nor does a provider that runs no module 1: with no origination profile,
+	// naming callers is the same mistake.
+	want := "gateway: SCENARIO_CALLERS_FILE requires ORIGINATION_PROFILE: with none, module 1 is off and no route serves /scenario"
+	if _, err := loadProfile("provider", "", write("off.json", `[]`)); err == nil || err.Error() != want {
+		t.Errorf("a provider with SCENARIO_CALLERS_FILE and no profile: err = %v, want %q", err, want)
+	}
+}
+
+// moduleOneSettingsSet names each set setting only module 1 reads, for the
+// boot warning a gateway with module 1 off gives, and nothing else.
+func TestModuleOneSettingsSet(t *testing.T) {
+	if got := moduleOneSettingsSet(config{}); len(got) != 0 {
+		t.Errorf("nothing set: %v, want none", got)
+	}
+	all := config{NPI: "1234567893", ProviderDTRNative: true, ProviderDTRPopulateURL: "https://p", ProviderDTRPopulateTokenURL: "https://t"}
+	if got, want := moduleOneSettingsSet(all), []string{"NPI", "PROVIDER_DTR_NATIVE", "PROVIDER_DTR_POPULATE_URL", "PROVIDER_DTR_POPULATE_TOKEN_URL"}; !slices.Equal(got, want) {
+		t.Errorf("all set: %v, want %v", got, want)
+	}
+	if got := moduleOneSettingsSet(config{ProviderDTRPopulateURL: "https://p", FHIRDataURL: "https://f"}); !slices.Equal(got, []string{"PROVIDER_DTR_POPULATE_URL"}) {
+		t.Errorf("populate URL and a setting outside module 1: %v, want only PROVIDER_DTR_POPULATE_URL", got)
 	}
 }
 
@@ -174,5 +200,43 @@ func TestBuild_ScenarioCallersReachTheRoutes(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "gateway: WARNING: SCENARIO_CALLERS_FILE unset") {
 		t.Errorf("boot log does not warn that the routes are unauthenticated:\n%s", logs.String())
+	}
+}
+
+// A provider gateway's boot output says whether it runs module 1: with no
+// origination profile it says module 1 is off and names each module 1
+// setting set but unused; with one, it names its /scenario callers instead.
+func TestBuild_ModuleOneBootLines(t *testing.T) {
+	boot := func(profile string) string {
+		t.Helper()
+		var logs bytes.Buffer
+		log.SetOutput(&logs)
+		defer log.SetOutput(os.Stderr)
+		if _, out, err := buildProviderForPopulate(t, map[string]string{
+			"ORIGINATION_PROFILE":       profile,
+			"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
+		}); err != nil {
+			t.Fatalf("profile %q: %v\n%s", profile, err, out)
+		}
+		return logs.String()
+	}
+	off := boot("")
+	for _, want := range []string{
+		"gateway: ORIGINATION_PROFILE unset — module 1 is off, and no /scenario route is served",
+		"gateway: WARNING PROVIDER_DTR_POPULATE_URL set but unused: only module 1 reads them, and it is off (ORIGINATION_PROFILE unset)",
+	} {
+		if !strings.Contains(off, want) {
+			t.Errorf("module 1 off: boot output lacks %q:\n%s", want, off)
+		}
+	}
+	if strings.Contains(off, "/scenario admits") || strings.Contains(off, "do not authenticate") {
+		t.Errorf("module 1 off: boot output speaks of /scenario callers:\n%s", off)
+	}
+	on := boot("demo")
+	if strings.Contains(on, "module 1 is off") || strings.Contains(on, "set but unused") {
+		t.Errorf("module 1 on: boot output says it is off:\n%s", on)
+	}
+	if !strings.Contains(on, "do not authenticate their caller") {
+		t.Errorf("module 1 on: boot output does not state its /scenario callers:\n%s", on)
 	}
 }

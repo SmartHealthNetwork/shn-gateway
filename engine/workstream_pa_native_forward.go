@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -8,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 )
 
 // WithEligibilityURL declares the payer's own coverage-eligibility endpoint:
@@ -18,12 +21,12 @@ import (
 // relayed, instead of being answered from the payer's records. Empty leaves
 // the gateway answering from the records.
 func WithEligibilityURL(eligibilityURL string) NativeOption {
-	return func(n *nativeResponder) { n.eligibilityURL = eligibilityURL }
+	return func(n *nativeResponder) { n.paNative().eligibilityURL = eligibilityURL }
 }
 
 // forwardsEligibility reports whether the payer declared its own eligibility
 // endpoint.
-func (n *nativeResponder) forwardsEligibility() bool { return n.eligibilityURL != "" }
+func (n *nativeResponder) forwardsEligibility() bool { return n.paNative().eligibilityURL != "" }
 
 // forwardEligibility carries the network's coverage-eligibility request
 // exactly to the payer's own endpoint and returns its answer: a 2xx answer
@@ -32,7 +35,7 @@ func (n *nativeResponder) forwardsEligibility() bool { return n.eligibilityURL !
 // the payer's place.
 func (n *nativeResponder) forwardEligibility(ctx context.Context, request []byte) (LegResult, error) {
 	in := relay.NewBody(request, relay.OriginPeerFrame)
-	up, bad, err := n.post(ctx, n.eligibilityURL, "", relay.Exact(in, "application/fhir+json"), "coverage-eligibility", "eligibility")
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerEligibility)), n.paNative().eligibilityURL, "", relay.Exact(in, "application/fhir+json"), "coverage-eligibility", "eligibility")
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -52,7 +55,7 @@ type eligibilityForwarder interface {
 // EligibilityURLForTest reports the eligibility endpoint the payer declared
 // (WithEligibilityURL), so the build that wires it can be proven from another
 // package; empty when none was declared.
-func (n *nativeResponder) EligibilityURLForTest() string { return n.eligibilityURL }
+func (n *nativeResponder) EligibilityURLForTest() string { return n.paNative().eligibilityURL }
 
 // WithDTRBaseURL overrides the base used for the DTR forwards
 // (/Questionnaire/$questionnaire-package and $next-question), for partners whose DTR
@@ -61,7 +64,7 @@ func (n *nativeResponder) EligibilityURLForTest() string { return n.eligibilityU
 func WithDTRBaseURL(dtrBaseURL string) NativeOption {
 	return func(n *nativeResponder) {
 		if dtrBaseURL != "" {
-			n.dtrBaseURL = dtrBaseURL
+			n.paNative().dtrBaseURL = dtrBaseURL
 		}
 	}
 }
@@ -73,7 +76,7 @@ func WithDTRBaseURL(dtrBaseURL string) NativeOption {
 func WithPASBaseURL(pasBaseURL string) NativeOption {
 	return func(n *nativeResponder) {
 		if pasBaseURL != "" {
-			n.pasBaseURL = pasBaseURL
+			n.paNative().pasBaseURL = pasBaseURL
 		}
 	}
 }
@@ -211,19 +214,18 @@ func redactURLForLog(raw string) string {
 }
 
 // dtrBase / pasBase are the per-operation bases with their fallback applied:
-// the configured DTR/PAS base when set, the shared base otherwise. Every DTR
-// and PAS forward reads through these (never the raw fields), so a responder
-// built without the constructor defaults still forwards to the shared base.
+// the configured DTR/PAS base when set, the responder's shared base otherwise.
+// Every DTR and PAS forward reads through these, never the raw fields.
 func (n *nativeResponder) dtrBase() string {
-	if n.dtrBaseURL != "" {
-		return n.dtrBaseURL
+	if base := n.paNative().dtrBaseURL; base != "" {
+		return base
 	}
 	return n.baseURL
 }
 
 func (n *nativeResponder) pasBase() string {
-	if n.pasBaseURL != "" {
-		return n.pasBaseURL
+	if base := n.paNative().pasBaseURL; base != "" {
+		return base
 	}
 	return n.baseURL
 }
@@ -283,7 +285,7 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 		}
 		request = mapped
 	}
-	up, bad, err := n.post(ctx, n.resolvedURL(ctx, contract, n.dtrBase(), path), "", request, leg, label)
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerDTR)), n.resolvedURL(ctx, contract, n.dtrBase(), path), "", request, leg, label)
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}

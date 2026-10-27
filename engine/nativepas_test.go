@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -61,7 +63,7 @@ func TestNativeSubmit_ConformantRecordsTheDecision(t *testing.T) {
 		t.Run("approved, "+tc.name+": verbatim + decision recorded", func(t *testing.T) {
 			srv := stubPartnerSrv(t, http.StatusOK, approved)
 			store := newCensusSoR()
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(store))
 			res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", tc.request)
 			if err != nil || res.Status != 0 {
 				t.Fatalf("approved conformant submit: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -85,7 +87,7 @@ func TestNativeSubmit_ConformantRecordsTheDecision(t *testing.T) {
 		body := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","outcome":"queued"}},{"resource":{"resourceType":"Task","status":"requested"}}]}`)
 		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 		res, err := n.Handle(context.Background(), "pas-claim", "corr-conf", "PCI-1", conformant)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("pended conformant submit: err=%v status=%d", err, res.Status)
@@ -190,7 +192,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		body = fixturePASResponse(t, body, true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("approved conformant update: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -206,7 +208,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	t.Run("partner 500 AFTER Begin -> relayed verbatim WITH Rollback (no strand)", func(t *testing.T) {
 		srv := stubPartnerSrv(t, http.StatusInternalServerError, []byte(`boom`))
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if err != nil || res.Status != http.StatusInternalServerError {
 			t.Fatalf("want 500 (relayed verbatim), got status=%d err=%v", res.Status, err)
@@ -227,7 +229,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 	// subtest's Rollback assertion goes red.
 	t.Run("partner UNREACHABLE after Begin -> error return still carries Rollback (no strand)", func(t *testing.T) {
 		s := seedPended()
-		n := NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", "shn-order-select", s, fixedClock)
+		n := NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if err == nil {
 			t.Fatal("a true no-response fault must surface as an error return, not a relayable status")
@@ -243,7 +245,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		body := fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1"}`), true)
 		srv := stubPartnerSrv(t, http.StatusOK, body)
 		s := newCensusSoR() // NOT seeded
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if err != nil || res.Status != 0 || !bytes.Equal(responseBytes(res), body) || res.Rollback != nil {
 			t.Fatalf("no-pend amendment: err=%v status=%d rollback=%v", err, res.Status, res.Rollback != nil)
@@ -258,7 +260,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 		denied := fixturePASResponse(t, loadDeniedClaimResponseBytes(t), true)
 		srv := stubPartnerSrv(t, http.StatusOK, denied)
 		s := seedPended()
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, bundle)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("a payer denial is an answer, not this gateway's 422: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -319,7 +321,7 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 			defer srv.Close()
 			s := newCensusSoR()
 			_ = s.RecordPendedClaim(pci, origCorr)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 			res, err := n.Handle(context.Background(), "pas-claim-update", "corr-1", pci, row.bundle())
 			if err != nil || res.Status != 0 {
 				t.Fatalf("amend-after-resolution: err=%v status=%d msg=%s", err, res.Status, res.Message)

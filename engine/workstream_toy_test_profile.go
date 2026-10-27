@@ -37,17 +37,21 @@ var toyLegs = map[string]legDetail{
 // in: the toy.
 func profileWorkstreams() []workstream { return []workstream{toyAdapter} }
 
-func (toyProfileWorkstream) id() string                                    { return toyWorkstreamTag }
-func (w toyProfileWorkstream) catalog() map[string]legSpec                 { return w.legs }
-func (toyProfileWorkstream) routes(g *Gateway, role string) []mountedRoute { return nil }
-func (toyProfileWorkstream) ingressRoutes() map[string]ingressHandler      { return nil }
-func (toyProfileWorkstream) involvement(string) (bool, bool)               { return false, false }
-func (toyProfileWorkstream) requestMembers(string, []byte) []namedMember   { return nil }
-func (toyProfileWorkstream) canonicalContractVersion() string              { return "" }
-func (toyProfileWorkstream) originatedAnswerCheck(string) legAnswerCheck   { return nil }
-func (toyProfileWorkstream) newMemState() memState                         { return nil }
-func (toyProfileWorkstream) checkStore(Store) error                        { return nil }
-func (toyProfileWorkstream) newGatewayState(*Gateway) gatewayState         { return nil }
+func (toyProfileWorkstream) id() string                                     { return toyWorkstreamTag }
+func (w toyProfileWorkstream) catalog() map[string]legSpec                  { return w.legs }
+func (toyProfileWorkstream) routes(g *Gateway, role string) []mountedRoute  { return nil }
+func (toyProfileWorkstream) ingressRoutes() map[string]ingressHandler       { return nil }
+func (toyProfileWorkstream) involvement(string) (bool, bool)                { return false, false }
+func (toyProfileWorkstream) requestMembers(string, []byte) []namedMember    { return nil }
+func (toyProfileWorkstream) canonicalContractVersion() string               { return "" }
+func (toyProfileWorkstream) originatedAnswerCheck(string) legAnswerCheck    { return nil }
+func (toyProfileWorkstream) newMemState() memState                          { return nil }
+func (toyProfileWorkstream) checkStore(Store) error                         { return nil }
+func (toyProfileWorkstream) newGatewayState(*Gateway) (gatewayState, error) { return nil, nil }
+func (toyProfileWorkstream) newNativeState(*nativeResponder) nativeState    { return nil }
+func (toyProfileWorkstream) lineBridge() lineBridgeRows                     { return lineBridgeRows{} }
+func (toyProfileWorkstream) relayEdits() []relayEdit                        { return nil }
+func (toyProfileWorkstream) ingressOperations() []string                    { return nil }
 
 // forward: the toy has no native responder send; its recipient answers
 // through the Responder (answer).
@@ -70,7 +74,7 @@ func (toyProfileWorkstream) answer(leg string) answerHandler {
 }
 
 // certifiedBuilds: the toy workstream builds nothing on a participant's behalf.
-func (toyProfileWorkstream) certifiedBuilds() map[certifiedBuild]string { return nil }
+func (toyProfileWorkstream) certifiedBuilds() map[certifiedBuild]certification { return nil }
 
 // certification: the toy's payloads are certified by no IG profile.
 func (toyProfileWorkstream) certification() certificationAdapter { return nil }

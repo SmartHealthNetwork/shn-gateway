@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // egressadapt_test.go — g.egressAdapt: the pipeline between build
 // and validate that applies route's transform chain (if any), builds the
 // transform Provenance, and emits leg.transformed. See versionroute_test.go for
@@ -277,7 +279,7 @@ func TestEgressAdaptFillsPromisedFieldsChainInvoking(t *testing.T) {
 // obligation discharge): dtr-questionnaire-fetch is a transport ENVELOPE, not FHIR
 // content the pa.dtr compat-manifest rows model — running it through
 // applyChain would hand its bytes to dtrStep2122Up, which
-// json.Unmarshal-then-json.Marshal's the payload (transform_dtr.go's
+// json.Unmarshal-then-json.Marshal's the payload (workstream_pa_transform_dtr.go's
 // dtrStep2122Up/dtrStep2122Down have no return-input path) and therefore
 // re-sorts its JSON object keys. This probe payload — a REAL golden that
 // step WOULD rewrite — is the enforcement fence: byte-equality between out
@@ -364,7 +366,7 @@ func TestCRDLegsNeverJoinEnvelopeCarveOut(t *testing.T) {
 // leg.failed choke point) — an honesty gap of the same grade. This
 // emission is NEW, tested in the same change. Drives a REAL gated chain
 // (chainFor("pa.pas","2.0","2.2")) on a Claim-shaped payload — pasStep2021Up's
-// unconditional refusal (transform_pas.go) — and asserts exactly one
+// unconditional refusal (workstream_pa_transform_pas.go) — and asserts exactly one
 // leg.failed observed, with Route carrying the attempted 2-step chain
 // (classes gated,carry, walk-direction {2.0->2.1, 2.1->2.2} per
 // routeInfoFor) + Detail containing "semantic-change refusal" + LegType/

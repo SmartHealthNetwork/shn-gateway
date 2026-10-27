@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 // continuation_test.go — the continuation store's durable rows, plus the one

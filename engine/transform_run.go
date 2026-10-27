@@ -1,6 +1,6 @@
 // transform_run.go — RunTransformChain: the exported,
 // contract-parameterized sibling of TransformPASForTest/TransformDTRForTest
-// (transform_pas.go/transform_dtr.go). Same chainFor+applyChain shape, but
+// (workstream_pa_transform_pas.go/workstream_pa_transform_dtr.go). Same chainFor+applyChain shape, but
 // deliberately NOT *ForTest: this is a published seam, not a test-only
 // cross-module escape hatch.
 package engine

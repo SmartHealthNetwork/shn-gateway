@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 // pg_multi_test.go — the TWO-INSTANCE proof for the shared state seams.
@@ -131,7 +133,7 @@ func pgMultiEnv(t *testing.T, dir, dsn string, key *ecdsa.PrivateKey) map[string
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	t.Cleanup(keys.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
 	payerDir := fmt.Sprintf(`[{"system":%q,"value":%q,"holderId":"h-multi-payer"}]`, pgMultiPayerSystem, pgMultiPayerValue)
@@ -539,6 +541,9 @@ func TestPgMulti_StoreOutageTokenIs503(t *testing.T) {
 // shared-state seams do, and name the store rather than the database's own error text.
 func TestPgMulti_ResetOverAnUnreachableStoreIs503(t *testing.T) {
 	env, _, _, _ := pgMultiSetup(t)
+	// The reset is a module 1 route, so this gateway declares module 1: with
+	// ORIGINATION_PROFILE unset no /scenario route is mounted.
+	env["ORIGINATION_PROFILE"] = "demo"
 	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
 	t.Cleanup(func() {
 		if b.gateway != nil {
@@ -784,5 +789,51 @@ func TestPgMulti_PoolStatsCarriedOnlyWithMetricsOptIn(t *testing.T) {
 	}
 	if len(stats) < 4 {
 		t.Fatalf("StorePool stats emitted = %v, want one per pool stat", stats)
+	}
+}
+
+// TestPgMulti_AuditOutboxIsDurableAndShared: under a store database the audit
+// outbox is gw_audit_outbox. A record one instance queues is a row a second
+// instance of the same holder, built afterwards (a restart), finds queued.
+func TestPgMulti_AuditOutboxIsDurableAndShared(t *testing.T) {
+	env, _, dsn, holderID := pgMultiSetup(t)
+	first, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if first.gateway != nil {
+			_ = first.gateway.Close()
+		}
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	rec := shnsdk.AuditRecord{
+		Timestamp: "2027-01-01T00:00:00Z", Sender: holderID, Recipient: "payer-b",
+		TransactionType: shnsdk.AuditTypeModuleDetails, Outcome: "authored",
+		PayloadBundleHash: strings.Repeat("ab", 32), Version: 2, CorrelationID: "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+		Module: &shnsdk.Module{Body: "request", Leg: "pa.pas-claim", Ownership: "authored", Builder: "sdk-pas-submit"},
+	}
+	if got := first.auditAppender.Append(rec); got != "queued" {
+		t.Fatalf("Append = %s, want queued", got)
+	}
+	restarted, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if restarted.gateway != nil {
+			_ = restarted.gateway.Close()
+		}
+	})
+	if err != nil {
+		t.Fatalf("second build: %v", err)
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM gw_audit_outbox WHERE holder_id = $1`, holderID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("gw_audit_outbox holds %d rows for the holder after a restart, want the one queued", n)
 	}
 }

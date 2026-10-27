@@ -29,7 +29,7 @@ Three containers:
 | Service | Role |
 |---|---|
 | `gateway` | The real `shn-gateway` image, configured with `ROLE=payer`, native-forwarding all CRD and PAS decisioning to `br-payer`. |
-| `br-payer` | A reference Da Vinci payer application (HL7-DaVinci's `br-payer`, built from pinned upstream source) that adjudicates CRD hooks and PAS `$submit` requests conformantly, standing in for your own decisioning system. |
+| `br-payer` | A reference Da Vinci payer application (HL7-DaVinci's `br-payer`, the pinned upstream commit's build, plus SHN's trust-store edit: four emSign roots removed) that adjudicates CRD hooks and PAS `$submit` requests conformantly, standing in for your own decisioning system. |
 | `validator` | A FHIR server pre-loaded with the US Core + Da Vinci PAS implementation guides, used only for runtime `$validate` of outbound resources — it holds no data. |
 
 There is no Store and no Postgres in this bundle. A PAS-native payer holds
@@ -98,6 +98,20 @@ it — that's expected, not a bug.
 
 **Step 1 — build the reference payer.** This clones and builds `br-payer`
 from pinned upstream source; there's no published image to pull.
+The image `br-payer:a8bece4` is the pinned upstream commit's build, plus SHN's
+trust-store edit (four emSign roots removed): one layer, its JVM trust store
+without the four eMudhra emSign root certificates of CVE-2026-114820, checked in
+the built image (`../../validator/truststore/wrap-image.sh`). The upstream build
+alone is kept as `br-payer:a8bece4-upstream`.
+
+The upstream build is upstream's own Dockerfile, built from the pinned commit's
+tree as upstream builds it, with upstream's `.dockerignore` applied. It pins the
+images of the build's tools (bun, Python and Maven) by digest, so a new release
+of one cannot break the build, though the docs stage's pip install of
+mkdocs-material names no version and still floats. The final image's base,
+the distroless Java 21 runtime, is not pinned, so each build takes its current
+Java patches.
+
 The clone is kept in `/tmp/br-payer` (set `BRPAYER_CLONE_DIR` to keep it
 elsewhere). If your system's `/tmp` cleanup has emptied or pruned it, the
 script moves it aside to `/tmp/br-payer.broken-<time>-<pid>-<n>` and clones

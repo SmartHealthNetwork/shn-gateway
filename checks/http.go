@@ -27,12 +27,7 @@ import (
 // 200) — see Runner.Run.
 func Handler(r *Runner, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if ok, code := authorized(req, token); !ok {
-			msg := "unauthorized"
-			if code == http.StatusForbidden {
-				msg = "forbidden"
-			}
-			writeJSON(w, code, map[string]string{"error": msg})
+		if !admit(w, req, token) {
 			return
 		}
 		switch req.Method {
@@ -44,6 +39,32 @@ func Handler(r *Runner, token string) http.Handler {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		}
 	})
+}
+
+// Guard serves h behind /internal/checks' access rule (the token-or-loopback
+// gate described on Handler): every operator endpoint that shares the rule
+// shares its one gate, admit.
+func Guard(h http.Handler, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !admit(w, req, token) {
+			return
+		}
+		h.ServeHTTP(w, req)
+	})
+}
+
+// admit applies the gate: it reports whether req may proceed, having
+// answered 401 or 403 when it may not.
+func admit(w http.ResponseWriter, req *http.Request, token string) bool {
+	ok, code := authorized(req, token)
+	if !ok {
+		msg := "unauthorized"
+		if code == http.StatusForbidden {
+			msg = "forbidden"
+		}
+		writeJSON(w, code, map[string]string{"error": msg})
+	}
+	return ok
 }
 
 // bearerPrefix is the required "Authorization" header prefix for the

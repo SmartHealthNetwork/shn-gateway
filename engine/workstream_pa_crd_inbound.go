@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_crd_inbound.go — the CONFORMANT CRD leg (crd-order-select): the payer-side inbound
 // handler + subject-bind for a conformant CDS Hooks order-select request (context.draftOrders
 // is a FHIR Bundle). This is the only CRD coverage-discovery contract (br-provider's verbatim
@@ -259,7 +261,9 @@ func (g *Gateway) validateCRDEmbedded(ctx context.Context, leg, corr, line strin
 		default:
 			start := g.exchangeClock()
 			res, err := validator.Validate(ctx, e.resource, "")
-			v.Ms = g.exchangeClock().Sub(start).Milliseconds()
+			took := g.exchangeClock().Sub(start)
+			g.routingValidatorTook(line, took)
+			v.Ms = took.Milliseconds()
 			switch {
 			case err != nil:
 				v.Outcome = "unavailable"

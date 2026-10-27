@@ -370,6 +370,32 @@ func TestReachable(t *testing.T) {
 	}
 }
 
+// TestUndiscovered: a target discovery did not name fails endpoint-unknown,
+// and nothing is probed.
+func TestUndiscovered(t *testing.T) {
+	probed := false
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		probed = true
+		return nil, fmt.Errorf("no request is expected")
+	})}
+	rn := NewRunner([]Target{{ID: "AUDIT_ENDPOINT", Kind: KindUndiscovered}}, client, time.Now)
+	results, err := rn.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.OK || r.Failure == nil || r.Failure.Code != FailEndpointUnknown || r.Target != "" {
+		t.Fatalf("result %+v, want failing %s with no target", r, FailEndpointUnknown)
+	}
+	if probed {
+		t.Fatal("an undiscovered target was probed")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // 6. single-flight: a second Run while the first is blocked returns ErrBusy.
 func TestSingleFlight(t *testing.T) {
 	handlerStarted := make(chan struct{})
@@ -1042,5 +1068,147 @@ func TestProbesSendTargetHeaders(t *testing.T) {
 	}
 	if got := seen[3].Get("X-Route-Key"); got != "" {
 		t.Errorf("target without headers sent X-Route-Key=%q", got)
+	}
+}
+
+// A validator-lane check reports the lane's qualification from its state and
+// dials nothing: lane-unqualified with the state's hint until it qualifies,
+// then ok.
+func TestValidatorLaneReportsQualificationWithoutDialing(t *testing.T) {
+	ok, hint := false, "failed, retrying in 30s (attempt 2): qualification corpus did not pass"
+	dialed := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("a validator-lane check dialed")
+		return nil, nil
+	})}
+	clock := newFakeClock(time.Unix(0, 0))
+	rn := NewRunner([]Target{{ID: "validator-lane-2.2", Kind: KindValidatorLane, URL: "http://shn-validator-2-2:8080/fhir", LaneState: func() (bool, string) { return ok, hint }}}, dialed, clock.Now)
+	results, err := rn.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := results[0]
+	if got.OK || got.Failure == nil || got.Failure.Code != FailLaneUnqualified || got.Failure.Hint != hint || got.Target != "http://shn-validator-2-2:8080" {
+		t.Fatalf("unqualified lane: %+v (failure %+v)", got, got.Failure)
+	}
+	ok = true
+	clock.Advance(time.Minute) // past the cooldown
+	results, err = rn.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := results[0]; !got.OK || got.Failure != nil {
+		t.Fatalf("qualified lane: %+v", got)
+	}
+}
+
+// The rejection row: a validator-lane target with no state is a bug, never ok.
+func TestValidatorLaneWithoutStateIsInternal(t *testing.T) {
+	rn := NewRunner([]Target{{ID: "validator-lane-2.2", Kind: KindValidatorLane, URL: "http://shn-validator-2-2:8080/fhir"}}, http.DefaultClient, newFakeClock(time.Unix(0, 0)).Now)
+	results, _ := rn.Run(context.Background())
+	if got := results[0]; got.OK || got.Failure == nil || got.Failure.Code != FailInternal {
+		t.Fatalf("%+v", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A GET (Last) reads a validator-lane result afresh: a lane that qualified
+// after the last run reads qualified, not as the run saw it.
+func TestValidatorLaneLastReadsTheLaneNow(t *testing.T) {
+	ok := false
+	clock := newFakeClock(time.Unix(0, 0))
+	rn := NewRunner([]Target{{ID: "validator-lane-2.2", Kind: KindValidatorLane, URL: "http://shn-validator-2-2:8080/fhir", LaneState: func() (bool, string) { return ok, "qualifying (attempt 1)" }}}, http.DefaultClient, clock.Now)
+	if _, err := rn.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ok = true
+	results, _, _ := rn.Last()
+	if !results[0].OK || results[0].Failure != nil {
+		t.Fatalf("Last after the lane qualified: %+v", results[0])
+	}
+}
+
+// A target marked advisory marks its results advisory on every path (a
+// probe, a cached read, and a probe the run deadline starved), and no other
+// target's results carry it.
+func TestAdvisoryFollowsTheTarget(t *testing.T) {
+	local := func() (bool, string, *Failure) {
+		return false, "off", &Failure{Code: FailInvalidTelemetryConfiguration}
+	}
+	r := NewRunner([]Target{
+		{ID: "monitoring", Kind: KindLocal, Advisory: true, Local: local},
+		{ID: "plain", Kind: KindLocal, Local: local},
+	}, nil, nil)
+	results, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, _, _ := r.Last()
+	for _, set := range [][]Result{results, cached} {
+		if len(set) != 2 || !set[0].Advisory || set[1].Advisory {
+			t.Fatalf("results %+v: want only the advisory target's result advisory", set)
+		}
+		if set[0].OK || set[0].Failure == nil || set[0].Failure.Code != FailInvalidTelemetryConfiguration {
+			t.Fatalf("an advisory result still reports its failure: %+v", set[0])
+		}
+	}
+	starved := NewRunner([]Target{{ID: "monitoring", Kind: KindLocal, Advisory: true, Local: local}}, nil, nil)
+	starved.deadline = -1
+	out, err := starved.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || !out[0].Advisory || out[0].Failure == nil || out[0].Failure.Code != FailNotChecked {
+		t.Fatalf("a starved advisory probe: %+v", out)
+	}
+	raw, _ := json.Marshal(Result{ID: "plain"})
+	if strings.Contains(string(raw), "advisory") {
+		t.Fatalf("a result that is not advisory carries the field: %s", raw)
+	}
+}
+
+// Exactly the results that ran no probe carry noProbe, with no latency, on
+// every path: a local read, a validator lane's state, an undiscovered
+// endpoint, and a probe the run deadline starved. A probe that ran never
+// carries it.
+func TestNoProbeMarksExactlyTheResultsThatRanNoProbe(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+	clock := time.Unix(0, 0)
+	targets := []Target{
+		{ID: "local", Kind: KindLocal, Local: func() (bool, string, *Failure) { clock = clock.Add(time.Second); return true, "valid", nil }},
+		{ID: "lane", Kind: KindValidatorLane, URL: slow.URL, LaneState: func() (bool, string) { clock = clock.Add(time.Second); return true, "" }},
+		{ID: "undiscovered", Kind: KindUndiscovered},
+		{ID: "reachable", Kind: KindReachable, URL: slow.URL},
+		{ID: "metadata", Kind: KindFHIRMetadata, URL: slow.URL},
+	}
+	noProbe := map[string]bool{"local": true, "lane": true, "undiscovered": true}
+	r := NewRunner(targets, nil, func() time.Time { clock = clock.Add(time.Millisecond); return clock })
+	results, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, _, _ := r.Last()
+	for _, set := range [][]Result{results, cached} {
+		for _, res := range set {
+			if res.NoProbe != noProbe[res.ID] {
+				t.Errorf("%s: noProbe=%t, want %t", res.ID, res.NoProbe, noProbe[res.ID])
+			}
+			if res.NoProbe && res.LatencyMS != 0 {
+				t.Errorf("%s ran no probe and reports %d ms", res.ID, res.LatencyMS)
+			}
+		}
+	}
+	starved := NewRunner(targets, nil, nil)
+	starved.deadline = -1
+	out, _ := starved.Run(context.Background())
+	for _, res := range out {
+		if !res.NoProbe || res.Failure == nil || res.Failure.Code != FailNotChecked {
+			t.Errorf("a starved result: %+v", res)
+		}
 	}
 }

@@ -114,60 +114,31 @@ func applyChain(steps []CompatStep, from string, payload []byte, x ExchangeIdent
 	return cur, reports, nil
 }
 
-// envelopeEgressLegs is the DTR-fetch-ONLY non-FHIR carve-out (the
-// multi-version spec's recorded DTR-fetch known-gap obligation, discharged).
-// Membership means egressAdapt walks
-// route.Chain for the routing/observer story but never hands the bytes to a
-// step function — safe only because dtr-questionnaire-fetch's payload is
-// the operation's own input, carried to the payer's line unchanged: the
-// ingress and the originator refuse a walk that would change a byte of it
-// (handleDTRIngress, carryUnchanged), so no pa.dtr compat-manifest step
-// ever rewrites it.
-//
-// CRD legs (crd-order-select, crd-order-dispatch) must NEVER join this set:
-// their arm-3 byte-identity rests on the identity chain genuinely RUNNING
-// (TestD7CRDArm3IdentityChainIsBytePreserving) — a CDS Hooks payload IS FHIR
-// content the pa.crd manifest models, so carving it out here would misname
-// it as an envelope, would be redundant (applyChain's nil-func identity path
-// is already a byte-pure pass-through with identical reports, transform.go's
-// applyChain), and would silently bypass any FUTURE real CRD module instead
-// of making it run or refuse honestly. TestCRDLegsNeverJoinEnvelopeCarveOut
-// pins the set's exact membership.
-//
-// Terminology note: the commit that discharged it calls this "proven
-// safe by byte-identity guard" — there is no RUNTIME guard (no equality
-// check anywhere in AdaptRequest below; out is never a copy, so one would be
-// structurally unreachable). "Guard" there means
-// TestEnvelopeLegChainIsByteIdenticalPassThrough, the test-time pin that
-// enforces byte-identity by construction, not a production code path.
-var envelopeEgressLegs = map[string]bool{"dtr-questionnaire-fetch": true}
+// envelopeEgressLegs are the legs whose payload the compat chain walks without
+// handing the bytes to a step (a non-FHIR operation input carried unchanged),
+// and verbatimChainLegs those whose payload it walks and never rewrites; each
+// workstream names its own (workstream.lineBridge) and says why (the PA
+// workstream's: paEnvelopeEgressLegs, paVerbatimChainLegs). Both are set at
+// package init (workstreams.go).
+var envelopeEgressLegs, verbatimChainLegs map[string]bool
 
-// verbatimChainLegs are legs whose payload the compat chain WALKS — so the
-// routing and observer story stays honest — and never rewrites.
-//
-// pas-claim-inquire is one, for two reasons that both have to hold.
-//
-// FIRST, the chain has nothing to do to it. Every pa.pas step models a
-// difference between the SUBMIT/AMENDMENT profiles (profile-claim,
-// profile-claim-update) or the response profile: the Claim.item line detail and
-// the related-claim relationship, and ClaimResponse.request. An inquiry's Claim
-// is profile-claim-inquiry, a third profile that states none of them — the same
-// distinction the certification layer draws (workstream_pa_conformance_species.go)
-// and the validator lane scopes (linefake.go). Measured: running the chain over an inquiry changed not
-// one fact, only the key order of the re-marshalled JSON.
-//
-// SECOND, that re-marshal is exactly what an inquiry must not suffer. Its
-// payload CARRIES the participant's own Patient, Coverage, provider and payer
-// records as verbatim spans, sealed as embeds — that is what makes the bytes on
-// the wire provably the participant's records rather than a rendering of them.
-// A step that re-serialized them would reorder their keys and leave the seal
-// describing a message that no longer exists.
-//
-// inquireContinuation keeps the runtime byte-equality check, so a future
-// inquiry-aware step that DID change the bytes is never sent under a broken
-// seal: the inquiry is sent as built, at its build line, or refused under the
-// participant's REQUIRE_SHARED_LINE.
-var verbatimChainLegs = map[string]bool{"pas-claim-inquire": true}
+// SemanticChangeError is the typed refusal a gated CompatStep direction
+// returns when the source line has no honest byte-level value for an
+// element the target line requires (loss policy: refuse only on semantic
+// change, never fabricate). Route callers match this with
+// errors.As to distinguish a gated-step refusal from any other applyChain
+// failure (e.g. chainDisconnectedError, a plain I/O/parse error).
+type SemanticChangeError struct {
+	Contract        string   // the step's contract
+	From, To        string   // adjacent line pair, low->high order (e.g. "2.0", "2.1")
+	Direction       string   // "up" | "down" — which TransformFunc refused
+	MissingElements []string // FHIRPath-ish locators the target line requires with no honest source
+}
+
+func (e *SemanticChangeError) Error() string {
+	return fmt.Sprintf("shn: semantic-change refusal: %s %s->%s (%s direction): no honest byte-level source for %s",
+		e.Contract, e.From, e.To, e.Direction, strings.Join(e.MissingElements, ", "))
+}
 
 // AdaptRequest walks payload along route's chain: through the steps, or, on an
 // envelope or verbatim leg, along them without handing the bytes to one.
@@ -332,4 +303,38 @@ type chainDisconnectedError struct {
 
 func (e *chainDisconnectedError) Error() string {
 	return "applyChain: step " + e.Contract + " " + e.From + "->" + e.To + " does not connect to current line " + e.CurLine
+}
+
+// collectResources returns every resource found in the document, keyed by
+// FHIR resourceType: the document itself when it is a bare resource, or each
+// Bundle.entry[].resource when the document is a Bundle. The returned maps
+// are the SAME map values referenced by top (Go maps are reference types) —
+// mutating a returned map mutates the document, so callers edit fields
+// directly and re-marshal top to get the transformed payload back.
+func collectResources(top map[string]any) map[string][]map[string]any {
+	out := map[string][]map[string]any{}
+	add := func(m map[string]any) {
+		rt, _ := m["resourceType"].(string)
+		if rt == "" {
+			return
+		}
+		out[rt] = append(out[rt], m)
+	}
+	if rt, _ := top["resourceType"].(string); rt == "Bundle" {
+		entries, _ := top["entry"].([]any)
+		for _, e := range entries {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			rm, ok := em["resource"].(map[string]any)
+			if !ok {
+				continue
+			}
+			add(rm)
+		}
+		return out
+	}
+	add(top)
+	return out
 }

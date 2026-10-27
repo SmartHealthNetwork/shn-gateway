@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pas_forward.go — the native PAS legs of the native-forward Responder.
 //
 // They forward pas-claim / pas-claim-update to the participant's own
@@ -25,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -58,7 +61,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// identity (and a Claim.insurer naming this payer) BEFORE any store write, so a
 	// refusal never leaves a claim pended with no way to release it. Off (the default) ⇒
 	// the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -103,7 +106,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		var releaseErr error
 		release = func() error {
 			once.Do(func() {
-				if releaseErr = n.store.ReleaseClaimUpdate(subjectPCI, related); releaseErr != nil {
+				if releaseErr = n.paNative().store.ReleaseClaimUpdate(subjectPCI, related); releaseErr != nil {
 					log.Printf("gateway: pas-claim-update: correlation %s: the amendment's claim could not be released: %v", corrID, releaseErr)
 				}
 			})
@@ -111,7 +114,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		}
 	} else {
 		log.Printf("gateway: pas-claim-update: correlation %s: amendment forwarded without binding a local pend (%s)", corrID, why)
-		noteOn(ctx, PendAmendmentUnboundEvent+":"+string(why))
+		noteDetailOn(ctx, PendAmendmentUnboundEvent, string(why))
 	}
 	var rollback func()
 	if release != nil {
@@ -123,7 +126,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// Whatever the payer answers is relayed, a conflict included: whether and when
 	// to send the amendment again is the requester's decision.
 	submitURL := n.resolvedURL(ctx, "pa.pas", n.pasBase(), "/Claim/$submit")
-	up, bad, err := n.post(ctx, submitURL, "", forward, "pas-claim-update", "PAS update")
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerPAS)), submitURL, "", forward, "pas-claim-update", "PAS update")
 	if err != nil {
 		return LegResult{Rollback: rollback}, err // post-Begin fault MUST still release the claim
 	}
@@ -171,7 +174,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		if !recordable {
 			return answer, nil // relayed; there is no prior claim to key a record on
 		}
-		pend := recordPASPend(ctx, n.store, subjectPCI, related,
+		pend := recordPASPend(ctx, n.paNative().store, subjectPCI, related,
 			mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR)), created)
 		answer.Commit = pend
 		if claimed {
@@ -200,7 +203,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// the payer dated. Rollback stays armed so a
 	// post-Begin response-leg failure still releases.
 	if recordable {
-		answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef))
+		answer.Commit = recordPASDecision(ctx, n.paNative().store, subjectPCI, related, pendOutcomeOf(parsed.Outcome), created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef))
 	}
 	return answer, nil
 }
@@ -209,10 +212,10 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 // it refused. A Store with a pend ledger answers the reason itself; one without
 // can only say "not pended", which is the same answer it has always given.
 func (n *nativeResponder) beginClaimUpdate(subjectPCI, related string) (bool, PendRefusal, error) {
-	if ledger, ok := LedgerOf(n.store); ok {
+	if ledger, ok := LedgerOf(n.paNative().store); ok {
 		return ledger.BeginClaimUpdateReason(subjectPCI, related)
 	}
-	claimed, err := n.store.BeginClaimUpdate(subjectPCI, related)
+	claimed, err := n.paNative().store.BeginClaimUpdate(subjectPCI, related)
 	if err != nil || claimed {
 		return claimed, PendRefusalNone, err
 	}
@@ -220,9 +223,9 @@ func (n *nativeResponder) beginClaimUpdate(subjectPCI, related string) (bool, Pe
 }
 
 // PendAmendmentUnboundEvent is noted when an amendment reached the payer without
-// binding a pend this gateway recorded; the reason (a PendRefusal, or
-// pendRefusalLedgerUnavailable) follows a colon. The payer's answer is relayed
-// and recorded either way.
+// binding a pend this gateway recorded; its detail is the reason, one of
+// PendAmendmentUnboundReasons. The payer's answer is relayed and recorded
+// either way.
 const PendAmendmentUnboundEvent = "pend.amendment-unbound"
 
 // The reasons an amendment did not bind beyond the ledger's own: the ledger
@@ -233,12 +236,23 @@ const (
 	pendRefusalOtherRequester    PendRefusal = "other-requester"
 )
 
+// PendAmendmentUnboundReasons is the closed set of PendAmendmentUnboundEvent's
+// detail: the ledger's refusals (pend.PendBegin's), then the leg's own.
+var PendAmendmentUnboundReasons = []string{
+	string(PendRefusalNotPended),
+	string(PendRefusalInProgress),
+	string(PendRefusalDecided),
+	string(pendRefusalLedgerUnavailable),
+	string(pendRefusalNoPriorClaim),
+	string(pendRefusalOtherRequester),
+}
+
 // heldByAnotherRequester reports whether the authorization an amendment names is
 // recorded for a different requester. Such an amendment is forwarded all the
 // same, but binds and records nothing: one requester never moves another's
 // authorization.
 func (n *nativeResponder) heldByAnotherRequester(subjectPCI, related, requester string) bool {
-	ledger, ok := LedgerOf(n.store)
+	ledger, ok := LedgerOf(n.paNative().store)
 	if !ok || requester == "" {
 		return false
 	}
@@ -251,7 +265,7 @@ func (n *nativeResponder) heldByAnotherRequester(subjectPCI, related, requester 
 // holds for this patient under that correlation, recorded for the same
 // requester (or for none). Anything else records nothing.
 func (n *nativeResponder) unboundRecordable(subjectPCI, related, requester string) bool {
-	ledger, ok := LedgerOf(n.store)
+	ledger, ok := LedgerOf(n.paNative().store)
 	if !ok || requester == "" {
 		return false
 	}
@@ -299,7 +313,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// Payer-edge identity mapping (payoredge.go): map the bundle's Coverage payer
 	// identity (and a Claim.insurer naming this payer) before it is posted (and before
 	// any store side-effect below). Off (the default) ⇒ the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgePASBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -309,7 +323,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
 	// endpoint for THIS routed pa.pas line (evidence absent ⇒ the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
 	submitURL := n.resolvedURL(ctx, "pa.pas", n.pasBase(), "/Claim/$submit")
-	up, bad, err := n.post(ctx, submitURL, "", forward, "pas-claim", "PAS submit")
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerPAS)), submitURL, "", forward, "pas-claim", "PAS submit")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}
@@ -349,7 +363,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		// payer's answer and this submission state, so the follow-up conformant
 		// ClaimUpdate binds to a REAL prior pend and a `Claim/$inquire` about the same
 		// authorization resolves to it.
-		answer.Commit = recordPASPend(ctx, n.store, subjectPCI, corrID,
+		answer.Commit = recordPASPend(ctx, n.paNative().store, subjectPCI, corrID,
 			mergePendKeys(requester, answerKeys, pasRequestKeys(requestFHIR)), created)
 		return answer, nil
 	}
@@ -368,7 +382,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	if parsed.Outcome == "denied" && payerStatedAuthNumber(response) != "" {
 		return relayDecisionUnrecorded(ctx, up, nil), nil
 	}
-	answer.Commit = recordPASDecision(ctx, n.store, subjectPCI, corrID, pendOutcomeOf(parsed.Outcome), created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef))
+	answer.Commit = recordPASDecision(ctx, n.paNative().store, subjectPCI, corrID, pendOutcomeOf(parsed.Outcome), created, decisionKeys(requester, answerKeys, requestFHIR, parsed.PreAuthRef))
 	return answer, nil
 }
 

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -136,8 +138,8 @@ func bundleClaimInsurerOrg(t *testing.T, bundleJSON []byte) (shnsdk.PayerIdentif
 // mapPASBundle runs the mapping over a $submit Bundle.
 func mapPASBundle(t *testing.T, bundle []byte, own, backend shnsdk.PayerIdentifier) ([]byte, LegResult) {
 	t.Helper()
-	n := NewNativeResponder(nil, "", "order-sign", nil, nil, WithPayorEdgeIdentity(own, backend))
-	p, lr, err := n.payorEdgeRequest(peerBody(bundle), payorEdgePASBundle, "application/fhir+json", nil)
+	n := NewNativeResponder(nil, "", nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(own, backend))
+	p, lr, err := n.payorEdgeRequest(peerBody(bundle), payorEdgeClaimBundle, "application/fhir+json", nil)
 	if err != nil {
 		t.Fatalf("payorEdgeRequest: %v", err)
 	}
@@ -297,7 +299,7 @@ func TestPayorEdgePASBundle_InsurerNamingAnotherIdentityLeftAsSent(t *testing.T)
 func TestNativeResponder_PayorEdge_CRD_SeamOff(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = crdPartnerCoverageCard
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
@@ -323,7 +325,7 @@ func TestNativeResponder_PayorEdge_CRD_SeamOff(t *testing.T) {
 func TestNativeResponder_PayorEdge_CRD_MismatchRefuses(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", foreignIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
@@ -345,7 +347,7 @@ func TestNativeResponder_PayorEdge_CRD_MismatchRefuses(t *testing.T) {
 // identifier at all" arm of A1.
 func TestNativeResponder_PayorEdge_CRD_AbsentPayorRefuses(t *testing.T) {
 	p := newStubPartner(t)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 	req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/p1"}}}}`)
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
 	if err != nil {
@@ -365,7 +367,7 @@ func TestNativeResponder_PayorEdge_CRD_AbsentPayorRefuses(t *testing.T) {
 func TestNativeResponder_PayorEdge_CRD_OwnIdentityRestamps(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/cds-services/order-sign"] = crdPartnerCoverageCard
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
 		t.Fatalf("BuildCoverageWithPayer: %v", err)
@@ -419,7 +421,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
@@ -432,7 +434,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 	t.Run("own identity restamps to backend", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", reqFHIR)
 		if err != nil || res.Status != 0 {
 			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -450,7 +452,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 			t.Fatalf("BuildCoverageWithPayer: %v", ferr)
 		}
 		foreignReq := dtrPackageWithCoverage(foreignCov)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", foreignReq)
 		if err != nil {
 			t.Fatalf("Handle must return a LegResult refusal, not a bare error: %v", err)
@@ -466,7 +468,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 	t.Run("no coverage carried stays a benign pass-through (seam on)", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		noCovReq := dtrPackageWithCoverage(nil)
 		res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", noCovReq)
 		if err != nil || res.Status != 0 {
@@ -505,7 +507,7 @@ func TestNativeSubmit_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 		bundle := conformantSubmitBundle(t, ownIdentity, true)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr", "MBR-1", bundle)
 		if err != nil || res.Status != 0 {
@@ -520,7 +522,7 @@ func TestNativeSubmit_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("own identity restamps to backend", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		bundle := conformantSubmitBundle(t, ownIdentity, true)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr", "MBR-1", bundle)
 		if err != nil || res.Status != 0 {
@@ -535,7 +537,7 @@ func TestNativeSubmit_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("mismatch refuses before forwarding", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		bundle := conformantSubmitBundle(t, foreignIdentity, true)
 		res, err := n.Handle(context.Background(), "pas-claim", "corr", "MBR-1", bundle)
 		if err != nil {
@@ -586,7 +588,7 @@ func TestNativeInquire_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$inquire"] = answer
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(ownIdentity))
 		if err != nil || res.Status != 0 {
 			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -603,7 +605,7 @@ func TestNativeInquire_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("own identity restamps to backend", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$inquire"] = answer
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(ownIdentity))
 		if err != nil || res.Status != 0 {
 			t.Fatalf("Handle: err=%v status=%d msg=%s", err, res.Status, res.Message)
@@ -620,7 +622,7 @@ func TestNativeInquire_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("mismatch refuses before forwarding", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$inquire"] = answer
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", newCensusSoR(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr", "MBR-1", inquiryBundleWithPayor(foreignIdentity))
 		if err != nil {
 			t.Fatalf("Handle must return a LegResult refusal, not a bare error: %v", err)
@@ -719,7 +721,7 @@ func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("seam off forwards verbatim", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", seedPended(), fixedClock)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(seedPended()))
 		bundle := conformantUpdateBundle(t, ownIdentity, true, "corr-payoredge-update", origCorr)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr", pci, bundle)
 		if err != nil || res.Status != 0 {
@@ -734,7 +736,7 @@ func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 	t.Run("own identity restamps to backend", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", seedPended(), fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(seedPended()), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		bundle := conformantUpdateBundle(t, ownIdentity, true, "corr-payoredge-update", origCorr)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr", pci, bundle)
 		if err != nil || res.Status != 0 {
@@ -750,7 +752,7 @@ func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Claim/$submit"] = approvedBody
 		s := seedPended()
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", s, fixedClock, WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 		bundle := conformantUpdateBundle(t, foreignIdentity, true, "corr-payoredge-update", origCorr)
 		res, err := n.Handle(context.Background(), "pas-claim-update", "corr", pci, bundle)
 		if err != nil {

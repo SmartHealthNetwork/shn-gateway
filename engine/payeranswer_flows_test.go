@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -268,10 +270,11 @@ func TestPayerAnswerFlows_PartnerPayerIsGovernedAtItsLevel(t *testing.T) {
 	}
 }
 
-// The network's reference payers, by identity, keep the skip on every family and
-// both lanes: no validator call on their answer at any level, even at strict against
-// a validator that would refuse everything.
-func TestPayerAnswerFlows_ReferencePayersAreNotCertified(t *testing.T) {
+// No payer is exempt by default (D122): the network's reference payers' answers are
+// judged on every family and both lanes, refused at structural and strict by a
+// validator that refuses everything, recorded at observe, unchecked at none. A
+// participant that tolerates them lists them (CONFORMANCE_TOLERATE_PEERS).
+func TestPayerAnswerFlows_ReferencePayersAreJudged(t *testing.T) {
 	for _, flow := range answerFlows {
 		for _, profile := range flow.profiles {
 			for _, payer := range ReferencePayerIdentities() {
@@ -281,14 +284,19 @@ func TestPayerAnswerFlows_ReferencePayersAreNotCertified(t *testing.T) {
 						var mu sync.Mutex
 						var events []ObserverEvent
 						status, body := flow.run(t, profile, payer, level, v, func(e ObserverEvent) { mu.Lock(); events = append(events, e); mu.Unlock() })
-						if status != http.StatusOK {
-							t.Fatalf("status %d %s, want the reference answer relayed", status, body)
+						refuses := level == EnforcementStructural || level == EnforcementStrict
+						if (status != http.StatusOK) != refuses {
+							t.Fatalf("status %d %s, want refused %v", status, body, refuses)
 						}
-						if got := v.answerChecks(); len(got) != 0 {
-							t.Fatalf("the reference payer's answer was checked %d times", len(got))
+						checks, f := len(v.answerChecks()), findingsFor(events, flow.leg)
+						if level == EnforcementNone {
+							if checks != 0 || len(f) != 0 {
+								t.Fatalf("checked %d times, findings %+v at none", checks, f)
+							}
+							return
 						}
-						if f := findingsFor(events, flow.leg); len(f) != 0 {
-							t.Fatalf("findings %+v for a reference answer", f)
+						if checks == 0 || len(f) == 0 {
+							t.Fatalf("the reference payer's answer was not judged: %d checks, findings %+v", checks, f)
 						}
 					})
 				}

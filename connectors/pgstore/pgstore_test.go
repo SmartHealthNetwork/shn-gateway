@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 import (
@@ -175,7 +177,7 @@ func TestEnsureSchema_Concurrent(t *testing.T) {
 
 // gwTables lists every table EnsureSchema owns, dependents first so DROP … CASCADE
 // order never matters.
-var gwTables = []string{"gw_exchange_leg", "gw_exchange", "gw_replay", "gw_ingress_key", "gw_auth_number", "gw_pended_claim_key", "gw_pended_claim", "gw_pa_continuation_item", "gw_pa_continuation", "gw_eob"}
+var gwTables = []string{"gw_audit_outbox", "gw_exchange_leg", "gw_exchange", "gw_replay", "gw_ingress_key", "gw_auth_number", "gw_pended_claim_key", "gw_pended_claim", "gw_pa_continuation_item", "gw_pa_continuation", "gw_eob"}
 
 func dropGWTables(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()

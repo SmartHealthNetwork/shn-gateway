@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -108,24 +110,72 @@ func (paCertification) profile(species, line, legType string) (string, bool) {
 	return certificationPAS + name + "|" + d.PackageVersion, true
 }
 
+// paLineMarkers are the structural markers whose presence in a payload claims
+// lines. A marker claims the lines whose packages define it for where it sits
+// (paLinesDefining, workstream_pa_extension_lines.json), so the lines are read from the
+// packages the validator lanes load, never from the marker's name. A marker
+// every line defines there claims every line, which constrains nothing.
+var paLineMarkers = map[string]bool{
+	certificationPAS + "extension-certificationType":      true,
+	certificationPAS + "extension-serviceItemRequestType": true,
+	certificationDTR + "qr-context":                       true,
+	certificationDTR + "qr-coverage":                      true,
+}
+
+// candidateGroups: a DTR $questionnaire-package answer names its line by its
+// parameters. The output Parameters profile slices parameter.name open at
+// every line, so a line of the other name family leaves those parameters
+// unprofiled and does not judge them: PackageBundle and operationOutcome are
+// judged at 2.0 and 2.1, packagebundle at 2.2 (outcome is every line's and
+// names none), and an answer naming both families must be valid at a line of
+// each. An answer naming neither is
+// judged at every line, where the profile itself judges the absence. Every
+// other answer is judged at every line.
+func (paCertification) candidateGroups(contract string, payload []byte) [][]string {
+	if contract != "pa.dtr" {
+		return nil
+	}
+	var groups [][]string
+	for _, f := range dtrAnswerNameFamilies(payload) {
+		groups = append(groups, dtrFamilyLines(f))
+	}
+	return groups
+}
+
 // lineClaims orders the Da Vinci lines 2.2, 2.1 and 2.0 for certifying
 // payload, whatever its species: first the lines a versioned meta.profile claims
-// (a PAS or DTR profile at that line's package version), then the lines a known
-// structural marker points to, then the rest, each group in 2.2, 2.1, 2.0 order.
-// It walks Bundle entries and Parameters parameter resources, so a DTR
-// $questionnaire-package answer is read through its PackageBundle. claimed is
-// the lines the payload itself points to, by a versioned meta.profile or a
-// structural marker. Claims and markers order attempts only; every supported
-// line is retained, including when extensions belong to an unknown namespace.
-func (paCertification) lineClaims(payload []byte) ([]string, map[string]bool) {
+// (a PAS or DTR profile at that line's package version), then the lines of a
+// structural marker's claim narrower than every line, then the rest, each
+// group in 2.2, 2.1, 2.0 order. It walks Bundle entries and Parameters
+// parameter resources, so a DTR $questionnaire-package answer is read through
+// its PackageBundle. claims is what the payload itself points to, each claim
+// a set of lines: one line for a versioned meta.profile, and for a marker the
+// lines whose packages define it where it sits (a resource's root, or a
+// Claim's item). Claims and markers order attempts only; every supported line
+// is retained, including when extensions belong to an unknown namespace.
+func (paCertification) lineClaims(payload []byte) ([]string, []claimSet) {
 	order := []string{"2.2", "2.1", "2.0"}
-	claimed := map[string]bool{}
 	var r map[string]any
 	if json.Unmarshal(payload, &r) != nil {
-		return order, claimed
+		return order, nil
 	}
-	claims := map[string]bool{}
-	markers := map[string]bool{}
+	profiled := map[string]bool{}
+	narrow := map[string]bool{}
+	var claims []claimSet
+	seen := map[string]bool{}
+	claim := func(set claimSet) {
+		key := strings.Join(set, ",")
+		if len(set) == 0 || seen[key] {
+			return
+		}
+		seen[key] = true
+		claims = append(claims, set)
+		if len(set) < len(order) {
+			for _, line := range set {
+				narrow[line] = true
+			}
+		}
+	}
 	var walk func(map[string]any)
 	walk = func(m map[string]any) {
 		meta, _ := m["meta"].(map[string]any)
@@ -140,27 +190,31 @@ func (paCertification) lineClaims(payload []byte) ([]string, map[string]bool) {
 				d, _ := shnsdk.PASLineDef(line)
 				q, _ := shnsdk.DTRLineDef(line)
 				if strings.HasPrefix(canonical, certificationPAS) && version == d.PackageVersion || strings.HasPrefix(canonical, certificationDTR) && version == q.PackageVersion {
-					claims[line] = true
+					profiled[line] = true
+					claim(claimSet{line})
 				}
 			}
 		}
-		resources := []map[string]any{m}
-		if m["resourceType"] == "Claim" {
+		resourceType, _ := m["resourceType"].(string)
+		type sited struct {
+			r        map[string]any
+			position string
+		}
+		resources := []sited{{m, resourceType}}
+		if resourceType == "Claim" {
 			items, _ := m["item"].([]any)
 			for _, item := range items {
 				r, _ := item.(map[string]any)
-				resources = append(resources, r)
+				resources = append(resources, sited{r, "Claim.item"})
 			}
 		}
-		for _, r := range resources {
-			extensions, _ := r["extension"].([]any)
+		for _, s := range resources {
+			extensions, _ := s.r["extension"].([]any)
 			for _, extension := range extensions {
 				e, _ := extension.(map[string]any)
-				switch e["url"] {
-				case certificationPAS + "extension-certificationType", certificationPAS + "extension-serviceItemRequestType", certificationDTR + "qr-context":
-					markers["2.1"] = true
-				case certificationDTR + "qr-coverage":
-					markers["2.2"] = true
+				url, _ := e["url"].(string)
+				if paLineMarkers[url] {
+					claim(claimSet(paLinesDefining(url, s.position, order)))
 				}
 			}
 		}
@@ -175,27 +229,17 @@ func (paCertification) lineClaims(payload []byte) ([]string, map[string]bool) {
 		}
 	}
 	walk(r)
-	for line := range claims {
-		claimed[line] = true
-	}
-	for line := range markers {
-		claimed[line] = true
-	}
-	out := make([]string, 0, 3)
-	for _, line := range order {
-		if claims[line] {
-			out = append(out, line)
+	out := make([]string, 0, len(order))
+	for _, group := range []func(string) bool{
+		func(l string) bool { return profiled[l] },
+		func(l string) bool { return narrow[l] && !profiled[l] },
+		func(l string) bool { return !narrow[l] && !profiled[l] },
+	} {
+		for _, line := range order {
+			if group(line) {
+				out = append(out, line)
+			}
 		}
 	}
-	for _, line := range order {
-		if markers[line] && !claims[line] {
-			out = append(out, line)
-		}
-	}
-	for _, line := range order {
-		if !claims[line] && !markers[line] {
-			out = append(out, line)
-		}
-	}
-	return out, claimed
+	return out, claims
 }

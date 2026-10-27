@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -128,7 +130,7 @@ func TestEligibility_DeclaredWithoutAnAnswerHasNoFallback(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := eligibilityPayer(t, EnforcementObserve, true)
-			p.g.cfg.Responder.(*nativeResponder).eligibilityURL = row.url + eligibilityPath
+			p.g.cfg.Responder.(*nativeResponder).paNative().eligibilityURL = row.url + eligibilityPath
 			counter := &coverageReadCounter{censusSoR: p.store}
 			p.g.cfg.SoR = counter
 			got := p.send(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember))

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // nativepas_unbound_line_test.go — the log line an amendment that binds no pend
@@ -55,7 +57,7 @@ func TestPASUpdate_UnboundLineNamesTheLedgerReason(t *testing.T) {
 			defer srv.Close()
 			s := newCensusSoR()
 			tc.seed(t, s)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", s, fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(s))
 			ctx, _ := withPASLeg(context.Background(), "provider")
 			res, err := n.Handle(ctx, "pas-claim-update", corr, pci, originatorBuiltConformantUpdateBundle(t))
 			if err != nil || res.Status != 0 {

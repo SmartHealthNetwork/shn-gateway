@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // workstream_pa_pendledger_test.go holds the ledger rows that need the engine's memory store:

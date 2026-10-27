@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate_dtr.go — the $questionnaire-package request this gateway
 // originates for its own participant after a CDS Hooks answer, built from the
 // participant's own records and the payer's own answer.

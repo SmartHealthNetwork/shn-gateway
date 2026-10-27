@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // payer_subject_test.go — what the payer records about an exchange is keyed by

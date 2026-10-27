@@ -6,13 +6,21 @@
 # same binary from the workspace instead (deploy/multiprocess/Dockerfile, gateway-ws).
 # The builder runs on the build's own platform and compiles for the target one, so one build
 # makes the linux/amd64 and linux/arm64 images of the published release without emulation.
+# GATEWAY_VERSION stamps the build's version (internal/buildversion): a release's tag, or a main
+# build's pseudo-version. Unset, the binary falls back to the module version Go records, else
+# v0.0.0-unstamped.
 FROM --platform=$BUILDPLATFORM golang:1.26.10@sha256:5c3f3f28a273c9b61698b2d34f18375929790ab1f1d3835d032d21e2b31eae0c AS builder
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags='-s -w' -o /out/gateway ./cmd/gateway
+# GATEWAY_VERSION is declared here, after the module download, so a new version does not miss that
+# layer's cache. The -X target sits in a variable, so the go build line names no package
+# tools/deployscope would read as one the image builds.
+ARG GATEWAY_VERSION=
+RUN stamp=; [ -z "$GATEWAY_VERSION" ] || stamp="-X github.com/SmartHealthNetwork/shn-gateway/internal/buildversion.stamp=$GATEWAY_VERSION"; \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w $stamp" -o /out/gateway ./cmd/gateway
 
 # Distroless static NONROOT (uid/gid 65532): no shell (keep healthchecks binary/none),
 # CA certs for outbound HTTPS. The runtime reads its key bundle from the mounted
@@ -20,5 +28,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 # nonroot runtime can traverse+read them (keys stay non-world-readable; AI-8 custody).
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/gateway /gateway
+# The licences of the modules the binary links, and the gateway's own.
+COPY THIRD_PARTY_NOTICES.md LICENSE /licenses/
 USER 65532:65532
 ENTRYPOINT ["/gateway"]

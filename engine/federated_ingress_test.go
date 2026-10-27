@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // federated_ingress_test.go — a participant's own system sends a consented

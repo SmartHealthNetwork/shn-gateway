@@ -10,6 +10,7 @@
 package engine
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -58,6 +59,19 @@ type memClaimUpdates interface {
 	FinalizeClaimUpdate(subjectPCI, correlationID string) error
 }
 
+// errNoClaimKeeper is what the claim-update methods answer when no compiled-in
+// workstream keeps claims: nothing was recorded, begun, released or finalized.
+var errNoClaimKeeper = errors.New("engine: no compiled-in workstream keeps claims")
+
+// noClaimKeeper serves the claim-update methods in a build with no workstream
+// that keeps claims: each refuses with errNoClaimKeeper.
+type noClaimKeeper struct{}
+
+func (noClaimKeeper) RecordPendedClaim(string, string) error        { return errNoClaimKeeper }
+func (noClaimKeeper) BeginClaimUpdate(string, string) (bool, error) { return false, errNoClaimKeeper }
+func (noClaimKeeper) ReleaseClaimUpdate(string, string) error       { return errNoClaimKeeper }
+func (noClaimKeeper) FinalizeClaimUpdate(string, string) error      { return errNoClaimKeeper }
+
 // memWorkstreamStates is what an in-memory Store, or a type embedding one,
 // answers: one workstream's own state.
 type memWorkstreamStates interface {
@@ -66,8 +80,15 @@ type memWorkstreamStates interface {
 
 // NewMemStore returns a ready-to-use in-memory Store with an initialized
 // auth-number store and each compiled-in workstream's state.
-func NewMemStore() *MemStore {
-	d := &MemStore{authNumbers: make(map[string]string), states: workstreamMemStates()}
+func NewMemStore() *MemStore { return newMemStoreFrom(workstreamMemStates()) }
+
+// newMemStoreFrom is NewMemStore over states. The workstream whose state keeps
+// claims serves the claim-update methods; with none compiled in (a core-only
+// build) they answer errNoClaimKeeper, so the Store still builds and nothing
+// is claimed. A later minor release moves the claim-update methods off the
+// core Store, to the workstream that keeps claims.
+func newMemStoreFrom(states map[string]memState) *MemStore {
+	d := &MemStore{authNumbers: make(map[string]string), states: states}
 	for _, id := range slices.Sorted(maps.Keys(d.states)) {
 		if c, ok := d.states[id].(interface{ claimUpdates() memClaimUpdates }); ok {
 			if d.claims != nil {
@@ -77,7 +98,7 @@ func NewMemStore() *MemStore {
 		}
 	}
 	if d.claims == nil {
-		panic("engine: no compiled-in workstream keeps claims in the in-memory Store")
+		d.claims = noClaimKeeper{}
 	}
 	return d
 }

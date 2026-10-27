@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // The PA workstream's FR-16/FR-27 attestation conformance fence. A
 // QuestionnaireResponse item carrying the FR-17 source-attribution extension
 // (dtrInformationOriginExt, source="manual") is either clinician-entered
@@ -46,7 +48,7 @@
 // It checks the SAME extension URLs the SDK
 // builders (shnsdk.BuildManualAttestedItem / BuildPatientAttestedItem) write —
 // dtrInformationOriginExt is the engine's own existing mirror of the SDK's
-// unexported information-origin constant (already used by transform_dtr.go's
+// unexported information-origin constant (already used by workstream_pa_transform_dtr.go's
 // dtrRemapOriginCode); ClinicianAttestationExt/QRSignatureExt are read directly
 // off the SDK. No new constants.
 package engine
@@ -143,7 +145,7 @@ func allQuestionnaireResponseEntries(bundleJSON []byte) (resources [][]byte, fou
 
 // walkFenceItems calls fn for every QuestionnaireResponse.item across BOTH FHIR
 // nesting axes — item.item and item.answer.item, the same two loci
-// dtrWalkAnswers (transform_dtr.go) walks for the identical reason: an item
+// dtrWalkAnswers (workstream_pa_transform_dtr.go) walks for the identical reason: an item
 // nested either way is the SAME element and must be fenced identically.
 // Stops early (returns false) the first time fn does.
 func walkFenceItems(node map[string]any, fn func(item map[string]any) bool) bool {

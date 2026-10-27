@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -8,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -18,7 +21,7 @@ import (
 func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 	return func(n *nativeResponder) {
 		if cdsBaseURL != "" {
-			n.cdsBaseURL = cdsBaseURL
+			n.paNative().cdsBaseURL = cdsBaseURL
 		}
 	}
 }
@@ -26,7 +29,7 @@ func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 // WithCRDDispatchService names the partner's CDS service for the crd-order-dispatch
 // leg. Empty (the default) selects the listed service for the order-dispatch hook.
 func WithCRDDispatchService(serviceID string) NativeOption {
-	return func(n *nativeResponder) { n.crdDispatchServiceID = serviceID }
+	return func(n *nativeResponder) { n.paNative().crdDispatchServiceID = serviceID }
 }
 
 // forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:
@@ -45,7 +48,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if err != nil || refused.Status != 0 {
 		return refused, err
 	}
-	up, bad, err := n.post(ctx, n.cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), n.paNative().cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}
@@ -171,5 +174,5 @@ func certifyCDSHooksAnswer(ctx context.Context, mod conformanceModule, emit func
 // Coverage naming no readable payor, or another payer, is refused, and so is a request
 // whose only Coverage is outside prefetch.coverage.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(in, payorEdgeCRDRequest, "application/json", nil)
+	return n.payorEdgeRequest(in, payorEdgeCDSHooksPrefetch, "application/json", nil)
 }

@@ -15,6 +15,14 @@ sys.path.insert(0, str(DEPLOY / "validator/backport"))
 import wire
 import cache
 
+# The IG packages each evaluation bundle's HAPI activates, written out here and never read from
+# the compose files, so the check below can fail. A package added to or removed from a bundle
+# changes its set here too.
+EXPECTED_ACTIVATION = {
+    "provider": {"uscore", "pas", "cdex", "hrex", "crd", "dtr", "sdc", "validationsupport"},
+    "payer": {"uscore", "pas"},
+}
+
 
 def run(args, output, name, **kwargs):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
@@ -42,7 +50,7 @@ def main():
         if Path(build["context"]).resolve() != DEPLOY or build["dockerfile"] != "eval/hapi/Dockerfile":
             raise ValueError("evaluation build context does not select shared source")
         activation = selected["environment"]
-        expected = {"uscore", "pas"} | ({"cdex", "hrex"} if name == "provider" else set())
+        expected = EXPECTED_ACTIVATION[name]
         actual = {k.split(".")[3] for k in activation if k.startswith("hapi.fhir.implementationguides.") and k.endswith(".name")}
         if actual != expected: raise ValueError("evaluation package activation changed")
         command = ["docker","run","-d","-p","127.0.0.1::8080"]

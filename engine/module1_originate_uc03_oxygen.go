@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate_uc03_oxygen.go — support for handleUC03's non-provider-data (demo) arm,
 // re-keyed onto the HomeOxygen family (register §11 ruling (b), R3): the hermetic FR-17
 // auto-fill evidence cross-check and the item-6.1 manual attestation. The order itself

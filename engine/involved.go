@@ -81,6 +81,9 @@ const (
 	involvedOmitBudget = "budget"
 )
 
+// InvolvedOmitReasons is the closed list of reasons InvolvedMetric reports.
+var InvolvedOmitReasons = []string{involvedOmitOverflow, involvedOmitUnreadable, involvedOmitUnknown, involvedOmitRefused, involvedOmitFailed, involvedOmitUnlabelled, involvedOmitBudget}
+
 func (g *Gateway) involvedBudget() time.Duration {
 	if g.cfg.InvolvedBudget > 0 {
 		return g.cfg.InvolvedBudget

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -121,14 +123,14 @@ func TestReleasedBuildNeverReadsTheValidatorTestDouble(t *testing.T) {
 	if _, _, err := discoverValidatorLanes(context.Background(), fake, engine.NativeContractVersions(), canonical, config{DefaultValidatorLanes: defaultValidatorLanesNone}, func(string) string { return "" }, nil); err == nil {
 		t.Fatal("discoverValidatorLanes booted every declared line with no lane configured: the double served them")
 	}
-	for line, v := range certificationValidators(fake, config{}, "https://validator.example/fhir", nil, nil) {
+	for line, v := range certValidators(t, fake, config{}, "https://validator.example/fhir", nil, nil) {
 		if _, ok := v.(*engine.LineFakeValidator); ok {
 			t.Fatalf("certification client %s is the test double in a released build", line)
 		}
 	}
 }
 
-// A test binary keeps the double: it is what the hermetic suites boot on.
+// A test build keeps the double: it is what the hermetic suites boot on.
 func TestTestBinaryKeepsTheValidatorTestDouble(t *testing.T) {
 	m := productionShaped()
 	m["SHN_FAKE_VALIDATOR"] = "1"

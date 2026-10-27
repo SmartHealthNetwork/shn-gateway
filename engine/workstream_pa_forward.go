@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -49,7 +51,7 @@ func (paWorkstream) forward(leg string) forwardHandler {
 func forwardDTRQuestionnaireFetch(n *nativeResponder, ctx context.Context, contract, leg, _, _ string, in relay.Body, _ []byte) (LegResult, error) {
 	switch op := RequestFrameOperation(ctx); op {
 	case shnsdk.FrameOperationQuestionnairePackage:
-		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", payorEdgeDTRParameters, leg, "DTR")
+		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", payorEdgeParametersCoverage, leg, "DTR")
 	case shnsdk.FrameOperationNextQuestion:
 		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$next-question", 0, leg, "DTR next-question")
 	case "":

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // patient_ref_test.go — a patient reference is read the same way in every

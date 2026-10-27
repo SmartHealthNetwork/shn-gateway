@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -125,7 +128,8 @@ var originatingRoutes = []string{
 }
 
 // localScenarioRoutes only read or drop this gateway's own pended state; they send
-// nothing, so they serve whatever the origination profile.
+// nothing. Like every /scenario route, they are mounted only with an origination
+// profile.
 var localScenarioRoutes = []string{
 	"POST /scenario/uc06/cancel",
 	"POST /scenario/uc07/cancel",
@@ -151,7 +155,6 @@ func unsetProfileProvider(t *testing.T, ingress bool) (*Gateway, *stubSubstrate,
 	gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
 	cfg.OriginationProfile = ""
-	cfg.Populator = nil
 	counter := &countingTransport{inner: stub}
 	cfg.Client = &http.Client{Transport: counter}
 	var events []ObserverEvent
@@ -169,43 +172,27 @@ func serve(g *Gateway, route, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// On a provider with no origination profile every originating route refuses before it
-// reads, builds or sends anything: 503, uncacheable, the named error. No request leaves
-// the gateway (no authorization, Hub or payer call) and nothing is read from the system
-// of record.
-func TestOriginatingRoutes_RefuseWithoutProfile(t *testing.T) {
-	wantBody := `{"error":"origination profile not set: set ORIGINATION_PROFILE (demo|provider-data)"}`
-	for _, route := range originatingRoutes {
+// On a provider with no origination profile module 1 is off: no /scenario
+// route is mounted, so every one of them, a path no route names, and every
+// method on them is the mux's own 404, the answer of a path the gateway does
+// not serve. No module 1 handler runs: nothing is read, built or sent, and
+// nothing is recorded.
+func TestScenarioRoutes_NotMountedWithoutProfile(t *testing.T) {
+	notFound := httptest.NewRecorder()
+	http.NotFound(notFound, httptest.NewRequest(http.MethodGet, "/", nil))
+	paths := []string{"GET /scenario/uc06", "POST /scenario/unknown", "POST /scenario/uc07/pending", "GET /scenario"}
+	for _, route := range slices.Concat(originatingRoutes, localScenarioRoutes, paths) {
 		t.Run(route, func(t *testing.T) {
-			g, stub, counter, events := unsetProfileProvider(t, false)
+			g, stub, counter, events := unsetProfileProvider(t, true)
 			rec := serve(g, route, `{"continuation":"c1","resumeToken":"r1","answers":{}}`)
-			if rec.Code != http.StatusServiceUnavailable || strings.TrimSpace(rec.Body.String()) != wantBody {
-				t.Fatalf("%s = %d %s, want 503 %s", route, rec.Code, rec.Body.String(), wantBody)
-			}
-			if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-				t.Fatalf("Cache-Control = %q, want no-store", cc)
+			if rec.Code != http.StatusNotFound || rec.Body.String() != notFound.Body.String() {
+				t.Fatalf("%s = %d %q, want the mux's own 404 %q", route, rec.Code, rec.Body.String(), notFound.Body.String())
 			}
 			if counter.n != 0 || len(stub.legTypes) != 0 {
 				t.Fatalf("%d outbound requests, legs %v; want none", counter.n, stub.legTypes)
 			}
 			if len(*events) != 0 {
 				t.Fatalf("events = %+v, want none (nothing read, built or sent)", *events)
-			}
-		})
-	}
-}
-
-// The routes that only touch this gateway's own pended state serve as before.
-func TestLocalScenarioRoutes_ServeWithoutProfile(t *testing.T) {
-	for _, route := range localScenarioRoutes {
-		t.Run(route, func(t *testing.T) {
-			g, _, counter, _ := unsetProfileProvider(t, false)
-			rec := serve(g, route, `{"resumeToken":"absent"}`)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("%s = %d %s, want 200", route, rec.Code, rec.Body.String())
-			}
-			if counter.n != 0 {
-				t.Fatalf("%s sent %d requests, want none", route, counter.n)
 			}
 		})
 	}
@@ -228,17 +215,17 @@ func TestIngress_RelaysWithoutProfile(t *testing.T) {
 	}
 }
 
-// On either lane the originating routes pass the guard and originate: the system of
+// On either lane the originating routes are mounted and originate: the system of
 // record is read and, on the demo lane driven to the stub payer, a leg is sent.
 func TestOriginatingRoutes_RunOnEveryLane(t *testing.T) {
 	for _, profile := range OriginationProfiles() {
 		t.Run(profile, func(t *testing.T) {
 			g, stub, counter, events := unsetProfileProvider(t, false)
-			g.cfg.OriginationProfile = profile
+			declareOriginationProfile(g, profile)
 			aimStubAt(t, stub, "MBR-D-UC03")
 			rec := serve(g, "POST /scenario/uc03", testRouteBody(g, "/scenario/uc03", ""))
-			if strings.Contains(rec.Body.String(), "origination profile not set") {
-				t.Fatalf("%s: uc03 refused as unset: %d %s", profile, rec.Code, rec.Body.String())
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("%s: uc03 is not mounted: %d %s", profile, rec.Code, rec.Body.String())
 			}
 			read := false
 			for _, e := range *events {
@@ -289,30 +276,37 @@ var otherRoleRoutes = map[string][]string{
 //     operation count, so it answers no path of its own;
 //   - routes mounts exactly coreRoutes, workstreamRoutes (every compiled-in
 //     workstream adapter's routes: the PA adapter's are paRoutes, the
-//     Federated Query Services adapter's fqsRoutes) and originationRoutes,
-//     each called with the role, and mountedRoute is named nowhere but its
-//     type, routes, the declarations coreRoutes, paRoutes, fqsRoutes and
-//     originationRoutes, and the signatures of workstreamRoutes, the workstream
-//     interface's routes method and its adapters' routes methods; and the
-//     bodies of workstreamRoutes and of each adapter's routes method are
-//     exactly workstreamRoutesBody and adapterRoutesBody, so the registry
-//     decides nothing about which routes mount;
-//   - requireOriginationProfile is called once in the package, by routes, on
-//     the routes declared as originating, and requireScenarioCaller once, by
+//     Federated Query Services adapter's fqsRoutes) and moduleRoutes (every
+//     compiled-in module's routes: on-behalf building's are originationRoutes
+//     as its state kept them, in moduleOneState's origination field, which
+//     module 1's newGatewayState alone sets, from originationRoutes called
+//     with the configured role: originationKeptFaults), each called with the
+//     role, in that order; mountedRoute is named nowhere but its type,
+//     routes, the declarations coreRoutes, paRoutes, fqsRoutes and
+//     originationRoutes, moduleOneState's origination field, and the
+//     signatures of workstreamRoutes and moduleRoutes, the workstream and
+//     gatewayModule interfaces' routes methods, and their adapters' and
+//     modules' routes methods; and the bodies of workstreamRoutes, moduleRoutes, each
+//     adapter's routes method and each module's are exactly
+//     workstreamRoutesBody, moduleRoutesBody, adapterRoutesBody and
+//     moduleRoutesMethodBodies, so neither registry decides anything about
+//     which routes mount;
+//   - readsClaimFacts is called once in the package, by originationRoutes,
+//     on the routes it declares originating, and requireScenarioCaller once, by
 //     routes, on the routes declared as the operator surface;
 //   - in a declaration every route pattern is a string literal, given to a
 //     local closure or as a mountedRoute's pattern, and it is declared
-//     originating (through a closure that builds originating routes, or
-//     originates: true) exactly when it is classified as originating, and
+//     originating (its handler is readsClaimFacts over its own, directly or
+//     through a closure that builds originating routes) exactly when it is
+//     classified as originating, and
 //     declared the operator surface (operator: true) exactly when on-behalf
 //     building declares it; a declaration names no other string but a role
 //     and "", and reads no gateway state but the conditions routeConditions
 //     drives (routeGates).
 //
 // By running every declaration for every role, under every condition that
-// gates a route: every originating route is declared originating and no other
-// route is, every /scenario route and no other is mounted behind
-// requireScenarioCaller, a route a role mounts is declared once, each piece
+// gates a route: every /scenario route and no other is mounted behind
+// requireScenarioCaller, and only with a declared origination profile, a route a role mounts is declared once, each piece
 // declares only its own routes (the core its inbound, on-behalf building
 // /scenario/*, the workstream adapters the rest), and every pattern a
 // piece's source names is mounted by that piece under some driven condition,
@@ -341,9 +335,9 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	}
 
 	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "fqsRoutes": "fqs", "originationRoutes": "origination"}
-	// mountable are what routes mounts: the core's and on-behalf building's
-	// declarations, and the workstream registry's routes.
-	mountable := map[string]bool{"coreRoutes": true, "workstreamRoutes": true, "originationRoutes": true}
+	// mountable are what routes mounts: the core's declaration, and the
+	// workstream and module registries' routes.
+	mountable := map[string]bool{"coreRoutes": true, "workstreamRoutes": true, "moduleRoutes": true}
 	originating := map[string]bool{}
 	for _, r := range originatingRoutes {
 		originating[r] = true
@@ -382,8 +376,14 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	}
 	var literals []declaredRoute
 	routesFuncs, handlers, muxRegistrations, mountLists, registryBodies, adapterBodies := 0, 0, 0, 0, 0, 0
+	moduleRegistryBodies, moduleBodies := 0, 0
+	moduleTypes := map[string]bool{}
+	for _, m := range modules {
+		moduleTypes[reflect.TypeOf(m).Name()] = true
+	}
 	guards := map[string]int{}
 	mounted := map[string]bool{}
+	var mountOrder []string
 	for _, file := range files {
 		for _, decl := range file.Decls {
 			fn, _ := decl.(*ast.FuncDecl)
@@ -410,10 +410,26 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 				literals = append(literals, readRouteDeclaration(t, fset, fn, recv, piece, gatewayFields)...)
 			}
 			// signature is where mountedRoute may be named as a type alone: the
-			// registry's routes and the workstream adapters' routes methods,
-			// whose bodies are pinned.
+			// registries' routes and the workstream adapters' and modules'
+			// routes methods, whose bodies are pinned.
 			var signature ast.Node
-			adapterRoutes := fn != nil && fn.Name.Name == "routes" && fn.Recv != nil && len(fn.Recv.List) == 1 && receiverType(fn) != "Gateway"
+			otherRoutes := fn != nil && fn.Name.Name == "routes" && fn.Recv != nil && len(fn.Recv.List) == 1 && receiverType(fn) != "Gateway"
+			moduleRoutesMethod := otherRoutes && moduleTypes[receiverType(fn)]
+			adapterRoutes := otherRoutes && !moduleRoutesMethod
+			if method == "moduleRoutes" {
+				signature = fn.Type
+				moduleRegistryBodies++
+				if err := bodyIs(fset, fn, strings.ReplaceAll(moduleRoutesBody, "g,", recv+",")); err != nil {
+					t.Errorf("%s: moduleRoutes %v", fset.Position(fn.Pos()), err)
+				}
+			}
+			if moduleRoutesMethod {
+				signature = fn.Type
+				moduleBodies++
+				if err := moduleRoutesMethodIs(fset, fn); err != nil {
+					t.Errorf("%s: a module's routes %v", fset.Position(fn.Pos()), err)
+				}
+			}
 			if method == "workstreamRoutes" {
 				signature = fn.Type
 				registryBodies++
@@ -437,9 +453,10 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 				stack = append(stack, n)
 				switch x := n.(type) {
 				case *ast.TypeSpec:
-					if x.Name.Name == "workstream" {
-						// The adapter interface may name mountedRoute in its
-						// routes method's signature alone.
+					if x.Name.Name == "workstream" || x.Name.Name == "gatewayModule" {
+						// The adapter and module interfaces may name
+						// mountedRoute in their routes method's signature
+						// alone.
 						if it, ok := x.Type.(*ast.InterfaceType); ok {
 							for _, m := range it.Methods.List {
 								if len(m.Names) == 1 && m.Names[0].Name == "routes" {
@@ -447,7 +464,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 								}
 								ast.Inspect(m.Type, func(n ast.Node) bool {
 									if id, ok := n.(*ast.Ident); ok && id.Name == "mountedRoute" {
-										t.Errorf("%s: mountedRoute is named in a workstream method other than routes", fset.Position(id.Pos()))
+										t.Errorf("%s: mountedRoute is named in a %s method other than routes", fset.Position(id.Pos()), x.Name.Name)
 									}
 									return true
 								})
@@ -467,13 +484,13 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					}
 				case *ast.Ident:
 					inSignature := signature != nil && x.Pos() >= signature.Pos() && x.End() <= signature.End()
-					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" && !inSignature {
+					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" && !inSignature && !inOriginationField(stack) {
 						t.Errorf("%s: mountedRoute is named outside its type, routes and the route declarations", fset.Position(x.Pos()))
 					}
 				case *ast.SelectorExpr:
-					if x.Sel.Name == "requireOriginationProfile" || x.Sel.Name == "requireScenarioCaller" {
-						if call, isCall := stack[len(stack)-2].(*ast.CallExpr); !isCall || call.Fun != x || method != "routes" {
-							t.Errorf("%s: %s is used outside routes", fset.Position(x.Pos()), x.Sel.Name)
+					if wantIn, guard := map[string]string{"readsClaimFacts": "originationRoutes", "requireScenarioCaller": "routes"}[x.Sel.Name]; guard {
+						if call, isCall := stack[len(stack)-2].(*ast.CallExpr); !isCall || call.Fun != x || method != wantIn {
+							t.Errorf("%s: %s is used outside %s", fset.Position(x.Pos()), x.Sel.Name, wantIn)
 						}
 						guards[x.Sel.Name]++
 					}
@@ -500,6 +517,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 							continue
 						}
 						mounted[name] = true
+						mountOrder = append(mountOrder, name)
 					}
 				case *ast.CallExpr:
 					pos := fset.Position(x.Pos())
@@ -523,8 +541,14 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			})
 		}
 	}
+	for _, f := range originationKeptFaults(fset, files) {
+		t.Error(f)
+	}
 	if registryBodies != 1 || adapterBodies != len(workstreams) {
 		t.Errorf("found %d workstreamRoutes and %d adapter routes methods, want 1 and %d (one per compiled-in workstream)", registryBodies, adapterBodies, len(workstreams))
+	}
+	if moduleRegistryBodies != 1 || moduleBodies != len(modules) {
+		t.Errorf("found %d moduleRoutes and %d module routes methods, want 1 and %d (one per compiled-in module)", moduleRegistryBodies, moduleBodies, len(modules))
 	}
 	if routesFuncs != 1 || handlers != 1 {
 		t.Errorf("found %d (*Gateway).routes and %d (*Gateway).Handler methods, want 1 of each", routesFuncs, handlers)
@@ -535,10 +559,13 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	if mountLists != 1 {
 		t.Errorf("routes builds %d lists of declarations, want one", mountLists)
 	}
-	for _, g := range []string{"requireOriginationProfile", "requireScenarioCaller"} {
+	for g, in := range map[string]string{"readsClaimFacts": "originationRoutes", "requireScenarioCaller": "routes"} {
 		if guards[g] != 1 {
-			t.Errorf("%s is called %d times in the package, want once (by routes)", g, guards[g])
+			t.Errorf("%s is called %d times in the package, want once (by %s)", g, guards[g], in)
 		}
+	}
+	if want := []string{"coreRoutes", "workstreamRoutes", "moduleRoutes"}; !slices.Equal(mountOrder, want) {
+		t.Errorf("routes mounts %v in that order, want %v: the core's, then the workstreams', then the modules'", mountOrder, want)
 	}
 	for name := range mountable {
 		if !mounted[name] {
@@ -564,7 +591,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		}
 	}
 
-	want := map[string]bool{} // "role pattern" -> originates
+	want := map[string]bool{} // "role pattern" -> originates (read from the source above)
 	for _, r := range originatingRoutes {
 		want["provider "+r] = true
 	}
@@ -586,9 +613,18 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			if reg, adapters := g.workstreamRoutes(role), slices.Concat(g.paRoutes(role), g.fqsRoutes(role)); !sameRoutes(reg, adapters) {
 				t.Errorf("%s under %s: the workstream registry mounts %v, the adapters declare %v", role, c, routePatterns(reg), routePatterns(adapters))
 			}
+			// The module registry mounts exactly what on-behalf building
+			// declares for the role, as its state kept it.
+			declared, err := g.originationRoutes(role)
+			if err != nil {
+				t.Fatalf("%s under %s: %v", role, c, err)
+			}
+			if reg := g.moduleRoutes(role); !sameRoutes(reg, declared) {
+				t.Errorf("%s under %s: the module registry mounts %v, on-behalf building declares %v", role, c, routePatterns(reg), routePatterns(declared))
+			}
 			seen := map[string]string{}
 			for piece, declared := range map[string][]mountedRoute{
-				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "fqs": g.fqsRoutes(role), "origination": g.originationRoutes(role),
+				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "fqs": g.fqsRoutes(role), "origination": g.moduleRoutes(role),
 			} {
 				for _, rt := range declared {
 					key := role + " " + rt.pattern
@@ -608,23 +644,14 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					if rt.operator != (piece == "origination") {
 						t.Errorf("%s under %s is mounted operator=%v, want it behind requireScenarioCaller exactly when it is /scenario", key, c, rt.operator)
 					}
-					if prev, ok := got[key]; ok && prev != rt.originates {
-						t.Errorf("%s is originating under one condition and not under another", key)
-					}
-					got[key] = rt.originates
+					got[key] = true
 				}
 			}
 		}
 	}
-	for key, originates := range got {
-		w, listed := want[key]
-		switch {
-		case !listed:
+	for key := range got {
+		if _, listed := want[key]; !listed {
 			t.Errorf("%s is declared but not classified (add it to a route list here)", key)
-		case w && !originates:
-			t.Errorf("%s originates but is not declared originating (mounted behind requireOriginationProfile)", key)
-		case !w && originates:
-			t.Errorf("%s does not originate but is declared originating", key)
 		}
 	}
 	for key := range want {
@@ -639,11 +666,11 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	}
 }
 
-// sameRoutes reports whether a and b declare the same patterns, in order, the
-// same ones originating and the same ones the operator surface.
+// sameRoutes reports whether a and b declare the same patterns, in order, and
+// the same ones the operator surface.
 func sameRoutes(a, b []mountedRoute) bool {
 	return slices.EqualFunc(a, b, func(x, y mountedRoute) bool {
-		return x.pattern == y.pattern && x.originates == y.originates && x.operator == y.operator && (x.handler == nil) == (y.handler == nil)
+		return x.pattern == y.pattern && x.operator == y.operator && (x.handler == nil) == (y.handler == nil)
 	})
 }
 
@@ -673,13 +700,13 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "ingressAuth": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 
 // readRouteDeclaration reads the route patterns a declaration's source names,
 // failing t on anything the classifier cannot read: a pattern that is not a
-// string literal, an originates or operator value that is not a literal, a
+// string literal, an operator value that is not a literal, a
 // string that is neither a pattern, a role nor "", or gateway state other than
 // the gates.
 func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, recv, piece string, gatewayFields map[string]bool) []declaredRoute {
@@ -692,8 +719,9 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 	// mountedRoute's pattern.
 	consumed := map[*ast.BasicLit]bool{}
 	var out []declaredRoute
-	// routeLiteral reads one mountedRoute literal: its originates and operator
-	// values, and its pattern, which is param inside a closure and a literal elsewhere.
+	// routeLiteral reads one mountedRoute literal: whether it originates (its
+	// handler is readsClaimFacts over the route's own), its operator value, and
+	// its pattern, which is param inside a closure and a literal elsewhere.
 	routeLiteral := func(lit *ast.CompositeLit, param string) (flags routeFlags) {
 		for _, e := range lit.Elts {
 			kv, ok := e.(*ast.KeyValueExpr)
@@ -704,16 +732,18 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 			key, _ := kv.Key.(*ast.Ident)
 			switch {
 			case key == nil:
-			case key.Name == "originates" || key.Name == "operator":
+			case key.Name == "handler":
+				if call, ok := kv.Value.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "readsClaimFacts" {
+						flags.originates = true
+					}
+				}
+			case key.Name == "operator":
 				id, ok := kv.Value.(*ast.Ident)
 				if !ok || (id.Name != "true" && id.Name != "false") {
 					t.Errorf("%s: %s declares %s other than as a literal", at(kv.Value), fn.Name.Name, key.Name)
 				}
-				if key.Name == "originates" {
-					flags.originates = ok && id.Name == "true"
-				} else {
-					flags.operator = ok && id.Name == "true"
-				}
+				flags.operator = ok && id.Name == "true"
 			case key.Name == "pattern":
 				if param != "" {
 					if id, ok := kv.Value.(*ast.Ident); !ok || id.Name != param {
@@ -895,6 +925,117 @@ func gatewayMethod(fn *ast.FuncDecl) (name, recv string) {
 	return fn.Name.Name, recv
 }
 
+// inOriginationField reports whether the innermost node of stack is in the
+// type of module 1's state's origination field.
+func inOriginationField(stack []ast.Node) bool {
+	inState := false
+	for _, n := range stack {
+		switch x := n.(type) {
+		case *ast.TypeSpec:
+			inState = x.Name.Name == "moduleOneState"
+		case *ast.Field:
+			if inState && len(x.Names) == 1 && x.Names[0].Name == "origination" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// originationKeptFaults: on-behalf building's routes are declared once, as
+// New builds module 1's state, for the configured role, and kept. In files,
+// moduleOneState's origination field is assigned exactly once, in module 1's
+// newGatewayState (the one New runs for every module, after its options), as
+// the first of the two values of originationRoutes called with the gateway's
+// cfg.Role, the second (the refusal) held, not dropped; it is otherwise read
+// only as module 1's routes method returns it, so nothing sets it in a
+// literal, writes into it or hands it on; and nothing else calls
+// originationRoutes.
+func originationKeptFaults(fset *token.FileSet, files []*ast.File) []string {
+	var faults []string
+	fault := func(n ast.Node, msg string) {
+		faults = append(faults, fset.Position(n.Pos()).String()+": "+msg)
+	}
+	sets := 0
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, _ := decl.(*ast.FuncDecl)
+			moduleOneMethod := ""
+			if fn != nil && fn.Recv != nil && len(fn.Recv.List) == 1 && receiverType(fn) == "moduleOne" {
+				moduleOneMethod = fn.Name.Name
+			}
+			var kept *ast.CallExpr
+			allowed := map[*ast.SelectorExpr]bool{}
+			var stack []ast.Node
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				stack = append(stack, n)
+				switch x := n.(type) {
+				case *ast.AssignStmt:
+					for i, lhs := range x.Lhs {
+						sel, ok := lhs.(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "origination" {
+							continue
+						}
+						sets++
+						call, _ := x.Rhs[0].(*ast.CallExpr)
+						if moduleOneMethod != "newGatewayState" || i != 0 || len(x.Lhs) != 2 || len(x.Rhs) != 1 || call == nil || !originationCallForRole(call) {
+							fault(x, "module 1's origination is set other than by its newGatewayState, from originationRoutes(<gateway>.cfg.Role)")
+							continue
+						}
+						if refusal, ok := x.Lhs[1].(*ast.Ident); !ok || refusal.Name == "_" {
+							fault(x, "module 1's newGatewayState drops originationRoutes' refusal")
+						}
+						allowed[sel] = true
+						kept = call
+					}
+				case *ast.SelectorExpr:
+					if x.Sel.Name != "origination" || allowed[x] {
+						break
+					}
+					if ret, isReturn := stack[len(stack)-2].(*ast.ReturnStmt); !isReturn || len(ret.Results) != 1 || moduleOneMethod != "routes" {
+						fault(x, "module 1's origination is used other than set by its newGatewayState and returned by its routes")
+					}
+				case *ast.KeyValueExpr:
+					if id, ok := x.Key.(*ast.Ident); ok && id.Name == "origination" {
+						fault(x, "module 1's origination is set in a literal")
+					}
+				case *ast.CallExpr:
+					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "originationRoutes" && x != kept {
+						fault(x, "originationRoutes is called other than to set module 1's origination in its newGatewayState")
+					}
+				}
+				return true
+			})
+		}
+	}
+	if sets != 1 {
+		faults = append(faults, fmt.Sprintf("module 1's origination is set %d times, want once (by its newGatewayState)", sets))
+	}
+	return faults
+}
+
+// originationCallForRole reports whether call is X.originationRoutes(Y.cfg.Role).
+func originationCallForRole(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "originationRoutes" || len(call.Args) != 1 {
+		return false
+	}
+	arg, ok := call.Args[0].(*ast.SelectorExpr)
+	if !ok || arg.Sel.Name != "Role" {
+		return false
+	}
+	cfg, ok := arg.X.(*ast.SelectorExpr)
+	if !ok || cfg.Sel.Name != "cfg" {
+		return false
+	}
+	_, ok = cfg.X.(*ast.Ident)
+	return ok
+}
+
 // declarationCall is the name of the declaration e calls, when e is
 // <recv>.<name>(role).
 func declarationCall(e ast.Expr, recv string) (string, bool) {
@@ -922,6 +1063,41 @@ const workstreamRoutesBody = `{
 	}
 	return out
 }`
+
+// moduleRoutesBody is (*Gateway).moduleRoutes' whole body: every compiled-in
+// module's routes, in registry order, and nothing else.
+const moduleRoutesBody = `{
+	for _, m := range modules {
+		out = append(out, m.routes(g, role)...)
+	}
+	return out
+}`
+
+// moduleRoutesMethodBodies are each module's whole routes method, by its
+// type: the routes its state kept, and none on a gateway assembled without
+// New. %s is the method's gateway parameter.
+var moduleRoutesMethodBodies = map[string]string{
+	"moduleOne": `{
+	if st := %s.moduleOneState(); st != nil {
+		return st.origination
+	}
+	return nil
+}`,
+}
+
+// moduleRoutesMethodIs reports whether fn, a module's routes method, is
+// exactly its pinned body.
+func moduleRoutesMethodIs(fset *token.FileSet, fn *ast.FuncDecl) error {
+	want, ok := moduleRoutesMethodBodies[receiverType(fn)]
+	if !ok {
+		return fmt.Errorf("of %s has no pinned body: pin it in moduleRoutesMethodBodies", receiverType(fn))
+	}
+	params := fn.Type.Params.List
+	if len(params) != 2 || len(params[0].Names) != 1 {
+		return fmt.Errorf("takes %d parameters, want the named gateway and the role", len(params))
+	}
+	return bodyIs(fset, fn, fmt.Sprintf(want, params[0].Names[0].Name))
+}
 
 // adapterRoutesBody is a workstream adapter's whole routes method: its
 // classified declaration, called with the role. %s are the method's gateway
@@ -1005,6 +1181,157 @@ const handlerBody = `{
 	})
 }`
 
+// moduleStatesAfterOptionsFaults: New builds every module's state once, after
+// its options. In files, New's body calls moduleGatewayStates exactly once,
+// in a statement of its own that comes after the loop over its options (a
+// range over opts), never before it or inside it, so an option that sets
+// what a module reads (its role, its origination profile) is seen.
+func moduleStatesAfterOptionsFaults(fset *token.FileSet, files []*ast.File) []string {
+	var faults []string
+	news := 0
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, _ := decl.(*ast.FuncDecl)
+			if fn == nil || fn.Recv != nil || fn.Name.Name != "New" || fn.Body == nil {
+				continue
+			}
+			news++
+			optionsAt, calls := -1, 0
+			for i, stmt := range fn.Body.List {
+				if rs, ok := stmt.(*ast.RangeStmt); ok {
+					if id, ok := rs.X.(*ast.Ident); ok && id.Name == "opts" {
+						optionsAt = i
+					}
+				}
+				ast.Inspect(stmt, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "moduleGatewayStates" {
+						calls++
+						if optionsAt < 0 || i <= optionsAt {
+							faults = append(faults, fset.Position(call.Pos()).String()+": New builds module state before or inside its options loop")
+						}
+					}
+					return true
+				})
+			}
+			if optionsAt < 0 {
+				faults = append(faults, fset.Position(fn.Pos()).String()+": New has no loop over its options")
+			}
+			if calls != 1 {
+				faults = append(faults, fmt.Sprintf("%s: New calls moduleGatewayStates %d times, want once, after its options", fset.Position(fn.Pos()), calls))
+			}
+		}
+	}
+	if news != 1 {
+		faults = append(faults, fmt.Sprintf("found %d New functions, want 1", news))
+	}
+	return faults
+}
+
+// TestNew_BuildsModuleStateAfterOptions: the package's New builds module
+// state after its options, and the fence refuses every other placement.
+func TestNew_BuildsModuleStateAfterOptions(t *testing.T) {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || !inThisBuild(t, ".", name) {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	for _, f := range moduleStatesAfterOptionsFaults(fset, files) {
+		t.Error(f)
+	}
+
+	faults := func(src string) []string {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "probe.go", "package engine\n\n"+src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return moduleStatesAfterOptionsFaults(fset, []*ast.File{f})
+	}
+	const options = "\tfor _, opt := range opts {\n\t\topt(g)\n\t}\n"
+	const build = "\tif g.moduleStates, err = moduleGatewayStates(g); err != nil {\n\t\treturn nil, err\n\t}\n"
+	newWith := func(body string) string {
+		return "func New(cfg Config, opts ...Option) (*Gateway, error) {\n\tg := &Gateway{cfg: cfg}\n\tvar err error\n" + body + "\treturn g, nil\n}\n"
+	}
+	if f := faults(newWith(options + build)); len(f) != 0 {
+		t.Fatalf("New building module state after its options is refused: %v", f)
+	}
+	for name, row := range map[string]struct{ src, want string }{
+		"before the options":      {newWith(build + options), "before or inside its options loop"},
+		"inside the options loop": {newWith("\tfor _, opt := range opts {\n\t\topt(g)\n\t\tg.moduleStates, err = moduleGatewayStates(g)\n\t}\n"), "before or inside its options loop"},
+		"no options loop":         {newWith(build), "no loop over its options"},
+		"never":                   {newWith(options), "calls moduleGatewayStates 0 times"},
+		"twice":                   {newWith(build + options + build), "calls moduleGatewayStates 2 times"},
+	} {
+		got := faults(row.src)
+		if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, row.want) }) {
+			t.Errorf("%s: faults %v, want one containing %q", name, got, row.want)
+		}
+	}
+}
+
+// TestRouteFence_OriginationIsKeptOnlyByNew: originationKeptFaults accepts
+// module 1's newGatewayState, which New runs once, keeping on-behalf
+// building's routes for the configured role and its routes method returning
+// them, and refuses every other way of setting or declaring them.
+func TestRouteFence_OriginationIsKeptOnlyByNew(t *testing.T) {
+	faults := func(src string) []string {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "probe.go", "package engine\n\n"+src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return originationKeptFaults(fset, []*ast.File{f})
+	}
+	const keptByState = "func (moduleOne) newGatewayState(g *Gateway) (gatewayState, error) {\n\tst := &moduleOneState{}\n\tvar err error\n\tif st.origination, err = g.originationRoutes(g.cfg.Role); err != nil {\n\t\treturn nil, err\n\t}\n\treturn st, nil\n}\n"
+	if f := faults(keptByState); len(f) != 0 {
+		t.Fatalf("module 1's state keeping the routes for the configured role is refused: %v", f)
+	}
+	const routes = "func (moduleOne) routes(g *Gateway, _ string) []mountedRoute {\n\tif st := g.moduleOneState(); st != nil {\n\t\treturn st.origination\n\t}\n\treturn nil\n}\n"
+	if f := faults(keptByState + routes); len(f) != 0 {
+		t.Fatalf("module 1's routes returning the kept routes is refused: %v", f)
+	}
+	const keep = "if st.origination, err = g.originationRoutes(g.cfg.Role); err != nil {\n\t\treturn nil, err\n\t}"
+	for name, row := range map[string]struct{ src, want string }{
+		"the state keeps none":                {"func (moduleOne) newGatewayState(g *Gateway) (gatewayState, error) { return &moduleOneState{}, nil }\n", "set 0 times"},
+		"the state keeps another role's":      {strings.Replace(keptByState, "g.originationRoutes(g.cfg.Role)", `g.originationRoutes("provider")`, 1), "set other than by its newGatewayState"},
+		"the state keeps another declaration": {strings.Replace(keptByState, "g.originationRoutes(g.cfg.Role)", "g.coreRoutes(g.cfg.Role)", 1), "set other than by its newGatewayState"},
+		"the state keeps them twice":          {strings.Replace(keptByState, "\treturn st, nil", "\tst.origination, err = g.originationRoutes(g.cfg.Role)\n\treturn st, nil", 1), "set 2 times"},
+		"the state drops the refusal":         {strings.Replace(keptByState, keep, "st.origination, _ = g.originationRoutes(g.cfg.Role)", 1), "drops originationRoutes' refusal"},
+		"the state sets them from one value":  {strings.Replace(keptByState, keep, "st.origination = nil", 1), "set other than by its newGatewayState"},
+		"another type's state keeps them":     {strings.Replace(keptByState, "func (moduleOne)", "func (paWorkstream)", 1), "set other than by its newGatewayState"},
+		"a method resets them":                {keptByState + "func (g *Gateway) reset() { g.moduleOneState().origination, _ = g.originationRoutes(g.cfg.Role) }\n", "set other than by its newGatewayState"},
+		"a method clears them":                {keptByState + "func (g *Gateway) clear() { g.moduleOneState().origination = nil }\n", "set other than by its newGatewayState"},
+		"a method edits one":                  {keptByState + "func (g *Gateway) open() { g.moduleOneState().origination[0].operator = false }\n", "used other than set by its newGatewayState and returned by its routes"},
+		"a method hands them on":              {keptByState + "func (g *Gateway) more() []mountedRoute { return g.moduleOneState().origination }\n", "used other than set by its newGatewayState and returned by its routes"},
+		"routes edits one":                    {keptByState + "func (moduleOne) routes(g *Gateway, _ string) []mountedRoute {\n\tst := g.moduleOneState()\n\tst.origination[0].handler = nil\n\treturn st.origination\n}\n", "used other than set by its newGatewayState and returned by its routes"},
+		"a literal sets them":                 {keptByState + "func other() *moduleOneState { return &moduleOneState{origination: nil} }\n", "set in a literal"},
+		"routes declares them again":          {keptByState + "func (moduleOne) routes(g *Gateway, role string) []mountedRoute { r, _ := g.originationRoutes(role); return r }\n", "called other than to set"},
+	} {
+		got := faults(row.src)
+		if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, row.want) }) {
+			t.Errorf("%s: faults %v, want one containing %q", name, got, row.want)
+		}
+	}
+}
+
 // TestRouteFence_RegistryBodiesArePinned: the registry and an adapter's routes
 // method pass the fence only exactly as pinned. A body that gates the routes
 // on gateway state, rewrites a pattern or swaps a handler is refused, whatever
@@ -1025,6 +1352,18 @@ func TestRouteFence_RegistryBodiesArePinned(t *testing.T) {
 	}
 	adapter := func(body string) error {
 		return adapterRoutesIs(fset, parse("func (paWorkstream) routes(g *Gateway, role string) []mountedRoute "+body))
+	}
+	moduleRegistry := func(body string) error {
+		return bodyIs(fset, parse("func (g *Gateway) moduleRoutes(role string) (out []mountedRoute) "+body), moduleRoutesBody)
+	}
+	module := func(recv, body string) error {
+		return moduleRoutesMethodIs(fset, parse("func ("+recv+") routes(gw *Gateway, _ string) []mountedRoute "+body))
+	}
+	if err := moduleRegistry("{\n\t// every module\n\tfor _, m := range modules { out = append(out, m.routes(g, role)...) }\n\treturn out\n}"); err != nil {
+		t.Errorf("the pinned module registry body, respaced and commented, is refused: %v", err)
+	}
+	if err := module("moduleOne", "{ if st := gw.moduleOneState(); st != nil { return st.origination }; return nil }"); err != nil {
+		t.Errorf("module 1's pinned routes body is refused: %v", err)
 	}
 	if err := registry("{\n\t// every adapter\n\tfor _, w := range workstreams { out = append(out, w.routes(g, role)...) }\n\treturn out\n}"); err != nil {
 		t.Errorf("the pinned registry body, respaced and commented, is refused: %v", err)
@@ -1056,8 +1395,32 @@ func TestRouteFence_RegistryBodiesArePinned(t *testing.T) {
 	if g.cfg.HubAcceptsInvolved { r[0].pattern = "GET /evil" }
 	return r
 }`),
-		"the adapter returns another declaration": adapter(`{ return g.originationRoutes(role) }`),
+		"the adapter returns another declaration": adapter(`{ r, _ := g.originationRoutes(role); return r }`),
 		"the adapter passes another role":         adapter(`{ return g.paRoutes("provider") }`),
+		"the module registry swaps a handler": moduleRegistry(`{
+	for _, m := range modules { out = append(out, m.routes(g, role)...) }
+	for i := range out { out[i].handler = g.handleCDSDiscovery }
+	return out
+}`),
+		"the module registry gates on gateway state": moduleRegistry(`{
+	if g.cfg.HubAcceptsInvolved { return nil }
+	for _, m := range modules { out = append(out, m.routes(g, role)...) }
+	return out
+}`),
+		"the module registry skips a module": moduleRegistry(`{
+	for _, m := range modules[1:] { out = append(out, m.routes(g, role)...) }
+	return out
+}`),
+		"module 1 gates on gateway state": module("moduleOne", `{
+	if st := gw.moduleOneState(); st != nil && !gw.cfg.HubAcceptsInvolved { return st.origination }
+	return nil
+}`),
+		"module 1 declares its routes again": module("moduleOne", `{ r, _ := gw.originationRoutes(gw.cfg.Role); return r }`),
+		"module 1 drops the operator surface": module("moduleOne", `{
+	if st := gw.moduleOneState(); st != nil { for i := range st.origination { st.origination[i].operator = false }; return st.origination }
+	return nil
+}`),
+		"a module with no pinned body": module("moduleTwo", "{ return nil }"),
 	} {
 		if err == nil {
 			t.Errorf("%s: the fence accepts it", name)

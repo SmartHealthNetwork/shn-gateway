@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_pas_tail.go — the shared LEAN PAS submit→resolve tail, extracted from handleHomeOxygen
 // (the provider-data order-dispatch handler) so the provider-data order-select single-shot
 // lanes (UC-02/03/04, D-PD-1) reuse one path instead of forking a second.
@@ -51,8 +53,8 @@ import (
 // facts are the request's own facts as the origination request stated them
 // (originationClaimInput); the SDK builder refuses a required one they do not
 // state.
-func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts shnsdk.PASClaimFacts) ([]byte, error) {
-	return buildAuthoredPASSubmit(line, shnsdk.ConformantClaimInputs{
+func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts shnsdk.PASClaimFacts, requester [][]byte) ([]byte, error) {
+	return buildModuleOnePASSubmit(line, shnsdk.ConformantClaimInputs{
 		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
 		Corr: corr, Created: created,
 		ContainedInsurer: brPayer,
@@ -62,7 +64,7 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, provider
 		// origination site), not a synthetic CMS literal (FR-G40).
 		Payer:         payer,
 		PASClaimFacts: facts,
-	})
+	}, requester)
 }
 
 // pasSubmission is what one PAS $submit leg produced: the correlation it ran
@@ -90,7 +92,7 @@ type pasSubmission struct {
 // relayOriginationError before the writeJSON(status,msg) fallback; a bare
 // (status,msg) return would re-synthesize the error to a string and DROP the
 // *RelayError sentinel (the %w audit).
-func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON []byte, source *dtrBuildSource, coverageJSON, insurerJSON []byte, patientRef, coverageRef, member, memberSystemOfFlow string, payer shnsdk.PayerIdentifier, recipient string) (pasSubmission, int, string, error) {
+func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON []byte, requester [][]byte, source *dtrBuildSource, coverageJSON, insurerJSON []byte, patientRef, coverageRef, member, memberSystemOfFlow string, payer shnsdk.PayerIdentifier, recipient string) (pasSubmission, int, string, error) {
 	out := pasSubmission{corr: g.cfg.CorrelationGen()}
 	// Select-before-build: this tail used to let OriginateLeg select
 	// INTERNALLY off an empty Content.ProfileID, which put the choice AFTER the bundle
@@ -110,7 +112,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	// The party this request comes from, read from the participant's own system
 	// through the one selection the inquiry also uses. A refusal here is named:
 	// nothing invents a provider so that a request can be sent.
-	_, providerJSON, status, msg := g.pasProvider(ctx, orderJSON, supplierJSON)
+	_, providerJSON, status, msg := g.pasProvider(ctx, orderJSON, append([][]byte{supplierJSON}, requester...)...)
 	if status != 0 {
 		return out, status, msg, nil
 	}
@@ -131,7 +133,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 		return out, status, msg, nil
 	}
 	facts := claimIn.facts()
-	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts)
+	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts, requester)
 	if err != nil {
 		if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
 			return out, http.StatusUnprocessableEntity, err.Error(), nil
@@ -303,8 +305,12 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 		// two different suppliers claiming the same entry — and the CONTENT is
 		// compared, not just the identity, so a second, different record cannot
 		// be swallowed by the entry already there.
+		// The supplier may also be one of the records the order's requester leads
+		// to (carryOrderRequester), carried with its references to other entries
+		// written absolute: that is still the same record.
 		if existingURL == fullURL && resource.ResourceType == org.ResourceType && resource.ID == org.ID &&
-			sameJSONResource(entry["resource"], supplier) {
+			(sameJSONResource(entry["resource"], supplier) ||
+				sameJSONResource(relativeReferences(entry["resource"], strings.TrimSuffix(fullURL, "/"+relative)), supplier)) {
 			return body, nil
 		}
 		return nil, fmt.Errorf("conflicting supplier entry")

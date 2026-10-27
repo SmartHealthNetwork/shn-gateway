@@ -7,10 +7,10 @@
 //
 // The readers moved here from package engine, which keeps its names
 // (engine.InspectNativePASResponse and the rest) as deprecated forwarders to
-// these until v1.0.0. These readers and the gateway's own checks of an answer
-// read it by one definition (the response graph rule in the gateway's
-// internal pasgraph package), so a reader of retained evidence agrees with the
-// gateway that relayed the answer.
+// these until a later minor release removes them. These readers and the
+// gateway's own checks of an answer read it by one definition (the response
+// graph rule in the gateway's internal pasgraph package), so a reader of
+// retained evidence agrees with the gateway that relayed the answer.
 package pasanswer
 
 import (

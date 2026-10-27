@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/relay_roundtrip_test.go
 //
 // Shared in-process exchange harness for the opaque-payload message-frame
@@ -55,6 +57,7 @@ type relaySubstrate struct {
 	mu        sync.Mutex
 	lastReq   []byte    // the last decrypted REQUEST payload (raw: framed or bare)
 	lastCorr  string    // the last request envelope's correlation id (the leg's id)
+	sentNames []string  // each request envelope's transaction type, as the gateway sent it
 	result    LegResult // seal target for /route; meaningful only when set==true
 	set       bool      // false until the test calls setResult (falls back to default success cards)
 	routeHits int       // count of handleRoute calls — the version-filter refusal test asserts this stays 0 (fail-closed BEFORE any Hub round-trip)
@@ -163,6 +166,7 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	}
 	s.mu.Lock()
 	s.lastCorr = env.Metadata.CorrelationID
+	s.sentNames = append(s.sentNames, env.Metadata.TransactionType)
 	s.mu.Unlock()
 	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
 		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {
@@ -376,7 +380,7 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 		SoR:             newCensusSoR(),
 		Store:           newCensusSoR(),
 		Clock:           clock,
-		NPI:             "1234567890",
+		NPI:             "1234567893",
 		Client:          &http.Client{Transport: stub},
 		PayerRouter:     payerRouterFor(t, "payer"),
 	}

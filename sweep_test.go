@@ -94,7 +94,7 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	// review NEW-3) — a leaked "R9" carries no "T14"/"ruling <date>" alongside it to catch
 	// it via the arms above. Deliberately NOT a general \bR[0-9]{1,2}\b: this codebase's
 	// FHIR release name IS "R4" ("base R4", "FHIR R4") on every published edge (gateway.go,
-	// compat.go, transform_pas.go, …) — a blanket digit-class widening here would flag that
+	// compat.go, workstream_pa_transform_pas.go, …) — a blanket digit-class widening here would flag that
 	// PUBLIC vocabulary wholesale, unlike the bare task-id arm and \bD[0-9]\b, which collide with
 	// nothing live in this tree today. R9 alone has zero live occurrences outside this
 	// file's own rejection-test fixture (verified before adding), so it costs nothing to add

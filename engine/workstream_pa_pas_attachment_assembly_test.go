@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -11,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -274,15 +275,8 @@ func TestAuthoredPASSubmitPreservesAttachment(t *testing.T) {
 
 // updateClaimsAt is how many Claims an update Bundle holds at line. From PAS 2.1 the
 // update carries the prior Claim beside it; PAS 2.0's update is the one Claim, naming
-// its prior by identifier. A shn-sdk without PASDef.UpdateCarriesPriorClaim (the
-// v0.62.0 this module pins, which the gateway's standalone build links) carried the
-// prior at every line, so there the count is two at each. Temporary seam (tracked in
-// the SHN platform repository): once gateway/go.mod pins a shn-sdk carrying the field,
-// the reflection and the two-at-every-line branch go, and the count is by line alone.
+// its prior by identifier (shn-sdk's PASDef.UpdateCarriesPriorClaim).
 func updateClaimsAt(line string) int {
-	if _, ok := reflect.TypeOf(shnsdk.PASDef{}).FieldByName("UpdateCarriesPriorClaim"); !ok {
-		return 2
-	}
 	if line == "2.0" {
 		return 1
 	}
@@ -475,12 +469,11 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		SoR:                sor,
 		Store:              base,
 		Clock:              clock,
-		NPI:                "1234567890",
+		NPI:                "1234567893",
 		OriginationProfile: "provider-data",
-		Populator:          &populator,
 		Observer:           func(e ObserverEvent) { e.Payload = bytes.Clone(e.Payload); events = append(events, e) },
 		Client:             &http.Client{Transport: stub},
-	})
+	}, WithPopulator(&populator))
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()
@@ -762,6 +755,7 @@ func TestAuthoredPASConstructionBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := map[string]int{}
+	authored := map[string]int{}
 	completions := map[string]int{}
 	sdkCalls := 0
 	for _, file := range files {
@@ -777,8 +771,11 @@ func TestAuthoredPASConstructionBoundary(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if name, ok := call.Fun.(*ast.Ident); ok && (name.Name == "buildAuthoredPASSubmit" || name.Name == "buildAuthoredPASUpdate") {
+			if name, ok := call.Fun.(*ast.Ident); ok && (name.Name == "buildModuleOnePASSubmit" || name.Name == "buildModuleOnePASUpdate") {
 				calls[file]++
+			}
+			if name, ok := call.Fun.(*ast.Ident); ok && (name.Name == "buildAuthoredPASSubmit" || name.Name == "buildAuthoredPASUpdate") {
+				authored[file]++
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
 			if !ok {
@@ -824,6 +821,11 @@ func TestAuthoredPASConstructionBoundary(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("unexpected construction callers: %v", calls)
+	}
+	// Module 1's two wrappers (which carry the order's requester) are the only
+	// callers of the authored builders.
+	if len(authored) != 1 || authored["module1_pas_requester.go"] != 2 {
+		t.Errorf("authored builder callers: %v, want module1_pas_requester.go only, twice", authored)
 	}
 }
 

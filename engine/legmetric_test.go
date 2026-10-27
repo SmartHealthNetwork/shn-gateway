@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // legmetric_test.go — hermetic tests for the LegMetric hook.
 // Like the Observer seam it is ADDITIVE instrumentation: nil = zero emission
 // (the published-gateway default); neutrality is asserted on/off.

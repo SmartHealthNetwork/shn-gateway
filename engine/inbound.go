@@ -66,6 +66,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decode envelope failed"})
 		return
 	}
+	// The leg's name in either form names the leg: everything below decides,
+	// records and answers on the flat name, and the answer goes out under the
+	// prefixed one (buildResponseLeg). A name no leg has stays as stated and is
+	// refused at the leg lookup.
+	env.Metadata.TransactionType, _ = canonicalLeg(env.Metadata.TransactionType)
 
 	// Require the binding-critical metadata fields even though the Hub already
 	// guards them — the payer must not assume an implicitly-trusted Hub channel
@@ -109,7 +114,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	exchangeOf(r.Context()).leg(env.Metadata.TransactionType)
 
 	// Every governed check this leg makes is reported as this leg: an inbound
-	// request's bytes are the peer's, at the seam certify.go already names.
+	// request's bytes are the peer's, at the seam module3_certify.go already names.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType:       env.Metadata.TransactionType,
 		CorrelationID: env.Metadata.CorrelationID,
@@ -209,7 +214,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// the native forward (mediatype.go).
 	r = r.WithContext(withRequestMediaType(r.Context(), inboundFrameMediaType(payload)))
 	// A request frame may name the operation its body is the input of
-	// (legSpec.OperationHeader). It rides the context too, for the same reason
+	// (legSpec.FrameOperations). It rides the context too, for the same reason
 	// as the answer line.
 	operation, status, msg := inboundFrameOperation(env.Metadata.TransactionType, payload)
 	if status != 0 {
@@ -264,7 +269,7 @@ func (g *Gateway) consentBackstop(ctx context.Context, pci, requester string) (s
 		return "", http.StatusInternalServerError, "consent auth"
 	}
 	hdr := map[string]string{"X-Holder-Assertion": assertionHdr}
-	if err := shnsdk.PostRaw(ctx, g.cfg.Client, g.cfg.ConsentURL+"/check", raw, &out, hdr); err != nil {
+	if err := shnsdk.PostRaw(ctx, g.consentClient(), g.cfg.ConsentURL+"/check", raw, &out, hdr); err != nil {
 		return "", http.StatusBadGateway, "consent check failed"
 	}
 	if !out.Permit {
@@ -320,4 +325,13 @@ func (g *Gateway) verifyHubAssertion(r *http.Request) (ok bool, unavailable bool
 		return false, true
 	}
 	return !replayed, false
+}
+
+// consentClient is the consent check's client: ConsentClient, else Client,
+// read at each call like authzClient.
+func (g *Gateway) consentClient() *http.Client {
+	if g.cfg.ConsentClient != nil {
+		return g.cfg.ConsentClient
+	}
+	return g.cfg.Client
 }

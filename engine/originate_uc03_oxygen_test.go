@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // originate_uc03_oxygen_test.go — TestUC03_AutoFillMutations is the executable mutation
 // evidence for homeOxygenAutoFillEvidence (the hermetic FR-17 source=auto attribution
 // proof, register §9 row 4 / §11) that test/conformance's TestUC03_AutoApproved names but

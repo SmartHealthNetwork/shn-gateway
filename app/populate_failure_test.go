@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -191,7 +193,7 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 			w.WriteHeader(500)
 			return
 		}
-		env, e := shnsdk.DecodeEnvelope(body)
+		env, e := hubDecodeEnvelope(body)
 		if e != nil {
 			t.Error(e)
 			w.WriteHeader(500)
@@ -276,14 +278,15 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 	}))
 	t.Cleanup(hub.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"endpoints": map[string]string{"authz": authz.URL, "hub": hub.URL}, "authzPublicKeyURL": keys.URL, "hubTransportKeyURL": keys.URL})
+		_ = json.NewEncoder(w).Encode(map[string]any{"wireProtocolVersion": "1.1.0", "wireProtocolVersionsAccepted": []string{"1.1.0", "2.0.0"}, "endpoints": map[string]string{"authz": authz.URL, "hub": hub.URL}, "authzPublicKeyURL": keys.URL, "hubTransportKeyURL": keys.URL})
 	}))
 	t.Cleanup(disc.Close)
 	dir := t.TempDir()
 	if e := shnsdk.WriteBundle(dir, provider, "provider", "https://holder.example"); e != nil {
 		t.Fatal(e)
 	}
-	env := map[string]string{"ROLE": "provider", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1", "FHIR_DATA_URL": fhir.URL}
+	// The participant's records name no ordering clinician, so it configures one.
+	env := map[string]string{"ROLE": "provider", "ORIGINATION_PROFILE": "demo", "SHN_SECRETS": dir, "SHN_DISCOVERY_URL": disc.URL, "SHN_FAKE_VALIDATOR": "1", "FHIR_DATA_URL": fhir.URL, "NPI": "1234567893"}
 	for k, v := range populate {
 		env[k] = v
 	}
@@ -381,8 +384,8 @@ func TestBuildPopulateFailureEvidenceWriterFailurePreservesResponse(t *testing.T
 }
 
 // populateFailureBody is the UC-08 origination request a driver sends: the
-// member the route resolves on the demo lane (an unset ORIGINATION_PROFILE is
-// normalized to demo), the order it holds and the claim facts stated for it —
+// member the route resolves on the demo lane (the gateway declares it), the
+// order it holds and the claim facts stated for it —
 // the PAS IG medical services example's codes.
 func populateFailureBody(t *testing.T) string {
 	t.Helper()
@@ -401,4 +404,17 @@ func populateFailureBody(t *testing.T) string {
 		`"serviceCategory":{"system":"https://codesystem.x12.org/005010/1365","code":"1","display":"Medical Care"},` +
 		`"placeOfService":{"system":"https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set","code":"11"},` +
 		`"requestType":{"system":"https://codesystem.x12.org/005010/1525","code":"IN","display":"Initial Medical Services Reservation"}}}`
+}
+
+// hubDecodeEnvelope decodes an envelope as a test's stand-in Hub receives
+// it: like the network's Hub while wire protocols 1.1.0 and 2.0.0 share the
+// network, it reads the leg's name in either form as the flat one.
+func hubDecodeEnvelope(body []byte) (shnsdk.Envelope, error) {
+	env, err := shnsdk.DecodeEnvelope(body)
+	if err == nil {
+		if flat, ok := shnsdk.FlatTransactionType(env.Metadata.TransactionType); ok {
+			env.Metadata.TransactionType = flat
+		}
+	}
+	return env, err
 }

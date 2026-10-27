@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -162,9 +164,9 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				}
 				after := httptest.NewRecorder()
 				if scenario == "uc06" {
-					ok = gw.completeClinician(after, request, st, "", "")
+					ok = gw.completeClinician(after, request, st, "42")
 				} else {
-					ok = gw.completePatient(after, request, st, "")
+					ok = gw.completePatient(after, request, st, "42")
 				}
 				want := 200
 				if strings.Contains(mode, "rejection") {
@@ -267,9 +269,9 @@ func TestDTRResumeIndependentPinsAndRefusals(t *testing.T) {
 				}
 				after := httptest.NewRecorder()
 				if scenario == "uc06" {
-					ok = gw.completeClinician(after, request, st, "", "")
+					ok = gw.completeClinician(after, request, st, "42")
 				} else {
-					ok = gw.completePatient(after, request, st, "")
+					ok = gw.completePatient(after, request, st, "42")
 				}
 				want := 200
 				if strings.Contains(mode, "rejection") {

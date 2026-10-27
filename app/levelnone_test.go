@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -67,20 +69,25 @@ func TestCheckingLevelsRefuseDeclaredLineWithoutLane(t *testing.T) {
 }
 
 // At none a declared default lane is never waited for: it qualifies in the
-// background, so one that fails qualification does not fail boot, and one that
-// passes is ready once its worker finishes. At every level that checks, the
-// same failure fails boot (the rejection row).
+// background, so one that fails qualification does not fail boot (it keeps
+// retrying, unqualified), and one that passes is ready once its worker
+// finishes. At every level that checks, a lane that keeps failing fails boot
+// once the startup budget is spent (the rejection row).
 func TestNoneQualifiesDeclaredDefaultLanesInTheBackground(t *testing.T) {
 	declared := []string{"pa.pas@2.0", "pa.pas@2.2"}
 	failing := func(context.Context, string, string) error { return errors.New("wrong-line verdict") }
 	passing := func(context.Context, string, string) error { return nil }
 	for _, canonical := range []shnsdk.Validator{nil, shnsdk.NewFakeValidator()} {
 		for name, qualify := range map[string]engine.LaneQualifier{"failing": failing, "passing": passing} {
-			_, m, err := discoverValidatorLanes(context.Background(), env(nil), declared, canonical, config{ConformanceEnforcement: engine.EnforcementNone}, engine.DefaultLaneURL, qualify)
+			_, m, err := discoverValidatorLanes(context.Background(), env(nil), declared, canonical, config{ConformanceEnforcement: engine.EnforcementNone, laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, qualify)
 			if err != nil {
 				t.Fatalf("canonical=%v, %s qualification: none refused boot: %v", canonical, name, err)
 			}
-			m.workers.Wait()
+			if name == "passing" {
+				m.workers.Wait()
+			} else {
+				waitForAttempts(t, m.defaults["2.2"], 2)
+			}
 			if got := m.defaults["2.2"].Ready(); got != (name == "passing") {
 				t.Errorf("canonical=%v, %s qualification: 2.2 ready=%v", canonical, name, got)
 			}
@@ -88,7 +95,7 @@ func TestNoneQualifiesDeclaredDefaultLanesInTheBackground(t *testing.T) {
 		}
 	}
 	for _, level := range checkingLevels {
-		_, _, err := discoverValidatorLanes(context.Background(), env(nil), declared, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: level}, engine.DefaultLaneURL, failing)
+		_, _, err := discoverValidatorLanes(context.Background(), env(nil), declared, shnsdk.NewFakeValidator(), config{ConformanceEnforcement: level, laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, failing)
 		if err == nil || !strings.Contains(err.Error(), "declared validator line 2.2") {
 			t.Errorf("%v: a declared default lane failing qualification = %v, want the boot refusal", level, err)
 		}
@@ -123,27 +130,36 @@ func builtValidator(t *testing.T, b built) reflect.Value {
 	return v
 }
 
-// A provider gateway at none boots with no validator at all and says so; the
-// same gateway with any validator, a single per-line lane or a default lane
-// included, boots with it and does not.
+// A provider gateway at none boots with no validator at all and says so, and
+// so does one that states no level, which is none (D116) and says that it is
+// none by default; the same gateway with any validator, a single per-line lane
+// or a default lane included, boots with it and does not.
 func TestBuildAtNoneBootsWithNoValidator(t *testing.T) {
-	b, out, err := buildForTest(t, noValidatorBuildEnv(t, "none"))
-	if err != nil {
-		t.Fatalf("build at none with no validator: %v", err)
-	}
-	b.lanes.Close()
-	if !strings.Contains(out, noValidatorLog) {
-		t.Fatalf("boot output does not carry the no-validator line:\n%s", out)
-	}
-	if v := builtValidator(t, b); !v.IsNil() {
-		t.Fatalf("cfg.Validator = %v, want none", v)
+	for level, levelLine := range map[string]string{
+		"none": "gateway: conformance enforcement=none\n",
+		"":     "gateway: conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)\n",
+	} {
+		b, out, err := buildForTest(t, noValidatorBuildEnv(t, level))
+		if err != nil {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: build with no validator: %v", level, err)
+		}
+		b.lanes.Close()
+		if !strings.Contains(out, noValidatorLog) {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: boot output does not carry the no-validator line:\n%s", level, out)
+		}
+		if !strings.Contains(out, levelLine) {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: boot output does not carry %q:\n%s", level, levelLine, out)
+		}
+		if v := builtValidator(t, b); !v.IsNil() {
+			t.Fatalf("CONFORMANCE_ENFORCEMENT=%q: cfg.Validator = %v, want none", level, v)
+		}
 	}
 
 	withURL := noValidatorBuildEnv(t, "none")
 	withURL["FHIR_VALIDATE_URL"] = "http://127.0.0.1:9/fhir"
 	withURL["FHIR_VALIDATE_URL_2_1"] = "http://127.0.0.1:9/fhir21"
 	withURL["FHIR_VALIDATE_URL_2_2"] = "http://127.0.0.1:9/fhir22"
-	b, out, err = buildForTest(t, withURL)
+	b, out, err := buildForTest(t, withURL)
 	if err != nil {
 		t.Fatalf("build at none with validators: %v", err)
 	}
@@ -176,11 +192,10 @@ func TestBuildAtNoneBootsWithNoValidator(t *testing.T) {
 	}
 }
 
-// REJECTION: at every level that checks, the unset default (observe) included,
-// the same validator-less gateway refuses to boot, naming the none level as the
-// other remedy.
+// REJECTION: at every level that checks, the same validator-less gateway
+// refuses to boot, naming the none level as the other remedy.
 func TestBuildAtCheckingLevelsRefusesNoValidator(t *testing.T) {
-	for _, level := range []string{"", "observe", "structural", "strict"} {
+	for _, level := range []string{"observe", "structural", "strict"} {
 		b, out, err := buildForTest(t, noValidatorBuildEnv(t, level))
 		if err == nil {
 			b.lanes.Close()

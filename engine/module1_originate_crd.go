@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate_crd.go — the CDS Hooks requests this gateway originates for its own
 // participant (the provider's scenario flows), built from the participant's own
 // records.
@@ -27,6 +29,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +38,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -206,8 +210,8 @@ func resourceTypeAndID(resource []byte) (string, string, error) {
 }
 
 // errNoOrderingClinician refuses an originated ordering request that has no
-// ordering clinician to name.
-var errNoOrderingClinician = errors.New("order names no requester; configure NPI")
+// ordering clinician to name: no source states one, and nothing stands in.
+var errNoOrderingClinician = errors.New("names no ordering clinician: the order names no Practitioner or PractitionerRole requester, the request states no npi, and NPI is not configured")
 
 // orderRequester returns the order's requester when it names a Practitioner or
 // PractitionerRole, "" otherwise.
@@ -227,48 +231,88 @@ func orderRequester(order []byte) string {
 	return ""
 }
 
-// orderingUser is the CDS Hooks userId of an originated ordering request: the
-// order's requester when it names a Practitioner or PractitionerRole;
-// otherwise, when an NPI is configured, the Practitioner named by it;
-// otherwise errNoOrderingClinician (nothing stands in for the clinician).
-func (g *Gateway) orderingUser(order []byte) (string, error) {
-	if ref := orderRequester(order); ref != "" {
+// orderingUser is the CDS Hooks userId of an originated ordering request,
+// from the first source that states the ordering clinician (clinicianSources):
+// an npi a verified caller sends; the order's requester (a Practitioner or
+// PractitionerRole) in the participant's system of record; the configured NPI;
+// an npi an unverified caller sends. With none, errNoOrderingClinician:
+// nothing stands in for the clinician.
+func (g *Gateway) orderingUser(ctx context.Context, order []byte) (string, error) {
+	sent, verified := statedClinician(ctx)
+	switch ref := orderRequester(order); {
+	case verified && sent != "":
+		return "Practitioner/" + sent, nil
+	case ref != "":
 		return ref, nil
-	}
-	if g.cfg.NPI != "" {
+	case g.cfg.NPI != "":
 		return "Practitioner/" + g.cfg.NPI, nil
+	case sent != "":
+		return "Practitioner/" + sent, nil
 	}
-	return "", errNoOrderingClinician
+	rt, id, err := resourceTypeAndID(order)
+	if err != nil {
+		return "", fmt.Errorf("order %w", errNoOrderingClinician)
+	}
+	return "", fmt.Errorf("order %s/%s %w", rt, id, errNoOrderingClinician)
 }
 
 // npiSystem is the NPI identifier system.
 const npiSystem = "http://hl7.org/fhir/sid/us-npi"
 
-// attestingNPI returns the NPI of the clinician who attests for order: the
-// NPI the caller sent; otherwise the configured NPI; otherwise the NPI of the
-// order's requester (a Practitioner, or a PractitionerRole's practitioner),
-// read from the system of record. With none of them the attestation is
-// refused (422); a failed read is the system-of-record failure.
-func (g *Gateway) attestingNPI(ctx context.Context, order []byte, sent string) (string, int, string) {
-	if sent != "" {
+// msgNoAttestingClinician refuses an attestation no source names a clinician
+// NPI for.
+const msgNoAttestingClinician = "attestation names no clinician NPI: the request states no npi, the order names no requester with an NPI in your system of record, and NPI is not configured"
+
+// attestingNPI returns the NPI of the clinician who attests for order, from
+// the first source that states it (clinicianSources): an npi a verified caller
+// sends; the NPI of the order's requester (a Practitioner, or a
+// PractitionerRole's practitioner) in the participant's system of record; the
+// configured NPI; an npi an unverified caller sends. With none, the
+// attestation is refused (422). The requester's records are read from held,
+// the records the origination already read (orderRequesterRecords), and from
+// the system of record only when held lacks one; a failed read is the system
+// of record's failure.
+func (g *Gateway) attestingNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string) {
+	sent, verified := statedClinician(ctx)
+	if verified && sent != "" {
 		return sent, 0, ""
 	}
-	if g.cfg.NPI != "" {
+	npi, status, msg := g.requesterNPI(ctx, order, held)
+	switch {
+	case status != 0:
+		return "", status, msg
+	case npi != "":
+		return npi, 0, ""
+	case g.cfg.NPI != "":
 		return g.cfg.NPI, 0, ""
+	case sent != "":
+		return sent, 0, ""
 	}
-	refuse := func() (string, int, string) {
-		return "", http.StatusUnprocessableEntity, "attestation names no clinician NPI: send npi, configure NPI, or name the order's requester with an NPI"
+	return "", http.StatusUnprocessableEntity, msgNoAttestingClinician
+}
+
+// requesterNPI is the NPI of the order's requester in the participant's own
+// records: a Practitioner's us-npi identifier, or a PractitionerRole's
+// practitioner's. It is "" when the order names no requester, or the
+// requester's records carry no NPI.
+func (g *Gateway) requesterNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string) {
+	read := func(ref string) ([]byte, bool, error) {
+		for _, rec := range held {
+			if shnsdk.PASResourceTypeOf(rec)+"/"+pasResourceID(rec) == ref {
+				return rec, true, nil
+			}
+		}
+		return ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, ref)
 	}
 	ref := orderRequester(order)
-	sor := ReadSystemOfRecord(g.cfg.SoR)
 	for hop := 0; hop < 2 && ref != ""; hop++ {
-		rec, found, err := sor.ResolveByReferenceContext(ctx, ref)
+		rec, found, err := read(ref)
 		if err != nil {
 			status, msg := SoRFailureResponse(err)
 			return "", status, msg
 		}
 		if !found {
-			return refuse()
+			return "", 0, ""
 		}
 		var r struct {
 			ResourceType string `json:"resourceType"`
@@ -281,7 +325,7 @@ func (g *Gateway) attestingNPI(ctx context.Context, order []byte, sent string) (
 			} `json:"practitioner"`
 		}
 		if decodeMessage(rec, &r) != nil {
-			return refuse()
+			return "", 0, ""
 		}
 		switch {
 		case r.ResourceType == "Practitioner" && strings.HasPrefix(ref, "Practitioner/"):
@@ -290,31 +334,33 @@ func (g *Gateway) attestingNPI(ctx context.Context, order []byte, sent string) (
 					return id.Value, 0, ""
 				}
 			}
-			return refuse()
+			return "", 0, ""
 		case r.ResourceType == "PractitionerRole" && strings.HasPrefix(ref, "PractitionerRole/") && strings.HasPrefix(r.Practitioner.Reference, "Practitioner/"):
 			ref = r.Practitioner.Reference
 		default:
-			return refuse()
+			return "", 0, ""
 		}
 	}
-	return refuse()
+	return "", 0, ""
 }
 
 // collectionBundle wraps resources in a collection Bundle, each entry's
-// fullUrl its Type/id (the form a payer resolves a context reference by).
-// Each resource is copied byte for byte.
-func collectionBundle(resources ...[]byte) ([]byte, error) {
+// fullUrl an absolute urn:uuid (entryFullURL, named by seed and the entry's
+// index), as FHIR R4 requires of a Bundle entry. A payer resolves a context
+// reference (a selection, a dispatched order) by the resource's own Type/id,
+// so the fullUrl names only the entry. Each resource is copied byte for byte.
+func collectionBundle(seed string, resources ...[]byte) ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString(`{"resourceType":"Bundle","type":"collection","entry":[`)
 	for i, r := range resources {
-		rt, id, err := resourceTypeAndID(r)
+		_, id, err := resourceTypeAndID(r)
 		if err != nil {
 			return nil, err
 		}
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fullURL, _ := json.Marshal(rt + "/" + id)
+		fullURL, _ := json.Marshal(entryFullURL(seed, i, id))
 		b.WriteString(`{"fullUrl":`)
 		b.Write(fullURL)
 		b.WriteString(`,"resource":`)
@@ -325,18 +371,52 @@ func collectionBundle(resources ...[]byte) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// entryFullURL is the urn:uuid of entry i of the Bundle seed names: a
+// name-based (version 5) UUID, so the same request builds the same bytes and
+// no randomness enters the build. (A searchset the gateway assembles from
+// the system of record names its entries by entryURN, from each record's own
+// bytes; a CRD request's Bundle is named by its request.) It never equals the resource's own id: a
+// fullUrl of urn:uuid:<the resource's id> makes a HAPI-based payer replace the
+// resource's id with the fullUrl when it parses the Bundle.
+func entryFullURL(seed string, i int, resourceID string) string {
+	name := seed + "/" + strconv.Itoa(i)
+	for {
+		u := nameBasedUUID(name)
+		if u != resourceID {
+			return "urn:uuid:" + u
+		}
+		name += "/"
+	}
+}
+
+// uuidNamespaceURL is RFC 4122's name space for URLs.
+var uuidNamespaceURL = [16]byte{0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8}
+
+// nameBasedUUID is the RFC 4122 version 5 UUID of name in uuidNamespaceURL,
+// in its lowercase string form.
+func nameBasedUUID(name string) string {
+	h := sha1.New()
+	h.Write(uuidNamespaceURL[:])
+	h.Write([]byte(name))
+	sum := h.Sum(nil)
+	sum[6] = sum[6]&0x0f | 0x50
+	sum[8] = sum[8]&0x3f | 0x80
+	x := hex.EncodeToString(sum[:16])
+	return x[0:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
+}
+
 // originatedOrderingRequest builds an order-sign or order-select request for
 // order from recs.
-func (g *Gateway) originatedOrderingRequest(hook, correlationID string, recs crdOriginRecords, order []byte) ([]byte, error) {
+func (g *Gateway) originatedOrderingRequest(ctx context.Context, hook, correlationID string, recs crdOriginRecords, order []byte) ([]byte, error) {
 	rt, id, err := resourceTypeAndID(order)
 	if err != nil {
 		return nil, fmt.Errorf("order: %w", err)
 	}
-	draft, err := collectionBundle(order)
+	draft, err := collectionBundle(hookInstanceFor(correlationID)+"/draftOrders", order)
 	if err != nil {
 		return nil, err
 	}
-	user, err := g.orderingUser(order)
+	user, err := g.orderingUser(ctx, order)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +456,7 @@ func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOrigin
 	case obtained && !bundleHolds(history, rt, id):
 		return nil, fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s", rt, id)
 	case !obtained:
-		history, err := collectionBundle(order)
+		history, err := collectionBundle(hookInstanceFor(correlationID)+"/deviceHistory", order)
 		if err != nil {
 			return nil, err
 		}

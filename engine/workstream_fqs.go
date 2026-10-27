@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_fqs.go — the Federated Query Services workstream's adapter
 // (design §4.2): its one leg, the federated query, derived from the gateway's
 // copy of the network's leg taxonomy (fqs.json), its Da Vinci ingress route,
@@ -25,7 +27,7 @@ type fqsWorkstream struct {
 	legs map[string]legSpec
 }
 
-// fqsAdapter is the adapter the registry compiles in (workstreams.go).
+// fqsAdapter is the adapter the registry compiles in (workstreams_zones.go).
 var fqsAdapter = fqsWorkstream{legs: mustCatalog(legtaxonomy.FQS(), "fqs", fqsLegs)}
 
 // fqsLegs is what the adapter adds to its taxonomy's one leg: a read of the
@@ -82,6 +84,9 @@ var fqsIngressRoutes = map[string]ingressHandler{
 	}},
 }
 
+// ingressOperations: the federated query's ingress names no operation.
+func (fqsWorkstream) ingressOperations() []string { return nil }
+
 // canonicalContractVersion and contractVersions: the federated query is
 // version-neutral, so the workstream names no contract line.
 func (fqsWorkstream) canonicalContractVersion() string { return "" }
@@ -91,7 +96,11 @@ func (fqsWorkstream) contractVersions() (native, defaults []string) {
 
 // certifiedBuilds: with no contract line, the workstream builds no message at
 // a line, so it has no builder and line pair to certify.
-func (fqsWorkstream) certifiedBuilds() map[certifiedBuild]string { return nil }
+func (fqsWorkstream) certifiedBuilds() map[certifiedBuild]certification { return nil }
+
+// lineBridge: with no contract line, the workstream contributes nothing to
+// module 2.
+func (fqsWorkstream) lineBridge() lineBridgeRows { return lineBridgeRows{} }
 
 // certification: the federated query's payload (CDex) is governed by no
 // declared contract line, so the workstream certifies none.
@@ -119,6 +128,9 @@ func (fqsWorkstream) forward(string) forwardHandler { return nil }
 func (fqsWorkstream) involvement(string) (request, answer bool)   { return false, false }
 func (fqsWorkstream) requestMembers(string, []byte) []namedMember { return nil }
 
+// The federated query declares no relay edits on its legs.
+func (fqsWorkstream) relayEdits() []relayEdit { return nil }
+
 // The federated query keeps no state in the in-memory Store, and so has
 // nothing to check of the configured one.
 func (fqsWorkstream) newMemState() memState  { return nil }
@@ -126,7 +138,11 @@ func (fqsWorkstream) checkStore(Store) error { return nil }
 
 // newGatewayState: the federated query keeps no state of its own on the
 // gateway.
-func (fqsWorkstream) newGatewayState(*Gateway) gatewayState { return nil }
+func (fqsWorkstream) newGatewayState(*Gateway) (gatewayState, error) { return nil, nil }
+
+// newNativeState: the federated query forwards nothing through the native
+// responder, so it keeps no state there.
+func (fqsWorkstream) newNativeState(*nativeResponder) nativeState { return nil }
 
 // FQSLegOperations returns a fresh copy of the Federated Query Services
 // workstream catalog's operation bindings, keyed by envelope TransactionType,

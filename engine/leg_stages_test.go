@@ -1,12 +1,19 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -120,6 +127,32 @@ func steppingPayer(t *testing.T, level ConformanceEnforcement) (*levelPayer, *ex
 	p.g.cfg.Clock = clock.Now
 	p.g.cfg.Responder.(*nativeResponder).clock = clock.Now
 	return p, got
+}
+
+// MON-R22: a stage the exchange did not enter is not reported. At none no
+// conformance check runs, so the leg spends no time validating and its record
+// has no validate stage; at observe the check is queued, and at structural
+// judged, on the leg's own time, so it has one.
+func TestExchangeRecord_NoValidateStageWhereNoCheckRuns_MONR22(t *testing.T) {
+	for _, c := range []struct {
+		level ConformanceEnforcement
+		want  bool
+	}{{EnforcementNone, false}, {EnforcementObserve, true}, {EnforcementStructural, true}} {
+		t.Run(c.level.String(), func(t *testing.T) {
+			p, got := steppingPayer(t, c.level)
+			if ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148")); ans.status != http.StatusOK {
+				t.Fatalf("answer %d %s", ans.status, ans.body)
+			}
+			rec := got.only(t)
+			st := rec.Stages
+			if st == nil || (st.Validate > 0) != c.want {
+				t.Fatalf("stages %+v, want a validate stage %t", st, c.want)
+			}
+			if rec.Latency < stagesSum(st) {
+				t.Fatalf("stages sum to %v, past the latency %v", stagesSum(st), rec.Latency)
+			}
+		})
+	}
 }
 
 // A leg refused before its dispatch spent its time unwrapping.
@@ -315,7 +348,7 @@ func TestExchangeRecord_LegStagesUpdateClaimExactly(t *testing.T) {
 	n.clock = clock.Now
 	request, related := updateBundle(t)
 	p.seedPend(t, related)
-	n.store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim}
+	n.paNative().store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim}
 	ans := p.send(t, "pas-claim-update", "", request)
 	if ans.status != http.StatusOK {
 		t.Fatalf("answer %d %s", ans.status, ans.body)
@@ -338,7 +371,7 @@ func TestExchangeRecord_LegStagesUpdateReleaseExactly(t *testing.T) {
 	n.clock = clock.Now
 	request, related := updateBundle(t)
 	p.seedPend(t, related)
-	n.store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim, release: release}
+	n.paNative().store = timedClaim{censusSoR: p.store, PendLedger: testLedger(p.store), clock: clock, claim: claim, release: release}
 	inner := p.partner.srv.Config.Handler
 	p.partner.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == pasSubmitPath {
@@ -610,4 +643,535 @@ func TestExchangeRecord_AnswerErrorClassPrecedence(t *testing.T) {
 			t.Fatalf("answer error %q, want cancelled", rec.AnswerError)
 		}
 	})
+}
+
+// afterTheHub is the time the originator spends on a leg once the Hub's answer
+// is in hand (networkTimedExchange): it is this gateway's own time, never the
+// network's. readingTheHub is the time reading the Hub's answer body takes:
+// the network's, since the wait runs until the answer is read.
+const (
+	afterTheHub   = 3 * time.Millisecond
+	readingTheHub = 2 * time.Millisecond
+)
+
+// clockedBody moves clock by d on its first Read: an answer body that takes
+// time to arrive.
+type clockedBody struct {
+	io.ReadCloser
+	clock *testClock
+	d     time.Duration
+	once  sync.Once
+}
+
+func (b *clockedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { b.clock.Add(b.d) })
+	return b.ReadCloser.Read(p)
+}
+
+// bodyTransport hands every /route answer's body to wrap.
+type bodyTransport struct {
+	inner http.RoundTripper
+	wrap  func(io.ReadCloser) io.ReadCloser
+}
+
+func (b bodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := b.inner.RoundTrip(r)
+	if err == nil && resp != nil && strings.HasSuffix(r.URL.Path, "/route") {
+		resp.Body = b.wrap(resp.Body)
+	}
+	return resp, err
+}
+
+// networkTimedExchange is an in-process exchange whose originator's clock only
+// the fakes move: each request to the Hub's /route takes hub before inner
+// answers it, and reading its answer's body takes readingTheHub; each other
+// call (the Authorization Framework's) takes authorize; and the leg's
+// handling once the Hub's answer or failure is back takes afterTheHub. So the
+// network stage is exact, and must run until the answer was read and stop
+// there. authorizes counts the other calls.
+func networkTimedExchange(t *testing.T, hub, authorize time.Duration, inner func(*inProcessExchange) http.RoundTripper) (*inProcessExchange, *exchangeRecords, *atomic.Int32) {
+	t.Helper()
+	env := newInProcessExchange(t)
+	var got exchangeRecords
+	env.originator.cfg.ExchangeObserved = got.observe
+	clock := &testClock{now: env.originator.cfg.Clock()}
+	env.originator.cfg.Clock = clock.Now
+	next := http.RoundTripper(env.substrate)
+	if inner != nil {
+		next = inner(env)
+	}
+	// The leg's outcome is observed once the Hub's answer is read (or the
+	// request failed): the time after it is the gateway's own.
+	observed := env.originator.cfg.Observer
+	env.originator.cfg.Observer = func(e ObserverEvent) {
+		if e.Kind == "leg.response" || e.Kind == "leg.failed" {
+			clock.Add(afterTheHub)
+		}
+		if observed != nil {
+			observed(e)
+		}
+	}
+	var authorizes atomic.Int32
+	next = bodyTransport{inner: next, wrap: func(rc io.ReadCloser) io.ReadCloser {
+		return &clockedBody{ReadCloser: rc, clock: clock, d: readingTheHub}
+	}}
+	env.originator.cfg.Client = &http.Client{Transport: stagedTransport{inner: next, before: func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/route") {
+			clock.Add(hub)
+		} else {
+			authorizes.Add(1)
+			clock.Add(authorize)
+		}
+		return nil, nil
+	}}}
+	return env, &got, &authorizes
+}
+
+// MON-R22: an ingress call's network stage is exactly its wait on the Hub and
+// the peer, one request, and the rest of the call is this gateway's own time:
+// the Authorization Framework's before the request, and its handling of the
+// answer after it, which the network stage excludes.
+func TestExchangeRecord_IngressNetworkStage_MONR22(t *testing.T) {
+	const hub, authorize = 40 * time.Millisecond, 7 * time.Millisecond
+	env, got, authorizes := networkTimedExchange(t, hub, authorize, nil)
+	env.payerReturns(LegResult{})
+	w := httptest.NewRecorder()
+	env.originator.ingressRoute(RouteCRD)(w, env.crdIngressRequest(t))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	rec := got.only(t)
+	if rec.Network == nil || rec.Network.Latency != hub+readingTheHub || rec.Network.Calls != 1 {
+		t.Fatalf("network %+v, want %v and %v reading the answer, over 1 call", rec.Network, hub, readingTheHub)
+	}
+	if self := rec.Latency - rec.Network.Latency; authorizes.Load() == 0 || self != time.Duration(authorizes.Load())*authorize+afterTheHub {
+		t.Fatalf("self %v (latency %v), want %d authorizations × %v and %v after the Hub", self, rec.Latency, authorizes.Load(), authorize, afterTheHub)
+	}
+}
+
+// MON-R22: a request handed to the transport is the network's time whatever
+// the Hub made of it, and the wait ends on every way the request returns: the
+// Hub refused it, the Hub was not reached, or its answer could not be read.
+// The leg's handling after that is not the network's.
+func TestExchangeRecord_IngressNetworkStageOnFailure_MONR22(t *testing.T) {
+	const hub, authorize = 25 * time.Millisecond, time.Millisecond
+	for name, row := range map[string]struct {
+		hub  hubAnswers
+		wait time.Duration
+	}{
+		"hub refusal":       {hubAnswers{status: 409, reason: "replay detected", delivered: "no"}, hub + readingTheHub},
+		"hub not reached":   {hubAnswers{fail: true}, hub},
+		"answer unreadable": {hubAnswers{unreadable: true}, hub + readingTheHub},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := row.hub
+			env, got, authorizes := networkTimedExchange(t, hub, authorize, func(env *inProcessExchange) http.RoundTripper {
+				h.next = env.substrate
+				return h
+			})
+			w := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteCRD)(w, env.crdIngressRequest(t))
+			rec := got.only(t)
+			if w.Code/100 == 2 || rec.Network == nil || rec.Network.Latency != row.wait || rec.Network.Calls != 1 {
+				t.Fatalf("answer %d, network %+v, want %v over 1 call", w.Code, rec.Network, row.wait)
+			}
+			if self := rec.Latency - rec.Network.Latency; self != time.Duration(authorizes.Load())*authorize+afterTheHub {
+				t.Fatalf("self %v, want %d authorizations × %v and %v after the Hub", self, authorizes.Load(), authorize, afterTheHub)
+			}
+		})
+	}
+}
+
+// MON-R22: an ingress call refused before it sent anything to the Hub waited
+// on no network, and records none rather than a zero wait.
+func TestExchangeRecord_IngressRefusedBeforeTheHubHasNoNetwork_MONR22(t *testing.T) {
+	env, got, _ := networkTimedExchange(t, time.Second, 0, nil)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(pasIngressBundle("99999", "")))
+	env.originator.ingressRoute(RoutePAS)(w, r)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if rec := got.only(t); rec.Network != nil {
+		t.Fatalf("network %+v on a call refused before the Hub", rec.Network)
+	}
+}
+
+// MON-R22: the network stage is an ingress call's: an inbound leg's time is in
+// its LegStages.
+func TestExchangeRecord_InboundHasNoNetwork_MONR22(t *testing.T) {
+	p, got := newRecordingLevelPayer(t, EnforcementObserve)
+	p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
+	if rec := got.only(t); rec.Network != nil {
+		t.Fatalf("network %+v on an inbound leg", rec.Network)
+	}
+	x := &exchangeRecorder{now: func() time.Time { t.Fatal("an inbound leg's network stage read the clock"); return time.Time{} }}
+	x.rec.Direction = DirectionInbound
+	x.network()()
+	if x.rec.Network != nil {
+		t.Fatalf("network %+v", x.rec.Network)
+	}
+}
+
+// MON-R22: requests to the Hub outstanding together are timed once, so the
+// stage never exceeds the call; time between requests is not the network's.
+func TestExchangeRecorder_NetworkOverlapTimedOnce_MONR22(t *testing.T) {
+	clock := &testClock{now: time.Unix(1700000000, 0)}
+	x := &exchangeRecorder{now: clock.Now}
+	x.rec.Direction = DirectionIngress
+	a := x.network()
+	clock.Add(5 * time.Millisecond)
+	b := x.network()
+	clock.Add(5 * time.Millisecond)
+	a()
+	clock.Add(10 * time.Millisecond)
+	b()
+	if n := x.rec.Network; n == nil || n.Latency != 20*time.Millisecond || n.Calls != 2 {
+		t.Fatalf("network %+v, want 20ms over 2 calls", n)
+	}
+	clock.Add(7 * time.Millisecond)
+	c := x.network()
+	clock.Add(3 * time.Millisecond)
+	c()
+	if n := x.rec.Network; n.Latency != 23*time.Millisecond || n.Calls != 3 {
+		t.Fatalf("network %+v, want 23ms over 3 calls", n)
+	}
+}
+
+// MON-R22: a request to the Hub still outstanding when the answer is written
+// waited until then.
+func TestExchangeRecord_NetworkOutstandingAtTheAnswer_MONR22(t *testing.T) {
+	clock := &testClock{now: time.Unix(1700000000, 0)}
+	var got exchangeRecords
+	g := &Gateway{cfg: Config{Clock: clock.Now, ExchangeObserved: got.observe, HolderID: "provider"}}
+	g.recordExchange(RouteCRD, DirectionIngress, func(w http.ResponseWriter, r *http.Request) {
+		clock.Add(2 * time.Millisecond)
+		exchangeOf(r.Context()).network()
+		clock.Add(9 * time.Millisecond)
+		w.WriteHeader(http.StatusBadGateway)
+	})(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+	rec := got.only(t)
+	if rec.Network == nil || rec.Network.Latency != 9*time.Millisecond || rec.Latency != 11*time.Millisecond {
+		t.Fatalf("network %+v, latency %v, want 9ms of 11ms", rec.Network, rec.Latency)
+	}
+}
+
+// panicsOnRoute panics on a request to the Hub's /route.
+type panicsOnRoute struct{ next http.RoundTripper }
+
+func (p panicsOnRoute) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(r.URL.Path, "/route") {
+		panic("transport panicked")
+	}
+	return p.next.RoundTrip(r)
+}
+
+// MON-R22: a Hub request whose transport panics is still recorded: the call
+// panics on to the server, its record is emitted, and the request's wait is
+// settled when the call ended: the Hub's time, which is all that passed after
+// the request was handed to the transport.
+func TestExchangeRecord_IngressNetworkStageOnPanic_MONR22(t *testing.T) {
+	const hub = 25 * time.Millisecond
+	env, got, _ := networkTimedExchange(t, hub, time.Millisecond, func(env *inProcessExchange) http.RoundTripper {
+		return panicsOnRoute{next: env.substrate}
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the transport's panic did not reach the caller")
+			}
+		}()
+		env.originator.ingressRoute(RouteCRD)(httptest.NewRecorder(), env.crdIngressRequest(t))
+	}()
+	rec := got.only(t)
+	if rec.Network == nil || rec.Network.Calls != 1 || rec.Network.Latency != hub || rec.Network.Latency > rec.Latency {
+		t.Fatalf("network %+v, latency %v: want one request, its wait %v, within the latency", rec.Network, rec.Latency, hub)
+	}
+}
+
+// exchangeShape is what an exchange carries that decides the EMF lines it
+// writes (MON-R47): from its record, which stages took time, whether the
+// network wait or a body size is known, and the outcome, refusal and backend
+// call; and what it reported through the engine's metric hooks beside the
+// record. Byte counts and durations are left out: they do not change the
+// lines.
+type exchangeShape struct {
+	Name          string        `json:"name"`
+	Source        string        `json:"source"`
+	Level         string        `json:"level"`
+	Direction     string        `json:"direction"`
+	Exchange      string        `json:"exchange"`
+	Outcome       string        `json:"outcome"`
+	Rule          string        `json:"rule,omitempty"`
+	RefusedBy     string        `json:"refusedBy,omitempty"`
+	Backend       *shapeBackend `json:"backend,omitempty"`
+	Stages        []string      `json:"stages,omitempty"`
+	Rest          bool          `json:"rest,omitempty"`
+	NetworkCalls  int           `json:"networkCalls,omitempty"`
+	Self          bool          `json:"self,omitempty"`
+	RequestBytes  bool          `json:"requestBytes,omitempty"`
+	ResponseBytes bool          `json:"responseBytes,omitempty"`
+	// What the exchange reported through the engine's metric hooks
+	// (shapeReports): each writes a line of its own.
+	Legs           []string `json:"legs,omitempty"`
+	Tokens         []string `json:"tokens,omitempty"`
+	Involved       []string `json:"involved,omitempty"`
+	StoreErrors    []string `json:"storeErrors,omitempty"`
+	ValidatorCalls int      `json:"validatorCalls,omitempty"`
+	Findings       int      `json:"findings,omitempty"`
+	ObserveDropped int      `json:"observeDropped,omitempty"`
+}
+
+type shapeBackend struct {
+	Status     int    `json:"status,omitempty"`
+	ErrorClass string `json:"errorClass,omitempty"`
+}
+
+// shapeReports is what an exchange reports through the engine's metric hooks
+// beside its record; an observe check reports from its worker.
+type shapeReports struct {
+	mu                                  sync.Mutex
+	legs, tokens, involved, storeErrors []string
+	validator, findings, dropped        int
+}
+
+// wire sets every metric hook of g's config to record into r, and fails on
+// one it does not know: a hook the EMF cost does not count is a line it
+// leaves out.
+func (r *shapeReports) wire(t *testing.T, g *Gateway) {
+	t.Helper()
+	lock := func(f func()) { r.mu.Lock(); defer r.mu.Unlock(); f() }
+	g.cfg.LegMetric = func(o string) { lock(func() { r.legs = append(r.legs, o) }) }
+	g.cfg.TokenMetric = func(o string, _ time.Duration) { lock(func() { r.tokens = append(r.tokens, o) }) }
+	g.cfg.InvolvedMetric = func(reason string) { lock(func() { r.involved = append(r.involved, reason) }) }
+	g.cfg.StoreErrorMetric = func(store string) { lock(func() { r.storeErrors = append(r.storeErrors, store) }) }
+	g.cfg.ValidatorMetric = func(string, string, time.Duration) { lock(func() { r.validator++ }) }
+	g.cfg.FindingMetric = func(FindingMetric) { lock(func() { r.findings++ }) }
+	g.cfg.ObserveCheckDroppedMetric = func() { lock(func() { r.dropped++ }) }
+	// The requests in flight are sampled once a minute: no line per exchange.
+	g.cfg.ActiveRequestMetric = func(string, int) {}
+	cfg := reflect.ValueOf(g.cfg)
+	for n := range cfg.NumField() {
+		f := cfg.Type().Field(n)
+		if strings.HasSuffix(f.Name, "Metric") && f.Type.Kind() == reflect.Func && cfg.Field(n).IsNil() {
+			t.Fatalf("engine.Config.%s is a metric hook the exchange shapes do not capture", f.Name)
+		}
+	}
+}
+
+// shapeOf is rec's shape, with what r recorded.
+func shapeOf(name, source string, level ConformanceEnforcement, rec ExchangeRecord, r *shapeReports) exchangeShape {
+	sh := exchangeShape{Name: name, Source: source, Level: level.String(), Direction: rec.Direction, Exchange: rec.Exchange, Outcome: rec.Outcome,
+		Rule: rec.Rule, RefusedBy: rec.RefusedBy, RequestBytes: rec.RequestBytes != nil, ResponseBytes: rec.ResponseBytes != nil}
+	if rec.Backend != nil {
+		sh.Backend = &shapeBackend{Status: rec.Backend.Status, ErrorClass: rec.Backend.ErrorClass}
+	}
+	if st := rec.Stages; st != nil {
+		for _, s := range []struct {
+			name string
+			d    time.Duration
+		}{{"unwrap", st.Unwrap}, {"reads", st.Reads}, {"forward", st.Forward}, {"validate", st.Validate}, {"seal", st.Seal}, {"ledger", st.Ledger}, {"write", st.Write}} {
+			if s.d > 0 {
+				sh.Stages = append(sh.Stages, s.name)
+			}
+		}
+		sh.Rest = rec.Latency > stagesSum(st)
+	}
+	if rec.Direction == DirectionIngress {
+		var wait time.Duration
+		if rec.Network != nil {
+			sh.NetworkCalls, wait = rec.Network.Calls, rec.Network.Latency
+		}
+		sh.Self = rec.Latency > wait
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sh.Legs, sh.Tokens, sh.Involved, sh.StoreErrors = r.legs, r.tokens, r.involved, r.storeErrors
+	sh.ValidatorCalls, sh.Findings, sh.ObserveDropped = r.validator, r.findings, r.dropped
+	return sh
+}
+
+// exchangeShapesPath is the golden of the exchange shapes the EMF cost is
+// measured over (gateway/app TestEMFCost_MON_R47 reads it). Set
+// SHN_UPDATE_EXCHANGE_SHAPES=1 to rewrite it.
+const exchangeShapesPath = "testdata/exchange_shapes.json"
+
+// MON-R47: the exchange shapes the EMF cost is measured over, each driven
+// through the engine as the two reference implementations' use cases drive it
+// (the payer's gateway answering each PA leg from the network, the
+// provider's gateway calling the Hub for its own system), with a clock that
+// moves on every read, so every stage the engine enters takes time, and every
+// metric hook recorded. Each names the test that drives the same exchange and
+// checks its record, with that test's level where it differs. The golden is
+// the shapes exactly: a change to a shape is a change to every gateway's EMF
+// volume.
+func TestExchangeShapes_MON_R47(t *testing.T) {
+	var shapes []exchangeShape
+	stepping := func(g *Gateway) {
+		clock := &steppingClock{testClock{now: time.Unix(1_700_000_000, 0)}}
+		g.cfg.Clock = clock.Now
+		if r, ok := g.cfg.Responder.(*nativeResponder); ok {
+			r.clock = clock.Now
+		}
+	}
+	payer := func(t *testing.T, level ConformanceEnforcement) (*levelPayer, *exchangeRecords, *shapeReports) {
+		p := eligibilityPayer(t, level, true)
+		var got exchangeRecords
+		p.g.cfg.ExchangeObserved = got.observe
+		r := &shapeReports{}
+		r.wire(t, p.g)
+		stepping(p.g)
+		return p, &got, r
+	}
+	// The payer's gateway, from the network, at none (the default) unless a
+	// row says: each PA leg answered by the payer's own system, refused, and
+	// the payer's own system failing.
+	for _, c := range []struct {
+		name, source, leg, operation string
+		level                        ConformanceEnforcement
+		setup                        func(t *testing.T, p *levelPayer)
+		body                         func(t *testing.T) []byte
+	}{
+		{"inbound crd-order-select answered", "TestExchangeRecord_InboundAnswered (at observe)", "crd-order-select", "", EnforcementNone, nil,
+			func(*testing.T) []byte { return conformantCRD("MBR-COVERED", "72148") }},
+		{"inbound crd-order-select answered at observe", "TestExchangeRecord_InboundAnswered", "crd-order-select", "", EnforcementObserve, nil,
+			func(*testing.T) []byte { return conformantCRD("MBR-COVERED", "72148") }},
+		{"inbound dtr-questionnaire-fetch answered", "TestExchangeRecord_InboundOperationAndLine (at observe)", "dtr-questionnaire-fetch", shnsdk.FrameOperationQuestionnairePackage, EnforcementNone, nil,
+			func(*testing.T) []byte { return dtrFetchReq }},
+		{"inbound pas-claim answered (pended)", "TestExchangeRecord_RecipientEdits", "pas-claim", "", EnforcementNone, nil,
+			func(*testing.T) []byte { return []byte(pasIngressBundle("00001", "")) }},
+		{"inbound pas-claim-inquire answered", "TestExchangeRecord_LegStagesInquiryExactly (at observe)", "pas-claim-inquire", "", EnforcementNone,
+			func(t *testing.T, p *levelPayer) { p.seedInquiryPend(t, "corr-submit-1") },
+			func(*testing.T) []byte { return inquiryBundle("MBR-COVERED", "", "TRN-1", "72148") }},
+		{"inbound coverage-eligibility answered", "TestEligibility_DeclaredForwardsAndRelaysExactly", "coverage-eligibility", "", EnforcementNone,
+			func(_ *testing.T, p *levelPayer) {
+				p.partner.respByPath[eligibilityPath] = payersEligibilityAnswer("Patient/" + dtrFrameMember)
+			},
+			func(t *testing.T) []byte { return eligibilityRequest(t, dtrFrameMember) }},
+		{"inbound crd-order-select refused by the payer's gateway at strict (conformance)", "TestExchangeRecord_InboundConformance", "crd-order-select", "", EnforcementStrict, nil,
+			func(t *testing.T) []byte {
+				return crdSelectWith(t, `{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148"}]}}}`, ``)
+			}},
+		{"inbound crd-order-select, the payer's own system answers http-5xx", "TestExchangeRecord_InboundBackendFailures (at observe)", "crd-order-select", "", EnforcementNone,
+			func(_ *testing.T, p *levelPayer) { p.partner.status = http.StatusServiceUnavailable },
+			func(*testing.T) []byte { return conformantCRD("MBR-COVERED", "72148") }},
+		// No test captures a 4xx from the payer's own system: it is driven
+		// as the 5xx is.
+		{"inbound crd-order-select, the payer's own system answers http-4xx", "none (driven as TestExchangeRecord_InboundBackendFailures's http-5xx)", "crd-order-select", "", EnforcementNone,
+			func(_ *testing.T, p *levelPayer) { p.partner.status = http.StatusNotFound },
+			func(*testing.T) []byte { return conformantCRD("MBR-COVERED", "72148") }},
+		{"inbound crd-order-select, the payer's own system times out", "TestBackendDeadline_SlowSystemIsItsOwnTimeout", "crd-order-select", "", EnforcementNone,
+			func(_ *testing.T, p *levelPayer) {
+				WithBackendDeadline(50 * time.Millisecond)(p.g.cfg.Responder.(*nativeResponder))
+				p.partner.delay = time.Second
+			},
+			func(*testing.T) []byte { return conformantCRD("MBR-COVERED", "72148") }},
+	} {
+		p, got, r := payer(t, c.level)
+		if c.setup != nil {
+			c.setup(t, p)
+		}
+		p.send(t, c.leg, c.operation, c.body(t))
+		// An observe check reports from its worker: flush it.
+		_ = p.g.Close()
+		shapes = append(shapes, shapeOf(c.name, c.source, c.level, got.only(t), r))
+	}
+	{
+		p, got, r := payer(t, EnforcementNone)
+		w := httptest.NewRecorder()
+		p.g.inboundRoute()(w, inboundRequest(t, p, "crd-order-select", func(_ *levelPayer, e *shnsdk.Envelope) { e.Metadata.Recipient = "someone-else" }, nil))
+		shapes = append(shapes, shapeOf("inbound crd-order-select refused by the payer's gateway before dispatch (routing)", "TestExchangeRecord_InboundRefusalRules (at observe)", EnforcementNone, got.only(t), r))
+	}
+	// The provider's gateway, for its own system, at none: answered, refused
+	// before the Hub, refused by the Hub, and the recipient failing. An
+	// ingress call's lines do not depend on its leg.
+	provider := func(t *testing.T) (*inProcessExchange, *exchangeRecords, *shapeReports) {
+		env := newInProcessExchange(t)
+		env.originator.cfg.ConformanceEnforcement = EnforcementNone
+		var got exchangeRecords
+		env.originator.cfg.ExchangeObserved = got.observe
+		r := &shapeReports{}
+		r.wire(t, env.originator)
+		stepping(env.originator)
+		return env, &got, r
+	}
+	level := func(env *inProcessExchange) ConformanceEnforcement { return env.originator.conformance().Level() }
+	{
+		env, got, r := provider(t)
+		env.payerReturns(LegResult{})
+		env.originator.ingressRoute(RouteCRD)(httptest.NewRecorder(), env.crdIngressRequest(t))
+		shapes = append(shapes, shapeOf("ingress crd-order-select answered", "TestExchangeRecord_IngressAnsweredAndUpstreamError (at strict)", level(env), got.only(t), r))
+	}
+	{
+		env, got, r := provider(t)
+		env.originator.ingressRoute(RoutePAS)(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(pasIngressBundle("99999", ""))))
+		shapes = append(shapes, shapeOf("ingress pas-claim refused by the provider's gateway (routing)", "TestExchangeRecord_IngressRoutingRefusal (at strict)", level(env), got.only(t), r))
+	}
+	{
+		// No client credentials: refused before the body is read.
+		var got exchangeRecords
+		g := &Gateway{cfg: Config{ExchangeObserved: got.observe, HolderID: "provider", ConformanceEnforcement: EnforcementNone}}
+		r := &shapeReports{}
+		r.wire(t, g)
+		stepping(g)
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
+		req.SetPathValue("id", "shn-order-sign")
+		g.ingressRoute(RouteCRD)(httptest.NewRecorder(), req)
+		shapes = append(shapes, shapeOf("ingress crd-order-select refused by the provider's gateway (authentication)", "TestExchangeRecord_IngressAuthenticationRefusal (at strict)", g.conformance().Level(), got.only(t), r))
+	}
+	for _, c := range []struct {
+		name string
+		hub  hubAnswers
+	}{
+		{"ingress crd-order-select refused by the Hub (replay)", hubAnswers{status: 409, reason: "replay detected", delivered: "no"}},
+		{"ingress crd-order-select, the recipient answers 5xx", hubAnswers{status: 502, reason: "forward to recipient failed: the recipient answered 500", delivered: "unknown"}},
+	} {
+		env, got, r := provider(t)
+		c.hub.next = env.substrate
+		env.originator.cfg.Client = &http.Client{Transport: c.hub}
+		env.originator.ingressRoute(RouteCRD)(httptest.NewRecorder(), env.crdIngressRequest(t))
+		shapes = append(shapes, shapeOf(c.name, "TestExchangeRecord_IngressHubOutcomes (at strict)", level(env), got.only(t), r))
+	}
+
+	// Every source a shape names is a test of this package.
+	var src strings.Builder
+	files, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), "_test.go") {
+			b, err := os.ReadFile(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			src.Write(b)
+		}
+	}
+	for _, sh := range shapes {
+		name := strings.TrimPrefix(sh.Source, "none (driven as ")
+		name, _, _ = strings.Cut(name, " ")
+		name = strings.TrimSuffix(name, "'s")
+		if !strings.Contains(src.String(), "\nfunc "+name+"(t *testing.T) {") {
+			t.Errorf("%s names %q, which is no test of this package", sh.Name, name)
+		}
+	}
+
+	got, err := json.MarshalIndent(shapes, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = append(got, '\n')
+	if os.Getenv("SHN_UPDATE_EXCHANGE_SHAPES") == "1" {
+		if err := os.WriteFile(exchangeShapesPath, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(exchangeShapesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the exchange shapes differ from %s (SHN_UPDATE_EXCHANGE_SHAPES=1 rewrites it, and the EMF cost with it):\n%s", exchangeShapesPath, fmt.Sprint(string(got)))
+	}
 }

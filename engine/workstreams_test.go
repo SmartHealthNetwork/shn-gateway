@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -23,25 +25,31 @@ type toyWorkstream struct {
 	rows    map[relay.Key]relay.Rule
 	ingress map[string]ingressHandler
 	answers map[string]answerHandler
+	edits   []relayEdit
+	ops     []string
 }
 
-func (w toyWorkstream) id() string                                  { return w.tag }
-func (w toyWorkstream) catalog() map[string]legSpec                 { return w.legs }
-func (w toyWorkstream) routes(*Gateway, string) []mountedRoute      { return nil }
-func (w toyWorkstream) ownershipRows() map[relay.Key]relay.Rule     { return w.rows }
-func (w toyWorkstream) certifiedBuilds() map[certifiedBuild]string  { return nil }
-func (w toyWorkstream) certification() certificationAdapter         { return nil }
-func (w toyWorkstream) involvement(string) (bool, bool)             { return false, false }
-func (w toyWorkstream) requestMembers(string, []byte) []namedMember { return nil }
-func (w toyWorkstream) ingressRoutes() map[string]ingressHandler    { return w.ingress }
-func (w toyWorkstream) canonicalContractVersion() string            { return "" }
-func (w toyWorkstream) originatedAnswerCheck(string) legAnswerCheck { return nil }
-func (w toyWorkstream) answer(leg string) answerHandler             { return w.answers[leg] }
-func (w toyWorkstream) forward(string) forwardHandler               { return nil }
-func (w toyWorkstream) contractVersions() ([]string, []string)      { return nil, nil }
-func (w toyWorkstream) newMemState() memState                       { return nil }
-func (w toyWorkstream) checkStore(Store) error                      { return nil }
-func (w toyWorkstream) newGatewayState(*Gateway) gatewayState       { return nil }
+func (w toyWorkstream) id() string                                        { return w.tag }
+func (w toyWorkstream) catalog() map[string]legSpec                       { return w.legs }
+func (w toyWorkstream) routes(*Gateway, string) []mountedRoute            { return nil }
+func (w toyWorkstream) ownershipRows() map[relay.Key]relay.Rule           { return w.rows }
+func (w toyWorkstream) certifiedBuilds() map[certifiedBuild]certification { return nil }
+func (w toyWorkstream) certification() certificationAdapter               { return nil }
+func (w toyWorkstream) involvement(string) (bool, bool)                   { return false, false }
+func (w toyWorkstream) requestMembers(string, []byte) []namedMember       { return nil }
+func (w toyWorkstream) ingressRoutes() map[string]ingressHandler          { return w.ingress }
+func (w toyWorkstream) canonicalContractVersion() string                  { return "" }
+func (w toyWorkstream) originatedAnswerCheck(string) legAnswerCheck       { return nil }
+func (w toyWorkstream) answer(leg string) answerHandler                   { return w.answers[leg] }
+func (w toyWorkstream) forward(string) forwardHandler                     { return nil }
+func (w toyWorkstream) contractVersions() ([]string, []string)            { return nil, nil }
+func (w toyWorkstream) newMemState() memState                             { return nil }
+func (w toyWorkstream) checkStore(Store) error                            { return nil }
+func (w toyWorkstream) newGatewayState(*Gateway) (gatewayState, error)    { return nil, nil }
+func (w toyWorkstream) newNativeState(*nativeResponder) nativeState       { return nil }
+func (w toyWorkstream) lineBridge() lineBridgeRows                        { return lineBridgeRows{} }
+func (w toyWorkstream) relayEdits() []relayEdit                           { return w.edits }
+func (w toyWorkstream) ingressOperations() []string                       { return w.ops }
 
 // checkWorkstreamsUnique reports the first collision among compiled-in
 // workstreams: an empty or repeated WorkstreamType, a transaction type two
@@ -141,12 +149,12 @@ func TestWorkstreams_LookupsAnswerTheCatalog(t *testing.T) {
 	}
 	for _, tx := range slices.Sorted(maps.Keys(paCatalog)) {
 		spec, ok := legSpecFor(tx)
-		if !ok || spec != paCatalog[tx] {
+		if !ok || !sameLegSpec(spec, paCatalog[tx]) {
 			t.Fatalf("legSpecFor(%q) = %+v, %v; want %+v", tx, spec, ok, paCatalog[tx])
 		}
 	}
 	for _, tx := range []string{"", "unknown", "pdex-read", "CRD-ORDER-SELECT"} {
-		if spec, ok := legSpecFor(tx); ok || spec != (legSpec{}) {
+		if spec, ok := legSpecFor(tx); ok || !sameLegSpec(spec, legSpec{}) {
 			t.Fatalf("legSpecFor(%q) = %+v, %v; want no leg", tx, spec, ok)
 		}
 	}
@@ -155,8 +163,9 @@ func TestWorkstreams_LookupsAnswerTheCatalog(t *testing.T) {
 // catalogNames are the names through which a leg catalog can be read, and the
 // non-test files allowed to name them (path.Match patterns): the PA adapter's
 // catalog, rows and adapter value in workstream_pa.go, its methods in any of
-// the PA adapter's files, and the registry and the derivation in
-// workstreams.go. The taxonomy itself is the derivation's input. The FQS
+// the PA adapter's files, the registry and the derivation in workstreams.go,
+// and the adapter values the registry calls in the wiring file
+// (workstreams_zones.go). The taxonomy itself is the derivation's input. The FQS
 // adapter (workstream_fqs.go) and the toy test profile's adapter
 // (workstream_toy_test_profile.go, under its build tag) each derive their own
 // catalog as PA's does.
@@ -165,10 +174,10 @@ var catalogNames = map[string][]string{
 	"paLegs":              {"workstream_pa.go"},
 	"paIngressRoutes":     {"workstream_pa.go"},
 	"paWorkstream":        {"workstream_pa.go", "workstream_pa_*.go"},
-	"paAdapter":           {"workstream_pa.go", "workstreams.go"},
+	"paAdapter":           {"workstream_pa.go", "workstreams_zones.go"},
 	"fqsLegs":             {"workstream_fqs.go"},
 	"fqsWorkstream":       {"workstream_fqs.go"},
-	"fqsAdapter":          {"workstream_fqs.go", "workstreams.go"},
+	"fqsAdapter":          {"workstream_fqs.go", "workstreams_zones.go"},
 	"workstreams":         {"workstreams.go"},
 	"mustCatalog":         {"workstream_pa.go", "workstream_fqs.go", "workstreams.go", "workstream_toy_test_profile.go"},
 	"catalogFromTaxonomy": {"workstreams.go"},
@@ -362,11 +371,195 @@ func TestWorkstreams_OwnershipIsRegisteredOverTheCatalogs(t *testing.T) {
 	}
 }
 
+// The engine's edit registry is the compiled-in workstreams' edits, in the
+// relay package's id order, and refuses an edit naming a leg its own
+// adapter's catalog does not declare, an id outside the closed set, or an id
+// two edits declare.
+func TestWorkstreams_RelayEditsAreGatheredFromTheAdapters(t *testing.T) {
+	got, err := workstreamRelayEdits(workstreams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]relay.EditID, len(got))
+	for i, e := range got {
+		ids[i] = e.ID
+	}
+	if !slices.Equal(ids, relay.EditIDs()) || len(relayEdits) != len(got) {
+		t.Fatalf("gathered %v (registry %d), want the closed set %v", ids, len(relayEdits), relay.EditIDs())
+	}
+	e01, _ := relayEditByID(relay.EditCDSCallbackStrip)
+	toy := toyWorkstream{tag: "toy", legs: map[string]legSpec{"toy-leg": {Op: "toy-op", RespOp: "toy-answer"}}}
+	withEdits := func(w toyWorkstream, edits ...relayEdit) toyWorkstream { w.edits = edits; return w }
+	onToyLeg := e01
+	onToyLeg.Legs = []string{"toy-leg"}
+	paLess := toyWorkstream{tag: "pa-less", legs: paCatalog}
+	// The toy's E-01 comes after the PA-less E-02…, so only the sort puts the
+	// gathered edits in id order.
+	split, err := workstreamRelayEdits([]workstream{withEdits(paLess, paRelayEdits[1:]...), withEdits(toy, onToyLeg)})
+	splitIDs := make([]relay.EditID, len(split))
+	for i, e := range split {
+		splitIDs[i] = e.ID
+	}
+	if err != nil || !slices.Equal(splitIDs, relay.EditIDs()) {
+		t.Errorf("edits split across two workstreams: %v, %v; want the whole registry in id order %v", err, splitIDs, relay.EditIDs())
+	}
+	unknown := e01
+	unknown.ID = "E-99"
+	for name, c := range map[string]struct {
+		ws   []workstream
+		want string
+	}{
+		"an edit on another workstream's leg": {[]workstream{withEdits(toy, e01)}, "no leg of its catalog"},
+		"an id outside the closed set":        {[]workstream{withEdits(paLess, unknown)}, "not in the relay package's closed set"},
+		"an id two edits declare":             {[]workstream{paAdapter, withEdits(paLess, e01)}, "is declared twice"},
+	} {
+		if _, err := workstreamRelayEdits(c.ws); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error %v, want one containing %q", name, err, c.want)
+		}
+	}
+}
+
+// The exchange record's operations are gathered from the adapters: each
+// workstream's ingress operations, then the frame operations its catalog's
+// legs declare (from the taxonomy), by transaction type, each value once
+// across the workstreams.
+func TestWorkstreams_OperationsAreGatheredFromTheAdapters(t *testing.T) {
+	want := []string{"order-sign", "order-select", "order-dispatch", "questionnaire-package", "next-question"}
+	want = append(want, operationsOf(profileWorkstreams())...)
+	if got := workstreamOperations(); !slices.Equal(got, want) {
+		t.Fatalf("operations %v, want the PA hooks and DTR frame operations %v", got, want)
+	}
+	if got := paAdapter.catalog()["dtr-questionnaire-fetch"].FrameOperations; !slices.Equal(got, []string{"questionnaire-package", "next-question"}) {
+		t.Errorf("dtr-questionnaire-fetch's frame operations %v, want the taxonomy's", got)
+	}
+	toy := toyWorkstream{tag: "toy", ops: []string{"toy-hook"}, legs: map[string]legSpec{
+		"toy-b": {FrameOperations: []string{"toy-frame-b", "toy-frame-a"}},
+		"toy-a": {FrameOperations: []string{"toy-frame-a"}},
+		"toy-c": {},
+	}}
+	other := toyWorkstream{tag: "other", ops: []string{"toy-hook", "other-hook"}, legs: map[string]legSpec{"other-leg": {FrameOperations: []string{"toy-frame-b"}}}}
+	for name, c := range map[string]struct {
+		ws   []workstream
+		want []string
+	}{
+		"a workstream's hooks, then its legs' frame operations by transaction type": {[]workstream{toy}, []string{"toy-hook", "toy-frame-a", "toy-frame-b"}},
+		"a value two workstreams name, once":                                        {[]workstream{toy, other}, []string{"toy-hook", "toy-frame-a", "toy-frame-b", "other-hook"}},
+		"a workstream that names none":                                              {[]workstream{toyWorkstream{tag: "none", legs: map[string]legSpec{"leg": {}}}}, nil},
+	} {
+		if got := operationsOf(c.ws); !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+}
+
 // The PA adapter's ingress routes are its map itself: the core mounts exactly
 // the handlers paIngressRoutes names (which the answer-line tripwire reads),
 // with nothing wrapped in between.
 func TestWorkstreams_PAIngressRoutesAreTheMap(t *testing.T) {
 	if got := paAdapter.ingressRoutes(); fmt.Sprintf("%p", got) != fmt.Sprintf("%p", paIngressRoutes) {
 		t.Fatal("the PA adapter's ingress routes are not paIngressRoutes itself")
+	}
+}
+
+// TestNativeStates_AreTheRegisteredWorkstreams: a native responder holds
+// the forward state of each compiled-in workstream that keeps one, by its id
+// and of the type that workstream makes, and nothing else; the state exists
+// before the options run, so a workstream's option lands in it.
+func TestNativeStates_AreTheRegisteredWorkstreams(t *testing.T) {
+	store := newCensusSoR()
+	n := NewNativeResponder(nil, "http://partner.invalid", nil, WithCRDService("order-sign"), WithPASStore(store))
+	want := map[string]string{}
+	for _, w := range workstreams {
+		if st := w.newNativeState(n); st != nil {
+			want[w.id()] = fmt.Sprintf("%T", st)
+		}
+	}
+	got := map[string]string{}
+	for id, st := range n.states {
+		got[id] = fmt.Sprintf("%T", st)
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("the responder holds %v, the workstreams make %v", got, want)
+	}
+	if _, ok := n.states[workstreamFQS]; ok {
+		t.Error("the federated query keeps forward state on the responder: it forwards nothing there")
+	}
+	pa := n.paNative()
+	if pa == nil {
+		t.Fatal("the PA workstream's forward state is missing")
+	}
+	if pa.crdServiceID != "order-sign" || pa.store != Store(store) {
+		t.Errorf("the PA options did not land in the PA state: service %q, store %v", pa.crdServiceID, pa.store)
+	}
+	if pa.cdsBaseURL != "http://partner.invalid" {
+		t.Errorf("the CDS Hooks base defaults to %q, want the responder's base", pa.cdsBaseURL)
+	}
+}
+
+// The tables module 2 reads are the compiled-in workstreams' lineBridge rows,
+// whole and in registry order, whatever order Go initializes the files in:
+// the manifest's rows, the two leg sets and the edited answers. No two
+// workstreams register the same leg or answer, and each names only legs of
+// its own catalog.
+func TestLineBridge_TablesAreTheRegisteredRows(t *testing.T) {
+	var steps []CompatStep
+	envelope, verbatim := map[string]bool{}, map[string]bool{}
+	answers := map[relay.Key]bool{}
+	owner := map[string]string{}
+	for _, w := range workstreams {
+		rows := w.lineBridge()
+		steps = append(steps, rows.steps...)
+		claim := func(set map[string]bool, legs []string, what string) {
+			for _, leg := range legs {
+				if _, ok := w.catalog()[leg]; !ok {
+					t.Errorf("workstream %s names %s leg %s outside its catalog", w.id(), what, leg)
+				}
+				if prev, ok := owner[what+" "+leg]; ok {
+					t.Errorf("%s leg %s is registered by %s and %s", what, leg, prev, w.id())
+				}
+				owner[what+" "+leg] = w.id()
+				set[leg] = true
+			}
+		}
+		claim(envelope, rows.envelopeEgressLegs, "envelope")
+		claim(verbatim, rows.verbatimChainLegs, "verbatim")
+		for k, bridge := range rows.answers {
+			if _, ok := w.catalog()[k.Leg]; !ok {
+				t.Errorf("workstream %s edits an answer of leg %s outside its catalog", w.id(), k.Leg)
+			}
+			if answers[k] {
+				t.Errorf("answer %v is edited by two workstreams", k)
+			}
+			if bridge == nil {
+				t.Errorf("workstream %s registers a nil bridge for %v", w.id(), k)
+			}
+			answers[k] = true
+		}
+	}
+	if len(steps) == 0 || len(compatManifest) != len(steps) {
+		t.Fatalf("compatManifest has %d rows, the workstreams register %d", len(compatManifest), len(steps))
+	}
+	for i := range steps {
+		got, want := compatManifest[i], steps[i]
+		if got.Contract != want.Contract || got.From != want.From || got.To != want.To || got.Class != want.Class ||
+			fmt.Sprintf("%p", got.Up) != fmt.Sprintf("%p", want.Up) || fmt.Sprintf("%p", got.Down) != fmt.Sprintf("%p", want.Down) {
+			t.Errorf("compatManifest row %d is %+v, the registry's is %+v", i, got, want)
+		}
+	}
+	if !maps.Equal(envelopeEgressLegs, envelope) || !maps.Equal(verbatimChainLegs, verbatim) {
+		t.Errorf("leg sets %v / %v, the registry's %v / %v", envelopeEgressLegs, verbatimChainLegs, envelope, verbatim)
+	}
+	if len(answerBridges) != len(answers) {
+		t.Errorf("answerBridges has %d entries, the registry %d", len(answerBridges), len(answers))
+	}
+	for k := range answers {
+		if answerBridges[k] == nil {
+			t.Errorf("answerBridges is missing %v", k)
+		}
+	}
+	// The PA workstream's rows today, pinned: E-08 is the one edited answer,
+	// the DTR fetch the one envelope leg, the PAS inquiry the one verbatim leg.
+	if !maps.Equal(envelope, map[string]bool{"dtr-questionnaire-fetch": true}) || !maps.Equal(verbatim, map[string]bool{"pas-claim-inquire": true}) || !answers[dtrAnswerKey] || len(answers) != 1 {
+		t.Errorf("module 2's PA rows changed: envelope %v, verbatim %v, answers %v", envelope, verbatim, answers)
 	}
 }

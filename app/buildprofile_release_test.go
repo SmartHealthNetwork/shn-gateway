@@ -1,4 +1,4 @@
-//go:build !shn_toyworkstream
+//go:build !shn_toyworkstream && !shn_coreonly
 
 package app
 

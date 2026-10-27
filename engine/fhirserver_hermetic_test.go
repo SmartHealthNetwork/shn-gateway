@@ -35,6 +35,10 @@ func TestMain(m *testing.M) {
 	fhirServerSystemDial = func(_ context.Context, _ *net.Dialer, _, address string) (net.Conn, error) {
 		return nil, noteLiveFHIRServer("dial " + address)
 	}
+	// Certification clients start and retry on whole steps here (no random
+	// spread), so a row's timing is the schedule's; the spread rows set their
+	// own jitter.
+	certificationJitter = nil
 	code := m.Run()
 	if hits := takeLiveFHIRServer(); len(hits) > 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: a test read a fhirServer through the real network (give it a resolver and dial): %v\n", hits)

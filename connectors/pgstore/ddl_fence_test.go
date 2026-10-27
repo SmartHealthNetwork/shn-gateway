@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 // ddl_fence_test.go is the HERMETIC half of the schema's guard: it parses the very
@@ -28,6 +30,7 @@ import (
 	"testing"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/auditappend"
 )
 
 // expectedDDLTables is every table `ddl` must declare. Pinned so a parse that
@@ -37,6 +40,7 @@ var expectedDDLTables = []string{
 	"gw_auth_number", "gw_pended_claim", "gw_pended_claim_key", "gw_eob", // business Store
 	"gw_pa_continuation", "gw_pa_continuation_item", // the continuation store
 	"gw_ingress_key", "gw_replay", "gw_exchange", "gw_exchange_leg", // shared replica state
+	"gw_audit_outbox", // the audit outbox
 }
 
 // contentBearingTypes are the column types a metadata-only table must never declare.
@@ -56,7 +60,8 @@ var contentBearingTypes = map[string]bool{"BYTEA": true, "JSON": true, "JSONB": 
 // "gw_ingress_key.<column>" entry here, reviewed on its own terms — not a standing
 // blanket pass on the table.
 var ddlContentExceptions = map[string]string{
-	"gw_eob.eob_json": "pre-existing business Store column (not shared replica state): the holder's own PA-decision EOB resource, stored as BYTEA since the E-mid Store slice; written and read by nothing since v0.63.0, until the table is dropped",
+	"gw_audit_outbox.body": "AI-1: holds only a version 2 audit record the content guard passed (auditappend.Check: every member closed and bounded), unsigned (each send signs it), metadata with no Content; an outbox row, deleted once the Audit Plane accepts or refuses it, at most auditappend.Bound per holder",
+	"gw_eob.eob_json":      "pre-existing business Store column (not shared replica state): the holder's own PA-decision EOB resource, stored as BYTEA since the E-mid Store slice; written and read by nothing since v0.63.0, until the table is dropped",
 }
 
 // legRecordColumns maps every persisted engine.LegRecord field path (LegPhysics
@@ -122,7 +127,7 @@ func ddlTableBody(t *testing.T, table string) string {
 // no entry here — a new exemption is how a JSON column for "just the keys" would
 // arrive, and it never gets to arrive quietly.
 func TestDDLFence_NoNewExceptions(t *testing.T) {
-	want := map[string]bool{"gw_eob.eob_json": true}
+	want := map[string]bool{"gw_eob.eob_json": true, "gw_audit_outbox.body": true}
 	for qual := range ddlContentExceptions {
 		if !want[qual] {
 			t.Errorf("ddlContentExceptions gained %q. A gw_* table needing an opaque column is a DESIGN "+
@@ -411,4 +416,72 @@ func mapKeys(m map[string]string) map[string]bool {
 		out[k] = true
 	}
 	return out
+}
+
+// auditOutboxColumns is gw_audit_outbox's whole column set. Its one opaque
+// column, body, is a named exception above; pinning the rest means no second
+// column carrying a value arrives in the table quietly, whatever its type.
+var auditOutboxColumns = map[string]string{
+	"holder_id": "TEXT", "seq": "BIGSERIAL", "record_id": "TEXT", "body": "BYTEA",
+	"enqueued_at": "TIMESTAMPTZ", "next_attempt_at": "TIMESTAMPTZ", "attempts": "INTEGER", "last_status": "TEXT",
+}
+
+// auditOutboxDDLProblems is every way src's gw_audit_outbox leaves its pinned
+// column set or its body CHECK.
+func auditOutboxDDLProblems(t *testing.T, src string) []string {
+	var problems []string
+	cols := parseDDLTables(t, src)["gw_audit_outbox"]
+	if len(cols) == 0 {
+		return []string{"ddl declares no gw_audit_outbox"}
+	}
+	seen := map[string]bool{}
+	for _, c := range cols {
+		want, ok := auditOutboxColumns[c.name]
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("gw_audit_outbox.%s (%s) is not one of the outbox's pinned columns: "+
+				"the table holds only the guarded record and its queue state", c.name, c.typ))
+		case normalizeSQLType(c.typ) != want:
+			problems = append(problems, fmt.Sprintf("gw_audit_outbox.%s is %s, pinned as %s", c.name, c.typ, want))
+		}
+		seen[c.name] = true
+	}
+	for _, name := range sortedKeys(mapKeys(auditOutboxColumns)) {
+		if !seen[name] {
+			problems = append(problems, "gw_audit_outbox declares no "+name)
+		}
+	}
+	want := fmt.Sprintf("CHECK (octet_length(body) <= %d)", auditappend.MaxBody)
+	if !strings.Contains(stripSQLComments(src), want) {
+		problems = append(problems, fmt.Sprintf("gw_audit_outbox does not declare %q: the schema and auditappend.MaxBody have drifted", want))
+	}
+	return problems
+}
+
+// TestAuditOutboxDDL_Fence: gw_audit_outbox declares exactly its pinned
+// columns, and its body CHECK is auditappend.MaxBody.
+func TestAuditOutboxDDL_Fence(t *testing.T) {
+	for _, p := range auditOutboxDDLProblems(t, ddl) {
+		t.Error(p)
+	}
+}
+
+// TestAuditOutboxDDL_FenceRejects: the fence itself bites on an added column
+// of any type, a retyped one, a dropped one and a drifted body bound.
+func TestAuditOutboxDDL_FenceRejects(t *testing.T) {
+	const last = "    last_status     TEXT NOT NULL DEFAULT '',"
+	for name, mutated := range map[string]string{
+		"an added TEXT column":  strings.Replace(ddl, last, last+"\n    note TEXT,", 1),
+		"an added JSONB column": strings.Replace(ddl, last, last+"\n    extra JSONB,", 1),
+		"a retyped column":      strings.Replace(ddl, "    record_id       TEXT NOT NULL,\n    body", "    record_id       BYTEA NOT NULL,\n    body", 1),
+		"a dropped column":      strings.Replace(ddl, "    attempts        INTEGER NOT NULL DEFAULT 0,\n", "", 1),
+		"a drifted body bound":  strings.Replace(ddl, fmt.Sprintf("octet_length(body) <= %d", auditappend.MaxBody), "octet_length(body) <= 1048576", 1),
+	} {
+		if mutated == ddl {
+			t.Fatalf("%s: mutation did not apply", name)
+		}
+		if len(auditOutboxDDLProblems(t, mutated)) == 0 {
+			t.Errorf("%s: the fence still passes", name)
+		}
+	}
 }

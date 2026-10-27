@@ -1,9 +1,11 @@
+//go:build !shn_coreonly
+
 // authoredqr_line_test.go — proves the selected pa.dtr line threads through
 // the THREE authored-QR build sites (closes an earlier KNOWN GAP
 // recorded at handleUC04's attestation refill (module1_originate.go), scenarioToPend's
-// UC-06 attestation refill (module1_originate_resume.go), and populator.go's
+// UC-06 attestation refill (module1_originate_resume.go), and workstream_pa_populator.go's
 // managedPopulator.Populate — the UC-03 silent wrong-line pass).
-// TestManagedPopulatorBuildsAtLine (populator_test.go) proves the
+// TestManagedPopulatorBuildsAtLine (workstream_pa_populator_test.go) proves the
 // managedPopulator.Populate site directly at the unit level; THIS file proves
 // the other two — handleUC04's and scenarioToPend's attestation refill — end
 // to end against a live (fake-Hub) round trip, reading the ACTUAL wire bytes
@@ -119,7 +121,7 @@ func (c *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 		body, err := io.ReadAll(req.Body)
 		if err == nil {
 			req.Body = io.NopCloser(bytes.NewReader(body))
-			if env, derr := shnsdk.DecodeEnvelope(body); derr == nil {
+			if env, derr := hubDecodeEnvelope(body); derr == nil {
 				if keys, ok := c.encKeys[env.Metadata.Recipient]; ok {
 					if payload, perr := shnsdk.Open(env, keys.pub, keys.priv); perr == nil {
 						p := payload
@@ -244,7 +246,7 @@ func newAuthoredQRGateway(t *testing.T, keys authoredQRKeys, sor SystemOfRecord,
 		SoR:                      sor,
 		Store:                    newCensusSoR(),
 		Clock:                    clock,
-		NPI:                      "1234567890",
+		NPI:                      "1234567893",
 		OriginationProfile:       "provider-data",
 		Client:                   &http.Client{Transport: transport},
 	})
@@ -359,7 +361,7 @@ func (s *uc04SingleShotSubstrate) handleAuthorize(body []byte) (*http.Response, 
 }
 
 func (s *uc04SingleShotSubstrate) handleRoute(body []byte) (*http.Response, error) {
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}

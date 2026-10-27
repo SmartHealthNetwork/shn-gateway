@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // observer_test.go — hermetic tests for the observer seam (see STABILITY.md).
 // The seam is ADDITIVE instrumentation: nil Observer = zero emission (the
 // default, and the published-gateway posture); a configured Observer receives
@@ -523,19 +525,17 @@ func TestObservingSoR_CoverageInforceDetail(t *testing.T) {
 func TestObserver_SoRDecorationPrecedesDerivations(t *testing.T) {
 	gw, _, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
-	// The first New() (observer off) already derived the Populator over the RAW SoR —
-	// nil it so this New() re-derives, as a fresh production construction with an
-	// Observer would.
-	cfg.Populator = nil
+	// A fresh New() builds the PA workstream's state, and with it the managed
+	// Populator, anew, as a production construction with an Observer would.
 	cfg.Observer = func(ObserverEvent) {}
 	g2 := mustNew(t, cfg)
 
 	if _, ok := g2.cfg.SoR.(observingSoR); !ok {
 		t.Fatalf("cfg.SoR not decorated: %T", g2.cfg.SoR)
 	}
-	mp, ok := g2.cfg.Populator.(*managedPopulator)
+	mp, ok := g2.populator().(*managedPopulator)
 	if !ok {
-		t.Fatalf("unexpected populator type %T", g2.cfg.Populator)
+		t.Fatalf("unexpected populator type %T", g2.populator())
 	}
 	if _, ok := mp.sor.(observingSoR); !ok {
 		t.Fatal("managed Populator captured the raw SoR — decoration must precede the Populator derivation")
@@ -578,14 +578,13 @@ func TestObserver_SoRDecorationIdempotent(t *testing.T) {
 // asserted only for the sor.read ops it genuinely makes (ResolvePatient et
 // al., module1_originate.go:352). The non-negotiable half of the capture-site pin —
 // a populator-driven read emits through the decorated SoR — is then asserted
-// directly: g2.cfg.Populator is in-package, so its Populate entry point is
+// directly: g2.populator() is in-package, so its Populate entry point is
 // invoked with a stub persona + the demo lumbar $questionnaire-package, and the
 // resulting ClinicalContext sor.read is required.
 func TestObserver_SoREventsInUC03(t *testing.T) {
 	gw, _, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded, Questionnaires: []string{"http://example.org/q"}})
 	cfg := gw.cfg
 	cfg.Responder = nil
-	cfg.Populator = nil
 	var events []ObserverEvent
 	cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 	g2 := mustNew(t, cfg)
@@ -611,9 +610,9 @@ func TestObserver_SoREventsInUC03(t *testing.T) {
 	// Non-negotiable half: the managed Populator (holding the decorated SoR —
 	// TestObserver_SoRDecorationPrecedesDerivations already pins that capture)
 	// emits ClinicalContext when it actually populates.
-	mp, ok := g2.cfg.Populator.(*managedPopulator)
+	mp, ok := g2.populator().(*managedPopulator)
 	if !ok {
-		t.Fatalf("unexpected populator type %T", g2.cfg.Populator)
+		t.Fatalf("unexpected populator type %T", g2.populator())
 	}
 	const member = "MBR-COVERED"
 	_, _, err := mp.Populate(context.Background(), wrapDemoLumbarPackage(t), PopulateContext{

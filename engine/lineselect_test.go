@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // lineselect_test.go — build-at-the-selected-line:
 // the declared-set accessor, the paCatalog ok-guards, the line-aware
 // validator seam (F7), and the request-frame rules on BOTH sides.
@@ -529,7 +531,8 @@ func TestNativeForwardFilterUsesDeclaredSet(t *testing.T) {
 			opts = append(opts, WithOwnContractVersions(own))
 		}
 		return NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid",
-			"svc", newCensusSoR(), func() time.Time { return time.Unix(1700000000, 0).UTC() }, opts...)
+			func() time.Time { return time.Unix(1700000000, 0).UTC() },
+			append([]NativeOption{WithCRDService("svc"), WithPASStore(newCensusSoR())}, opts...)...)
 	}
 	t.Run("build constant alone refuses", func(t *testing.T) {
 		res, err := newResponder(nil).Handle(context.Background(), "crd-order-select", "corr", "pci", nil)

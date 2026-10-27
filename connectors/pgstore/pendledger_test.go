@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore_test
 
 // pendledger_test.go is the ONE conformance table for the payer pend ledger

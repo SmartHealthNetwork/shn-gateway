@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -16,6 +18,12 @@ import (
 // are built with.
 type onBehalfEnrichment struct {
 	g *Gateway
+}
+
+// init gives the PA workstream's enrichment hook its builder: on-behalf
+// building installs its own enrichment, and the hook never names it.
+func init() {
+	nativeEnrichmentFor = func(g *Gateway) nativeEnrichment { return onBehalfEnrichment{g: g} }
 }
 
 func (e onBehalfEnrichment) prefetchValue(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string) {

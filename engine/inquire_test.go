@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -72,7 +74,7 @@ func TestPASInquire_RelayedExactly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			answer := inquiryFixture(t, tc.fixture)
 			p := newInquirePartner(t, http.StatusOK, answer, tc.mediaType)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", newCensusSoR(), fixedClock)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock, WithPASStore(newCensusSoR()))
 			res, err := n.Handle(context.Background(), "pas-claim-inquire", "corr-inq", "PCI-1", request)
 			if err != nil || res.Status != 0 {
 				t.Fatalf("inquiry: err=%v status=%d msg=%s", err, res.Status, res.Message)

@@ -1,6 +1,8 @@
+//go:build !shn_coreonly
+
 // transform_run_test.go — RunTransformChain: the exported,
 // contract-parameterized sibling of TransformPASForTest/TransformDTRForTest.
-// Exercises the SAME real fixtures and idioms transform_dtr_test.go and
+// Exercises the SAME real fixtures and idioms workstream_pa_transform_dtr_test.go and
 // test/conformance/dtr_transform_live_test.go already establish for pa.dtr
 // 2.1<->2.2, through the new exported entry point rather than the *ForTest
 // wrapper or chainFor/applyChain directly — proving the demo/diagnostic seam

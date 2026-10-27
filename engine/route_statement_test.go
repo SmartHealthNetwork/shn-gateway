@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -352,7 +354,7 @@ func TestUC05_AmendmentCertificationTypeRefusedBeforeAnyLeg(t *testing.T) {
 				opts.declared = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
 			}
 			gw, stub := newPendResumeFixture(t, opts)
-			gw.cfg.OriginationProfile = "demo"
+			declareOriginationProfile(gw, "demo")
 			gw.cfg.Validator = NewLineFakeValidator("2.0")
 			gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
 			body := editBody(t, testRouteBody(gw, "/scenario/uc05", ""), func(m map[string]json.RawMessage) { delete(m, "certificationType") })

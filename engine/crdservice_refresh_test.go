@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -104,12 +106,12 @@ func TestCDSListing_ConcurrentRequestsReadOnce(t *testing.T) {
 	release := p.set(false, true)
 	defer release()
 	clock := &testClock{now: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, clock.Now)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, clock.Now)
 	const callers = 6
 	joined := make(chan struct{}, callers)
-	n.cds.mu.Lock()
-	n.cds.joined = func() { joined <- struct{}{} }
-	n.cds.mu.Unlock()
+	n.paNative().cds.mu.Lock()
+	n.paNative().cds.joined = func() { joined <- struct{}{} }
+	n.paNative().cds.mu.Unlock()
 
 	results := make(chan LegResult, callers)
 	for range callers {
@@ -139,7 +141,7 @@ func TestCDSListing_ConcurrentRequestsReadOnce(t *testing.T) {
 func TestCDSListing_RefreshDoesNotHoldRequests(t *testing.T) {
 	p := newListingPayer(t)
 	clock := &testClock{now: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, clock.Now)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, clock.Now)
 	if res := signRequest(t, n); res.Status != 0 {
 		t.Fatalf("first request: %+v", res)
 	}
@@ -176,7 +178,7 @@ func TestCDSListing_RefreshDoesNotHoldRequests(t *testing.T) {
 func TestCDSListing_RefreshFailureKeepsLastGoodListing(t *testing.T) {
 	p := newListingPayer(t)
 	clock := &testClock{now: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, clock.Now)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, clock.Now)
 	if res := signRequest(t, n); res.Status != 0 {
 		t.Fatalf("first request: %+v", res)
 	}
@@ -224,7 +226,7 @@ func TestCDSListing_RefreshFailureKeepsLastGoodListing(t *testing.T) {
 func TestCDSListing_OverAgeListingWaitsForTheRead(t *testing.T) {
 	p := newListingPayer(t)
 	clock := &testClock{now: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, clock.Now)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, clock.Now)
 	if res := signRequest(t, n); res.Status != 0 {
 		t.Fatalf("first request: %+v", res)
 	}
@@ -232,9 +234,9 @@ func TestCDSListing_OverAgeListingWaitsForTheRead(t *testing.T) {
 	release := p.set(false, true)
 	defer release()
 	joined := make(chan struct{}, 1)
-	n.cds.mu.Lock()
-	n.cds.joined = func() { joined <- struct{}{} }
-	n.cds.mu.Unlock()
+	n.paNative().cds.mu.Lock()
+	n.paNative().cds.joined = func() { joined <- struct{}{} }
+	n.paNative().cds.mu.Unlock()
 	first := make(chan LegResult, 1)
 	go func() { first <- signRequest(t, n) }()
 	<-p.held // the read is open
@@ -266,11 +268,11 @@ func TestCDSListing_WaiterLeavesWhenItsRequestEnds(t *testing.T) {
 	release := p.set(false, true)
 	defer release()
 	clock := &testClock{now: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, clock.Now)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, clock.Now)
 	joined := make(chan struct{}, 1)
-	n.cds.mu.Lock()
-	n.cds.joined = func() { joined <- struct{}{} }
-	n.cds.mu.Unlock()
+	n.paNative().cds.mu.Lock()
+	n.paNative().cds.joined = func() { joined <- struct{}{} }
+	n.paNative().cds.mu.Unlock()
 	first := make(chan LegResult, 1)
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	go func() {

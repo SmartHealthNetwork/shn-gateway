@@ -93,17 +93,15 @@ func (b chainBridge) Certify(ctx context.Context, contract, line, profile string
 // evaluation (FR-G52). Production-dormant BY DESIGN: this consult always
 // answers false for every real
 // call site — SHN-registry peers get NO overlay field today ("SHN builds
-// tolerate unknown extensions by construction"), and PAYER_DAVINCI_STRICT_EXTENSIONS
-// (env → config → WithStrictExtensions → nativeResponder.strictExtensions,
-// gateway/app/app.go + native.go) stays dormant plumbing on the native
-// responder ONLY — it is not read here. Two future extension points, both
-// explicitly deferred, not implemented now: (1) a per-registry-entry
-// overlay field on shnsdk.RegistryEntry, live the day a non-SHN build
-// registers; (2) reading the SAME PAYER_DAVINCI_STRICT_EXTENSIONS flag here
-// too, going live together with transform-at-the-native-forward-edge (the
-// deferral native.go's strictExtensions field comment records) — until that
-// ships, native.go's arm-1-only pin (TestNativeForwardStaysArm1) means the
-// one peer the flag is meant for could never reach this consult anyway.
+// tolerate unknown extensions by construction"), and no setting feeds it
+// (PAYER_DAVINCI_STRICT_EXTENSIONS, which once reserved it, is no longer
+// read). Two future extension points, both explicitly deferred, not
+// implemented now: (1) a per-registry-entry overlay field on
+// shnsdk.RegistryEntry, live the day a non-SHN build registers; (2) a
+// per-partner setting, going live together with
+// transform-at-the-native-forward-edge — until that ships, native.go's
+// arm-1-only pin (TestNativeForwardStaysArm1) means no foreign peer could
+// reach this consult anyway.
 // StrictPeerForTest (Config, the EgressNativeLines seam's shape) is the SELECTION-level test
 // override — never set outside a test.
 func (g *Gateway) strictPeer(recipient string) bool { return g.cfg.StrictPeerForTest }
@@ -306,4 +304,37 @@ func bridgedDecision(v Verdict) Decision {
 		return Record
 	}
 	return Refuse
+}
+
+// lineBridgeRows are a workstream's contribution to module 2. The chain
+// machinery (compatManifest's structure, chainFor, applyChain, Reach, the
+// Certify seam) is the core's; what it walks is the workstreams'.
+type lineBridgeRows struct {
+	// steps are the workstream's compatibility manifest rows, one per adjacent
+	// line pair per contract (compatManifest).
+	steps []CompatStep
+	// envelopeEgressLegs are the workstream's legs whose payload the chain
+	// walks without handing the bytes to a step (envelopeEgressLegs).
+	envelopeEgressLegs []string
+	// verbatimChainLegs are the workstream's legs whose payload the chain
+	// walks and never rewrites (verbatimChainLegs).
+	verbatimChainLegs []string
+	// answers are the answers the workstream's module 2 contribution edits,
+	// by the relay key of the transmit that carries them (AdaptAnswer).
+	answers map[relay.Key]answerBridge
+}
+
+// answerBridge carries one answer a workstream's module 2 contribution edits
+// to the requester's system (chainBridge.AdaptAnswer).
+type answerBridge func(b chainBridge, ctx context.Context, answer []byte, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string)
+
+// AdaptAnswer carries an answer to the requester's system. An answer a
+// workstream's module 2 contribution edits (lineBridgeRows.answers; the PA
+// workstream's E-08, carryDTRAnswer) goes through its bridge; every other
+// answer is carried exactly as it arrived.
+func (b chainBridge) AdaptAnswer(ctx context.Context, key relay.Key, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string) {
+	if bridge := answerBridges[key]; bridge != nil {
+		return bridge(b, ctx, answer, routed, declared, x)
+	}
+	return relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType), routed, 0, ""
 }

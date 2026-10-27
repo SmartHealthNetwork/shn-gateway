@@ -1,11 +1,13 @@
-package app
+//go:build !shn_coreonly
 
-import "testing"
+package app
 
 // The validator test double (SHN_FAKE_VALIDATOR=1, engine.NewLineFakeValidator on
 // every lane) checks a few PAS/DTR cardinalities and bindings and accepts
 // everything else, so a gateway running it appears to certify bodies it never
-// checked. It exists only in a test binary or a build tagged shn_testdouble. Every
+// checked. It exists only in a build tagged shn_testdouble, test binaries
+// included (the module's own tests run with -tags=shn_testdouble); an untagged
+// build does not link it at all (testdouble_release.go). Every
 // other build (the published image, go install, a plain go build) refuses to boot
 // with SHN_FAKE_VALIDATOR set to any value (loadConfig), before any conformance
 // level or validator lane is read, so the refusal holds at every level and with no
@@ -15,7 +17,7 @@ import "testing"
 // claims a certification it did not perform. It never judges a payload.
 //
 // A var so this package's rejection rows can stand in for a released build.
-var testDoubleAvailable = func() bool { return testDoubleBuild || testing.Testing() }
+var testDoubleAvailable = func() bool { return testDoubleBuild }
 
 // fakeValidator reports whether this gateway runs the validator test double. It is
 // the only reader of SHN_FAKE_VALIDATOR's value.

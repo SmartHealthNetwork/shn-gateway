@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pasleg.go — what the engine knows about a PAS exchange that the payer content
 // seam does not take, and the pend-ledger effects the submit and update legs
 // derive from the payer's own answer.
@@ -50,7 +52,8 @@ type pasLeg struct {
 }
 
 // answered records that the payer's own system answered this exchange's
-// forward. A nil carrier drops it, as note does.
+// forward (the native responder calls it through systemAnswered). A nil
+// carrier drops it, as note does.
 func (l *pasLeg) answered() {
 	if l != nil {
 		l.payerAnswered = true
@@ -65,7 +68,7 @@ func (l *pasLeg) afterPayerAnswered() bool { return l != nil && l.payerAnswered 
 // envelope Sender.
 func withPASLeg(ctx context.Context, requester string) (context.Context, *pasLeg) {
 	leg := &pasLeg{requester: strings.TrimSpace(requester)}
-	return context.WithValue(ctx, pasLegKey{}, leg), leg
+	return withSystemAnswered(context.WithValue(ctx, pasLegKey{}, leg), leg.answered), leg
 }
 
 // pasLegOf reads the carrier, or nil when the caller attached none (an injected
@@ -91,9 +94,6 @@ func (l *pasLeg) note(kind string) {
 	}
 	l.notes = append(l.notes, kind)
 }
-
-// noteOn is note on the carrier this context holds.
-func noteOn(ctx context.Context, kind string) { pasLegOf(ctx).note(kind) }
 
 // pasLegNote is an observer event the leg raised with a detail: what an
 // operator needs to know about it beyond its kind (metadata only, never a

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_uc04_attest.go — the provider-data UC-04 DTR ATTESTATION answer-map builder.
 //
 // br-payer's UC-04 questionnaire (HomeHealthAssessment) is an ADAPTIVE questionnaire with 0 CQL

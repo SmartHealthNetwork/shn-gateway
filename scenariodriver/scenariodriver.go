@@ -34,7 +34,7 @@ type Config struct {
 	//
 	// Deprecated: the ops console and its /api/run route are being retired.
 	// Drive a provider gateway's /scenario/* routes with
-	// RunProviderDataScenario instead. ConsoleURL is removed in v1.0.0.
+	// RunProviderDataScenario instead. A later minor release removes ConsoleURL.
 	ConsoleURL string
 	PHGURL     string           // patient surface base (optional)
 	HTTP       *http.Client     // nil → http.DefaultClient (signs nothing)
@@ -286,7 +286,7 @@ func (d *Driver) ContinuePA(jsonBody string) (HTTPResult, error) {
 //
 // Deprecated: the ops console and its /api/run route are being retired. Use
 // RunProviderDataScenario against a provider gateway's /scenario/* routes.
-// RunConsoleScenario is removed in v1.0.0.
+// A later minor release removes RunConsoleScenario.
 func (d *Driver) RunConsoleScenario(jsonBody string) (HTTPResult, error) {
 	return d.postJSON(d.cfg.ConsoleURL, "/api/run", jsonBody)
 }

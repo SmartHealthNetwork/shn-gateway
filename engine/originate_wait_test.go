@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // originate_wait_test.go — the originator's prior-authorization operation.
@@ -1331,7 +1333,7 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 		return s.stubSubstrate.RoundTrip(req)
 	}
 	body, _ := io.ReadAll(req.Body)
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}

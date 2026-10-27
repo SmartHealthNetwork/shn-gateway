@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -65,7 +67,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	for _, want := range []string{
 		`"pas-claim-update"`,
 		`g.supplementalReport(ctx, member, res.sorID)`,
-		"buildAuthoredPASUpdate",
+		"buildModuleOnePASUpdate",
 	} {
 		if !strings.Contains(fn, want) {
 			t.Fatalf("handleUC04 amendment tail missing %q", want)

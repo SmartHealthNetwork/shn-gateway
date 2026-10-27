@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -205,7 +207,7 @@ func TestSoRSubjectRouteFamilies(t *testing.T) {
 				// the participant requires known members; the prefetch route reads
 				// it for the fill, which runs only under enrichment.
 				g := &Gateway{cfg: Config{SoR: sor, RequireKnownMembers: true, EnrichNativeRequests: true}}
-				g.states = workstreamGatewayStates(g)
+				g.states = gatewayStates(g)
 				var status int
 				var msg string
 				switch route {
@@ -417,7 +419,7 @@ func TestSoRDispatchRefFailureNoLegs(t *testing.T) {
 				}}
 			}
 			fixture.gw.cfg.SoR = sor
-			fixture.gw.cfg.Populator = nil // Any population after the failed ref lookup is a test failure.
+			fixture.gw.paState().populator = nil // Any population after the failed ref lookup is a test failure.
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest("POST", "/scenario/dispatch", strings.NewReader(testRouteBody(fixture.gw, "/scenario/dispatch", `"member":"MBR-OX"`)))
 			fixture.gw.handleDispatch(w, r)

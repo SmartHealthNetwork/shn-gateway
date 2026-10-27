@@ -72,7 +72,9 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		h(w, r)
+		// The route learns who it serves: a statement the request makes about
+		// its caller's own clinician ranks first only from a verified caller.
+		h(w, r.WithContext(scenarioauth.WithCaller(r.Context(), c)))
 	}
 }
 

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -138,7 +140,7 @@ func TestNativeDiagnosticRawNonJSONResponse(t *testing.T) {
 		w.Write([]byte("raw upstream failure"))
 	}))
 	defer srv.Close()
-	n := NewNativeResponder(srv.Client(), srv.URL, "crd", nil, time.Now, WithNativeDiagnostic(func(e diagnostics.Event) bool { events = append(events, e); return true }))
+	n := NewNativeResponder(srv.Client(), srv.URL, time.Now, WithCRDService("crd"), WithNativeDiagnostic(func(e diagnostics.Event) bool { events = append(events, e); return true }))
 	ctx := diagnostics.WithRequestIdentity(context.Background(), "actual-ciphertext", "provider", "payer", "reused")
 	_, result, err := n.post(ctx, srv.URL, "/x", testRequest([]byte("{}")), "pas-claim", "submit")
 	if err != nil || result.Status != 502 {
@@ -222,7 +224,7 @@ func TestNativeDiagnosticReadFailureIsPartial(t *testing.T) {
 	client := &http.Client{Transport: diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 502, Body: &diagnosticPrefixFailure{}, Header: make(http.Header)}, nil
 	})}
-	n := NewNativeResponder(client, "http://payer", "crd", nil, time.Now, WithNativeDiagnostic(func(e diagnostics.Event) bool { events = append(events, e); return true }))
+	n := NewNativeResponder(client, "http://payer", time.Now, WithCRDService("crd"), WithNativeDiagnostic(func(e diagnostics.Event) bool { events = append(events, e); return true }))
 	_, _, err := n.post(context.Background(), "http://payer", "/x", testRequest([]byte("{}")), "pas-claim", "submit")
 	if err == nil {
 		t.Fatal("read fault disappeared")
@@ -273,7 +275,7 @@ func TestDiagnosticIngressCollectorContract(t *testing.T) {
 
 func TestNativeDiagnosticHeaderBudget(t *testing.T) {
 	var got diagnostics.Event
-	n := NewNativeResponder(nil, "", "", nil, time.Now, WithNativeDiagnostic(func(e diagnostics.Event) bool { got = e; return true }))
+	n := NewNativeResponder(nil, "", time.Now, WithNativeDiagnostic(func(e diagnostics.Event) bool { got = e; return true }))
 	req := httptest.NewRequest("POST", "http://partner/x", nil)
 	req.Header.Set("Large", strings.Repeat("x", 65537))
 	n.emitDiagnostic(context.Background(), "native.request", []byte("exact"), 0, "", req, req.Header)

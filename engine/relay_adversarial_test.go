@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/relay_adversarial_test.go
 //
 // Adversarial row for the opaque-payload message-frame contract:

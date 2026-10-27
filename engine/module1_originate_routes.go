@@ -1,21 +1,78 @@
+//go:build !shn_coreonly
+
 package engine
 
 import "net/http"
 
+// moduleOne is on-behalf building as a module of the gateway (gatewayModule):
+// New builds its state, and routes() mounts its routes, through the module
+// registry, so the core names none of its code.
+type moduleOne struct{}
+
+// moduleOneID is the id module 1's state is kept under on a gateway.
+const moduleOneID = "module1"
+
+// moduleOneState is module 1's own state on a gateway, built once by New:
+// its in-flight pend state, and the routes it declared for the gateway's role
+// (originationRoutes).
+type moduleOneState struct {
+	pending     moduleOnePending
+	origination []mountedRoute
+}
+
+func (moduleOne) id() string { return moduleOneID }
+
+// newGatewayState checks the origination profile and declares module 1's
+// routes for g's role, once; a profile that names no lane refuses New.
+func (moduleOne) newGatewayState(g *Gateway) (gatewayState, error) {
+	st := &moduleOneState{}
+	var err error
+	if st.origination, err = g.originationRoutes(g.cfg.Role); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// routes are the routes module 1 declared when New built its state; none on a
+// gateway assembled without New. They were declared for the gateway's own
+// role, the one routes() mounts for.
+func (moduleOne) routes(g *Gateway, _ string) []mountedRoute {
+	if st := g.moduleOneState(); st != nil {
+		return st.origination
+	}
+	return nil
+}
+
+// moduleOneState is module 1's state on g, or nil on a gateway assembled
+// without New.
+func (g *Gateway) moduleOneState() *moduleOneState {
+	st, _ := g.moduleStates[moduleOneID].(*moduleOneState)
+	return st
+}
+
 // originationRoutes are on-behalf building's routes for role: the provider's
-// /scenario/* origination API. Every route that ORIGINATES (builds and sends
-// a request of this gateway's own) is marked so, and refuses while
-// Config.OriginationProfile is unset (requireOriginationProfile). The routes
-// that only read or drop this gateway's own pended state — cancel, pending,
-// reset — serve whatever the profile. Every route here is the operator
-// surface: each caller is authenticated (requireScenarioCaller).
-func (g *Gateway) originationRoutes(role string) []mountedRoute {
-	if role != "provider" {
-		return nil
+// /scenario/* origination API. Module 1 runs only where the participant
+// declares it, by its origination profile (Config.OriginationProfile): with
+// none, no route here is mounted, and a /scenario path is the mux's own 404.
+// Every route that ORIGINATES (builds and sends a request of this gateway's
+// own) is marked so, and reads the Claim facts the request states
+// (readsClaimFacts); the routes that only read or drop this gateway's own
+// pended state (cancel, pending, reset) do not. Every route here is the
+// operator surface: each caller is authenticated (requireScenarioCaller).
+// A profile that names no lane is refused first, on every role
+// (checkOriginationProfile): module 1's newGatewayState calls this once, as New
+// builds its state, New refuses with its error, and the routes are kept for
+// routes() to mount.
+func (g *Gateway) originationRoutes(role string) ([]mountedRoute, error) {
+	if err := checkOriginationProfile(g.cfg.OriginationProfile); err != nil {
+		return nil, err
+	}
+	if role != "provider" || g.cfg.OriginationProfile == "" {
+		return nil, nil
 	}
 	var out []mountedRoute
 	originates := func(pattern string, h http.HandlerFunc) {
-		out = append(out, mountedRoute{pattern: pattern, handler: h, originates: true, operator: true})
+		out = append(out, mountedRoute{pattern: pattern, handler: g.readsClaimFacts(h), operator: true})
 	}
 	local := func(pattern string, h http.HandlerFunc) {
 		out = append(out, mountedRoute{pattern: pattern, handler: h, operator: true})
@@ -56,5 +113,5 @@ func (g *Gateway) originationRoutes(role string) []mountedRoute {
 	// pended UC-06/07 does not survive as an orphaned questionnaire (which would
 	// 502 on a stale patient submit). Internal — provider-gw is not public.
 	local("POST /scenario/reset", g.handleScenarioReset)
-	return out
+	return out, nil
 }

@@ -3,14 +3,18 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/backoff"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -23,15 +27,64 @@ func DefaultLaneURL(line string) string {
 // LaneQualifier proves a validator's finite synthetic corpus for one line.
 type LaneQualifier func(context.Context, string, string) error
 
-// DiscoveredLane admits a default endpoint only after one successful qualification.
+// DiscoveredLane admits a default endpoint once a qualification passes.
 // Its manager supplies the lifecycle context; ordinary validation never changes readiness.
+// A failed qualification is never final: the lane stays unqualified,
+// reports so (State), and a later Qualify runs a fresh attempt, on the
+// manager's schedule (KeepQualifying). Once one passes the lane is ready for
+// the life of the process.
 type DiscoveredLane struct {
 	line, base string
 	validator  shnsdk.Validator
 	ready      atomic.Bool
-	once       sync.Once
-	err        error
+
+	mu       sync.Mutex
+	inflight chan struct{} // closed when the running attempt ends; nil when none runs
+	attempts int           // attempts finished
+	failures int           // consecutive failed attempts; 0 once one passes
+	err      error         // the last attempt's failure; nil once one passes
+	// passed is the qualification that made the lane ready: the endpoint, the
+	// line and the qualifier it ran (qualifierID), which a certification client
+	// compares with its own before it takes the pass as its own.
+	passed lanePass
+	// keeping counts the KeepQualifying loops retrying the lane now.
+	keeping atomic.Int32
 }
+
+// lanePass is what one passing qualification ran: the endpoint it posted the
+// corpus to, the line whose corpus it was, the qualifier that ran it, and how
+// long it took.
+type lanePass struct {
+	base, line string
+	qualifier  uintptr
+	took       time.Duration
+}
+
+// qualifierID identifies a qualifier by its code. Two LaneQualifier values
+// with one ID run the same function; with the line, which selects the corpus,
+// that is the same qualification. That holds for a top-level function, or
+// one closure value passed to both routing and certification, as the
+// gateway's is. Closures of one literal are not enough: an inlined literal
+// is a function of its own at each call site. Which side an attempt is for
+// travels in its context (endpointcert.WithTag), not in the qualifier.
+func qualifierID(q LaneQualifier) uintptr {
+	if q == nil {
+		return 0
+	}
+	return reflect.ValueOf(q).Pointer()
+}
+
+// passedWith is the qualification that made the lane ready, ok false while it
+// is not.
+func (d *DiscoveredLane) passedWith() (lanePass, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.passed, d.ready.Load()
+}
+
+// retrying reports whether a KeepQualifying loop is qualifying the lane now:
+// its manager keeps retrying until an attempt passes.
+func (d *DiscoveredLane) retrying() bool { return d.keeping.Load() > 0 }
 
 func NewDiscoveredLane(line, base string, validator shnsdk.Validator) *DiscoveredLane {
 	return &DiscoveredLane{line: line, base: base, validator: validator}
@@ -43,20 +96,207 @@ func (d *DiscoveredLane) Ready() bool { return d.ready.Load() }
 // Base is the endpoint the lane qualifies.
 func (d *DiscoveredLane) Base() string { return d.base }
 
+// Line is the contract line the lane serves.
+func (d *DiscoveredLane) Line() string { return d.line }
+
+// LaneState is a lane's qualification as its reports read it: no network
+// activity and no validator output, only whether it is ready, how many
+// attempts have finished, how many of the latest failed in a row, and the
+// last failure (lanequalify.FailureReason names its kind).
+type LaneState struct {
+	Line, Base string
+	Ready      bool
+	Attempts   int
+	Failures   int
+	Err        error
+}
+
+// State is the lane's qualification now.
+func (d *DiscoveredLane) State() LaneState {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return LaneState{Line: d.line, Base: d.base, Ready: d.ready.Load(), Attempts: d.attempts, Failures: d.failures, Err: d.err}
+}
+
+// Qualify runs one qualification attempt unless the lane is ready. Attempts
+// never overlap: a caller that arrives while one runs waits for it and
+// returns its outcome, so concurrent callers make one attempt, as they always
+// have. A failure is not terminal: the next call runs a new attempt.
 func (d *DiscoveredLane) Qualify(ctx context.Context, q LaneQualifier) error {
-	d.once.Do(func() {
-		if d.err = ctx.Err(); d.err != nil {
-			return
+	for {
+		if d.ready.Load() {
+			return nil
 		}
-		d.err = q(ctx, d.base, d.line)
-		if d.err == nil {
-			d.err = ctx.Err()
+		d.mu.Lock()
+		if d.ready.Load() {
+			d.mu.Unlock()
+			return nil
 		}
-		if d.err == nil {
+		if wait := d.inflight; wait != nil {
+			attempts := d.attempts
+			d.mu.Unlock()
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			d.mu.Lock()
+			// The attempt this caller waited for decided it.
+			if d.attempts > attempts {
+				err := d.err
+				d.mu.Unlock()
+				return err
+			}
+			d.mu.Unlock()
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			d.mu.Unlock()
+			return err
+		}
+		done := make(chan struct{})
+		d.inflight = done
+		d.mu.Unlock()
+		return d.attempt(ctx, q, done)
+	}
+}
+
+// attempt runs q as the lane's one in-flight attempt and records its outcome.
+// The deferred release runs even if q panics, so callers waiting on done
+// are never left blocked.
+func (d *DiscoveredLane) attempt(ctx context.Context, q LaneQualifier, done chan struct{}) (err error) {
+	err = errLaneAttemptAborted
+	started := time.Now()
+	defer func() {
+		d.mu.Lock()
+		d.attempts++
+		if err == nil {
+			d.failures, d.err = 0, nil
+			d.passed = lanePass{base: d.base, line: d.line, qualifier: qualifierID(q), took: time.Since(started)}
 			d.ready.Store(true)
+		} else {
+			d.failures++
+			d.err = err
 		}
-	})
-	return d.err
+		d.inflight = nil
+		d.mu.Unlock()
+		close(done)
+	}()
+	// The attempt is routing's: a qualifier that records the lane's
+	// certificate (MON-R25) records it under the validator kind for the line.
+	err = q(endpointcert.WithTag(ctx, endpointcert.Lane(endpointcert.Validator, d.line)), d.base, d.line)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return err
+}
+
+// errLaneAttemptAborted is the outcome recorded for an attempt whose
+// qualifier did not return (it panicked).
+var errLaneAttemptAborted = errors.New("validator lane qualification aborted")
+
+// LaneBackoff is the schedule a validator lane's qualification retries on
+// after a failure: Base after the first failure, doubling with
+// each further one up to Max. Jitter spreads each wait over its upper half,
+// so gateways whose lanes failed together after one deploy do not retry
+// together; it returns a value in [0, 1). A nil Jitter waits the whole step.
+type LaneBackoff struct {
+	Base, Max time.Duration
+	Jitter    func() float64
+}
+
+// Default lane retry schedule: 15 s after the first failure, doubling to 5
+// minutes.
+const (
+	laneRetryBase = 15 * time.Second
+	laneRetryMax  = 5 * time.Minute
+)
+
+// DefaultLaneBackoff is the lane retry schedule with jitter from jitter.
+func DefaultLaneBackoff(jitter func() float64) LaneBackoff {
+	return LaneBackoff{Base: laneRetryBase, Max: laneRetryMax, Jitter: jitter}
+}
+
+// Wait is how long to wait after failures consecutive failures (at least 1),
+// on the gateway's shared schedule (internal/backoff). A Base or Max that is
+// not positive is the default's, so a zero LaneBackoff never retries in a
+// tight loop.
+func (b LaneBackoff) Wait(failures int) time.Duration {
+	if b.Base <= 0 {
+		b.Base = laneRetryBase
+	}
+	if b.Max <= 0 {
+		b.Max = laneRetryMax
+	}
+	return backoff.Exponential{Base: b.Base, Max: b.Max, Jitter: b.Jitter}.Wait(failures)
+}
+
+// LaneSchedule is how KeepQualifying retries: the backoff between attempts,
+// each attempt's own budget, and the clock it waits on (nil: time.After).
+// Changed, when set, is told the lane's state when it changes: at the first
+// failure of a run of failures, when the failure's reason changes, and when
+// the lane becomes ready, with the wait before the next attempt (0 when
+// ready). Attempted, when set, is told every attempt's outcome.
+type LaneSchedule struct {
+	Backoff   LaneBackoff
+	Budget    time.Duration
+	After     func(time.Duration) <-chan time.Time
+	Changed   func(state LaneState, next time.Duration)
+	Attempted func(ready bool)
+}
+
+// KeepQualifying qualifies the lane until an attempt passes or ctx ends.
+// Each attempt is bounded by s.Budget; between attempts it waits
+// s.Backoff.Wait for the failures so far. It returns nil once the lane is
+// ready, and otherwise ctx's error joined with the last attempt's.
+func (d *DiscoveredLane) KeepQualifying(ctx context.Context, q LaneQualifier, s LaneSchedule) error {
+	d.keeping.Add(1)
+	defer d.keeping.Add(-1)
+	after := s.After
+	if after == nil {
+		after = time.After
+	}
+	var lastReason error
+	for {
+		attemptCtx, cancel := ctx, context.CancelFunc(func() {})
+		if s.Budget > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, s.Budget)
+		}
+		err := d.Qualify(attemptCtx, q)
+		cancel()
+		if s.Attempted != nil && ctx.Err() == nil {
+			s.Attempted(err == nil)
+		}
+		state := d.State()
+		if err == nil {
+			if s.Changed != nil {
+				s.Changed(state, 0)
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return errors.Join(ctx.Err(), err)
+		}
+		wait := s.Backoff.Wait(state.Failures)
+		if s.Changed != nil && (state.Failures == 1 || !sameFailure(lastReason, err)) {
+			s.Changed(state, wait)
+		}
+		lastReason = err
+		select {
+		case <-ctx.Done():
+			return errors.Join(ctx.Err(), err)
+		case <-after(wait):
+		}
+	}
+}
+
+// sameFailure reports whether two attempts failed for the same kind of
+// reason, so a lane that keeps failing the same way logs once.
+func sameFailure(a, b error) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return lanequalify.FailureReason(a) == lanequalify.FailureReason(b)
 }
 
 func (d *DiscoveredLane) Validate(ctx context.Context, body []byte, profile string) (shnsdk.Result, error) {
@@ -72,7 +312,16 @@ func (d *DiscoveredLane) Validate(ctx context.Context, body []byte, profile stri
 // still-warming answers. Metadata availability never grants lane readiness. It
 // is a LaneQualifier.
 func QualifyValidatorLane(ctx context.Context, base, line string) error {
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return QualifyValidatorLaneWith(ctx, &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, base, line)
+}
+
+// QualifyValidatorLaneWith is QualifyValidatorLane with client for its
+// metadata reads. The client must follow no redirect; a gateway passes one
+// with the lane's endpoint kind on its transport, so each qualification
+// records the lane's certificate (MON-R25). The corpus that follows is
+// posted by lanequalify.Warm, whose orchestrator is the Kit's byte for byte,
+// to the base that read was just made to.
+func QualifyValidatorLaneWith(ctx context.Context, client *http.Client, base, line string) error {
 	defer client.CloseIdleConnections()
 	// The last metadata attempt's outcome, so a lane that never answers fails
 	// naming why (its name does not resolve, it refuses), not only that time ran out.
@@ -242,7 +491,7 @@ func (g *Gateway) servesLine(contract, line string) bool {
 	if g.validatorForContractLine(contract, line) != nil {
 		return true
 	}
-	return !payloadChecksConsumeLanes(g.cfg.ConformanceEnforcement) && contractLineSet(g.declaredContractVersions(), contract)[line]
+	return !payloadChecksConsumeLanes(g.conformance().Level()) && contractLineSet(g.declaredContractVersions(), contract)[line]
 }
 
 // payloadChecksConsumeLanes reports whether this gateway's payload conformance

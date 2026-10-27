@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -43,7 +45,7 @@ func relayCase(t *testing.T, leg, hook string, contentType string, answer []byte
 	t.Helper()
 	p := newCDSPayer(t, referencePayerServices...)
 	p.respond(http.StatusOK, contentType, answer)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 	req := cdsRequest(hook)
 	res, err := n.Handle(context.Background(), leg, "corr", "pci", req)
 	if err != nil {
@@ -89,7 +91,7 @@ func TestNativeCRD_OrderSelectRelaysPayerBytes(t *testing.T) {
 	t.Run("an answer without a media type is relayed as the JSON the payer sent", func(t *testing.T) {
 		p := newCDSPayer(t, referencePayerServices...)
 		p.respond(http.StatusOK, "", realCRDAnswer(t))
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 		res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
 		if err != nil || res.Status != 0 || !bytes.Equal(relay.BytesForTest(res.Response), realCRDAnswer(t)) {
 			t.Fatalf("got %v %+v", err, res)
@@ -102,7 +104,7 @@ func TestNativeCRD_OrderSelectRelaysPayerBytes(t *testing.T) {
 		body := []byte(`{"error":"Mismatched hook"}`)
 		p := newCDSPayer(t, referencePayerServices...)
 		p.respond(http.StatusBadRequest, "application/json", body)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 		res, err := n.Handle(context.Background(), "crd-order-select", "c", "pci", cdsRequest("order-sign"))
 		if err != nil || res.Status != http.StatusBadRequest || !bytes.Equal(relay.BytesForTest(res.Response), body) || res.Response.ContentType() != "application/json" {
 			t.Fatalf("got %v %d %q %q", err, res.Status, relay.BytesForTest(res.Response), res.Response.ContentType())
@@ -262,7 +264,7 @@ func TestNativeCRD_HookNeverRewritten(t *testing.T) {
 	for _, hook := range []string{"order-select", "order-sign", "order-dispatch"} {
 		t.Run(hook, func(t *testing.T) {
 			p := newCDSPayer(t, referencePayerServices...)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 			// The EHR's own layout, with the hook last.
 			req := []byte("{ \"hookInstance\" : \"h\", \"context\" : { \"patientId\" : \"p1\" },\n  \"hook\" : \"" + hook + "\" }")
 			if res, err := n.Handle(context.Background(), legFor(hook), "c", "pci", req); err != nil || res.Status != 0 {
@@ -278,7 +280,7 @@ func TestNativeCRD_HookNeverRewritten(t *testing.T) {
 		own := shnsdk.PayerIdentifier{System: "urn:shn:payer", Value: "OWN"}
 		backend := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00001"}
 		p := newCDSPayer(t, referencePayerServices...)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithPayorEdgeIdentity(own, backend))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithPayorEdgeIdentity(own, backend))
 		for _, hook := range []string{"order-sign", "order-dispatch"} {
 			req := []byte(`{"hook":"` + hook + `","context":{"patientId":"p1"},"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1","payor":[{"identifier":{"system":"urn:shn:payer","value":"OWN"}}]}}}`)
 			if res, err := n.Handle(context.Background(), legFor(hook), "c", "pci", req); err != nil || res.Status != 0 {
@@ -341,7 +343,7 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 			t.Run(tail.leg+"/"+verdict.name, func(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
 				p := newCDSPayer(t, referencePayerServices...)
-				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 				// The clock moves only while the embedded order is validated,
 				// so its event carries exactly that call's time.
 				clock := &testClock{now: time.Date(2026, 10, 7, 14, 0, 0, 0, time.UTC)}
@@ -409,7 +411,7 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 		g, requester := newInboundTestGateway(t, true)
 		p := newCDSPayer(t, referencePayerServices...)
 		p.respond(http.StatusOK, "application/json", []byte(withCard(`{"summary":"s","indicator":"info"}`)))
-		g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+		g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 		calls := 0
 		g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
 			calls++
@@ -443,7 +445,7 @@ func TestNativeCRD_EmbeddedValidationOnlyWhereChecksRun(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
 				g.cfg.ConformanceEnforcement = level
 				p := newCDSPayer(t, referencePayerServices...)
-				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil, WithConformancePolicy(NewConformancePolicy(level)))
+				g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithConformancePolicy(NewConformancePolicy(level)))
 				var mu sync.Mutex
 				embeddedCalls, calls := 0, 0
 				g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {
@@ -658,7 +660,7 @@ func TestNewBindsFindingEmitterToNativeResponder(t *testing.T) {
 	_, paySignPriv := genED25519(t)
 	payEncPub, payEncPriv := genKeyPair(t)
 	sor := newCensusSoR()
-	n := NewNativeResponder(&http.Client{}, "http://payer-backend.test", "", nil, nil)
+	n := NewNativeResponder(&http.Client{}, "http://payer-backend.test", nil)
 	mustNew(t, Config{
 		Role:            "payer",
 		HolderID:        "payer",
@@ -698,8 +700,7 @@ func TestForwardCRD_RelaysBelowStrict(t *testing.T) {
 			_, paySignPriv := genED25519(t)
 			payEncPub, payEncPriv := genKeyPair(t)
 			sor := newCensusSoR()
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil,
-				WithConformancePolicy(NewConformancePolicy(level)))
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithConformancePolicy(NewConformancePolicy(level)))
 			gw := mustNew(t, Config{
 				Role:            "payer",
 				HolderID:        "payer",

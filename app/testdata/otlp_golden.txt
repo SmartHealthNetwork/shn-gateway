@@ -1,0 +1,159 @@
+resource
+  deployment.environment.name=golden
+  service.instance.id=98f3f6d4-01aa-594c-b56b-4030d2f17cbb
+  service.name=golden-gw
+  service.version=v1.0.0-golden
+  shn.holder_id=h-golden-own
+  shn.role=payer
+scope github.com/SmartHealthNetwork/shn-gateway/telemetry v1.0.0-golden
+  http.server.request.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {error.type=502,http.request.method=POST,http.response.status_code=502,http.route=/Claim/$submit,network.protocol.version=1.1,url.scheme=http} count=1 sum=0.25 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0]
+    {http.request.method=GET,http.response.status_code=404,network.protocol.version=1.1,url.scheme=http} count=1 sum=0.25 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0]
+  shn.gateway.active_requests unit="{request}" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound} 1
+    {shn.direction=ingress} 1
+  shn.gateway.audit.appends unit="{record}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {} 1
+  shn.gateway.audit.drops unit="{record}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.reason=conflict} 5
+    {shn.reason=invalid} 2
+    {shn.reason=overflow} 1
+    {shn.reason=refused} 4
+    {shn.reason=stopped} 6
+    {shn.reason=store} 3
+  shn.gateway.audit.endpoint.unknown unit="{record}" gauge
+    {} 5
+  shn.gateway.audit.queue.depth unit="{record}" gauge
+    {} 7
+  shn.gateway.audit.retries unit="{record}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.reason=store} 1
+    {shn.reason=unavailable} 1
+    {shn.reason=unknown-sender} 1
+    {shn.reason=unreachable} 1
+  shn.gateway.authorization.token.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {} count=5 sum=1.7999999999999998 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 2 2 1 0 0 0 0 0 0 0 0 0]
+  shn.gateway.authorization.tokens unit="{token}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.outcome=denied} 1
+    {shn.outcome=failed} 1
+    {shn.outcome=ok} 1
+    {shn.outcome=other} 1
+    {shn.outcome=unavailable} 1
+  shn.gateway.backend.calls unit="{call}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.backend.class=cancelled,shn.exchange=pas-claim} 1
+    {shn.backend.class=http-4xx,shn.exchange=dtr-questionnaire-fetch} 1
+    {shn.backend.class=http-5xx,shn.exchange=crd-order-select} 1
+    {shn.backend.class=ok,shn.exchange=pas-claim} 1
+    {shn.backend.class=other,shn.exchange=coverage-eligibility} 1
+    {shn.backend.class=other,shn.exchange=other} 1
+    {shn.backend.class=timeout,shn.exchange=crd-order-select} 1
+  shn.gateway.backend.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.exchange=crd-order-select} count=2 sum=30.08 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 1 0 0 0 0 0 0 0 0 0 1 0 0]
+    {shn.exchange=dtr-questionnaire-fetch} count=1 sum=0.04 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.exchange=other} count=1 sum=0.001 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.exchange=pas-claim} count=2 sum=29.9 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 0 1 0 0 0 0 0 0 1 0 0]
+  shn.gateway.certificate.expiry unit="s" gauge
+    {shn.cert.role=self,shn.endpoint.kind=ingress,shn.ig_line=none} 5.184e+06
+    {shn.cert.role=server,shn.endpoint.kind=hub,shn.ig_line=none} 7.776e+06
+    {shn.cert.role=server,shn.endpoint.kind=validator,shn.ig_line=2.2} 1.728e+06
+    {shn.cert.role=trust-root,shn.endpoint.kind=trust-root,shn.ig_line=none} 432000
+  shn.gateway.conformance.checks.dropped unit="{check}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {} 1
+  shn.gateway.conformance.findings unit="{finding}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.conformance.level=observe,shn.exchange=pas-claim,shn.finding.action=relayed,shn.finding.kind=fhir-ingress,shn.finding.tolerated=false} 1
+    {shn.conformance.level=other,shn.exchange=other,shn.finding.action=other,shn.finding.kind=other,shn.finding.tolerated=false} 1
+    {shn.conformance.level=strict,shn.exchange=crd-order-select,shn.finding.action=refused,shn.finding.kind=cds-envelope,shn.finding.tolerated=false} 1
+    {shn.conformance.level=strict,shn.exchange=pas-claim,shn.finding.action=relayed,shn.finding.kind=fhir-ingress,shn.finding.tolerated=true} 1
+  shn.gateway.dependency.age unit="s" gauge
+    {shn.dependency=registrar-feed} 42
+  shn.gateway.exchange.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=coverage-eligibility} count=1 sum=0 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=crd-order-select} count=3 sum=55.007 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 1 0 0 0 0 0 0 0 0 0 0 0 1 1 0 0]
+    {shn.direction=inbound,shn.exchange=dtr-questionnaire-fetch} count=1 sum=0 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim} count=2 sum=30.5 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0 0]
+    {shn.direction=ingress,shn.exchange=pas-claim} count=2 sum=2.348678 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0]
+    {shn.direction=other,shn.exchange=other} count=1 sum=0 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+  shn.gateway.exchange.request.size unit="By" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=pas-claim} count=1 sum=4096 bounds=[1024 4096 16384 65536 262144 1.048576e+06 4.194304e+06 1.6777216e+07 6.7108864e+07] buckets=[0 1 0 0 0 0 0 0 0 0]
+    {shn.direction=ingress,shn.exchange=pas-claim} count=1 sum=3000 bounds=[1024 4096 16384 65536 262144 1.048576e+06 4.194304e+06 1.6777216e+07 6.7108864e+07] buckets=[0 1 0 0 0 0 0 0 0 0]
+  shn.gateway.exchange.response.size unit="By" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=pas-claim} count=1 sum=70000 bounds=[1024 4096 16384 65536 262144 1.048576e+06 4.194304e+06 1.6777216e+07 6.7108864e+07] buckets=[0 0 0 0 1 0 0 0 0 0]
+    {shn.direction=ingress,shn.exchange=pas-claim} count=1 sum=65536 bounds=[1024 4096 16384 65536 262144 1.048576e+06 4.194304e+06 1.6777216e+07 6.7108864e+07] buckets=[0 0 0 1 0 0 0 0 0 0]
+  shn.gateway.exchange.stage.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=forward} count=1 sum=0.9 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=reads} count=1 sum=0.1 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=rest} count=1 sum=0.15 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=seal} count=1 sum=0.3 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=unwrap} count=1 sum=0.02 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.stage=write} count=1 sum=0.03 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.stage=network} count=1 sum=2 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0]
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.stage=self} count=2 sum=0.348678 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0]
+  shn.gateway.exchanges unit="{exchange}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=coverage-eligibility,shn.outcome=upstream-error} 1
+    {shn.direction=inbound,shn.exchange=crd-order-select,shn.outcome=other} 1
+    {shn.direction=inbound,shn.exchange=crd-order-select,shn.outcome=refused} 1
+    {shn.direction=inbound,shn.exchange=crd-order-select,shn.outcome=upstream-error} 1
+    {shn.direction=inbound,shn.exchange=dtr-questionnaire-fetch,shn.outcome=upstream-error} 1
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.outcome=answered} 1
+    {shn.direction=inbound,shn.exchange=pas-claim,shn.outcome=other} 1
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.outcome=answered} 1
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.outcome=refused} 1
+    {shn.direction=other,shn.exchange=other,shn.outcome=other} 1
+  shn.gateway.info unit="" gauge
+    {shn.conformance.level=observe,shn.ig_line=2.1,shn.wire_protocol=2.0.0} 1
+    {shn.conformance.level=observe,shn.ig_line=2.2,shn.wire_protocol=2.0.0} 1
+  shn.gateway.ingress_key.age unit="s" gauge
+    {} 75600
+  shn.gateway.ingress_key.remaining unit="s" gauge
+    {} 10800
+  shn.gateway.involved.omitted unit="{patient}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.reason=authorization-failed} 1
+    {shn.reason=authorization-refused} 1
+    {shn.reason=budget} 1
+    {shn.reason=involvement-not-carried} 1
+    {shn.reason=overflow} 1
+    {shn.reason=system-of-record-unavailable} 1
+    {shn.reason=unknown-member} 1
+  shn.gateway.legs unit="{leg}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.outcome=answered} 1
+    {shn.outcome=denied} 1
+    {shn.outcome=failed} 1
+    {shn.outcome=routed} 1
+    {shn.outcome=unreachable} 1
+  shn.gateway.peers.known unit="{peer}" gauge
+    {} 3
+  shn.gateway.refusals unit="{refusal}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.direction=inbound,shn.exchange=crd-order-select,shn.refusal.by=payer-gateway,shn.refusal.rule=consent} 1
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.refusal.by=provider-gateway,shn.refusal.rule=authentication} 1
+  shn.gateway.store.errors unit="{error}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.store=exchange} 1
+    {shn.store=ingresskey} 1
+    {shn.store=pended} 1
+    {shn.store=replay} 1
+  shn.gateway.store.pool.connections unit="{connection}" gauge
+    {shn.pool.state=acquired} 3
+    {shn.pool.state=idle} 4
+    {shn.pool.state=total} 7
+  shn.gateway.store.pool.empty_acquires unit="{acquire}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {} 11
+  shn.gateway.validator.duration unit="s" histogram AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.ig_line=2.1,shn.lane=certification} count=1 sum=2 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0]
+    {shn.ig_line=2.2,shn.lane=routing} count=1 sum=0.12 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0]
+    {shn.ig_line=other,shn.lane=other} count=1 sum=0.001 bounds=[0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 15 20 25 30 60] buckets=[1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+  shn.gateway.validator.lane.attempts unit="{attempt}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.ig_line=2.1,shn.lane=routing,shn.outcome=ready} 1
+    {shn.ig_line=2.2,shn.lane=routing,shn.outcome=failed} 1
+  shn.gateway.validator.lane.qualified unit="" gauge
+    {shn.ig_line=2.0,shn.lane=routing} 1
+    {shn.ig_line=2.2,shn.lane=certification} 1
+    {shn.ig_line=2.2,shn.lane=routing} 0
+scope github.com/SmartHealthNetwork/shn-gateway/telemetry/otelsetup/process v1.0.0-golden
+  process.cpu.time unit="s" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+  process.uptime unit="s" gauge
+scope go.opentelemetry.io/contrib/instrumentation/runtime 0.72.0
+  go.config.gogc unit="%" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.goroutine.count unit="{goroutine}" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.memory.allocated unit="By" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.memory.allocations unit="{allocation}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.memory.gc.goal unit="By" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.memory.used unit="By" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE
+  go.processor.limit unit="{thread}" sum monotonic=false AGGREGATION_TEMPORALITY_CUMULATIVE

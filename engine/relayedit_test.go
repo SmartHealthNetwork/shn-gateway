@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -6,6 +8,20 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
+
+// relayEditKind is the one kind of change a registered edit makes
+// (relay.EditKind).
+type relayEditKind = relay.EditKind
+
+// relayEditByID returns the registered edit with the given id.
+func relayEditByID(id relay.EditID) (relayEdit, bool) {
+	for _, e := range relayEdits {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return relayEdit{}, false
+}
 
 // TestRelayEditRegistryPinned holds the edit registry's content: ids,
 // names, transmits, paths and kinds. Any change is a reviewed diff here.

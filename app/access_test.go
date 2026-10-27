@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -152,6 +154,20 @@ func TestAccessLineFor(t *testing.T) {
 	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"stages"`)) || bytes.Contains(b, []byte(`"answerError"`)) {
 		t.Fatalf("an ingress call rendered stages or an answer error: %s %v", b, err)
 	}
+
+	// An ingress call's wait on the network renders as network.latencyMs, in
+	// whole milliseconds, with the requests it counts (MON-R22); a call that
+	// handed nothing to the transport for the Hub holds no network key (the
+	// golden above).
+	waited := refusedRecord()
+	waited.Network = &engine.NetworkWait{Latency: 42*time.Millisecond + 900*time.Microsecond, Calls: 1}
+	b, err = json.Marshal(accessLineFor(waited))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantWaited := strings.Replace(want, `"findings":`, `"network":{"latencyMs":42,"calls":1},"findings":`, 1); string(b) != wantWaited {
+		t.Fatalf("access line with the network stage\n got %s\nwant %s", b, wantWaited)
+	}
 }
 
 // The line is always written; with capture configured the same JSON is
@@ -226,7 +242,7 @@ func TestBuild_WritesAnAccessLinePerExchange(t *testing.T) {
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	// The payer's own system, never called by this refusal.
@@ -290,7 +306,7 @@ func buildPayerAt(t *testing.T, payerSystem string, extra map[string]string) (bu
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	t.Cleanup(keys.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
 	env := map[string]string{

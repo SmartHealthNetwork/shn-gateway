@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/inbound_test.go — coverage-eligibility is the promoted,
 // Coverage-derived engine handler. handleEligibilityInbound answers directly
 // off the member's own Coverage (SoR.CoverageInforce + SoR.OpenCoverage's payor) and

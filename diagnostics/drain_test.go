@@ -101,3 +101,11 @@ func TestNoDrainStopsAtOnce(t *testing.T) {
 		t.Fatalf("health %+v, %d batches, %d heartbeats", h, len(f.batches), beats)
 	}
 }
+
+// TestLastHeartbeatWaitIsTheDocumentedBound: the heartbeat after the drain
+// waits up to 1 second, the figure the gateway's stop budget documents.
+func TestLastHeartbeatWaitIsTheDocumentedBound(t *testing.T) {
+	if lastHeartbeatWait != time.Second {
+		t.Fatalf("lastHeartbeatWait = %s, documented as 1 second", lastHeartbeatWait)
+	}
+}

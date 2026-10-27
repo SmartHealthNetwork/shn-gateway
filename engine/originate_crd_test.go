@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -66,7 +68,7 @@ func (p *originPayer) RoundTrip(req *http.Request) (*http.Response, error) {
 	if strings.HasSuffix(req.URL.Path, "/authorize") {
 		return stub.handleAuthorize(body)
 	}
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("decode: " + err.Error()), nil
 	}
@@ -117,15 +119,14 @@ func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populat
 		SoR:                sor,
 		Store:              newCensusSoR(),
 		Clock:              clock,
-		NPI:                "1234567890",
+		NPI:                "1234567893",
 		OriginationProfile: profile,
-		Populator:          pop,
 		CorrelationGen: func() string {
 			n++
 			return strings.Repeat("0", 31) + string(rune('0'+n%10))
 		},
 		Client: &http.Client{Transport: payer},
-	})
+	}, WithPopulator(pop))
 	return g, payer
 }
 
@@ -379,7 +380,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 		})
 		g.runCRDThenDTROrder(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
 		sent := decodeSent(t, payer.sent("crd-order-select")[0])
-		if sent.Hook != "order-sign" || sent.Context.Selections != nil || sent.Context.UserID != "Practitioner/1234567890" {
+		if sent.Hook != "order-sign" || sent.Context.Selections != nil || sent.Context.UserID != "Practitioner/1234567893" {
 			t.Fatalf("hook %q selections %v user %q", sent.Hook, sent.Context.Selections, sent.Context.UserID)
 		}
 	})

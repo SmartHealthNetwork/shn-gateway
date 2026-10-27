@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -66,7 +68,7 @@ func (f *legFault) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		req.Body = io.NopCloser(bytes.NewReader(body))
-		if env, err := shnsdk.DecodeEnvelope(body); err == nil && env.Metadata.TransactionType == f.leg {
+		if env, err := hubDecodeEnvelope(body); err == nil && env.Metadata.TransactionType == f.leg {
 			f.mu.Lock()
 			f.hits++
 			f.mu.Unlock()
@@ -127,7 +129,7 @@ var legSiteRows = []legSiteRow{
 	}},
 	{"module1_originate.go:handleUC08", "pas-claim", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		gw, stub, _ := crdTestSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredNotCovered, PANeeded: shnsdk.PANeededNoAuth})
-		gw.cfg.OriginationProfile = "demo"
+		declareOriginationProfile(gw, "demo")
 		stub.pci = shnsdk.ResolvePCI("MBR-D-UC08", "1968-12-21", "Adeyemi")
 		stub.pasDenialRationale = "not medically necessary"
 		stub.pasLine = highestLine(contractLineSet(gw.declaredContractVersions(), "pa.pas"))
@@ -137,7 +139,7 @@ var legSiteRows = []legSiteRow{
 	}},
 	{"module1_originate.go:originateNoPACRD", "crd-order-select", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		env := newInProcessExchange(t)
-		env.originator.cfg.OriginationProfile = "demo"
+		declareOriginationProfile(env.originator, "demo")
 		f := fail(env.originator)
 		env.originator.handleUC02(rec, post(env.originator, "/scenario/uc02", ""))
 		return f
@@ -157,7 +159,7 @@ var legSiteRows = []legSiteRow{
 		gw, _ := uc06Fixture(t)
 		st := pendFor(t, gw, "uc06", "MBR-UC06")
 		f := fail(gw)
-		if gw.completeClinician(rec, post(gw, "/scenario/uc06/complete", ""), st, "", "") {
+		if gw.completeClinician(rec, post(gw, "/scenario/uc06/complete", ""), st, "42") {
 			t.Fatal("the resume completed with its pas-claim-update leg refused")
 		}
 		return f
@@ -230,7 +232,7 @@ func uc07Row(leg string) legSiteRow {
 			pendedItem: "patient-reported-functional-status", extraRoles: map[string]string{"phg": "phg"}})
 		st := pendFor(t, gw, "uc07", "MBR-UC07")
 		f := fail(gw)
-		if gw.completePatient(rec, post(gw, "/scenario/uc07/complete", ""), st, "") {
+		if gw.completePatient(rec, post(gw, "/scenario/uc07/complete", ""), st, "42") {
 			t.Fatalf("the resume completed with its %s leg refused", leg)
 		}
 		return f

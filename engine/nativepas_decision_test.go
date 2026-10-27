@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // nativepas_decision_test.go — the payer's own ClaimResponse decisions the
@@ -122,7 +124,7 @@ func TestNativeSubmit_DenialStatingAnAuthorizationNumberIsRelayed(t *testing.T) 
 		t.Run(reviewAction, func(t *testing.T) {
 			body := fixturePASResponse(t, withPreAuthRef(deniedClaimResponse(reviewActionExt(reviewAction, "Not Certified", "", ""), nil), "PA-PARTIAL"), true)
 			srv := stubPartnerSrv(t, http.StatusOK, body)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 			ctx, leg := withPASLeg(context.Background(), "provider")
 			res, err := n.Handle(ctx, "pas-claim", "corr-decision", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
 			if err != nil || res.Status != 0 || !bytes.Equal(responseBytes(res), body) {

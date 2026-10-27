@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/frame_originate_test.go
 //
 // Opaque-payload message frame: the engine originator

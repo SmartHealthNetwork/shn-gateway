@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -59,15 +61,20 @@ func newBootPlanes(t *testing.T, disc, authz, hub []int) *bootPlanes {
 	p.authz = serve(&p.authzTries, authz, key(p.authzPub))
 	p.hub = serve(&p.hubTries, hub, key(p.hubPub))
 	p.disc = serve(&p.discTries, disc, func() string {
-		return fmt.Sprintf(`{"endpoints":{"hub":"http://hub.invalid"},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, p.authz.URL, p.hub.URL)
+		return fmt.Sprintf(`{`+acceptingWire+`"endpoints":{"hub":"http://hub.invalid"},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, p.authz.URL, p.hub.URL)
 	})
 	return p
+}
+
+// oneDiscoveryClient is c for the discovery document and both keys.
+func oneDiscoveryClient(c *http.Client) discoveryClients {
+	return discoveryClients{doc: c, authzKey: c, hubKey: c}
 }
 
 var shortWaits = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 
 func (p *bootPlanes) resolve(c *http.Client, waits []time.Duration, budget time.Duration) (trustAnchors, resolvedEndpoints, error) {
-	return resolveDiscoveryWaiting(context.Background(), bootClient(c, waits, budget), config{DiscoveryURL: p.disc.URL})
+	return resolveDiscoveryWaiting(context.Background(), oneDiscoveryClient(bootClient(c, waits, budget)), config{DiscoveryURL: p.disc.URL})
 }
 
 // A gateway that boots while a plane rolls to a new task waits for it: each
@@ -131,7 +138,7 @@ func TestResolveDiscoveryWaitsForItsFetches(t *testing.T) {
 		}
 		p.discTries.Add(1)
 		// The document in two parts, the second after the headers were read.
-		_, _ = w.Write([]byte(`{"endpoints":{"hub":"http://hub.invalid"},`))
+		_, _ = w.Write([]byte(`{` + acceptingWire + `"endpoints":{"hub":"http://hub.invalid"},`))
 		w.(http.Flusher).Flush()
 		time.Sleep(50 * time.Millisecond)
 		fmt.Fprintf(w, `"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, p.authz.URL, p.hub.URL)
@@ -206,7 +213,7 @@ func TestBootFetchesWaitWithinBounds(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		began := time.Now()
-		_, _, err := resolveDiscoveryWaiting(ctx, bootClient(&http.Client{Timeout: 500 * time.Millisecond}, shortWaits, time.Minute), config{DiscoveryURL: p.disc.URL})
+		_, _, err := resolveDiscoveryWaiting(ctx, oneDiscoveryClient(bootClient(&http.Client{Timeout: 500 * time.Millisecond}, shortWaits, time.Minute)), config{DiscoveryURL: p.disc.URL})
 		if err == nil || p.authzTries.Load() != 1 || time.Since(began) > 5*time.Second {
 			t.Fatalf("%v after %d fetches, %s", err, p.authzTries.Load(), time.Since(began))
 		}
@@ -224,7 +231,10 @@ func TestBootFetchesWaitWithinBounds(t *testing.T) {
 			cancel()
 		}()
 		done := make(chan error, 1)
-		go func() { _, _, err := resolveDiscoveryWaiting(ctx, hc, config{DiscoveryURL: p.disc.URL}); done <- err }()
+		go func() {
+			_, _, err := resolveDiscoveryWaiting(ctx, oneDiscoveryClient(hc), config{DiscoveryURL: p.disc.URL})
+			done <- err
+		}()
 		select {
 		case err := <-done:
 			if !errors.Is(err, context.Canceled) || p.discTries.Load() != 1 {

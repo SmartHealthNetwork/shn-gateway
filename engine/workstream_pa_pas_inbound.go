@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pas_inbound.go — the CONFORMANT PAS leg (pas-claim): a relaxed full-bundle subject-bind +
 // the payer-side inbound handler for a conformant Da Vinci $submit Claim Bundle (Claim +
 // Patient + Coverage + payor Org + Practitioner + ServiceRequest [+ QuestionnaireResponse], in any

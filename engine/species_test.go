@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -33,7 +35,7 @@ func TestCertificationSeam_ReachesTheWorkstreamThatCertifies(t *testing.T) {
 			t.Errorf("%s: %v %v, want the PA adapter's %v %v", contract, order, claimed, wantOrder, wantClaimed)
 		}
 	}
-	if !reflect.DeepEqual(wantOrder, []string{"2.0", "2.2", "2.1"}) || !wantClaimed["2.0"] || len(wantClaimed) != 1 {
+	if !reflect.DeepEqual(wantOrder, []string{"2.0", "2.2", "2.1"}) || !reflect.DeepEqual(wantClaimed, []claimSet{{"2.0"}}) {
 		t.Fatalf("the PA adapter orders a 2.0 Claim %v claiming %v", wantOrder, wantClaimed)
 	}
 	for _, contract := range []string{"", "fqs", "toy.echo", "pa.unknown"} {

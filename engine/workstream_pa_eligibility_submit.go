@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // workstream_pa_eligibility_submit.go — the input of CoverageEligibilityRequest/$submit,

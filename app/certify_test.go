@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -24,9 +26,20 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
+// certValidators is certificationValidators for a test whose configuration must
+// build: an error fails the test.
+func certValidators(t testing.TB, getenv func(string) string, cfg config, canonical string, defaults map[string]*engine.DiscoveredLane, qualify engine.LaneQualifier) map[string]shnsdk.Validator {
+	t.Helper()
+	v, err := certificationValidators(getenv, cfg, canonical, defaults, qualify)
+	if err != nil {
+		t.Fatalf("certificationValidators: %v", err)
+	}
+	return v
+}
+
 func TestCertificationClientsAreIndependent(t *testing.T) {
 	cfg := config{FHIRValidateURL21: "http://configured21/fhir"}
-	clients := certificationValidators(env(nil), cfg, "http://canonical/fhir", nil, nil)
+	clients := certValidators(t, env(nil), cfg, "http://canonical/fhir", nil, nil)
 	defer engine.CloseCertificationClients(clients)
 	// No lane is invented: 2.2 has neither a configured lane nor a default, so it
 	// has no client and the collector records it as unavailable.
@@ -42,7 +55,7 @@ func TestCertificationClientsAreIndependent(t *testing.T) {
 	if !ok || gated.Endpoint() != "http://configured21/fhir" {
 		t.Fatalf("2.1: %#v, want the configured lane gated on its own qualification", clients["2.1"])
 	}
-	fake := certificationValidators(env(map[string]string{"SHN_FAKE_VALIDATOR": "1"}), cfg, "", nil, nil)
+	fake := certValidators(t, env(map[string]string{"SHN_FAKE_VALIDATOR": "1"}), cfg, "", nil, nil)
 	for _, v := range fake {
 		if _, ok := v.(*engine.LineFakeValidator); !ok {
 			t.Fatal("fake mode used network")
@@ -57,7 +70,7 @@ func TestCertificationClientsAreIndependent(t *testing.T) {
 // it (the engine rows in versionroute_test pin that side).
 func TestCertifyURLPrecedesLaneAndNeverLanesRouting(t *testing.T) {
 	cfg := config{FHIRValidateURL: "http://v/fhir", FHIRValidateURL21: "http://lane21/fhir", FHIRCertifyURL21: "http://certify21/fhir", FHIRCertifyURL22: "http://certify22/fhir"}
-	clients := certificationValidators(env(nil), cfg, "http://v/fhir", nil, nil)
+	clients := certValidators(t, env(nil), cfg, "http://v/fhir", nil, nil)
 	defer engine.CloseCertificationClients(clients)
 	for line, want := range map[string]string{"2.1": "http://certify21/fhir", "2.2": "http://certify22/fhir"} {
 		v, ok := clients[line].(*engine.GatedCertificationValidator)
@@ -136,7 +149,7 @@ func buildForCertification(t *testing.T, extra map[string]string) built {
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	defer keys.Close()
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	defer disc.Close()
 	dir := t.TempDir()
@@ -195,10 +208,11 @@ func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
 
 // build asks for the boot certification warm-up exactly when certification
 // evidence is collected: at every level but none, where no certification
-// worker starts and nothing would use a warmed validator.
+// worker starts and nothing would use a warmed validator. An unset level is
+// none (D116).
 func TestBuildWarmsCertificationOnlyWhenItRuns(t *testing.T) {
 	unresolvedComposeLanes(t)
-	for level, want := range map[string]bool{"": true, "observe": true, "structural": true, "strict": true, "none": false} {
+	for level, want := range map[string]bool{"": false, "observe": true, "structural": true, "strict": true, "none": false} {
 		b := buildForCertification(t, map[string]string{"CONFORMANCE_ENFORCEMENT": level})
 		if b.warmCertification != want {
 			t.Errorf("CONFORMANCE_ENFORCEMENT=%q: warmCertification %v, want %v", level, b.warmCertification, want)
@@ -226,11 +240,18 @@ func TestCertificationDefaultLaneGatedOnQualification(t *testing.T) {
 	}))
 	defer upstream.Close()
 	lane := engine.NewDiscoveredLane("2.2", upstream.URL+"/fhir", shnsdk.NewOperationValidator(upstream.URL+"/fhir"))
-	// A qualifier that never succeeds on its own: this row is about routing's
-	// qualification gating the client, and the exact reason text the
-	// configuration reference promises.
-	never := func(context.Context, string, string) error { return errors.New("not yet") }
-	clients := certificationValidators(env(nil), config{}, "http://canonical/fhir", map[string]*engine.DiscoveredLane{"2.2": lane}, never)
+	// One qualifier, routing's and the client's, as the gateway wires them: it
+	// fails until routing's attempt below, so the client never passes on its own.
+	// The row is about routing's qualification gating the client, and the exact
+	// reason text the configuration reference promises.
+	var routingTurn atomic.Bool
+	never := func(context.Context, string, string) error {
+		if routingTurn.Load() {
+			return nil
+		}
+		return errors.New("not yet")
+	}
+	clients := certValidators(t, env(nil), config{}, "http://canonical/fhir", map[string]*engine.DiscoveredLane{"2.2": lane}, never)
 	gated, ok := clients["2.2"].(*engine.GatedCertificationValidator)
 	if !ok {
 		t.Fatalf("2.2 client = %#v, want the gated default", clients["2.2"])
@@ -250,7 +271,8 @@ func TestCertificationDefaultLaneGatedOnQualification(t *testing.T) {
 		t.Fatal("an unqualified default lane was dialed")
 	}
 
-	if err := lane.Qualify(context.Background(), func(context.Context, string, string) error { return nil }); err != nil {
+	routingTurn.Store(true)
+	if err := lane.Qualify(context.Background(), never); err != nil {
 		t.Fatal(err)
 	}
 	res, err := gated.Validate(context.Background(), []byte(`{"resourceType":"Claim"}`), "profile")
@@ -301,7 +323,7 @@ func TestCertificationAddressGatedOnItsOwnQualification(t *testing.T) {
 		}
 		return qualifyDefaultLane(ctx, base, line)
 	}
-	clients := certificationValidators(env(nil), config{FHIRValidateURL22: lane.URL + "/fhir"}, "http://canonical/fhir", nil, qualify)
+	clients := certValidators(t, env(nil), config{FHIRValidateURL22: lane.URL + "/fhir"}, "http://canonical/fhir", nil, qualify)
 	defer engine.CloseCertificationClients(clients)
 	gated, ok := clients["2.2"].(*engine.GatedCertificationValidator)
 	if !ok {

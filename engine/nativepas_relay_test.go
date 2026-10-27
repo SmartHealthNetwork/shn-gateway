@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // nativepas_relay_test.go — the PAS submit and update legs relay the payer's own
 // decision.
 //
@@ -158,7 +160,7 @@ func deviceRequestSubmitBundle(t *testing.T) []byte {
 // the engine verified, so the ledger keys land in that requester's namespace.
 func relayResponder(t *testing.T, srv *httptest.Server, store Store) (*nativeResponder, context.Context) {
 	t.Helper()
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", store, fixedClock)
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(store))
 	ctx, _ := withPASLeg(context.Background(), relayRequester)
 	return n, ctx
 }
@@ -369,7 +371,7 @@ func TestNoInfoChangedInjectedOnFreshSubmit(t *testing.T) {
 				built, err := buildPASSubmitBundle("2.0", brPayer, row.order, nil,
 					testRequestingProvider(), testMemberCoverage("MBR-COVERED"), testPayerOrganization(shnsdk.CMSPayerIdentity),
 					shnsdk.MemberSystem, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", "MBR-COVERED",
-					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
+					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
 				if err != nil {
 					t.Fatalf("build: %v", err)
 				}
@@ -571,7 +573,7 @@ func TestNativeUpdate_MalformedUpstream502(t *testing.T) {
 func TestNativeUpdate_Transport500(t *testing.T) {
 	srv, _ := newRecordingPayer(t)
 	n, ctx, _, bundle, pci, _ := updateRelayLeg(t, srv)
-	n = NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", "shn-order-select", n.store, fixedClock)
+	n = NewNativeResponder(&http.Client{}, "http://127.0.0.1:1", fixedClock, WithCRDService("shn-order-select"), WithPASStore(n.paNative().store))
 	res, err := n.Handle(ctx, "pas-claim-update", "corr-dead", pci, bundle)
 	if err == nil {
 		t.Fatal("a no-response fault must surface as an error return")

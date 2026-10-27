@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_cdex_evidence.go — the supplemental evidence module 1's attachment
 // fetch (UC-05) takes from a facility's records answer, for the
 // prior-authorization update it builds.

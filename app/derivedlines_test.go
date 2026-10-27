@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -116,8 +118,9 @@ func TestDerivedDeclaration_BootRefusals(t *testing.T) {
 // TestDerivedDeclaration_NeedsItsLane: a derived non-canonical line needs its
 // validator lane exactly as a declared one does. On a network without the
 // default validator services (FHIR_DEFAULT_VALIDATOR_LANES=none), a 2.2
-// system with no FHIR_VALIDATE_URL_2_2 refuses to boot, naming the key and
-// where the declaration came from; with the key set it boots with the lane.
+// system with no FHIR_VALIDATE_URL_2_2 refuses to boot at a level that checks,
+// naming the key and where the declaration came from; with the key set it boots
+// with the lane. The level is stated: unset is none, which needs no lane.
 func TestDerivedDeclaration_NeedsItsLane(t *testing.T) {
 	boot := func(env map[string]string) (map[string]shnsdk.Validator, error) {
 		cfg, err := loadConfig(func(k string) string { return env[k] })
@@ -128,7 +131,7 @@ func TestDerivedDeclaration_NeedsItsLane(t *testing.T) {
 			shnsdk.NewFakeValidator(), cfg, engine.DefaultLaneURL, qualifyDefaultLane)
 		return lanes, err
 	}
-	env := nativePayerEnv(map[string]string{"PAYER_DAVINCI_CONTRACT_VERSIONS": system22, "FHIR_DEFAULT_VALIDATOR_LANES": "none"})
+	env := nativePayerEnv(map[string]string{"PAYER_DAVINCI_CONTRACT_VERSIONS": system22, "FHIR_DEFAULT_VALIDATOR_LANES": "none", "CONFORMANCE_ENFORCEMENT": "observe"})
 	_, err := boot(env)
 	if err == nil {
 		t.Fatal("booted a derived 2.2 line with no lane")

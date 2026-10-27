@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // nosor_test.go — a payer-native gateway that keeps no system of record
@@ -216,7 +218,7 @@ func runPayerLeg(t *testing.T, sor SystemOfRecord, c payerLegCase) legRun {
 	p := newLevelPayer(t, EnforcementObserve)
 	p.g.cfg.SoR = sor
 	if c.service != "" {
-		n := NewNativeResponder(p.partner.srv.Client(), p.partner.srv.URL, c.service, p.store, fixedClock, WithConformancePolicy(NewConformancePolicy(EnforcementObserve)))
+		n := NewNativeResponder(p.partner.srv.Client(), p.partner.srv.URL, fixedClock, WithCRDService(c.service), WithPASStore(p.store), WithConformancePolicy(NewConformancePolicy(EnforcementObserve)))
 		n.bindFindingEmitter(p.g.emitFinding)
 		p.g.cfg.Responder = n
 	}
@@ -573,7 +575,6 @@ func TestNoSystemOfRecord_ObservedGatewayKeepsNone(t *testing.T) {
 	base, _ := newInboundTestGateway(t, true)
 	cfg := base.cfg
 	cfg.SoR = NoSystemOfRecord()
-	cfg.Populator = nil
 	cfg.Observer = func(ObserverEvent) {}
 	g := mustNew(t, cfg)
 	if hasSystemOfRecord(g.cfg.SoR) {

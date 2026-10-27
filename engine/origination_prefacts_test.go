@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -209,10 +211,12 @@ func TestPASOriginationsCheckFactsBeforeAnyLeg(t *testing.T) {
 
 	builds := map[string]bool{
 		"buildAuthoredPASSubmit": true, "buildAuthoredPASUpdate": true, "buildPASSubmitBundle": true,
+		"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true,
 		"submitPASClaim": true, "submitClaimAndFollow": true,
 	}
 	tails := map[string]bool{
 		"buildAuthoredPASSubmit": true, "buildAuthoredPASUpdate": true, "buildPASSubmitBundle": true,
+		"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true,
 		"submitPASClaim": true, "submitClaimAndFollow": true,
 	}
 	entries := map[string]bool{"runCRDThenDTROrder": true, "runCRDDispatch": true, "resumeAmendmentOrFail": true}

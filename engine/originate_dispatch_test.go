@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // originate_dispatch_test.go — hermetic unit test for handleDispatch, the
 // caller-named-member wrapper around originateDispatch (the SHN Kit's
 // free-form "run against your data" entry).
@@ -129,15 +131,14 @@ func newDispatchFixtureWith(t *testing.T, member string, demo Demo, orderJSON []
 		SoR:                sor,
 		Store:              base,
 		Clock:              clock,
-		NPI:                "1234567890",
+		NPI:                "1234567893",
 		OriginationProfile: "provider-data",
-		Populator:          fakePopulator{canonical: canonical},
 		Client:             &http.Client{Transport: stub},
 	}
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	gw := mustNew(t, cfg)
+	gw := mustNew(t, cfg, WithPopulator(fakePopulator{canonical: canonical}))
 
 	return &dispatchFixture{gw: gw, sor: sor, stub: stub, canonical: canonical}
 }
@@ -472,9 +473,10 @@ func TestHandler_DispatchRouteRegistered(t *testing.T) {
 			EncPub:   encPub,
 			EncPriv:  encPriv,
 		},
-		SoR:       stub,
-		Store:     stub,
-		Validator: shnsdk.NewFakeValidator(),
+		SoR:                stub,
+		Store:              stub,
+		Validator:          shnsdk.NewFakeValidator(),
+		OriginationProfile: "demo",
 	})
 	h := gw.Handler()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(gw, "/scenario/dispatch", "")))

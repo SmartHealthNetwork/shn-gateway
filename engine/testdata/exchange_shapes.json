@@ -1,0 +1,346 @@
+[
+  {
+    "name": "inbound crd-order-select answered",
+    "source": "TestExchangeRecord_InboundAnswered (at observe)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound crd-order-select answered at observe",
+    "source": "TestExchangeRecord_InboundAnswered",
+    "level": "observe",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "validate",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ],
+    "validatorCalls": 3
+  },
+  {
+    "name": "inbound dtr-questionnaire-fetch answered",
+    "source": "TestExchangeRecord_InboundOperationAndLine (at observe)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "dtr-questionnaire-fetch",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound pas-claim answered (pended)",
+    "source": "TestExchangeRecord_RecipientEdits",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "pas-claim",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "ledger",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound pas-claim-inquire answered",
+    "source": "TestExchangeRecord_LegStagesInquiryExactly (at observe)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "pas-claim-inquire",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "ledger",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound coverage-eligibility answered",
+    "source": "TestEligibility_DeclaredForwardsAndRelaysExactly",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "coverage-eligibility",
+    "outcome": "answered",
+    "backend": {
+      "status": 200
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound crd-order-select refused by the payer's gateway at strict (conformance)",
+    "source": "TestExchangeRecord_InboundConformance",
+    "level": "strict",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "refused",
+    "rule": "conformance",
+    "refusedBy": "payer-gateway",
+    "stages": [
+      "unwrap",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ],
+    "findings": 1
+  },
+  {
+    "name": "inbound crd-order-select, the payer's own system answers http-5xx",
+    "source": "TestExchangeRecord_InboundBackendFailures (at observe)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "upstream-error",
+    "backend": {
+      "status": 503,
+      "errorClass": "http-5xx"
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound crd-order-select, the payer's own system answers http-4xx",
+    "source": "none (driven as TestExchangeRecord_InboundBackendFailures's http-5xx)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "upstream-error",
+    "backend": {
+      "status": 404,
+      "errorClass": "http-4xx"
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound crd-order-select, the payer's own system times out",
+    "source": "TestBackendDeadline_SlowSystemIsItsOwnTimeout",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "crd-order-select",
+    "outcome": "upstream-error",
+    "backend": {
+      "errorClass": "timeout"
+    },
+    "stages": [
+      "unwrap",
+      "reads",
+      "forward",
+      "seal",
+      "write"
+    ],
+    "rest": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "inbound crd-order-select refused by the payer's gateway before dispatch (routing)",
+    "source": "TestExchangeRecord_InboundRefusalRules (at observe)",
+    "level": "none",
+    "direction": "inbound",
+    "exchange": "other",
+    "outcome": "refused",
+    "rule": "routing",
+    "refusedBy": "payer-gateway",
+    "stages": [
+      "unwrap",
+      "write"
+    ],
+    "requestBytes": true,
+    "responseBytes": true
+  },
+  {
+    "name": "ingress crd-order-select answered",
+    "source": "TestExchangeRecord_IngressAnsweredAndUpstreamError (at strict)",
+    "level": "none",
+    "direction": "ingress",
+    "exchange": "crd-order-select",
+    "outcome": "answered",
+    "networkCalls": 1,
+    "self": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "legs": [
+      "routed",
+      "answered"
+    ],
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "ingress pas-claim refused by the provider's gateway (routing)",
+    "source": "TestExchangeRecord_IngressRoutingRefusal (at strict)",
+    "level": "none",
+    "direction": "ingress",
+    "exchange": "other",
+    "outcome": "refused",
+    "rule": "routing",
+    "refusedBy": "provider-gateway",
+    "self": true,
+    "requestBytes": true,
+    "responseBytes": true
+  },
+  {
+    "name": "ingress crd-order-select refused by the provider's gateway (authentication)",
+    "source": "TestExchangeRecord_IngressAuthenticationRefusal (at strict)",
+    "level": "none",
+    "direction": "ingress",
+    "exchange": "other",
+    "outcome": "refused",
+    "rule": "authentication",
+    "refusedBy": "provider-gateway",
+    "self": true,
+    "responseBytes": true
+  },
+  {
+    "name": "ingress crd-order-select refused by the Hub (replay)",
+    "source": "TestExchangeRecord_IngressHubOutcomes (at strict)",
+    "level": "none",
+    "direction": "ingress",
+    "exchange": "crd-order-select",
+    "outcome": "refused",
+    "rule": "replay",
+    "refusedBy": "hub",
+    "networkCalls": 1,
+    "self": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "legs": [
+      "routed",
+      "unreachable"
+    ],
+    "tokens": [
+      "ok"
+    ]
+  },
+  {
+    "name": "ingress crd-order-select, the recipient answers 5xx",
+    "source": "TestExchangeRecord_IngressHubOutcomes (at strict)",
+    "level": "none",
+    "direction": "ingress",
+    "exchange": "crd-order-select",
+    "outcome": "upstream-error",
+    "networkCalls": 1,
+    "self": true,
+    "requestBytes": true,
+    "responseBytes": true,
+    "legs": [
+      "routed",
+      "failed"
+    ],
+    "tokens": [
+      "ok"
+    ]
+  }
+]

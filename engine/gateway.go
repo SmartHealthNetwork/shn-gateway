@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -60,11 +62,10 @@ type Config struct {
 	// family-keyed order tuples (E0250/L8000/G0151/J3490) off the MBR-D-UC0N roster;
 	// "provider-data" = originate every UC off the provider's seeded SoR and drive real
 	// br-payer verdicts (Mode A). targetsBrPayer keys the contained-insurer /
-	// absolute-refs / R-8 ingress-skip handling on it. Spec 2B-bis/2C, §4.3.
-	// New refuses any other non-empty value (OriginationProfiles). Unset, a provider
-	// still serves its ingress and relays, but every route that originates refuses
-	// with 503 "origination profile not set: set ORIGINATION_PROFILE (demo|provider-data)"
-	// before anything is read, built or sent (requireOriginationProfile).
+	// absolute-refs handling on it. Spec 2B-bis/2C, §4.3.
+	// New refuses any other non-empty value (OriginationProfiles). Unset, module 1 is
+	// off: a provider serves its ingress and relays, and mounts no /scenario route
+	// (module 1's routes, moduleRoutes).
 	OriginationProfile string
 	// Identity is the gateway's substrate identity: its holder signing key (used to
 	// sign holder assertions) plus its envelope-encryption keypair (used to open
@@ -105,7 +106,7 @@ type Config struct {
 	// Deprecated: set ValidatorsByContractLine (ContractLineLanes derives it
 	// from per-line lanes). New derives it from ValidatorsByLine,
 	// CanonicalFallbackLines and DefaultValidatorsByLine when it is unset;
-	// these stay until v1.0.0.
+	// a later minor release removes these.
 	//
 	// ValidatorsByLine are the per-contract-LINE $validate lanes:
 	// "2.0"/"2.1"/"2.2" → the validator that resolves THAT line's IG
@@ -122,6 +123,9 @@ type Config struct {
 	// CertificationValidatorsByLine are independent observational clients, never routing lanes.
 	CertificationValidatorsByLine map[string]shnsdk.Validator
 	certificationDisabled         bool
+	// conformanceModuleAbsent runs the gateway with module 3 not loaded
+	// (DisableConformanceModuleForTest, a test build only). The zero value loads it.
+	conformanceModuleAbsent bool
 	// DefaultValidatorsByLine are lifecycle-managed candidates, admitted only after qualification.
 	//
 	// Deprecated: see ValidatorsByContractLine.
@@ -248,11 +252,6 @@ type Config struct {
 	// engine does NOT foreign-$validate it. false ⇒ an SHN-produced, US-Core-resolvable
 	// package, which still egress-$validates byte-identically. FR-G28.
 	PayerDavinciNative bool
-	// Populator is the DTR population seam (provider-local). Normally left nil and
-	// DEFAULTED to the managed backend (today's FillQuestionnaire) in New; the native
-	// pass-through backend is injected by config (PROVIDER_DTR_NATIVE). A test MAY
-	// inject a custom Populator.
-	Populator Populator
 	// IngressEnabled mounts the Da Vinci ingress routes on the provider role.
 	// Set from PROVIDER_DAVINCI_INGRESS by app.go. The routes fail-closed without
 	// ingressAuthBypass (real inbound UDAP auth is a planned future enhancement), so
@@ -278,9 +277,22 @@ type Config struct {
 	// UNEXPORTED and set ONLY by EnableIngressForTest — never read from env, never set
 	// by build() (image purity, scaffold pattern).
 	ingressAuthBypass bool
-	Client            *http.Client
-	Clock             func() time.Time
-	NPI               string
+	// Client is the Hub's client: each leg's POST to HubURL, whose Timeout
+	// is the leg's budget. It is also the Authorization Framework's and
+	// consent's while AuthzClient and ConsentClient are nil.
+	Client *http.Client
+	// AuthzClient is the client of the token request to AuthzURL, and
+	// ConsentClient of the consent check at ConsentURL; nil ⇒ Client. The
+	// gateway binary gives each its own endpoint kind (MON-R25).
+	AuthzClient   *http.Client
+	ConsentClient *http.Client
+	// CertRecorder, when set, tags the clients the engine builds itself
+	// (a CRD request's fhirServer read, the validator lanes' checks and
+	// certification) with their endpoint kinds, so their handshakes'
+	// certificates are recorded (MON-R25). nil ⇒ untagged, as before.
+	CertRecorder *endpointcert.Recorder
+	Clock        func() time.Time
+	NPI          string
 	// CorrelationGen generates a new correlation ID for each outbound scenario
 	// request. Defaults to newCorrelationID (crypto-random 128-bit hex string).
 	// Override in tests for deterministic IDs.
@@ -375,6 +387,32 @@ type Config struct {
 	// leaves out of its list, with the reason (involved.go). Leaving one out
 	// never changes the leg; this count is how an operator sees it.
 	InvolvedMetric func(reason string)
+	// TokenMetric, when set, is called once per Authorization Framework token
+	// acquisition (authorizeRequest) with its outcome, one of TokenOutcomes,
+	// and its duration end to end, its one retry included (MON-R26). A call
+	// whose request could not even be built never reached the wire, and is
+	// not reported.
+	TokenMetric func(outcome string, d time.Duration)
+	// ActiveRequestMetric, when set, is called with +1 when a call arrives on
+	// an exchange route (a Da Vinci ingress route or /substrate/inbound) and
+	// with -1 once its answer is written, with the call's direction: the
+	// requests in flight (MON-R23). Called on the request path: it must not
+	// block.
+	ActiveRequestMetric func(direction string, delta int)
+	// FindingMetric, when set, is called once for each conformance finding
+	// the gateway records, where it is recorded (emitFinding), with the
+	// finding's closed values only (MON-R24). Called on the request path or
+	// an observe worker: it must not block.
+	FindingMetric func(FindingMetric)
+	// ValidatorMetric, when set, is called once for each $validate call a
+	// check or a piece of SHN's own evidence makes, with its IG line, its
+	// lane (ValidatorLaneRouting or ValidatorLaneCertification) and how long
+	// it took (MON-R24). A lane's qualification probe is not counted. It must
+	// not block.
+	ValidatorMetric func(line, lane string, took time.Duration)
+	// ObserveCheckDroppedMetric, when set, is called once for each observe
+	// check dropped because the observe queue was full or closed (MON-R24).
+	ObserveCheckDroppedMetric func()
 	// DemoEdgeCapture (SHN_DEMO_EDGE_CAPTURE) turns on the bounded pre-seal
 	// edge-capture store (edgecapture.go): egressAdapt records each
 	// transformed leg's own before/after payload pair for local inspection,
@@ -390,11 +428,18 @@ type Config struct {
 	// IS STRICT, and it stays strict for every in-process construction here or
 	// in any test harness that does not say otherwise. A DEPLOYED gateway is
 	// different: the gateway/app env loader maps an ABSENT
-	// CONFORMANCE_ENFORCEMENT to EnforcementObserve, which is the one and only
-	// place a non-strict level comes from an omission. Every gate, reference
+	// CONFORMANCE_ENFORCEMENT to EnforcementNone (D116), which is the one and
+	// only place a non-strict level comes from an omission. Every gate, reference
 	// participant and hosted gate therefore pins its level explicitly
 	// (test/invariants' TestInvariant_EveryGateRunsStrict).
 	ConformanceEnforcement ConformanceEnforcement
+	// ConformanceToleratePeers is the payers whose answers this participant
+	// tolerates (CONFORMANCE_TOLERATE_PEERS, D122): a defect the FHIR profile
+	// check of a payer's DTR or PAS answer would refuse is recorded instead, with
+	// its finding marked tolerated, when every payer identity the exchange was
+	// routed by is listed. The content rules and the CDS Hooks answer check are
+	// not tolerated, and a check that could not run never is. Empty tolerates no one.
+	ConformanceToleratePeers []shnsdk.PayerIdentifier
 	// AdvertisedCDSHooks narrows which CDS Hooks services the provider ingress
 	// advertises and dispatches (ParseAdvertisedCDSHooks). Nil advertises every
 	// hook the network carries. An interim, optional override: the registry
@@ -407,13 +452,17 @@ type Config struct {
 // Gateway is a constructed holder gateway.
 type Gateway struct {
 	cfg Config
-	// pending is module 1's in-flight pend state (module1_pending.go).
-	pending moduleOnePending
 
 	// states is each compiled-in workstream's own state on this gateway, by
 	// workstream id, built once by New (workstream.newGatewayState). A
 	// Gateway assembled without New holds none.
 	states map[string]gatewayState
+
+	// moduleStates is each compiled-in module's own state on this gateway, by
+	// module id, built once by New after its options
+	// (gatewayModule.newGatewayState): on-behalf building's pend state and
+	// the routes it declared. A Gateway assembled without New holds none.
+	moduleStates map[string]gatewayState
 
 	// regRefresh runs Config.RegistryRefresh single-flight for the inbound
 	// requester guard; regRefreshBudget overrides registryRefreshBudget (tests).
@@ -437,6 +486,8 @@ type Gateway struct {
 	// bearer verifier for the DaVinciIngress. nil when the ingress is disabled OR
 	// running under the test-only bypass; ingressAuthOK is nil-safe.
 	ingressAuth *ingressAuthServer
+	// routePatterns are the patterns routes last mounted (RoutePatternsForTest).
+	routePatterns atomic.Pointer[[]string]
 
 	// edgeCapture is the bounded pre-seal edge-capture store (nil unless
 	// Config.DemoEdgeCapture is set — zero allocation in the production
@@ -458,7 +509,7 @@ type Gateway struct {
 	explicitLanes []*explicitLane
 
 	// observeOnce/observeChecks: observe-level checks run off the request path
-	// (observe_async.go), started on first use.
+	// (module3_observe.go), started on first use.
 	observeOnce   sync.Once
 	observeChecks atomic.Pointer[observeChecks]
 
@@ -477,13 +528,33 @@ type Gateway struct {
 	fallbackStore atomic.Pointer[MemStore]
 }
 
+// TokenMetricWiredForTest reports whether Config.TokenMetric is set.
+func (g *Gateway) TokenMetricWiredForTest() bool { return g.cfg.TokenMetric != nil }
+
+// OutboundClientsForTest is the Hub's, the token request's and the consent
+// check's clients, each as its call site resolves it.
+func (g *Gateway) OutboundClientsForTest() (hub, authz, consent *http.Client) {
+	return g.cfg.Client, g.authzClient(), g.consentClient()
+}
+
+// authzClient is the token request's client: AuthzClient, else Client. It is
+// read at each call, so a Client set after New is the one used.
+func (g *Gateway) authzClient() *http.Client {
+	if g.cfg.AuthzClient != nil {
+		return g.cfg.AuthzClient
+	}
+	return g.cfg.Client
+}
+
 // New constructs a Gateway. The clock defaults to time.Now and the client to
 // http.DefaultClient when unset.
 //
 // It returns an ERROR (never a panic) for the conditions a DEPLOYMENT can hit with
 // otherwise-valid config: a payer role with no content occupant (§3.2 — the
 // fail-closed payer boot), an unusable ingress client registration, and an
-// OriginationProfile that names no origination lane (OriginationProfiles). The remaining
+// OriginationProfile that names no origination lane (OriginationProfiles, checked by
+// on-behalf building as New builds its state), and an EnrichNativeRequests opt-in
+// this build has no enrichment compiled in for. The remaining
 // checks stay panics: they fire only on a caller that omitted a required field, which is
 // a programming error, not a deployment one.
 //
@@ -496,7 +567,7 @@ type Gateway struct {
 // validate.result even with Observer set. Harmless where it happens (those
 // tests don't assert on the observer stream for that lane), but worth
 // knowing before adding a new one that does.
-func New(cfg Config) (*Gateway, error) {
+func New(cfg Config, opts ...Option) (*Gateway, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -541,9 +612,10 @@ func New(cfg Config) (*Gateway, error) {
 			panic("gateway: HubTransportPub required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 		}
 	}
-	// Observer seam: decorate the SoR BEFORE the Populator derivation below — it
-	// captures cfg.SoR at construction (newManagedPopulator), and decorating at the
-	// validator's later site would leave them reading the raw SoR forever.
+	// Observer seam: decorate the SoR BEFORE the workstreams' states are built
+	// below — the PA workstream's managed populator captures cfg.SoR at
+	// construction, and decorating at the validator's later site would leave it
+	// reading the raw SoR forever.
 	// g does not exist yet here, so the decorator closes over Observer +
 	// Clock (already defaulted above).
 	// Idempotence guard: never double-wrap (double emission) if a caller
@@ -559,23 +631,30 @@ func New(cfg Config) (*Gateway, error) {
 	// directly. There is NO derived in-process fallback any more — the in-process responder
 	// that used to be synthesized here from Config.Adjudicator is deleted, so a payer with
 	// no occupant refuses to boot instead of quietly serving invented verdicts.
-	if err := checkOriginationProfile(cfg.OriginationProfile); err != nil {
-		return nil, err
-	}
 	if cfg.Role == "payer" && cfg.Responder == nil {
 		return nil, errors.New("gateway: a payer gateway has no content occupant — set Config.Responder " +
 			"(a native-forward responder over the payer's own Da Vinci endpoint, or your own LegResponder). " +
 			"From the published binary: set PAYER_DAVINCI_BASE_URL (plus PAYER_DAVINCI_TOKEN_URL/PAYER_DAVINCI_CLIENT_ID/" +
 			"PAYER_DAVINCI_CLIENT_SECRET for an authenticated forward). Config.Adjudicator no longer derives a responder")
 	}
-	if cfg.Populator == nil {
-		cfg.Populator = newManagedPopulator(cfg.SoR)
-	}
 	g := &Gateway{
 		cfg:           cfg,
 		explicitLanes: explicit,
 	}
-	g.states = workstreamGatewayStates(g)
+	states, err := workstreamGatewayStates(g)
+	if err != nil {
+		return nil, err
+	}
+	g.states = states
+	for _, opt := range opts {
+		opt(g)
+	}
+	// Each module builds its own state once, here, after the options: on-behalf
+	// building checks its own origination profile and declares its routes, and
+	// routes() mounts what it kept.
+	if g.moduleStates, err = moduleGatewayStates(g); err != nil {
+		return nil, err
+	}
 	g.exchanges = cfg.Exchanges
 	if g.exchanges == nil {
 		g.exchanges = NewInMemoryExchangeStore(cfg.ExchangeTTL, cfg.Clock)
@@ -723,6 +802,9 @@ const (
 	storeErrPended     = "pended"
 )
 
+// StoreErrorStores is the closed list of store names StoreErrorMetric reports.
+var StoreErrorStores = []string{storeErrExchange, storeErrReplay, storeErrIngressKey, storeErrPended}
+
 // noteStoreError counts one shared-state store failure. Nil-safe: a gateway with no
 // metric hook configured (every hermetic test, and any deployment without
 // METRICS_SERVICE) is unaffected.
@@ -764,41 +846,47 @@ func (g *Gateway) Handler() http.Handler {
 }
 
 // mountedRoute is one route a piece of the gateway declares for its role.
-// originates marks a route that builds and sends a request of this gateway's
-// own (on-behalf building): it is mounted behind requireOriginationProfile,
-// so it refuses while Config.OriginationProfile is unset. operator marks a
-// route of the gateway's operator surface (/scenario): it is mounted behind
-// requireScenarioCaller, outermost, so an unauthenticated caller is refused
-// before anything else runs.
+// operator marks a route of the gateway's operator surface (/scenario): it is
+// mounted behind requireScenarioCaller, outermost, so an unauthenticated
+// caller is refused before anything else runs.
 type mountedRoute struct {
-	pattern    string
-	handler    http.HandlerFunc
-	originates bool
-	operator   bool
+	pattern  string
+	handler  http.HandlerFunc
+	operator bool
 }
 
 // routes mounts what each piece of this gateway declares for its role
 // (AI-G10): the core's own routes, every compiled-in workstream adapter's
-// (workstreamRoutes), and on-behalf building's. It is the only place a route
-// is mounted, the only place an originating route is put behind
-// requireOriginationProfile, and the only place an operator route is put
+// (workstreamRoutes), and every compiled-in module's (moduleRoutes): on-behalf
+// building declares none unless the participant declares its origination
+// profile, and declares them once, as New builds its state. It is the only
+// place a route is mounted, and the only place an operator route is put
 // behind requireScenarioCaller.
 func (g *Gateway) routes() *http.ServeMux {
 	mux := http.NewServeMux()
+	var patterns []string
 	role := g.cfg.Role
-	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.originationRoutes(role)} {
+	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 		for _, rt := range declared {
 			h := rt.handler
-			if rt.originates {
-				h = g.requireOriginationProfile(h)
-			}
 			if rt.operator {
 				h = g.requireScenarioCaller(h)
 			}
 			mux.HandleFunc(rt.pattern, h)
+			patterns = append(patterns, rt.pattern)
 		}
 	}
+	g.routePatterns.Store(&patterns)
 	return mux
+}
+
+// RoutePatternsForTest are the patterns of the routes this gateway mounts, as
+// the ServeMux names them (a request's Pattern), in mount order: what the
+// HTTP metric's closed list of routes is pinned to (MON-R29). It mounts them
+// to read them. A test helper, not an API.
+func (g *Gateway) RoutePatternsForTest() []string {
+	g.routes()
+	return slices.Clone(*g.routePatterns.Load())
 }
 
 // coreRoutes are the core's own routes: a responding role's Hub-routed legs.
@@ -808,14 +896,6 @@ func (g *Gateway) coreRoutes(role string) []mountedRoute {
 		return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute()}}
 	}
 	return nil
-}
-
-// EnableIngressForTest enables the Da Vinci ingress routes AND the test-only auth bypass on
-// cfg. It is the ONLY affordance that sets ingressAuthBypass; build()/main MUST never call it
-// (enforced by ingress_imagepurity_test.go — the scaffold image-purity pattern).
-func EnableIngressForTest(cfg *Config) {
-	cfg.IngressEnabled = true
-	cfg.ingressAuthBypass = true
 }
 
 // ingressAuthOK gates every ingress route. Real SMART Backend Services bearer
@@ -876,29 +956,6 @@ func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) boo
 	exchangeOf(r.Context()).refused(RefusalAuthentication)
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
 	return true
-}
-
-// originationProfileNotSet is the refusal an originating route answers on a provider
-// whose Config.OriginationProfile is unset. Stable text: callers may match it.
-var originationProfileNotSet = "origination profile not set: set ORIGINATION_PROFILE (" + strings.Join(originationProfiles, "|") + ")"
-
-// requireOriginationProfile guards a route that originates. With no origination
-// profile no lane is chosen, and the origination paths, which compare the profile
-// exactly, would build a PAS request carrying a payer Organization no system of record
-// supplied. So the route refuses before anything is read, built or sent: 503, uncacheable,
-// the package's {"error": …} envelope (writeUnavailable). 503, not 4xx: the request is
-// well-formed and the caller cannot fix it; this gateway cannot serve the route as
-// configured, the same cause-stating refusal writeStoreUnavailable gives for an outage.
-func (g *Gateway) requireOriginationProfile(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if g.cfg.OriginationProfile == "" {
-			writeUnavailable(w, originationProfileNotSet)
-			return
-		}
-		// The Claim facts the request states (module1_claimfacts.go), read before any
-		// handler decodes the body for its own keys.
-		h(w, withOriginationClaimInput(r))
-	}
 }
 
 // writeStoreUnavailable is the refusal a route answers when a shared-state record could
@@ -1004,6 +1061,40 @@ const (
 	LegOutcomeUnreachable = "unreachable"
 	LegOutcomeFailed      = "failed"
 )
+
+// LegOutcomes is the closed list of LegMetric outcomes.
+var LegOutcomes = []string{LegOutcomeRouted, LegOutcomeAnswered, LegOutcomeDenied, LegOutcomeUnreachable, LegOutcomeFailed}
+
+// Token outcomes passed to Config.TokenMetric, decided by status and error
+// class, never by an answer's text.
+const (
+	// TokenOK is a token.
+	TokenOK = "ok"
+	// TokenDenied is the Framework refusing this holder's assertion (401) or
+	// denying the request (403).
+	TokenDenied = "denied"
+	// TokenUnavailable is no usable answer from the Framework or what it
+	// depends on: a transport error or timeout, an answer cut off before it
+	// was read, or a 429, 502, 503 or 504.
+	TokenUnavailable = "unavailable"
+	// TokenFailed is any other answer, an unreadable success among them.
+	TokenFailed = "failed"
+)
+
+// TokenOutcomes is the closed list of TokenMetric outcomes.
+var TokenOutcomes = []string{TokenOK, TokenDenied, TokenUnavailable, TokenFailed}
+
+// tokenOutcomeOf is the outcome of an authorize answer that was not a token,
+// by its status code.
+func tokenOutcomeOf(code int) string {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return TokenDenied
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return TokenUnavailable
+	}
+	return TokenFailed
+}
 
 // errHubUnreachable marks a Hub-leg transport/routing failure (the Hub could
 // not be reached or refused to route). Same user-facing message as before —
@@ -1141,9 +1232,13 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 	// the write authz may have decided and recorded the decision, and its
 	// decision record carries no correlation id a second decision could be
 	// attributed by, so that call is not repeated. An answer is never retried.
-	tok, retry, err := g.authorizeOnce(r.Context(), body)
+	start := g.exchangeClock()
+	tok, retry, outcome, err := g.authorizeOnce(r.Context(), body)
 	if retry && r.Context().Err() == nil {
-		tok, _, err = g.authorizeOnce(r.Context(), body)
+		tok, _, outcome, err = g.authorizeOnce(r.Context(), body)
+	}
+	if outcome != "" && g.cfg.TokenMetric != nil {
+		g.cfg.TokenMetric(outcome, g.exchangeClock().Sub(start))
 	}
 	return tok, err
 }
@@ -1151,15 +1246,16 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 // authorizeOnce makes one authorize call, with its own holder assertion: authz
 // consumes each assertion's jti once, so a repeated call needs a fresh one. It
 // reports whether the call failed before its request was written in a way a
-// second attempt could clear.
-func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token, bool, error) {
+// second attempt could clear, and the call's token outcome (TokenOutcomes),
+// empty when its request could not be built.
+func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token, bool, string, error) {
 	// H1: authenticate to the Authorization Framework with a holder assertion for
 	// the "authz" audience so the policy can bind authority to THIS holder. The
 	// provider authorizes as "provider", the payer as "payer" (via cfg.HolderID).
 	assertion := shnsdk.IssueAssertion(g.cfg.HolderID, "authz", g.cfg.Identity.SignPriv, g.cfg.Clock(), time.Hour)
 	assertionJSON, err := json.Marshal(assertion)
 	if err != nil {
-		return shnsdk.Token{}, false, err
+		return shnsdk.Token{}, false, "", err
 	}
 	var wrote atomic.Bool
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -1171,11 +1267,11 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.AuthzURL+"/authorize", bytes.NewReader(body))
 	if err != nil {
-		return shnsdk.Token{}, false, err
+		return shnsdk.Token{}, false, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Holder-Assertion", base64.StdEncoding.EncodeToString(assertionJSON))
-	client := g.cfg.Client
+	client := g.authzClient()
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -1183,33 +1279,33 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	if err != nil {
 		retry := !wrote.Load() && (errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
 			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
-		return shnsdk.Token{}, retry, fmt.Errorf("%w (%w)", errAuthzUnreachable, err)
+		return shnsdk.Token{}, retry, TokenUnavailable, fmt.Errorf("%w (%w)", errAuthzUnreachable, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
 	if err != nil {
-		return shnsdk.Token{}, false, fmt.Errorf("read authorize answer: %w", err)
+		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("read authorize answer: %w", err)
 	}
 	// A 403 is a policy/consent DENIAL (not a transport failure); surface it as
 	// the typed sentinel so callers can distinguish it from the Authorization
 	// Framework being unreachable or erroring.
 	if resp.StatusCode == http.StatusForbidden {
-		return shnsdk.Token{}, false, errAuthorizationDenied
+		return shnsdk.Token{}, false, TokenDenied, errAuthorizationDenied
 	}
 	// The Framework never answers 503 or 504 itself: the proxy in front of it
 	// (a service mesh sidecar, a load balancer) had no Framework to reach. Not
 	// retried: the request reached that proxy.
 	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
-		return shnsdk.Token{}, false, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
+		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return shnsdk.Token{}, false, &shnsdk.StatusError{Code: resp.StatusCode, Body: string(respBody)}
+		return shnsdk.Token{}, false, tokenOutcomeOf(resp.StatusCode), &shnsdk.StatusError{Code: resp.StatusCode, Body: string(respBody)}
 	}
 	var out authorizeResp
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return shnsdk.Token{}, false, fmt.Errorf("decode authorize answer: %w", err)
+		return shnsdk.Token{}, false, TokenFailed, fmt.Errorf("decode authorize answer: %w", err)
 	}
-	return out.Token, false, nil
+	return out.Token, false, TokenOK, nil
 }
 
 // postEnvelope POSTs an encoded envelope and the holder assertion header to url,
@@ -1232,8 +1328,12 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 			}
 		},
 	}))
+	// The network stage runs from handing the sealed request to the
+	// transport to reading the Hub's answer (MON-R22).
+	waited := exchangeOf(ctx).network()
 	resp, err := client.Do(req)
 	if err != nil {
+		waited()
 		if wrote.Load() {
 			return shnsdk.Envelope{}, &hubSentError{err: err}
 		}
@@ -1242,6 +1342,7 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
+	waited()
 	if err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// A Hub 200 comes only after the recipient answered and the Hub verified it.
 		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer could not be read"}
@@ -1486,7 +1587,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	meta := shnsdk.Metadata{
 		Sender:          g.cfg.HolderID,
 		Recipient:       recipient,
-		TransactionType: txType,
+		TransactionType: wireName(txType),
 		AuthorityFrame:  reqFrame,
 		Timestamp:       g.cfg.Clock().Format(time.RFC3339),
 		CorrelationID:   correlationID,
@@ -1819,14 +1920,13 @@ func (g *Gateway) validatorForLine(line string) shnsdk.Validator {
 // an unlaned line fails closed with a 500 naming it (FR-36/FR-G29 — never a
 // silent fallback to the canonical lane).
 //
-// This function NEVER skips — every call always validates. The one ingress skip
-// lives ONLY in validateFHIRPayerIngress below, keyed on the leg's counterparty
-// being one of the network's reference payers on a lane that relays their bytes. A
-// skip keyed on the lane alone once exempted every ingress check on the demo lane,
-// including handleUC05's facility federated-query searchset, which is not a payer's
-// answer at all; keeping the skip in its own function makes the set of skip-eligible
-// legs a grep (call sites of validateFHIRPayerIngress), never something a new ingress
-// site inherits by accident.
+// Every call validates at the routed line. A payer's answer to a leg this gateway
+// originated is judged instead by validateFHIRPayerIngress below, at its candidate
+// lines and with the participant's tolerance of the payer that answered
+// (CONFORMANCE_TOLERATE_PEERS); keeping that in its own function makes the set of
+// payer-answer legs a grep (call sites of validateFHIRPayerIngress), never something
+// a new ingress site, such as handleUC05's facility federated-query searchset,
+// inherits by accident.
 func (g *Gateway) validateFHIR(ctx context.Context, resourceJSON []byte, dir, line string) (int, string) {
 	return g.validateFHIRAtProfile(ctx, resourceJSON, dir, line, "")
 }
@@ -1897,13 +1997,23 @@ func kindForDirection(dir string) CheckKind {
 type lineLane struct {
 	Line string
 	V    shnsdk.Validator
-	// Decisive marks the routed line, or a line the payload itself claims: when
-	// no line is valid and a decisive line could not be judged, the check is
-	// unavailable rather than decided on what the other lines said.
+	// Decisive marks the routed line: when no line is valid and it could not
+	// be judged, the check is unavailable rather than decided on what the
+	// other lines said.
 	Decisive bool
+	// Claims are the indexes of the payload's claims (claimSet) this line is
+	// one of. A claim is met once any one of its lines is judged; one that no
+	// line met decides as an unjudged routed line does.
+	Claims []int
 	// Extra marks a candidate beyond the routed line; its call is bounded by
 	// payerAnswerCandidateTimeout.
 	Extra bool
+	// Qualifying marks a line whose lane is configured but has not qualified
+	// yet, so V is nil: the line cannot be judged now, which is not the
+	// same as having no lane. A qualifying routed line, or a qualifying line
+	// of a claim no line met, makes the check unavailable even when another
+	// line answers valid.
+	Qualifying bool
 }
 
 // payerAnswerCandidateTimeout bounds each extra candidate line's validator call
@@ -1924,13 +2034,13 @@ var payerAnswerCandidateTimeout = certificationCandidateTimeout
 // defect refuses and a deeper one is recorded; a validator that answered without
 // reading the payload is unavailable at every level.
 func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shnsdk.Validator, resourceJSON []byte, dir, line, profile string, bridged bool) govResult {
-	defer exchangeOf(ctx).validation()()
 	return g.validateGovernedLines(ctx, fc, []lineLane{{Line: line, V: v}}, resourceJSON, dir, line, profile, bridged, false)
 }
 
 // validateGovernedLines is the ONE place a runtime FHIR $validate verdict becomes
-// a refusal or a record. lanes are tried in order until one answers valid; with
-// one lane this is exactly validateGoverned's contract above. line is the line the
+// a refusal or a record. lanes are tried in order until one answers valid (and
+// after it only while a later line could still change the outcome, judgeLines);
+// with one lane this is exactly validateGoverned's contract above. line is the line the
 // leg was routed at, named by an unavailable finding and a missing-lane refusal.
 //
 // candidates marks a candidate-line certification (validateFHIRPayerIngress): the
@@ -1938,21 +2048,34 @@ func (g *Gateway) validateGoverned(ctx context.Context, fc findingContext, v shn
 // verdict (Lines), and a valid answer on a line after the first still emits one
 // finding saying so. The verdict decided is the best any line gave — valid,
 // then deeper, then structural — and unavailable when no line's validator
-// answered or, with no line valid, when a Decisive lane could not be judged. The
+// answered or, with no line valid, when the Decisive (routed) lane could not be
+// judged or a claim was met by none of its lanes (lineLane.Claims). The
 // finding's Line names the line that verdict came from.
 func (g *Gateway) validateGovernedLines(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
+	return g.validateGovernedLinesBy(ctx, g.conformance(), fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
+}
+
+// validateGovernedLinesBy is validateGovernedLines with module 3 given: a
+// payer's answer is decided by conformanceFor, which tolerates the payers the
+// participant lists.
+func (g *Gateway) validateGovernedLinesBy(ctx context.Context, mod gatewayConformance, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
+	// A check the level does not run (none) is no validate stage: the leg
+	// spends no time on it, as judgeLines decides.
+	if !bridged && !mod.Runs(kindForDirection(dir), "") {
+		return govResult{}
+	}
 	defer exchangeOf(ctx).validation()()
 	// A bridged payload is SHN's own edit, module 2's, refused at every level
 	// ahead of module 3. A participant's payload is module 3's check.
 	if bridged {
-		return g.judgeLines(ctx, g.conformance(), fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
+		return g.judgeLines(ctx, mod, fc, lanes, resourceJSON, dir, line, profile, bridged, candidates)
 	}
-	return g.conformance().fhir(ctx, fc, lanes, resourceJSON, dir, line, profile, candidates)
+	return mod.fhir(ctx, fc, lanes, resourceJSON, dir, line, profile, candidates)
 }
 
 // fhir is module 3's governed check of a participant's payload. At observe the
 // check can only record, so the leg does not wait for it: it is queued and its
-// finding emitted when the validator answers (observe_async.go). At every
+// finding emitted when the validator answers (module3_observe.go). At every
 // other level it is judged now.
 func (m gatewayConformance) fhir(ctx context.Context, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, candidates bool) govResult {
 	if m.Level() == EnforcementObserve {
@@ -1965,7 +2088,7 @@ func (m gatewayConformance) fhir(ctx context.Context, fc findingContext, lanes [
 
 // judgeLines runs a governed check and acts on its verdict: on the request path
 // for every level that can refuse, and on an observe worker for a check that can
-// only record (observe_async.go). mod is module 3, which decides a
+// only record (module3_observe.go). mod is module 3, which decides a
 // participant's payload and names the level a finding records; a bridged
 // check is decided by module 2's bridgedDecision.
 func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc findingContext, lanes []lineLane, resourceJSON []byte, dir, line, profile string, bridged, candidates bool) govResult {
@@ -2008,23 +2131,87 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		return govResult{}
 	}
 	var (
-		best             shnsdk.Result
-		bestLine         string
-		bestVerdict      Verdict
-		answered         bool
-		laned            bool
-		noLaneLine       string
-		decisiveUnjudged bool
+		best        shnsdk.Result
+		bestLine    string
+		bestVerdict Verdict
+		answered    bool
+		laned       bool
+		// valid is set once a line answers valid: validLine is the first such
+		// line (a single-lane check may name none) and validAfter whether a
+		// line was tried before it. A qualifying line may still keep it from
+		// deciding.
+		valid      bool
+		validLine  string
+		validAfter bool
+		// routedJudged and met record what was judged: the routed line, and
+		// each claim (by index) one of whose lines was.
+		routedJudged bool
+		met          = map[int]bool{}
+		// unanswered is each line tried whose validator did not answer.
+		unanswered = map[string]bool{}
 	)
+	judged := func(lane lineLane) {
+		routedJudged = routedJudged || lane.Decisive
+		for _, i := range lane.Claims {
+			met[i] = true
+		}
+	}
+	// unmet reports whether lane is the routed line and was not judged, or a
+	// line of a claim none of whose lines was.
+	unmet := func(lane lineLane) bool {
+		if lane.Decisive && !routedJudged {
+			return true
+		}
+		for _, i := range lane.Claims {
+			if !met[i] {
+				return true
+			}
+		}
+		return false
+	}
+	// A qualifying line that is the routed line or one of a claim may keep a
+	// valid answer from deciding: the line the payload is at cannot be judged
+	// yet, and reading it valid elsewhere would make the check more
+	// permissive exactly while its checker is missing. Whether it does may
+	// depend on a later line, since another line of the same claim, judged,
+	// meets the claim (undecided).
+	vetoable := false
 	for _, lane := range lanes {
+		vetoable = vetoable || lane.Qualifying && lane.V == nil && (lane.Decisive || len(lane.Claims) > 0)
+	}
+	// undecided reports, once a line has answered valid and lanes[i] was the
+	// last tried, whether a later line could still change the outcome: only
+	// when a qualifying line's claim is unmet and a later laned line of that
+	// claim could meet it. A veto already certain, or none possible, is
+	// decided now, so no further validator is called.
+	undecided := func(i int) bool {
+		open := false
+		for _, q := range lanes {
+			if !q.Qualifying || q.V != nil {
+				continue
+			}
+			if q.Decisive && !routedJudged {
+				return false
+			}
+			for _, c := range q.Claims {
+				if met[c] {
+					continue
+				}
+				later := false
+				for _, l := range lanes[i+1:] {
+					later = later || l.V != nil && slices.Contains(l.Claims, c)
+				}
+				if !later {
+					return false
+				}
+				open = true
+			}
+		}
+		return open
+	}
+	for i, lane := range lanes {
 		if lane.V == nil {
 			note(lane.Line, VerdictUnavailable, 0)
-			if lane.Decisive {
-				decisiveUnjudged = true
-				if noLaneLine == "" {
-					noLaneLine = lane.Line
-				}
-			}
 			continue
 		}
 		laned = true
@@ -2036,51 +2223,106 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		req, reqProfile := validateRequest(resourceJSON, profile)
 		res, err := lane.V.Validate(callCtx, req, reqProfile)
 		took := g.exchangeClock().Sub(callStart)
+		g.validatorMetric(lane.Line, ValidatorLaneRouting, took)
 		spent += took
 		cancel()
 		if err != nil {
 			note(lane.Line, VerdictUnavailable, took)
-			decisiveUnjudged = decisiveUnjudged || lane.Decisive
+			unanswered[lane.Line] = true
 			continue
 		}
 		if res.Valid {
-			if len(tried) > 0 {
-				note(lane.Line, VerdictValid, took)
-				g.emitFindingIn(ctx, ConformanceFinding{
-					Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
-					Seam: fc.Seam, Whose: whose, Line: lane.Line, Profile: profile,
-					Level: mod.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
-					PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
-					ValidatorMs: spent.Milliseconds(),
-				})
+			judged(lane)
+			if !valid {
+				valid, validLine, validAfter = true, lane.Line, len(tried) > 0
 			}
-			return govResult{}
+			note(lane.Line, VerdictValid, took)
+			if !vetoable || !undecided(i) {
+				break
+			}
+			continue
 		}
 		verdict := classifyFHIR(res, resourceJSON, lane.Line, profile)
 		note(lane.Line, verdict, took)
 		if verdict == VerdictUnavailable {
-			decisiveUnjudged = decisiveUnjudged || lane.Decisive
+			unanswered[lane.Line] = true
 			continue
 		}
+		judged(lane)
 		if !answered || verdict == VerdictDeeper && bestVerdict != VerdictDeeper {
 			best, bestLine, bestVerdict, answered = res, lane.Line, verdict, true
 		}
 	}
-	// No line was valid. If the routed line, or a line the answer itself claims,
-	// could not be judged, what the other lines said does not decide it: a line the
-	// answer is not at reports its own profiles' failures, which says nothing about
-	// the line the answer is at. The check is then unavailable.
+	for _, lane := range lanes {
+		if lane.Qualifying && lane.V == nil && unmet(lane) {
+			return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, lane.Line)
+		}
+	}
+	if valid {
+		if validAfter {
+			g.emitFindingIn(ctx, ConformanceFinding{
+				Kind: string(kind), Direction: dir, LegType: fc.LegType, CorrelationID: fc.CorrelationID,
+				Seam: fc.Seam, Whose: whose, Line: validLine, Profile: profile,
+				Level: mod.Level().String(), Verdict: findingVerdict(VerdictValid), Decision: Record.String(),
+				PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
+				ValidatorMs: spent.Milliseconds(),
+			})
+		}
+		return govResult{}
+	}
+	// No line was valid. If the routed line could not be judged, or a claim the
+	// answer makes was met by none of its lines, what the other lines said does
+	// not decide it: a line the answer is not at reports its own profiles'
+	// failures, which says nothing about the line the answer is at. The check
+	// is then unavailable.
+	decisiveUnjudged, noLaneLine := false, ""
+	for _, lane := range lanes {
+		if unmet(lane) {
+			decisiveUnjudged = true
+			if lane.V == nil && noLaneLine == "" {
+				noLaneLine = lane.Line
+			}
+		}
+	}
 	if !answered || decisiveUnjudged {
 		switch {
 		case noLaneLine != "":
 			return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + noLaneLine + " (FR-36/FR-G29)", NoLane: true}, noLaneLine)
 		case !laned:
+			// No lane was ready. A lane still qualifying is a validator not yet
+			// available at its line, not a missing lane; the routed line may be
+			// outside the lines tried (answerCandidateGroups).
+			for _, lane := range lanes {
+				if lane.Qualifying {
+					return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, lane.Line)
+				}
+			}
 			return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "no FHIR validator lane configured for contract line " + line + " (FR-36/FR-G29)", NoLane: true}, line)
 		}
-		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, line)
+		// Name the line that could not be judged: the first unmet line whose
+		// validator did not answer, else the first line tried whose validator did
+		// not answer. The routed line may not be among the lines tried at all.
+		at, anyUnanswered := line, ""
+		for _, lane := range lanes {
+			if !unanswered[lane.Line] {
+				continue
+			}
+			if unmet(lane) {
+				at, anyUnanswered = lane.Line, ""
+				break
+			}
+			if anyUnanswered == "" {
+				anyUnanswered = lane.Line
+			}
+		}
+		if anyUnanswered != "" {
+			at = anyUnanswered
+		}
+		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, at)
 	}
 	decision := decide(bestVerdict)
 	g.emitFindingIn(ctx, ConformanceFinding{
+		Tolerated:     !bridged && toleratedDecision(mod, kind, bestVerdict, decision),
 		Kind:          string(kind),
 		Direction:     dir,
 		LegType:       fc.LegType,
@@ -2110,30 +2352,36 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 // declared line, or this build's own line for a payer that declared none — and payer
 // is the payer identity the member's Coverage named, which the leg was routed by.
 //
-// Reference payers. The check is skipped only when BOTH halves hold: this lane relays
-// reference-payer bytes (relaysReferencePayerBytes) AND payer is one of the network's
-// reference payer identities (isReferencePayer). Those answers are the reference
-// implementation's own bytes, relayed verbatim, and do not yet conform (the 2.0
-// reference payer's DTR package fails DTR 2.0.1), so certifying them would refuse the
-// network's own reference traffic. Every other payer, on any lane, is governed at this
-// gateway's level: none runs nothing, observe records, structural refuses a structural
-// defect, strict refuses every defect and a check that could not run.
+// Every payer, on any lane, is governed at this gateway's level: none runs nothing,
+// observe records, structural refuses a structural defect, strict refuses every defect
+// and a check that could not run. No payer is exempt by default (D122): a participant
+// that tolerates a payer's known defects lists it (CONFORMANCE_TOLERATE_PEERS), and a
+// defect its level would refuse is then recorded, its finding marked tolerated; a check
+// that could not run is never tolerated.
 //
 // Candidate lines. A payer's declaration may be this gateway's default rather than the
 // payer's own claim, and the registry cannot tell the two apart, so an answer is not
 // judged only at the routed line. It is certified against the lines this build
 // supports, in order: the routed line first (the line the request was built for), then
 // the lines the answer itself claims (versioned meta.profile, then structural
-// markers), then 2.2, 2.1 and 2.0 — each line once, only where this build has a
-// validator lane for it, and each validator once (where one validator serves every
-// line the answer is judged once, at the routed line). The first valid line ends the
-// check (valid on any line is valid). Otherwise, if the routed line or a line the
-// answer claims could not be judged (its validator was unavailable, or no lane serves
-// it), the verdict is unavailable: another line's profiles failing says nothing about
-// the line the answer is at. Otherwise the verdict is the best one any line gave
+// markers whose claim is narrower than every line), then 2.2, 2.1 and 2.0 — within
+// the lines the answer's own structure names when it names any
+// (answerCandidateGroups, validatePayerAnswerAtCandidates), so a routed line outside
+// them is not tried — each line once, only where this build has a validator lane for it, and each validator
+// once (where one validator serves every line the answer is judged once, at the
+// routed line). What the answer claims is a set of claims, each met once any one of
+// its lines is judged (answerLineClaims, answerCandidates). A valid line decides the
+// check (valid on any line is valid), unless the routed line, or a claim none of
+// whose lines was judged, has a default lane that has not qualified yet: then the
+// line the answer is at cannot be judged, so the check is unavailable whatever
+// another line says. Otherwise, if the routed line could not be judged, or a claim
+// was met by none of its lines (no validator answered, or no lane serves them), the
+// verdict is unavailable: another line's profiles failing says nothing about the
+// line the answer is at. Otherwise the verdict is the best one any line gave
 // (deeper beats structural), and unavailable if no line's validator answered. The
 // policy then decides as for one line. A further line is tried only after the
-// previous one failed, each extra line's call is bounded by
+// previous one failed, or, after a valid one, while it could still meet a claim a
+// qualifying line left unmet; each extra line's call is bounded by
 // payerAnswerCandidateTimeout, and the one finding names the routed line and each
 // tried line's verdict; it can record an answer valid only on a line other than its
 // routed one, which is not a defect. Judging a payer's confirmed line alone, more
@@ -2145,39 +2393,71 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 // site here unless the leg's counterparty is a payer answering a leg this gateway
 // originated.
 func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []byte, line, contract string, payer shnsdk.PayerIdentifier) (int, string) {
-	if relaysReferencePayerBytes(g.cfg.OriginationProfile) && isReferencePayer(payer) {
-		return 0, ""
-	}
-	return g.validatePayerAnswerAtCandidates(ctx, resourceJSON, line, contract)
+	return g.validatePayerAnswerAtCandidates(ctx, resourceJSON, line, contract, "", []shnsdk.PayerIdentifier{payer})
 }
 
 // validatePayerAnswerAtCandidates certifies a payer's answer against the candidate
-// lines, as validateFHIRPayerIngress describes, for every payer: it has no
-// reference-payer skip. The provider ingress calls it directly for the answers it
-// carries for its own participant's system (carriedAnswerRefused), a path that never
-// had the skip; the tolerance it would extend is to leave the core, as a participant's
-// opt-in.
-func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJSON []byte, line, contract string) (int, string) {
-	lanes := g.candidateLanes(contract, line, resourceJSON)
-	if !anyLaned(lanes) {
-		// No lane serves any line: the routed line alone, which reports the missing
-		// lane as the check being unavailable.
-		return g.validateFHIRForContract(ctx, resourceJSON, "ingress", contract, line, "")
+// lines, as validateFHIRPayerIngress describes, for every payer. The provider ingress
+// calls it directly for the answers it carries for its own participant's system
+// (carriedAnswerRefused). profile is the profile the answer is judged against at each
+// line, "" for the profiles it declares. payers is the payer identities the exchange
+// was routed by: when the participant tolerates every one of them
+// (CONFORMANCE_TOLERATE_PEERS), a defect its level would refuse is recorded instead
+// (conformanceFor).
+//
+// Where the answer's own structure names the lines that judge it
+// (answerCandidateGroups), it is judged at each group's lines alone, the routed
+// line first when it is one of them, and must be valid at a line of every group:
+// a line whose profile leaves a part unconstrained does not judge that part.
+func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJSON []byte, line, contract, profile string, payers []shnsdk.PayerIdentifier) (int, string) {
+	mod := g.conformanceFor(payers)
+	groups := answerCandidateGroups(contract, resourceJSON)
+	if groups == nil {
+		groups = [][]string{nil}
 	}
-	return g.validateGovernedLines(ctx, findingContextFrom(ctx), lanes, resourceJSON, "ingress", line, "", false, true).refusal()
+	for _, within := range groups {
+		lanes := g.candidateLanesWithin(contract, line, resourceJSON, within)
+		if !anyLaned(lanes) && !anyQualifying(lanes) {
+			// No lane serves any candidate line: the routed line alone, or, where the
+			// answer's structure names the lines, the first of those, never one
+			// outside them, which reports the missing lane as the check being
+			// unavailable.
+			at := line
+			if within != nil && !slices.Contains(within, line) {
+				at = within[0]
+			}
+			lane := []lineLane{{Line: at, V: g.validatorForContractLine(contract, at)}}
+			if status, msg := g.validateGovernedLinesBy(ctx, mod, findingContextFrom(ctx), lane, resourceJSON, "ingress", at, profile, false, false).refusal(); status != 0 {
+				return status, msg
+			}
+			continue
+		}
+		if status, msg := g.validateGovernedLinesBy(ctx, mod, findingContextFrom(ctx), lanes, resourceJSON, "ingress", line, profile, false, true).refusal(); status != 0 {
+			return status, msg
+		}
+	}
+	return 0, ""
 }
 
 // candidateLanes is the ordered set of lines a payer's answer is certified against:
 // routed first, then the contract's workstream's order over the answer (answerLineClaims), each of the
 // contract's lines once. A line with no validator lane is left out, unless it is
-// decisive (routed, or claimed by the answer), when it stays in with no validator so
-// that it is recorded as unavailable. A validator that already serves an earlier line
+// the routed line or a line of a claim none of whose lines has a lane
+// (answerCandidates), when it stays in with no validator so that it is recorded
+// as unavailable. A validator that already serves an earlier line
 // is not called again for a later one: where one validator serves every line, the
 // answer is judged once, at the routed line.
 func (g *Gateway) candidateLanes(contract, routed string, payload []byte) []lineLane {
+	return g.candidateLanesWithin(contract, routed, payload, nil)
+}
+
+// candidateLanesWithin is candidateLanes restricted to the lines within (every
+// line when within is nil): the routed line is a candidate only when it is
+// within.
+func (g *Gateway) candidateLanesWithin(contract, routed string, payload []byte, within []string) []lineLane {
 	var used []shnsdk.Validator
 	var out []lineLane
-	for _, c := range g.answerCandidates(contract, routed, payload) {
+	for _, c := range g.answerCandidatesWithin(contract, routed, payload, within) {
 		switch {
 		case c.V != nil && servesAlready(used, c.V):
 			continue
@@ -2193,35 +2473,102 @@ func (g *Gateway) candidateLanes(contract, routed string, payload []byte) []line
 // (FR-G29), one list for every check that reads an answer by its line: the
 // routed line first, then the contract's workstream's order over the answer (answerLineClaims), each of
 // the contract's lines once, a line with no validator lane left out unless it
-// is decisive (routed, or claimed by the answer). candidateLanes certifies by
+// is the routed line, its lane is configured but still qualifying, or it is a
+// line of a claim the answer makes (answerLineClaims) none of whose lines has
+// a lane. Each line carries the claims it is one of. candidateLanes certifies by
 // it; answer.shape reads the answer's graph by it (answerGraphLine).
 func (g *Gateway) answerCandidates(contract, routed string, payload []byte) []lineLane {
+	return g.answerCandidatesWithin(contract, routed, payload, nil)
+}
+
+// answerCandidatesWithin is answerCandidates restricted to the lines within
+// (every line when within is nil).
+func (g *Gateway) answerCandidatesWithin(contract, routed string, payload []byte, within []string) []lineLane {
 	native := map[string]bool{}
 	for _, l := range nativeLinesForContract(contract) {
-		native[l] = true
+		native[l] = within == nil || slices.Contains(within, l)
 	}
-	order, claimed := answerLineClaims(contract, payload)
+	order, claims := answerLineClaims(contract, payload)
+	// Each claim keeps only the contract's lines; one that keeps none
+	// constrains nothing.
+	var sets []claimSet
+	for _, c := range claims {
+		var set claimSet
+		for _, l := range c {
+			if native[l] {
+				set = append(set, l)
+			}
+		}
+		if len(set) > 0 {
+			sets = append(sets, set)
+		}
+	}
+	type candidate struct {
+		line       string
+		v          shnsdk.Validator
+		qualifying bool
+	}
 	seen := map[string]bool{}
-	var out []lineLane
+	var lines []candidate
+	reachable := map[string]bool{}
 	for _, l := range append([]string{routed}, order...) {
 		if !native[l] || seen[l] {
 			continue
 		}
 		seen[l] = true
-		decisive := l == routed || claimed[l]
-		v := g.validatorForContractLine(contract, l)
-		if v == nil && !decisive {
+		v, qualifying := g.candidateLaneAt(contract, l)
+		lines = append(lines, candidate{l, v, qualifying})
+		reachable[l] = v != nil || qualifying
+	}
+	var out []lineLane
+	for _, c := range lines {
+		var in []int
+		// A claim's line with no lane is listed only when no line of that
+		// claim has one: the claim cannot be met then, and the line says why.
+		unreachableClaim := false
+		for i, set := range sets {
+			member, has := false, false
+			for _, l := range set {
+				member = member || l == c.line
+				has = has || reachable[l]
+			}
+			if member {
+				in = append(in, i)
+				unreachableClaim = unreachableClaim || !has
+			}
+		}
+		// A line still qualifying stays a candidate, recorded unavailable,
+		// rather than dropping out as if it had no lane.
+		if c.v == nil && c.line != routed && !c.qualifying && !unreachableClaim {
 			continue
 		}
-		out = append(out, lineLane{Line: l, V: v, Decisive: decisive, Extra: l != routed})
+		out = append(out, lineLane{Line: c.line, V: c.v, Decisive: c.line == routed, Claims: in, Extra: c.line != routed, Qualifying: c.qualifying})
 	}
 	return out
 }
 
+// candidateLaneAt is contract's lane at line for a payer answer's candidates,
+// and whether that lane is a default lane still qualifying: one the
+// gateway has but cannot use until a qualification passes, unlike a line with
+// no lane. A default lane's readiness is read once, so the two answers come
+// from one snapshot: a lane that qualifies between two reads could otherwise
+// read as no lane at all, and let another line's valid decide the answer. A
+// lane that has read ready stays ready (DiscoveredLane never un-qualifies), so
+// readyLane serves it.
+func (g *Gateway) candidateLaneAt(contract, line string) (v shnsdk.Validator, qualifying bool) {
+	if d, ok := g.cfg.ValidatorsByContractLine[contract+"@"+line].(*DiscoveredLane); ok {
+		if !d.Ready() {
+			return nil, true
+		}
+		return g.readyLane(d), false
+	}
+	return g.validatorForContractLine(contract, line), false
+}
+
 // answerCandidateLines is the lines an answer can be valid at, in order: the
 // lines certification judges it at (candidateLanes) that have a validator,
-// and the routed line. A line the answer claims with no lane is one
-// certification can only record as unavailable, and a line whose validator
+// and the routed line. A claimed line with no lane is one certification can
+// only record as unavailable, and a line whose validator
 // already served an earlier one it does not judge again, so no other rule
 // reads the answer valid there either.
 func (g *Gateway) answerCandidateLines(contract, routed string, payload []byte) []string {
@@ -2232,6 +2579,18 @@ func (g *Gateway) answerCandidateLines(contract, routed string, payload []byte) 
 		}
 	}
 	return lines
+}
+
+// anyQualifying reports whether any lane in lanes is configured but still
+// qualifying: such a line is judged unavailable, not as one with no
+// lane.
+func anyQualifying(lanes []lineLane) bool {
+	for _, l := range lanes {
+		if l.Qualifying {
+			return true
+		}
+	}
+	return false
 }
 
 // anyLaned reports whether any lane in lanes has a validator.
@@ -2323,9 +2682,8 @@ func (g *Gateway) adaptAnswer(ctx context.Context, key relay.Key, answer []byte,
 // (carryDTRAnswer).
 func (g *Gateway) recordTransformed(ev ObserverEvent, x ExchangeIdentity, contract, fromLine, targetLine string, chain []CompatStep, reports []LossReport, before, after []byte) error {
 	// The transform Provenance (module id, source->target lines,
-	// the shn-loss-report extension) rides INSIDE the transformed payload
-	// where the target profile tolerates the extra Bundle.entry; else it
-	// rides the observer stream only — never the envelope, never Hub-visible.
+	// the shn-loss-report extension) rides the observer stream only — never
+	// the payload, never the envelope, never Hub-visible.
 	sdkLoss := toSDKLossReports(reports)
 	provJSON, perr := shnsdk.BuildTransformProvenance(
 		"urn:shn:leg:"+x.CorrelationID, "Organization/"+g.cfg.HolderID,
@@ -2347,17 +2705,10 @@ func (g *Gateway) recordTransformed(ev ObserverEvent, x ExchangeIdentity, contra
 		return fmt.Errorf("engine: %s: %w", ev.Direction, verr)
 	}
 
-	if provenanceTolerated(contract) {
-		// No contract's target profile has live-validate evidence for an
-		// added Provenance Bundle.entry yet — provenanceTolerated is false
-		// for every contract this build ships (the sanctioned safe default
-		// when evidence is absent). This branch is therefore unreached today; it stays
-		// explicit rather than speculatively implemented (transform-iff) —
-		// a future contract's Bundle.entry-append helper lands here once a
-		// specific placement is proven, live, against its target lane.
-	} else {
-		ev.Payload = provJSON
-	}
+	// A contract tolerates a carried provenance only with live evidence; its
+	// workstream then answers through a workstream method, added with that
+	// evidence.
+	ev.Payload = provJSON
 	g.observe(ev)
 
 	// Local demonstration/inspection only (SHN_DEMO_EDGE_CAPTURE /
@@ -2432,23 +2783,6 @@ func (g *Gateway) EdgeCaptureFor(id string) (EdgeCapture, bool) {
 // store on first use, exactly like the real egressAdapt capture hook.
 func (g *Gateway) RecordEdgeCaptureForTest(e EdgeCapture) {
 	g.edgeCaptureStoreForWrite().Record(e)
-}
-
-// provenanceTolerated reports whether contract's target profile has
-// live-validate evidence that it tolerates an added Provenance Bundle.entry.
-// No contract has that evidence yet — the live derivations behind the wired
-// transform steps predate the Provenance builder, so egressAdapt
-// observer-streams every transform's Provenance today (the sanctioned safe
-// default when evidence is absent).
-// Flipping a contract to true is additive future work once a specific
-// Bundle.entry placement is proven against its target lane, live.
-func provenanceTolerated(contract string) bool {
-	switch contract {
-	case "pa.crd", "pa.dtr", "pa.pas":
-		return false
-	default:
-		return false
-	}
 }
 
 // toSDKLossReports element-wise converts the engine's own []LossReport
@@ -2564,7 +2898,7 @@ func VerifyTransformLossRoundTripForTest(provenanceJSON []byte, want []shnsdk.Lo
 // Provenance-only strip, the opposite half of the same pair).
 //
 // Scoped to the pa.pas top-level-extension carry shape (Claim/ClaimResponse.
-// extension) — pasCollectResources walks a bare resource or a Bundle's
+// extension) — collectResources walks a bare resource or a Bundle's
 // entries the same way pasRestoreCarriedExtensions itself does, so this
 // checks exactly the surface that function would restore from. The pa.dtr
 // carry shape (QuestionnaireResponse.item.answer.value.extension:itemWeight,
@@ -2579,7 +2913,7 @@ func verifyCarryPresent(declared []shnsdk.LossEntry, payload []byte) error {
 		return fmt.Errorf("engine: verifyCarryPresent: unmarshal payload: %w", err)
 	}
 	present := map[string]bool{}
-	for _, resources := range pasCollectResources(top) {
+	for _, resources := range collectResources(top) {
 		for _, res := range resources {
 			extAny, _ := res["extension"].([]any)
 			for _, e := range extAny {
@@ -2621,7 +2955,7 @@ func VerifyCarryRestoredForTest(declared []shnsdk.LossEntry, payload []byte) err
 // comment), so the pend record and the Provenance loss record can never
 // disagree about what "carried" means. nil when the chain carried nothing,
 // which is EVERY flow this build originates today (produce-iff: no SHN
-// builder emits a 2.2-only top-level Claim extension — transform_pas.go's
+// builder emits a 2.2-only top-level Claim extension — workstream_pa_transform_pas.go's
 // pas22OnlyClaimExtensions note), so pendState.carriedEntries stays empty and
 // verifyPendCarryIntact stays a no-op on every existing path.
 func carriedEntriesFrom(reports []LossReport) []shnsdk.LossEntry {
@@ -2875,7 +3209,7 @@ func RequestFrameOperation(ctx context.Context) string {
 
 // inboundFrameOperation reads the operation header of an inbound request
 // frame. The header is defined only for a leg whose taxonomy declares frame
-// operations (legSpec.OperationHeader): a frame that names an operation on any
+// operations (legSpec.FrameOperations): a frame that names an operation on any
 // other leg is refused (400). Which operation values are served is the leg's
 // decision. A payload that is not a frame names none.
 func inboundFrameOperation(legType string, payload []byte) (string, int, string) {
@@ -2887,7 +3221,7 @@ func inboundFrameOperation(legType string, payload []byte) (string, int, string)
 		return "", http.StatusBadRequest, "request frame decode failed"
 	}
 	op := hdr.Headers[shnsdk.FrameHeaderOperation]
-	if spec, _ := legSpecFor(legType); op != "" && !spec.OperationHeader {
+	if spec, _ := legSpecFor(legType); op != "" && len(spec.FrameOperations) == 0 {
 		return "", http.StatusBadRequest, "operation header is not defined for this transaction type"
 	}
 	return op, 0, ""
@@ -3025,7 +3359,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	respMeta := shnsdk.Metadata{
 		Sender:          g.cfg.HolderID,
 		Recipient:       requester,
-		TransactionType: txType,
+		TransactionType: wireName(txType),
 		AuthorityFrame:  respFrame,
 		ConsentRef:      consentRef, // empty for non-consent exchanges (payer legs)
 		Timestamp:       g.cfg.Clock().Format(time.RFC3339),
@@ -3297,19 +3631,4 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		return
 	}
 	writeLeg(w, out)
-}
-
-// ValidatorReadinessForTest snapshots the existing PAS routing lanes without
-// qualification or validation work. It is independent of source evidence.
-func (g *Gateway) ValidatorReadinessForTest() map[string]bool {
-	out := map[string]bool{}
-	for _, line := range []string{"2.0", "2.1", "2.2"} {
-		v := g.validatorForContractLine("pa.pas", line)
-		ready := v != nil
-		if r, ok := v.(interface{ Ready() bool }); ok {
-			ready = r.Ready()
-		}
-		out[line] = ready
-	}
-	return out
 }

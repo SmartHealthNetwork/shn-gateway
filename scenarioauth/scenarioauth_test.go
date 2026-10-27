@@ -1,6 +1,7 @@
 package scenarioauth
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -544,5 +545,18 @@ func TestParseCallers(t *testing.T) {
 		if _, err := ParseCallers([]byte(raw)); err == nil {
 			t.Errorf("%s: parsed", name)
 		}
+	}
+}
+
+// A request context carries the caller a gateway verified, and only that: a
+// context no caller was put into carries none.
+func TestCallerFrom(t *testing.T) {
+	if _, ok := CallerFrom(context.Background()); ok {
+		t.Fatal("a context with no verified caller reports one")
+	}
+	want := Caller{Label: "provider-app", JTI: "j-1"}
+	got, ok := CallerFrom(WithCaller(context.Background(), want))
+	if !ok || got != want {
+		t.Fatalf("CallerFrom = %+v %v, want %+v", got, ok, want)
 	}
 }

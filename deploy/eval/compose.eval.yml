@@ -81,10 +81,19 @@ services:
 
   gateway:
     build: { context: ../.., dockerfile: Dockerfile }
+    # The gateway's stop takes up to 43 s (gateway/docs/DEPLOYMENT.md, "Stopping the
+    # gateway"); Docker's default of 10 s would cut it.
+    stop_grace_period: 45s
     environment:
       ROLE: provider
       PORT: "8080"
       ORIGINATION_PROFILE: provider-data
+      # The evaluation's test provider's synthetic clinician NPI (valid check digit), for
+      # orders whose records name no ordering clinician. The gateway has no NPI default: a
+      # CRD request or attestation no source names a clinician for is refused. With your own
+      # records, set your own clinician's NPI here, or name each order's requester in your
+      # records.
+      NPI: "1000000020"
       SHN_DISCOVERY_URL: ${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}
       SHN_SECRETS: /etc/shn
       PAYER_DIRECTORY: /etc/shn-config/payer-directory.json
@@ -109,10 +118,16 @@ services:
       # (payer/smoke.sh). Hardcoding `strict` served the first audience by
       # getting the other two wrong: a partner would meet a refusal produced by
       # a value WE put in a bundle THEY operate, and read it as a verdict on
-      # their own conformance. Absent means observe (check, record, relay),
-      # matching the sibling payer
+      # their own conformance. Absent means the release's default (none from
+      # v1.0.0: no check, no record; observe before), matching the sibling payer
       # bundle and the production install unit (../bundle/compose.yml).
       CONFORMANCE_ENFORCEMENT: ${CONFORMANCE_ENFORCEMENT:-}
+      # The payers whose answers the gateway tolerates: a defect its level would
+      # refuse is recorded instead, and the answer carried. Supplied by whoever
+      # runs this file, like the level above; absent tolerates no payer, as any
+      # gateway's default. SHN's own gate (../eval/smoke.sh) lists the reference
+      # payers it drives.
+      CONFORMANCE_TOLERATE_PEERS: ${CONFORMANCE_TOLERATE_PEERS:-}
     volumes:
       - ${SHN_SECRETS:?set SHN_SECRETS to your shn register bundle dir}:/etc/shn:ro
       # payer-directory.json is no longer bind-mounted directly (see the committed

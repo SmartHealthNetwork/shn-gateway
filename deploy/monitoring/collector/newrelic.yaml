@@ -1,0 +1,33 @@
+# SHN gateway metrics to New Relic over OTLP.
+# Gateway: OTEL_METRICS_EXPORTER=otlp, OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318.
+#          The gateway may stay cumulative: cumulativetodelta below gives New Relic the delta it prefers.
+# Collector env: NEW_RELIC_LICENSE_KEY (secret), NEW_RELIC_OTLP_ENDPOINT (https://otlp.nr-data.net, or the EU endpoint).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+  cumulativetodelta: {}
+
+exporters:
+  otlphttp/newrelic:
+    endpoint: ${env:NEW_RELIC_OTLP_ENDPOINT}
+    headers:
+      api-key: ${env:NEW_RELIC_LICENSE_KEY}
+    compression: gzip
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, cumulativetodelta, batch]
+      exporters: [otlphttp/newrelic]

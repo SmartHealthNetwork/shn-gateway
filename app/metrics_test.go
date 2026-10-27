@@ -1,17 +1,27 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	metrics "github.com/SmartHealthNetwork/shn-sdk/metrics"
 )
+
+// emfRegistry is a registry whose one sink is the EMF sink writing through em,
+// as build wires it when METRICS_SERVICE is set.
+func emfRegistry(em *metrics.Emitter, service, role string) *telemetry.Registry {
+	return telemetry.New(telemetry.NewEMF(em, service, role))
+}
 
 // decodeEMFLines parses each stdout line as JSON and returns the per-line maps.
 func decodeEMFLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
@@ -37,7 +47,7 @@ func decodeEMFLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 func TestLegMetricHook_EmitsLegOutcomeAndErrorRollup(t *testing.T) {
 	var buf bytes.Buffer
 	em := metrics.New(&buf, "SHN/Preview", map[string]string{"Env": "shn-preview"}, nil)
-	hook := legMetricHook(em, "provider-data-gw", "provider")
+	hook := legMetricHook(emfRegistry(em, "provider-data-gw", "provider"))
 
 	for _, o := range []string{
 		engine.LegOutcomeRouted, engine.LegOutcomeAnswered, engine.LegOutcomeDenied,
@@ -81,7 +91,7 @@ func TestStoreErrorMetricHook_EmitsStoreErrorWithStoreDim(t *testing.T) {
 	var buf bytes.Buffer
 	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
 
-	storeErrorMetricHook(em, "provider-gw")("exchange")
+	storeErrorMetricHook(emfRegistry(em, "provider-gw", ""))("exchange")
 
 	lines := decodeEMFLines(t, &buf)
 	if len(lines) != 1 {
@@ -102,7 +112,7 @@ func TestInvolvedOmittedMetricHook_EmitsReasonDim(t *testing.T) {
 	var buf bytes.Buffer
 	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
 
-	involvedOmittedMetricHook(em, "payer-gw")("authorization-refused")
+	involvedOmittedMetricHook(emfRegistry(em, "payer-gw", ""))("authorization-refused")
 
 	lines := decodeEMFLines(t, &buf)
 	if len(lines) != 1 {
@@ -122,7 +132,7 @@ func TestStorePoolMetric_EmitsOneGaugePerStat(t *testing.T) {
 	var buf bytes.Buffer
 	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
 
-	emitStorePool(em, "provider-gw", storePoolStat{
+	emitStorePool(emfRegistry(em, "provider-gw", ""), storePoolStat{
 		TotalConns: 7, AcquiredConns: 3, IdleConns: 4, EmptyAcquireCount: 11,
 	})
 
@@ -159,7 +169,7 @@ func TestStorePoolMetricLoop_SamplesThenReturnsOnCtxDone(t *testing.T) {
 	var buf lockedBuffer
 	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
 	sampled := make(chan struct{}, 1)
-	loop := storePoolMetricLoop(em, "provider-gw", func() storePoolStat {
+	loop := storePoolMetricLoop(emfRegistry(em, "provider-gw", ""), func() storePoolStat {
 		select {
 		case sampled <- struct{}{}:
 		default:
@@ -308,8 +318,10 @@ func TestExchangeMetricHook(t *testing.T) {
 			rec: engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "pas-claim", Outcome: engine.ExchangeRefused, RefusedBy: engine.RefusedByProviderGateway, Rule: engine.RefusalAuthentication,
 				Operation: "order-sign", Sender: "holder-a", Recipient: "holder-b", CorrelationID: "leg-1", Trace: "trace-1"},
 			wantLines: map[string]map[string]string{
-				"Exchange":        {"direction": "ingress", "exchange": "pas-claim", "outcome": "refused"},
-				"ExchangeLatency": {"direction": "ingress", "exchange": "pas-claim"},
+				"Exchange":              {"direction": "ingress", "exchange": "pas-claim", "outcome": "refused"},
+				"ExchangeLatency":       {"direction": "ingress", "exchange": "pas-claim"},
+				"ExchangeRefused":       {"direction": "ingress", "rule": "authentication", "by": "provider-gateway"},
+				"ExchangeRefusedByRule": {"rule": "authentication"},
 			},
 		},
 		{
@@ -328,7 +340,7 @@ func TestExchangeMetricHook(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			em := metrics.New(&buf, "SHN/Preview", map[string]string{"Env": "shn-preview"}, nil)
-			exchangeMetricHook(em, "shn-cloud-acme")(c.rec)
+			exchangeMetricHook(emfRegistry(em, "shn-cloud-acme", ""))(c.rec)
 			got := map[string]map[string]any{}
 			for _, m := range decodeEMFLines(t, &buf) {
 				aws := m["_aws"].(map[string]any)["CloudWatchMetrics"].([]any)[0].(map[string]any)
@@ -386,7 +398,7 @@ func TestExchangeMetricHook(t *testing.T) {
 func TestExchangeMetricBound(t *testing.T) {
 	var buf bytes.Buffer
 	em := metrics.New(&buf, "SHN/Preview", map[string]string{"Env": "shn-preview"}, nil)
-	hook := exchangeMetricHook(em, "shn-cloud-acme")
+	hook := exchangeMetricHook(emfRegistry(em, "shn-cloud-acme", ""))
 	classes := append([]string{""}, engine.BackendErrorClasses...)
 	for _, d := range append(engine.ExchangeDirections, "junk") {
 		for _, x := range append(engine.ExchangeKinds, "junk") {
@@ -395,6 +407,18 @@ func TestExchangeMetricBound(t *testing.T) {
 					hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: o, Backend: &engine.BackendCall{Latency: time.Millisecond, ErrorClass: cl}})
 				}
 			}
+			// The additions: every refusal rule and party, every stage, and
+			// both sizes.
+			for _, rule := range append(engine.RefusalRules, "junk") {
+				for _, by := range append(engine.RefusalParties, "junk") {
+					hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: engine.ExchangeRefused, Rule: rule, RefusedBy: by})
+				}
+			}
+			n := int64(1)
+			ms := time.Millisecond
+			hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: engine.ExchangeAnswered, Latency: 100 * ms,
+				Stages:  &engine.LegStages{Unwrap: ms, Reads: ms, Forward: ms, Validate: ms, Seal: ms, Ledger: ms, Write: ms},
+				Network: &engine.NetworkWait{Latency: 10 * ms, Calls: 1}, RequestBytes: &n, ResponseBytes: &n})
 		}
 	}
 	series := map[string]bool{}
@@ -411,8 +435,58 @@ func TestExchangeMetricBound(t *testing.T) {
 	}
 	// The count RUNNING.md states for today's lists, in a release build (a
 	// test profile's legs add their own series).
-	if !toyProfileBuild && exchangeSeriesBound != 311 {
+	if !toyProfileBuild && exchangeSeriesBound != 647 {
 		t.Fatalf("exchangeSeriesBound=%d; update the bound in docs/RUNNING.md \"Hosted tenant exchange metrics\" and this pin", exchangeSeriesBound)
+	}
+}
+
+// The conformance and in-flight metrics' EMF series: every combination of
+// their lists, plus values outside them, reports exactly
+// conformanceSeriesBound series.
+func TestConformanceMetricBound(t *testing.T) {
+	var buf bytes.Buffer
+	em := metrics.New(&buf, "SHN/Preview", map[string]string{"Env": "shn-preview"}, nil)
+	emf := telemetry.NewEMF(em, "shn-cloud-acme", "")
+	reg := telemetry.New(emf)
+	finding, took, active, dropped := findingMetricHook(reg), validatorMetricHook(reg), activeRequestHook(reg), observeCheckDroppedHook(reg)
+	for _, x := range append(engine.ExchangeKinds, "junk") {
+		for _, level := range append(engine.ConformanceLevels, "junk") {
+			for _, kind := range append(engine.CheckKinds, "junk") {
+				for _, action := range append(engine.FindingActions, "junk") {
+					for _, tolerated := range []bool{true, false} {
+						finding(engine.FindingMetric{Exchange: x, Level: level, Kind: kind, Action: action, Tolerated: tolerated})
+					}
+				}
+			}
+		}
+	}
+	for _, line := range append(telemetry.IGLines, "junk") {
+		for _, lane := range append(telemetry.LaneKinds, "junk") {
+			took(line, lane, time.Millisecond)
+		}
+	}
+	for _, d := range append(engine.ExchangeDirections, "junk") {
+		active(d, 1)
+	}
+	emf.SampleActiveRequests()
+	dropped()
+	series := map[string]bool{}
+	for _, m := range decodeEMFLines(t, &buf) {
+		aws := m["_aws"].(map[string]any)["CloudWatchMetrics"].([]any)[0].(map[string]any)
+		key := aws["Metrics"].([]any)[0].(map[string]any)["Name"].(string)
+		for _, d := range aws["Dimensions"].([]any)[0].([]any) {
+			key += "|" + d.(string) + "=" + m[d.(string)].(string)
+		}
+		series[key] = true
+	}
+	if len(series) != conformanceSeriesBound {
+		t.Fatalf("distinct series=%d, conformanceSeriesBound=%d", len(series), conformanceSeriesBound)
+	}
+	// The counts RUNNING.md states for today's lists, in a release build:
+	// this bound, and every series the additions add to the 311 before them.
+	if !toyProfileBuild && (conformanceSeriesBound != 225 || exchangeSeriesBound-311+conformanceSeriesBound != 561) {
+		t.Fatalf("conformanceSeriesBound=%d, additions=%d; update the bounds in docs/RUNNING.md \"Hosted tenant exchange metrics\" and these pins",
+			conformanceSeriesBound, exchangeSeriesBound-311+conformanceSeriesBound)
 	}
 }
 
@@ -434,4 +508,69 @@ func keysOf(m map[string]map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The audit outbox's counters: each name once, with its Service and, for a
+// retry or a drop, its reason; the depth and the unknown endpoint as gauges.
+func TestAuditMetrics_EmitsEachCounterWithItsDims(t *testing.T) {
+	var buf bytes.Buffer
+	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
+	m := auditMetrics{reg: emfRegistry(em, "provider-gw", "")}
+	m.Sent()
+	m.Retried("unknown-sender")
+	m.Dropped("overflow", 3)
+	m.Depth(7)
+	m.EndpointUnknown(7)
+
+	lines := decodeEMFLines(t, &buf)
+	if len(lines) != 6 {
+		t.Fatalf("want 6 EMF lines, got %d: %v", len(lines), lines)
+	}
+	for i, want := range []struct {
+		name   string
+		value  float64
+		reason string
+	}{
+		{"AuditAppendSent", 1, ""},
+		{"AuditAppendRetried", 1, "unknown-sender"},
+		{"AuditAppendDroppedBy", 3, "overflow"},
+		// The alarm's single stream: {Env, Service} only.
+		{"AuditAppendDropped", 3, ""},
+		{"AuditQueueDepth", 7, ""},
+		{"AuditEndpointUnknown", 7, ""},
+	} {
+		l := lines[i]
+		if l[want.name] != want.value || l["Service"] != "provider-gw" || l["Env"] != "test" {
+			t.Errorf("line %d: %v, want %s=%v for provider-gw", i, l, want.name, want.value)
+		}
+		if got, _ := l["reason"].(string); got != want.reason {
+			t.Errorf("line %d: reason %q, want %q", i, got, want.reason)
+		}
+	}
+}
+
+// One ValidatorLane gauge per lane, 1 when qualified and 0 when not, with its
+// line and kind; and one ValidatorLaneAttempt count per attempt by outcome.
+func TestValidatorLaneMetrics(t *testing.T) {
+	var buf bytes.Buffer
+	em := metrics.New(&buf, "SHN/Test", map[string]string{"Env": "test"}, func() time.Time { return time.Unix(0, 0) })
+	emitValidatorLanes(emfRegistry(em, "brpayer-gw", ""), []laneGauge{{"2.2", "routing", false}, {"2.2", "certification", true}})
+	validatorLaneAttemptHook(emfRegistry(em, "brpayer-gw", ""))("2.2", false)
+	var got []string
+	for _, m := range decodeEMFLines(t, &buf) {
+		if m["Service"] != "brpayer-gw" || m["Env"] != "test" || m["line"] != "2.2" {
+			t.Fatalf("dims wrong: %v", m)
+		}
+		switch {
+		case m["ValidatorLane"] != nil:
+			got = append(got, fmt.Sprintf("gauge %v=%v", m["lane"], m["ValidatorLane"]))
+		case m["ValidatorLaneAttempt"] != nil:
+			got = append(got, fmt.Sprintf("attempt %v %v=%v", m["lane"], m["outcome"], m["ValidatorLaneAttempt"]))
+		default:
+			t.Fatalf("unexpected line %v", m)
+		}
+	}
+	if want := []string{"gauge routing=0", "gauge certification=1", "attempt routing failed=1"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }

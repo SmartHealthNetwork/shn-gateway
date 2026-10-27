@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // Payer-side DTR operations: a request frame may name the DTR operation its
@@ -83,7 +85,7 @@ func newDTRPayer(t *testing.T, opts ...NativeOption) dtrPayer {
 	p := newStubPartner(t)
 	p.respByPath[packagePath] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 	p.respByPath[nextPath] = nextQuestionAnswer(t, "Patient/"+dtrFrameMember, rawItems(t, adaptiveTree(t, "1")))
-	g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, opts...)
+	g.cfg.Responder = NewNativeResponder(p.srv.Client(), p.srv.URL, nil, append([]NativeOption{WithCRDService("shn-order-select")}, opts...)...)
 	pci, _, ok := g.cfg.SoR.(*censusSoR).ResolvePatient(dtrFrameMember)
 	if !ok {
 		t.Fatalf("%s is not in the test system of record", dtrFrameMember)
@@ -182,7 +184,7 @@ func TestPayerDTR_DispatchByFrameOperation(t *testing.T) {
 	})
 
 	t.Run("responder refuses an unknown operation too", func(t *testing.T) {
-		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, "shn-order-select", nil, nil)
+		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, nil, WithCRDService("shn-order-select"))
 		d.partner.lastPath = ""
 		res, err := n.Handle(withRequestFrameOperation(context.Background(), "questionnaire-fetch"), "dtr-questionnaire-fetch", "corr", "pci", pkg)
 		if err != nil || res.Status != http.StatusBadRequest || !strings.Contains(res.Message, "unsupported DTR operation") {
@@ -194,7 +196,7 @@ func TestPayerDTR_DispatchByFrameOperation(t *testing.T) {
 	})
 
 	t.Run("answer keeps the payer's media type", func(t *testing.T) {
-		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, "shn-order-select", nil, nil)
+		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, nil, WithCRDService("shn-order-select"))
 		for _, op := range []string{shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion} {
 			body := pkg
 			if op == shnsdk.FrameOperationNextQuestion {
@@ -239,7 +241,7 @@ func TestPayerDTR_LegacyEnvelopeRefused400(t *testing.T) {
 	}
 
 	t.Run("responder refuses it too", func(t *testing.T) {
-		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, "shn-order-select", nil, nil)
+		n := NewNativeResponder(d.partner.srv.Client(), d.partner.srv.URL, nil, WithCRDService("shn-order-select"))
 		d.partner.lastPath = ""
 		res, err := n.Handle(context.Background(), "dtr-questionnaire-fetch", "corr", "pci",
 			[]byte(`{"canonical":"http://example.org/Questionnaire/q","coverage":`+dtrCoverage("cov-1", dtrFrameMember)+`}`))
@@ -452,7 +454,7 @@ func TestPayerDTR_AnswerWithoutMediaType(t *testing.T) {
 		_, _ = w.Write(answer)
 	}))
 	t.Cleanup(srv.Close)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(srv.Client(), srv.URL, nil, WithCRDService("shn-order-select"))
 	res, err := n.Handle(withRequestFrameOperation(context.Background(), shnsdk.FrameOperationQuestionnairePackage),
 		"dtr-questionnaire-fetch", "corr", "pci", dtrPackageFixture(t, "valid/dtr-package-params-2.0.json"))
 	if err != nil || res.Status != 0 {

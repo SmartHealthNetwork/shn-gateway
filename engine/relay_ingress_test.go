@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/relay_ingress_test.go
 package engine
 

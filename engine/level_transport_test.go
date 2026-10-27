@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -471,8 +473,8 @@ func TestLevelPayerPASResponder_NoCoverageWithIdentityMappingRefusesAtEveryLevel
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := newStubPartner(t)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, fixedClock,
-				append([]NativeOption{WithConformancePolicy(NewConformancePolicy(level))}, withIdentityMapping()...)...)
+			n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock,
+				append([]NativeOption{WithCRDService("shn-order-select"), WithConformancePolicy(NewConformancePolicy(level))}, withIdentityMapping()...)...)
 			res, err := n.Handle(t.Context(), "pas-claim", "corr-1", "pci-1", body)
 			if err != nil {
 				t.Fatal(err)

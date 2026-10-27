@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // legcatalog_test.go — the payer content occupant must have a case for every leg the
 // engine's inbound dispatch routes to it.
 //
@@ -40,8 +42,7 @@ var responderRoutedLegs = []string{
 // transport, a leg without one fails on the switch's default.
 func catalogResponder(t *testing.T) LegResponder {
 	t.Helper()
-	return NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid",
-		"svc", newCensusSoR(), func() time.Time { return time.Unix(1700000000, 0).UTC() })
+	return NewNativeResponder(&http.Client{Transport: errTransport{}}, "http://partner.invalid", func() time.Time { return time.Unix(1700000000, 0).UTC() }, WithCRDService("svc"), WithPASStore(newCensusSoR()))
 }
 
 // unhandledLeg reports whether err is the switch's generic "no case for this leg" default.

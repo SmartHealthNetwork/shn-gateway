@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // hubtimeout_test.go — the originating gateway names a Hub leg that produced no
 // answer within its client's timeout budget, instead of collapsing it into the
 // generic routing failure. Hermetic: the stub Hub holds /route open until the

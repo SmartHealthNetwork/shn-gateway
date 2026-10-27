@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa.go — the Prior Authorization workstream's adapter (design
 // §4.2): its leg catalog, derived from the gateway's copy of the network's leg
 // taxonomy, its participant-facing routes, its ownership rows
@@ -19,19 +21,33 @@ import (
 // its participant-facing routes, its ownership rows and its legs'
 // involvement.
 type paWorkstream struct {
-	legs map[string]legSpec
+	legs  map[string]legSpec
+	edits []relayEdit
 }
 
-// paAdapter is the adapter the registry compiles in (workstreams.go).
-var paAdapter = paWorkstream{legs: paCatalog}
+// paAdapter is the adapter the registry compiles in (workstreams_zones.go). It
+// holds its edits as it holds its catalog, so Go initializes both before the
+// registry reads them.
+var paAdapter = paWorkstream{legs: paCatalog, edits: paRelayEdits}
 
 func (paWorkstream) id() string                    { return workstreamPA }
 func (w paWorkstream) catalog() map[string]legSpec { return w.legs }
+func (w paWorkstream) relayEdits() []relayEdit     { return w.edits }
 func (paWorkstream) routes(g *Gateway, role string) []mountedRoute {
 	return g.paRoutes(role)
 }
 func (paWorkstream) ownershipRows() map[relay.Key]relay.Rule  { return paLegOwnership }
 func (paWorkstream) ingressRoutes() map[string]ingressHandler { return paIngressRoutes }
+
+// ingressOperations: the CRD ingress records the hook of the CDS service it
+// answers (cdsIngressServices), in discovery order.
+func (paWorkstream) ingressOperations() []string {
+	var out []string
+	for _, s := range cdsIngressServices {
+		out = append(out, s.Hook)
+	}
+	return out
+}
 
 // canonicalContractVersion: the canonical validator resolves PAS at 2.0, the
 // line every deployment's FHIR_VALIDATE_URL serves.

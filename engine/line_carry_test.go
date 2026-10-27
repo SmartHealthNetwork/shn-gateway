@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // line_carry_test.go — the network's default across IG lines (linecarry.go).

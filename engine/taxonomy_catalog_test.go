@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -64,7 +66,7 @@ func TestPACatalog_MatchesTheLegTaxonomy(t *testing.T) {
 // other side does not match.
 func TestCatalogFromTaxonomy_RefusesDrift(t *testing.T) {
 	got, err := catalogFromTaxonomy(legtaxonomy.PA(), "pa", paLegs)
-	if err != nil || !maps.Equal(got, paCatalog) {
+	if err != nil || !reflect.DeepEqual(got, paCatalog) {
 		t.Fatalf("the derivation is not the PA catalog: %v", err)
 	}
 	for name, tc := range map[string]struct {
@@ -153,8 +155,8 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		if spec.Seam != wantSeam[tx] {
 			t.Errorf("%s: seam %q, want %q", tx, spec.Seam, wantSeam[tx])
 		}
-		if spec.OperationHeader != (tx == "dtr-questionnaire-fetch") {
-			t.Errorf("%s: OperationHeader %v, want it only on dtr-questionnaire-fetch", tx, spec.OperationHeader)
+		if (len(spec.FrameOperations) > 0) != (tx == "dtr-questionnaire-fetch") {
+			t.Errorf("%s: frame operations %v, want them only on dtr-questionnaire-fetch", tx, spec.FrameOperations)
 		}
 	}
 	// Rejection row: an adapter row that names no seam is refused.

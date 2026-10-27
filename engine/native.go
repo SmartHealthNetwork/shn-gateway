@@ -1,13 +1,14 @@
 // native.go — the native-forward payer LegResponder (Case 1). It
-// forwards each read-only leg to a partner's real Da Vinci endpoint over a
-// SMART-authenticated *http.Client and returns the partner's FHIR. The engine still
+// forwards each leg to the participant's own system over a
+// SMART-authenticated *http.Client and returns that system's answer. The engine still
 // owns authority (the (A)/(B) inbound fences + the (C) outbound subject fence, now
-// defending a real party), sealing, edge $validate, and audit (AI-11). The PAS legs
-// (workstream_pa_pas_forward.go) reuse the originator's PUBLISHED shnsdk parsers; the CRD legs send the
-// request to the partner service chosen by its hook (workstream_pa_cds_services.go) and relay the
-// partner's CDS Hooks answer exactly once it passes the CDS Hooks response rules
-// (shnsdk.CheckCDSHooksResponse). It implements the internal, unstable
-// engine.LegResponder (STABILITY: connectors/* is the supported surface); it
+// defending a real party), sealing, edge $validate, and audit (AI-11). The core
+// responder holds what every leg shares (the client, the base, the version
+// filter, the backend headers and deadline); the workstream declaring a leg
+// sends it (forwardFor) and keeps its own forward state on the responder
+// (workstream.newNativeState): the PA adapter's is in
+// workstream_pa_native_state.go. It implements the internal, unstable
+// engine.LegResponder (a Go API, SHN-internal like every other, STABILITY.md); it
 // graduates to connectors/davinci when LegResponder promotes to shnsdk.
 package engine
 
@@ -35,66 +36,15 @@ const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
 
-// The two CDS service listing types below are the PA adapter's forward state,
-// held by the core responder until the responder is constructed per workstream
-// (tracked in the SHN platform repository as "The native responder is
-// constructed per workstream: the CDS service listing leaves core
-// native.go"). Only PA code uses them: the PA adapter's CRD forward and the
-// payer responder's CDS listing wiring in package app.
-
-// CDSService is one entry of a CDS service listing.
-type CDSService struct {
-	ID   string `json:"id"`
-	Hook string `json:"hook"`
-}
-
-// cdsServiceListing caches the payer's listing. A listing younger than
-// cdsServiceListingTTL is used as is; an older one is read again. One read
-// runs at a time and nobody holds the lock while it runs: requests that still
-// have a listing younger than cdsServiceListingMaxAge use it meanwhile, and
-// requests without one wait for the read. A failed read keeps the last listing
-// (up to cdsServiceListingMaxAge) and is remembered for
-// cdsServiceListingRetryAfter.
-type cdsServiceListing struct {
-	mu       sync.Mutex
-	services []CDSService
-	read     time.Time
-	failed   time.Time
-	err      error
-	// reading is closed when the read in progress ends; nil when none runs.
-	reading chan struct{}
-	// joined, when set, is called each time a request starts waiting for the
-	// read in progress.
-	joined func()
-}
-
 type nativeResponder struct {
 	diagnostic DiagnosticSink
 	client     *http.Client
-	baseURL    string // FHIR base ($questionnaire-package, $submit, CoverageEligibilityRequest)
-	cdsBaseURL string // CDS Hooks base (/cds-services/{id}); defaults to baseURL when co-located
-	// dtrBaseURL / pasBaseURL are the per-operation FHIR bases for a partner
-	// that serves DTR (/Questionnaire/$questionnaire-package, $next-question)
-	// and PAS (/Claim/$submit) from different bases. Empty ⇒ that operation uses
-	// baseURL (dtrBase/pasBase apply the fallback) — the byte-identical fallback
-	// every deployment that sets neither relies on. Published endpoint
-	// evidence (resolvedURL) still takes precedence over either.
-	dtrBaseURL string
-	pasBaseURL string
-	// eligibilityURL is the payer's own coverage-eligibility endpoint, when it
-	// declares one (WithEligibilityURL). Empty: the payer's gateway answers
-	// eligibility from the payer's records itself.
-	eligibilityURL string
-	// crdServiceID and crdDispatchServiceID optionally name the partner's CDS service
-	// for the order-select and order-dispatch legs; empty selects the listed service
-	// whose hook is the request's hook (workstream_pa_cds_services.go). Either way the service must be
-	// listed for the request's hook.
-	crdServiceID         string
-	crdDispatchServiceID string
-	// cds caches the partner's CDS service listing.
-	cds   cdsServiceListing
-	store Store // gateway-owned shadow ledger Store for the PAS legs (nil ⇒ read-only only)
-	clock func() time.Time
+	baseURL    string // the participant's own system's base; a workstream's option may name another for an operation
+	// states is each compiled-in workstream's own forward state, by
+	// workstream id (workstream.newNativeState), built by NewNativeResponder
+	// before its options run. nil on a responder assembled without it.
+	states map[string]nativeState
+	clock  func() time.Time
 	// declaredContractVersions is the operator-declared token set for the
 	// foreign partner (PAYER_DAVINCI_CONTRACT_VERSIONS) — the peer-config
 	// source of the routing filter. Empty = silent peer:
@@ -116,20 +66,6 @@ type nativeResponder struct {
 	// per-leg answer line: this is a fail-closed refuse-before-forward GATE, and a
 	// gate must not depend on a request-scoped value that could be absent.
 	ownContractVersions []string
-	// strictExtensions carries PAYER_DAVINCI_STRICT_EXTENSIONS (FR-G52) as
-	// DORMANT plumbing today: NO Handle-filter
-	// reads it, so it produces zero behavior delta on the native-forward
-	// path (byte-identical fence: TestNativeStrictExtensionsFieldIsDormant).
-	// The route-layer strict consult that IS live reads
-	// the SAME operator flag through g.strictPeer / Config, not through this
-	// field — native.go's arm-1-only pin
-	// (TestNativeForwardStaysArm1) means no chain ever reaches this
-	// responder's own forward today, so a Handle-side consult would guard a
-	// branch that can't run. This field goes live together with
-	// transform-at-the-forward-edge (recorded deferral) — the day this
-	// responder itself builds a chain-bridged payload rather than relaying
-	// the provider's bytes verbatim.
-	strictExtensions bool
 
 	// evMu guards endpointEvidence — the HRex per-version endpoint
 	// evidence. SetEndpointEvidence
@@ -156,7 +92,7 @@ type nativeResponder struct {
 
 	// payorEdgeOwn / payorEdgeBackend implement the payer-edge identity mapping seam
 	// (payoredge.go, PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND): when both
-	// set, the CRD/DTR/PAS legs re-stamp the inbound Coverage's payor identity from
+	// set, the legs a workstream maps re-stamp the inbound Coverage's payor identity from
 	// an identity this gateway OWNS to payorEdgeBackend — anything else refuses loudly
 	// (fail-closed). nil (the default) ⇒ seam off, every leg forwards its Coverage payor
 	// verbatim — byte-identical to every deployment that does not set the two env vars.
@@ -169,8 +105,8 @@ type nativeResponder struct {
 
 	// backendHeaders are fixed request headers a partner system routes on (a
 	// tenant or plan key its API gateway reads before any payload). They go on
-	// every request this responder sends the partner — listing read, CRD, DTR,
-	// PAS — and never on the token endpoint (the token client
+	// every request this responder sends the partner, a workstream's own reads
+	// among them, and never on the token endpoint (the token client
 	// builds its own request). Addressing for the participant's own system,
 	// never a change to the message: the body bytes are untouched. nil ⇒ none.
 	backendHeaders http.Header
@@ -187,6 +123,9 @@ type nativeResponder struct {
 	// value is strict, so a responder built without the option is today's
 	// behavior.
 	conformance ConformancePolicy
+	// moduleAbsent runs the responder with module 3 not loaded
+	// (WithoutConformanceModuleForTest, a test build only). The zero value loads it.
+	moduleAbsent bool
 	// emitFinding is bound by engine.New (bindFindingEmitter) because no
 	// gateway exists when this responder is constructed. nil is safe.
 	emitFinding func(ConformanceFinding)
@@ -199,6 +138,9 @@ type NativeOption func(*nativeResponder)
 // reached this responder (WithRequireSharedLine), so the build that wires it
 // can be proven from another package.
 func (n *nativeResponder) RequireSharedLineForTest() bool { return n.requireSharedLine }
+
+// ClientForTest is the client the responder forwards to the payer's system with.
+func (n *nativeResponder) ClientForTest() *http.Client { return n.client }
 
 // WithBackendHeaders sets fixed request headers for a partner system that
 // routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
@@ -271,20 +213,12 @@ func WithOwnContractVersions(tokens []string) NativeOption {
 	return func(n *nativeResponder) { n.ownContractVersions = tokens }
 }
 
-// WithStrictExtensions supplies PAYER_DAVINCI_STRICT_EXTENSIONS (FR-G52): DORMANT
-// plumbing today — see the strictExtensions field comment for why. Kept
-// as a constructor option (not a runtime setter) because, unlike
-// SetEndpointEvidence, it never needs to change after boot.
-func WithStrictExtensions(on bool) NativeOption {
-	return func(n *nativeResponder) { n.strictExtensions = on }
-}
-
 // WithPayorEdgeIdentity turns on the payer-edge identity mapping seam (payoredge.go):
 // own is the configured half of this deployment's payer identity (the assertion side —
 // WithPayorEdgePublishedIdentities supplies the other half, the identities this holder
 // publishes on the network feed), backend
 // is the identifier this responder's backend leg knows itself by (the re-stamp target).
-// Unset (the zero-value NativeOption slice) ⇒ seam off, every CRD/DTR/PAS leg forwards
+// Unset (the zero-value NativeOption slice) ⇒ seam off, every leg forwards
 // its Coverage payor verbatim (the prior behavior). Config loading enforces the
 // all-or-nothing rule (PAYER_DAVINCI_PAYOR_OWN / _BACKEND); this option itself has no
 // partial form.
@@ -309,24 +243,22 @@ var _ LegResponder = (*nativeResponder)(nil)
 
 // NewNativeResponder builds the native-forward Responder over a ready *http.Client
 // (in production a smartauth bearer client; in tests a fixed-bearer client).
-// crdServiceID optionally names the partner's CDS service for the order-select leg
-// ("" selects the listed service for the request's hook; FR-G26). store is the
-// gateway-owned Store the PAS legs
-// use (the pend ledger); a nil store is valid for a read-only-only native
-// responder. clock is the responder's own clock; nil ⇒ time.Now.
+// baseURL is the participant's own system. clock is the responder's own
+// clock; nil ⇒ time.Now. Each compiled-in workstream's forward state is
+// built before the options run, so a workstream's own options (the PA
+// adapter's WithCRDService and WithPASStore among them) write into it.
 //
 // Returns the concrete *nativeResponder (not the LegResponder interface): every
 // existing caller assigns the result to a LegResponder-typed slot or field (still
 // legal — *nativeResponder satisfies LegResponder, var _ below), but app.go's
 // checks-runner wiring needs SetEndpointEvidence, which is not part of the public
 // LegResponder seam — a caller that only wants LegResponder narrows implicitly.
-func NewNativeResponder(client *http.Client, baseURL, crdServiceID string, store Store, clock func() time.Time, opts ...NativeOption) *nativeResponder {
+func NewNativeResponder(client *http.Client, baseURL string, clock func() time.Time, opts ...NativeOption) *nativeResponder {
 	if clock == nil {
 		clock = time.Now
 	}
-	n := &nativeResponder{
-		client: client, baseURL: baseURL, cdsBaseURL: baseURL, crdServiceID: crdServiceID, store: store, clock: clock,
-	}
+	n := &nativeResponder{client: client, baseURL: baseURL, clock: clock}
+	n.states = workstreamNativeStates(n)
 	for _, o := range opts {
 		o(n)
 	}
@@ -347,9 +279,7 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	// intersection-only) BY CONSTRUCTION — the forwarded body is PROVIDER-
 	// BUILT bytes, not this gateway's own build product, so re-labeling or
 	// chaining it under a native-reach/transform-chain token is out of scope
-	// (transform-at-the-forward-edge is a recorded deferral; it goes live
-	// together with the strictExtensions flag, which is dormant plumbing for
-	// exactly this reason). Pinned by
+	// (transform-at-the-forward-edge is a recorded deferral). Pinned by
 	// TestNativeForwardStaysArm1.
 	contract, cerr := legContract(leg)
 	if cerr != nil {
@@ -391,9 +321,27 @@ func (n *nativeResponder) Handle(ctx context.Context, leg, corrID, subjectPCI st
 	if forward := forwardFor(leg); forward != nil {
 		return forward(n, ctx, contract, leg, corrID, subjectPCI, in, requestFHIR)
 	}
-	// The br-payer-targeting lane routes the read-only + PAS legs here; this is defensive
-	// for an unrouted leg.
+	// A leg no compiled-in workstream forwards; defensive, since only such
+	// workstreams' legs are routed here.
 	return LegResult{}, fmt.Errorf("engine: nativeResponder: unhandled leg %q", leg)
+}
+
+// systemAnsweredKey is the context key for the hook a workstream attaches
+// to learn that the participant's own system answered a forward.
+type systemAnsweredKey struct{}
+
+// withSystemAnswered attaches f, called once the participant's own system
+// answers a forward on this exchange (any status): from then on the system
+// may have acted on the request.
+func withSystemAnswered(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, systemAnsweredKey{}, f)
+}
+
+// systemAnswered calls the hook the exchange attached, if any.
+func systemAnswered(ctx context.Context) {
+	if f, _ := ctx.Value(systemAnsweredKey{}).(func()); f != nil {
+		f()
+	}
 }
 
 // forwardHandler sends one leg the native responder has admitted (the core's
@@ -451,7 +399,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	// The gateway's own work before the call (validation, the member's
 	// lookup) used the whole deadline: the operation is not sent, and the
 	// time is not the payer's system's failure. A read of that system that
-	// ran first (the member's lookup, the CDS service listing) is still
+	// ran first (the member's lookup, a workstream's own read) is still
 	// recorded, and the last one is the exchange's backend.
 	if timedOut() {
 		logDeadlineSpent(ctx, label, leg, n.backendDeadline)
@@ -524,7 +472,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	}
 	// The payer's system answered: the edits the forward carried were sent.
 	x.sent(p)
-	pasLegOf(ctx).answered()
+	systemAnswered(ctx)
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
 	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)

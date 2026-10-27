@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -334,7 +336,7 @@ func names(ms []member) []string {
 // carryGateway is the participant's default, which fills nothing.
 func prefetchGateway(s *prefetchSoR) *Gateway {
 	g := &Gateway{cfg: Config{SoR: s.sor(), PayerRouter: nil, EnrichNativeRequests: true}}
-	g.states = workstreamGatewayStates(g)
+	g.states = gatewayStates(g)
 	return g
 }
 

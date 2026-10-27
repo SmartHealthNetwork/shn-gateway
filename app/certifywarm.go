@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -8,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -29,7 +32,7 @@ const certificationWarmAttempts = 3
 // answered, and after how many requests. A gated lane (a default, or a 2.1 or
 // 2.2 address) is not warmed here: its qualification already posts the
 // readiness corpus to it.
-func warmCertification(ctx context.Context, validators map[string]shnsdk.Validator) {
+func warmCertification(ctx context.Context, validators map[string]shnsdk.Validator, certs *endpointcert.Recorder) {
 	lines := make([]string, 0, len(validators))
 	for line := range validators {
 		lines = append(lines, line)
@@ -45,13 +48,13 @@ func warmCertification(ctx context.Context, validators map[string]shnsdk.Validat
 		if !ok {
 			continue
 		}
-		wg.Go(func() { warmCertificationEndpoint(ctx, line, configured.BaseURL, body, profile) })
+		wg.Go(func() { warmCertificationEndpoint(ctx, certs, line, configured.BaseURL, body, profile) })
 	}
 	wg.Wait()
 }
 
-func warmCertificationEndpoint(ctx context.Context, line, base string, body []byte, profile string) {
-	client := certificationClient(base)
+func warmCertificationEndpoint(ctx context.Context, certs *endpointcert.Recorder, line, base string, body []byte, profile string) {
+	client := certifyClient(certs, line, base)
 	defer client.Client.CloseIdleConnections()
 	started := time.Now()
 	state, attempts := "unanswered", 0

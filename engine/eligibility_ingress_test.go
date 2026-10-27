@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // eligibility_ingress_test.go — a participant's own system sends a coverage

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // censusfixture_test.go — the ENGINE-SCALE hermetic persona fixture.
 //
 // §4.1 deletes the shipped in-process persona census: the published gateway module
@@ -144,9 +146,9 @@ func testQuestionnairePackage(questionnaire []byte) ([]byte, error) {
 // mustNew constructs a Gateway or fails the test. New returns an error since §3.2's
 // fail-closed payer boot (a payer with no content occupant), so every in-package
 // construction site funnels through here rather than dropping the error.
-func mustNew(t *testing.T, cfg Config) *Gateway {
+func mustNew(t *testing.T, cfg Config, opts ...Option) *Gateway {
 	t.Helper()
-	g, err := New(cfg)
+	g, err := New(cfg, opts...)
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}

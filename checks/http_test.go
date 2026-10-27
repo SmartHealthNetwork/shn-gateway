@@ -276,3 +276,33 @@ func TestHandler_AuthCheckedBeforeMethod(t *testing.T) {
 		t.Fatalf("content-type = %q, want json", w.Header().Get("Content-Type"))
 	}
 }
+
+// Guard is /internal/checks' access rule for any handler: the wrapped
+// handler runs only for a caller the rule admits.
+func TestGuardWrapsAnyHandler(t *testing.T) {
+	ran := 0
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ran++; w.WriteHeader(http.StatusTeapot) })
+	for _, c := range []struct {
+		token, remote, bearer string
+		want                  int
+	}{
+		{"", "127.0.0.1:1", "", http.StatusTeapot},
+		{"", "192.0.2.1:1", "", http.StatusForbidden},
+		{"tok", "127.0.0.1:1", "", http.StatusUnauthorized},
+		{"tok", "192.0.2.1:1", "tok", http.StatusTeapot},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/internal/anything", nil)
+		req.RemoteAddr = c.remote
+		if c.bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+c.bearer)
+		}
+		w := httptest.NewRecorder()
+		Guard(h, c.token).ServeHTTP(w, req)
+		if w.Code != c.want {
+			t.Errorf("token %q from %s: %d, want %d", c.token, c.remote, w.Code, c.want)
+		}
+	}
+	if ran != 2 {
+		t.Fatalf("the handler ran %d times, want 2", ran)
+	}
+}

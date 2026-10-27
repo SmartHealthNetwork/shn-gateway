@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -84,7 +86,7 @@ func TestResponderFailure_SaysWhetherThePayerSawTheRequest(t *testing.T) {
 	}
 	for name, row := range rows {
 		t.Run(name, func(t *testing.T) {
-			n := NewNativeResponder(&http.Client{}, row.url(t), "shn-order-select", newCensusSoR(), fixedClock)
+			n := NewNativeResponder(&http.Client{}, row.url(t), fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 			responderFailureIs(t, n, row.want)
 		})
 	}
@@ -130,7 +132,7 @@ func TestResponderFailure_TokenRequestIsNotThePayerRequest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			responderFailureIs(t, NewNativeResponder(client, row.payerURL, "shn-order-select", newCensusSoR(), fixedClock), errUpstreamNotReached)
+			responderFailureIs(t, NewNativeResponder(client, row.payerURL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR())), errUpstreamNotReached)
 			// Each row's failure comes from its own step: the refused token
 			// stops before the payer; the issued token goes on to the payer
 			// dial, which fails.

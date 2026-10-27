@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -100,7 +102,7 @@ func TestNativeHandleNamesTheCorrelationWhenAbandoned(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer close(held)
-	n := NewNativeResponder(srv.Client(), srv.URL, "", nil, nil)
+	n := NewNativeResponder(srv.Client(), srv.URL, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	if _, err := n.Handle(ctx, "crd-order-select", "corr-handle", "pci", cdsRequest("order-select")); err == nil {

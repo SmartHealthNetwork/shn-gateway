@@ -1,3 +1,5 @@
+//go:build shn_testdouble
+
 package engine
 
 import (

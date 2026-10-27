@@ -49,3 +49,22 @@ func TestLegOperations_ReleaseBuildIsPAsAndFQSs(t *testing.T) {
 		t.Fatalf("LegOperations() = %d legs, want PA's and FQS's %d", len(got), len(want))
 	}
 }
+
+// TestRegistry_ReleaseBuildIsPAFQSAndModuleOne pins what a release build
+// compiles in: the PA and FQS workstream adapters, in that order, and on-behalf
+// building (module 1) as its one module.
+func TestRegistry_ReleaseBuildIsPAFQSAndModuleOne(t *testing.T) {
+	var adapters, mods []string
+	for _, w := range workstreams {
+		adapters = append(adapters, w.id())
+	}
+	for _, m := range modules {
+		mods = append(mods, m.id())
+	}
+	if want := []string{workstreamPA, workstreamFQS}; !slices.Equal(adapters, want) {
+		t.Errorf("the release build's workstreams are %v, want %v", adapters, want)
+	}
+	if want := []string{"module1"}; !slices.Equal(mods, want) {
+		t.Errorf("the release build's modules are %v, want %v", mods, want)
+	}
+}

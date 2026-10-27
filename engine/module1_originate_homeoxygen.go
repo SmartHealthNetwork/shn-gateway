@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate_homeoxygen.go — originateDispatch, the provider-data order-dispatch
 // origination prong (handleHomeOxygen = the MBR-OX wrapper; UC-03 provider-data = the
 // MBR-PD-UC03 wrapper).
@@ -26,9 +28,6 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
-
-// homeOxygenMember is the seeded provider-data persona (the E0431 HomeOxygen order).
-const homeOxygenMember = "MBR-OX"
 
 // handleHomeOxygen originates the HomeOxygen PA off the member's seeded DeviceRequest.
 func (g *Gateway) handleHomeOxygen(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +76,10 @@ type dispatchResult struct {
 	payer        shnsdk.PayerIdentifier
 	recipient    string
 	canonical    string
+	// requester is the records the order's requester leads to, read from the
+	// participant's own system once, before any leg (pasOriginationBeforeAnyLeg).
+	// Every PAS request about the order carries them (carryOrderRequester).
+	requester [][]byte
 }
 
 // runCRDDispatch is the shared order-dispatch prefix: CRD(order-dispatch) → DIVERGENCE-3
@@ -142,7 +145,8 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// PAS build at the routed line requires, or it is refused here, before the
 	// order-dispatch and questionnaire legs, exactly as the build would refuse
 	// it (pasOriginationBeforeAnyLeg).
-	if !g.pasOriginationBeforeAnyLeg(w, r, recipient, orderJSON) {
+	requester, ok := g.pasOriginationBeforeAnyLeg(w, r, recipient, orderJSON)
+	if !ok {
 		return dispatchResult{}, false
 	}
 
@@ -307,7 +311,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// the store-resolvable Patient ref: the system of record's, read for the CRD request.
 	subjectFHIRRef := "Patient/" + recs.sorID
 	authored := g.cfg.Clock()
-	qrJSON, _, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
+	qrJSON, _, err := g.populator().Populate(ctx, packageJSON, PopulateContext{
 		Member:         member,
 		PatientRef:     patientRef,
 		SubjectFHIRRef: subjectFHIRRef,
@@ -358,6 +362,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		orderJSON: orderJSON, supplierJSON: supplierJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
 		memberSystem: recs.memberSystem,
 		member:       member, payer: payer, recipient: recipient, canonical: canonical,
+		requester: requester,
 	}, true
 }
 
@@ -461,7 +466,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	}
 	decision, status, msg, err := g.submitClaimAndFollow(r.Context(), r, pasFollowInputs{
 		pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, memberSystem: res.memberSystem,
-		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON,
+		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON, requester: res.requester,
 		supplierJSON: res.supplierJSON, source: res.qrSource, payer: res.payer, wait: wait,
 	})
 	if status != 0 {

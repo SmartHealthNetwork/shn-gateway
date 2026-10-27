@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -26,7 +28,7 @@ import (
 
 // TestSentPayorRefusalTexts pins every refusal of a coverage the EHR sent
 // whose payor Organization it names by reference alone (CRD, and DTR for the
-// unresolved payor), as STABILITY.md lists them: the prefix of any coverage
+// unresolved payor), as CHANGELOG.md lists them: the prefix of any coverage
 // without a payer, ": " and the reason, as a PAS Bundle's refusal is; only the
 // payor nothing could resolve adds a remedy after its reason, the one that
 // resolves that reference. A client matching the prefix keeps matching. Rows

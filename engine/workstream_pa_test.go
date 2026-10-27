@@ -1,9 +1,11 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
 	"context"
 	"fmt"
-	"maps"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -114,18 +116,18 @@ func TestPACatalog_Pinned(t *testing.T) {
 	readOnly := LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
 	mutating := LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate}
 	want := map[string]legSpec{
-		"coverage-eligibility":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native"},
-		"dtr-questionnaire-fetch": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", OperationHeader: true, Seam: "payer-native"},
-		"patient-dtr":             {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound"},
-		"crd-order-select":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native"},
-		"crd-order-dispatch":      {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native"},
-		"pas-claim":               {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native"},
-		"pas-claim-update":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native"},
-		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native"},
+		"coverage-eligibility":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native", WireName: "pa.coverage-eligibility"},
+		"dtr-questionnaire-fetch": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", FrameOperations: []string{"questionnaire-package", "next-question"}, Seam: "payer-native", WireName: "pa.dtr-questionnaire-fetch"},
+		"patient-dtr":             {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound", WireName: "pa.patient-dtr"},
+		"crd-order-select":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-select"},
+		"crd-order-dispatch":      {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-dispatch"},
+		"pas-claim":               {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim"},
+		"pas-claim-update":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-update"},
+		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire"},
 	}
-	if !maps.Equal(paCatalog, want) {
+	if !reflect.DeepEqual(paCatalog, want) {
 		for tx := range want {
-			if paCatalog[tx] != want[tx] {
+			if !reflect.DeepEqual(paCatalog[tx], want[tx]) {
 				t.Errorf("paCatalog[%q] = %+v, want %+v", tx, paCatalog[tx], want[tx])
 			}
 		}
@@ -133,21 +135,26 @@ func TestPACatalog_Pinned(t *testing.T) {
 	}
 }
 
+// sameLegSpec reports whether two leg specs are equal. It lives here, not
+// beside its callers in workstreams_test.go: a file that imports the relay
+// package may not import reflect.
+func sameLegSpec(a, b legSpec) bool { return reflect.DeepEqual(a, b) }
+
 // TestFQSCatalog_Pinned pins the FQS adapter's one row as PA's catalog held
 // it before the federated query became its own workstream's leg: the same
 // frames, operations, scope, physics, contract family and seam.
 func TestFQSCatalog_Pinned(t *testing.T) {
 	readOnly := LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
 	want := map[string]legSpec{
-		"federated-query": {ReqFrame: "provider-tpo", RespFrame: "facility-disclosure", Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only", Physics: readOnly, Seam: "facility-inbound"},
+		"federated-query": {ReqFrame: "provider-tpo", RespFrame: "facility-disclosure", Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only", Physics: readOnly, Seam: "facility-inbound", WireName: "fqs.federated-query"},
 	}
-	if got := fqsAdapter.catalog(); !maps.Equal(got, want) {
+	if got := fqsAdapter.catalog(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the FQS catalog = %+v, want %+v", got, want)
 	}
 	if _, ok := paCatalog["federated-query"]; ok {
 		t.Fatal("PA's catalog still declares the federated query")
 	}
-	if c, ok := catalogFor(workstreamFQS); !ok || !maps.Equal(c, want) {
+	if c, ok := catalogFor(workstreamFQS); !ok || !reflect.DeepEqual(c, want) {
 		t.Fatalf("catalogFor(%q) = %v, %v; want the FQS catalog", workstreamFQS, c, ok)
 	}
 	if w, ok := workstreamFor("federated-query"); !ok || w.id() != workstreamFQS {

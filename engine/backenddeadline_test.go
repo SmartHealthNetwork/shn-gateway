@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -88,7 +90,7 @@ func TestBackendDeadline_AnswerInTimeIsRelayed(t *testing.T) {
 // With no deadline of its own, a slow call is bounded only by its client and
 // the request, as before.
 func TestBackendDeadline_NoneOfItsOwn(t *testing.T) {
-	n := NewNativeResponder(nil, "http://payer.test", "", nil, fixedClock, WithBackendDeadline(0))
+	n := NewNativeResponder(nil, "http://payer.test", fixedClock, WithBackendDeadline(0))
 	if n.backendDeadline != 0 {
 		t.Fatalf("deadline %s", n.backendDeadline)
 	}
@@ -125,7 +127,7 @@ func TestResponderOwnFailureSaysWhetherTheSystemWasAsked(t *testing.T) {
 		after   = "the payer's gateway failed after forwarding this request to the payer's system, which may have acted on it: check its outcome before resending"
 		unknown = "the payer's gateway failed, and whether the payer's system received this request is not known: check its outcome before resending"
 	)
-	native := NewNativeResponder(http.DefaultClient, "http://payer.invalid", "shn-order-select", nil, fixedClock)
+	native := NewNativeResponder(http.DefaultClient, "http://payer.invalid", fixedClock, WithCRDService("shn-order-select"))
 	fail := func(t *testing.T, responder LegResponder, x *exchangeRecorder) string {
 		t.Helper()
 		ctx := context.Background()
@@ -204,7 +206,7 @@ func slowSystem(t *testing.T, delay time.Duration) *httptest.Server {
 // starts late still times out while the requester is waiting.
 func TestBackendDeadline_CountsFromTheLegsArrival(t *testing.T) {
 	srv := slowSystem(t, 400*time.Millisecond)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, fixedClock, WithBackendDeadline(500*time.Millisecond))
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithBackendDeadline(500*time.Millisecond))
 	start := time.Now()
 	err, rec := forwardOnce(t, n, context.Background(), start.Add(-300*time.Millisecond))
 	var up *upstreamFailure
@@ -230,7 +232,7 @@ func TestBackendDeadline_SlowTokenIsATimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNativeResponder(hc, sys.URL, "shn-order-select", nil, fixedClock, WithBackendDeadline(200*time.Millisecond))
+	n := NewNativeResponder(hc, sys.URL, fixedClock, WithCRDService("shn-order-select"), WithBackendDeadline(200*time.Millisecond))
 	err, rec := forwardOnce(t, n, context.Background(), time.Now())
 	var up *upstreamFailure
 	if !errors.As(err, &up) || !up.timedOut || up.sent {
@@ -248,7 +250,7 @@ func TestBackendDeadline_SlowTokenIsATimeout(t *testing.T) {
 // short: cancelled, and the exchange is not the system's error.
 func TestBackendDeadline_RequesterLeavingFirstIsCancelled(t *testing.T) {
 	srv := slowSystem(t, 2*time.Second)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, fixedClock, WithBackendDeadline(10*time.Second))
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithBackendDeadline(10*time.Second))
 	// The requester goes away: its request is cancelled, as net/http does on
 	// a disconnect.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,7 +279,7 @@ func TestBackendDeadline_SpentBeforeTheCallIsNotThePayers(t *testing.T) {
 		_, _ = w.Write([]byte(`{"cards":[]}`))
 	}))
 	t.Cleanup(srv.Close)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, fixedClock, WithBackendDeadline(500*time.Millisecond))
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithBackendDeadline(500*time.Millisecond))
 	err, rec := forwardOnce(t, n, context.Background(), time.Now().Add(-time.Second))
 	var spent *deadlineSpent
 	var up *upstreamFailure
@@ -352,7 +354,7 @@ func TestBackendDeadline_SpentAfterAReadRecordsTheLastRead(t *testing.T) {
 		"a failed listing re-read, the cached listing used": {
 			listing: func(p *levelPayer, n *nativeResponder) {
 				n.PrimeCDSServices(stubCDSServices)
-				n.cds.read = fixedClock().Add(-2 * cdsServiceListingTTL)
+				n.paNative().cds.read = fixedClock().Add(-2 * cdsServiceListingTTL)
 				p.partner.listingStatus = http.StatusServiceUnavailable
 			},
 			calls: 2, partnerCalls: 1, status: http.StatusServiceUnavailable, class: BackendHTTP5xx},

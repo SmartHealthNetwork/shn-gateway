@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // demo_endpoint_test.go — POST /demo/transform on the observer listener's mux
 // httptest against the composed observer handler exactly as build()
 // wires it (composeObserverHandler wrapping observer.NewHub().Handler()),

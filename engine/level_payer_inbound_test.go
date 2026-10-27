@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -55,7 +57,9 @@ type levelPayer struct {
 	// sideRecord are the events naming a decision this gateway's own record
 	// could not hold (pend.decision-not-recorded).
 	sideRecord []ObserverEvent
-	seq        int
+	// unbound are the pend.amendment-unbound events the feed carried.
+	unbound []ObserverEvent
+	seq     int
 	// corr, when set, is the correlation id every leg carries instead of a
 	// fresh one: a requester reusing its own trace id.
 	corr string
@@ -81,8 +85,8 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 	p.respByPath[nextPath] = nextQuestionAnswer(t, "Patient/"+dtrFrameMember, rawItems(t, adaptiveTree(t, "1")))
 	p.respByPath[pasSubmitPath] = []byte(assemblyRealPending)
 	p.respByPath[pasInquirePath] = decidedAnswer(t)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", store, fixedClock,
-		append([]NativeOption{WithConformancePolicy(NewConformancePolicy(level))}, opts...)...)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock,
+		append([]NativeOption{WithCRDService("shn-order-select"), WithPASStore(store), WithConformancePolicy(NewConformancePolicy(level))}, opts...)...)
 	n.bindFindingEmitter(g.emitFinding)
 	g.cfg.Responder = n
 	pci, _, ok := store.ResolvePatient(dtrFrameMember)
@@ -103,6 +107,8 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 			lp.skipped = append(lp.skipped, e)
 		case pendDecisionNotRecordedEvent:
 			lp.sideRecord = append(lp.sideRecord, e)
+		case PendAmendmentUnboundEvent:
+			lp.unbound = append(lp.unbound, e)
 		}
 	}
 	return lp
@@ -117,6 +123,8 @@ type payerAnswer struct {
 	corr   string
 	// header is the payer gateway's HTTP answer's header (the Hub's view).
 	header http.Header
+	// name is the transaction type the answer's envelope names.
+	name string
 }
 
 // send delivers body on leg through handleInbound, bound to the covered
@@ -205,7 +213,11 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	if err != nil {
 		t.Fatalf("decode response frame: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header}
+	answerEnv, err := shnsdk.DecodeEnvelope(rec.Body.Bytes())
+	if err != nil {
+		t.Fatalf("decode response leg: %v", err)
+	}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header, name: answerEnv.Metadata.TransactionType}
 }
 
 // content returns the content-rule findings recorded, as rule/decision.

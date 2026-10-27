@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // contractlines_test.go — contract-line boot gates: the declared-set
 // env (D1a) and the per-line validator lanes (F7). Declared defaults qualify at
 // boot; explicit endpoints preserve URL-only startup. Configured-map tests
@@ -19,9 +21,6 @@ func baseEnv(extra map[string]string) map[string]string {
 		"ROLE":              "provider",
 		"SHN_SECRETS":       "/etc/shn/bundles/provider",
 		"SHN_DISCOVERY_URL": "http://accounts:8088/discovery",
-		// ROLE=provider with an unset ORIGINATION_PROFILE now normalizes to "demo" at
-		// load, which requires the operated $populate endpoint.
-		"PROVIDER_DTR_POPULATE_URL": "https://populate.test/fhir/Questionnaire/$populate",
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -303,7 +302,7 @@ func TestValidatorLaneFailClosed(t *testing.T) {
 	for _, line := range []string{"2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			for _, fail := range []bool{false, true} {
-				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@" + line}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+				lanes, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{"pa.pas@" + line}, shnsdk.NewFakeValidator(), config{laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
 					if l != line {
 						<-ctx.Done()
 						return ctx.Err()
@@ -336,7 +335,7 @@ func TestValidatorLaneSingleLineDeclaration(t *testing.T) {
 	for _, token := range []string{"pa.crd@2.2", "pa.dtr@2.1", "pa.pas@2.1"} {
 		t.Run(token, func(t *testing.T) {
 			line := shnsdk.LineOf(token)
-			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{token}, shnsdk.NewFakeValidator(), config{}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
+			_, m, err := discoverValidatorLanes(context.Background(), func(string) string { return "" }, []string{token}, shnsdk.NewFakeValidator(), config{laneRetry: fastLaneRetry()}, engine.DefaultLaneURL, func(ctx context.Context, base, l string) error {
 				if l == line {
 					return errors.New("unqualified declared default")
 				}

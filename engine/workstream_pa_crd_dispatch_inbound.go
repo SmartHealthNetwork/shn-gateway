@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_crd_dispatch_inbound.go — the conformant crd-order-dispatch leg: the payer-side inbound handler +
 // AI-11 subject-bind for an order-dispatch CDS Hooks request (context.dispatchedOrders + performer,
 // resolved from prefetch — NOT draftOrders). The order-dispatch sibling of workstream_pa_crd_inbound.go. The card

@@ -1,6 +1,9 @@
 {
   "workstream": "toy",
   "taxonomyVersion": 1,
+  "contracts": {
+    "toy.echo": ["1"]
+  },
   "legs": [
     {
       "transactionType": "toy-echo",

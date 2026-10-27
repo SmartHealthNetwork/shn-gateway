@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // pendledger.go — the durable half of the payer pend ledger (engine.PendLedger):
 // the keyed lookup, the absorbing decided state, the atomic decision-plus-keys
 // write and the bounded six-month retention sweep.

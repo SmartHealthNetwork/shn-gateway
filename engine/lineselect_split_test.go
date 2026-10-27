@@ -33,8 +33,11 @@ var chainArm = map[string]bool{
 var reachEntries = map[string]bool{"reachPeerLine": true, "resumeReach": true}
 
 // moduleTwoFiles hold module 2's code: the bridge and its arm (3), its request
-// walk (transform.go) and E-08 (dtr_answer_bridge.go).
-var moduleTwoFiles = map[string]bool{"linebridge.go": true, "transform.go": true, "dtr_answer_bridge.go": true}
+// walk (transform.go), the seam its workstream rows arrive through
+// (linebridge.go, read from the registry in workstreams.go), and the PA workstream's
+// contribution: E-08 (workstream_pa_dtr_answer_bridge.go) and its rows
+// (workstream_pa_line_bridge.go).
+var moduleTwoFiles = map[string]bool{"linebridge.go": true, "transform.go": true, "workstream_pa_dtr_answer_bridge.go": true, "workstream_pa_line_bridge.go": true}
 
 // bridgeCalls are where the core asks module 2, by method: each of its four
 // calls from one place, through the gateway's bridge.
@@ -42,15 +45,15 @@ var bridgeCalls = map[string]map[string]bool{
 	"Reach":        {"linereach.go": true},
 	"AdaptRequest": {"gateway.go": true},
 	"AdaptAnswer":  {"gateway.go": true},
-	"Certify":      {"modulebuild.go": true, "dtr_answer_bridge.go": true},
+	"Certify":      {"modulebuild.go": true, "workstream_pa_dtr_answer_bridge.go": true},
 }
 
 // chainRunners are the files that may run a transform chain (applyChain):
 // module 2's own, the cross-module test wrappers and the demonstration
 // endpoint's chain (RunTransformChain, never a leg).
 var chainRunners = map[string]bool{
-	"transform.go": true, "dtr_answer_bridge.go": true,
-	"transform_pas.go": true, "transform_dtr.go": true, "transform_run.go": true,
+	"transform.go": true, "workstream_pa_dtr_answer_bridge.go": true,
+	"workstream_pa_transform_pas.go": true, "workstream_pa_transform_dtr.go": true, "transform_run.go": true,
 }
 
 // Line selection is split at arm (2). In the package's non-test files:

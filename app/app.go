@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // Package app is the federation-capable PUBLIC gateway runtime. It boots
 // config-only, loads its `shn register` bundle (shnsdk.LoadBundle), resolves
 // trust anchors + endpoints + the FHIR validator URL from /discovery, populates
@@ -22,6 +24,7 @@ import (
 	"log"
 	"maps"
 	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,8 +46,13 @@ import (
 	smartauth "github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/auditappend"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
+	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
+	"github.com/SmartHealthNetwork/shn-gateway/telemetry/otelsetup"
+	"github.com/SmartHealthNetwork/shn-gateway/telemetry/stats"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	health "github.com/SmartHealthNetwork/shn-sdk/health"
 	metrics "github.com/SmartHealthNetwork/shn-sdk/metrics"
@@ -61,6 +69,10 @@ import (
 // public binary is partner-path only.
 type config struct {
 	diagnostic *diagnosticSource
+	// certs records each outbound endpoint's certificate expiry by kind
+	// (MON-R25); every outbound client takes its transport from it. Set by
+	// build(); nil (tests, loadConfig alone) ⇒ clients are left as they were.
+	certs *endpointcert.Recorder
 	// tokenNotes receives the outbound token clients' departure notes
 	// (smartauth.Config.Observer: a partner authorization server read as sent
 	// but out of specification). Set by build() to the operator-visible
@@ -127,6 +139,9 @@ type config struct {
 	// and a line without FHIR_VALIDATE_URL_<line> / FHIR_CERTIFY_URL_<line> is
 	// simply unconfigured. Unset keeps the default lanes.
 	DefaultValidatorLanes string
+	// laneRetry is how default lanes retry their qualification (nil: the
+	// default schedule, lanes.go); never read from the environment.
+	laneRetry *laneRetry
 	// ContractVersions is the operator-DECLARED exchange-contract token set
 	// (SHN_CONTRACT_VERSIONS, comma-separated). Boot-validated: token grammar +
 	// membership of engine.NativeContractVersions(). Empty env ⇒ this build's
@@ -166,14 +181,25 @@ type config struct {
 	// recorded), "observe" (every check runs, each defect is recorded as a
 	// finding and the message is relayed as sent), "structural" (every check runs,
 	// a message whose structure is broken is refused and every other defect is
-	// recorded as at observe) or "strict" (a defect refuses the message). Absent means "observe": loadConfig remaps it, and
-	// that remap is the ONLY place in the tree where a level that is not
-	// strict comes from an omission — engine.ConformanceEnforcement's zero
+	// recorded as at observe) or "strict" (a defect refuses the message). Absent means "none" (D116):
+	// loadConfig remaps it, and that remap is the ONLY place in the tree where
+	// a level that is not strict comes from an omission — engine.ConformanceEnforcement's zero
 	// value is strict everywhere else. Network rules (authentication,
 	// authority, consent, routing, replay, message integrity) and the check of
 	// a payload this gateway itself translated between IG lines refuse at
 	// every level.
 	ConformanceEnforcement engine.ConformanceEnforcement
+	// ConformanceEnforcementUnset is whether CONFORMANCE_ENFORCEMENT was absent,
+	// so ConformanceEnforcement is none by default rather than by choice. It
+	// changes nothing the gateway does; the boot line says so.
+	ConformanceEnforcementUnset bool
+
+	// ConformanceToleratePeers (CONFORMANCE_TOLERATE_PEERS) is the payers whose
+	// answers this participant tolerates (D122): <system>|<value> payer
+	// identities, comma-separated. A defect the FHIR profile check of a listed
+	// payer's DTR or PAS answer would refuse is recorded instead; unset tolerates
+	// no one.
+	ConformanceToleratePeers []shnsdk.PayerIdentifier
 
 	// AdvertisedCDSHooks (CDS_ADVERTISE_HOOKS) narrows the CDS Hooks services
 	// the provider ingress advertises and dispatches to the hooks named, a
@@ -244,10 +270,6 @@ type config struct {
 	PayerDavinciScope        string
 	PayerDavinciClientKID    string
 	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
-	// PayerDavinciPASNativeSet is whether PAYER_DAVINCI_PAS_NATIVE is set at all:
-	// the key is no longer a switch, so its value changes nothing, and a gateway
-	// that sets it is told so at boot.
-	PayerDavinciPASNativeSet bool
 	// PayerDavinciCRDServiceID optionally names the partner's CDS service for the
 	// order-select leg (hooks order-select and order-sign). Empty ⇒ each request goes to
 	// the one service the partner's {CDS base}/cds-services listing offers for the
@@ -264,15 +286,6 @@ type config struct {
 	// PAYER_DAVINCI_CONTRACT_VERSIONS. Requires
 	// PayerDavinciBaseURL — there is nothing to verify against otherwise.
 	PayerDavinciContractVersions []string
-
-	// PayerDavinciStrictExtensions carries PAYER_DAVINCI_STRICT_EXTENSIONS
-	// (the per-peer strict-extensions overlay, FR-G52) into engine.WithStrictExtensions on the
-	// native responder — nativeResponder.strictExtensions, DORMANT plumbing
-	// (no Handle-filter consult, no behavior delta; see that field's
-	// comment in gateway/engine/native.go and g.strictPeer's comment in
-	// linereach.go for why this flag has NO live routing effect anywhere
-	// today).
-	PayerDavinciStrictExtensions bool
 
 	// PayerDavinciPayorOwnRaw / PayerDavinciPayorBackendRaw are the raw
 	// PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND env values ("system|value"),
@@ -308,9 +321,8 @@ type config struct {
 	// OriginationProfile selects the per-UC origination lane: "demo" keeps the
 	// self-contained demo order shape; "provider-data" originates every UC off the
 	// provider's seeded SoR and drives real reference-payer verdicts. ORIGINATION_PROFILE.
-	// Unset is normalized to "demo" on ROLE=provider, so after loadConfig "" survives
-	// only on the other roles, where it means no origination. Any other value refuses
-	// to boot (validOriginationProfile).
+	// Unset means module 1 is off: no origination, and no /scenario route. Any other
+	// value refuses to boot (validOriginationProfile).
 	OriginationProfile string
 
 	// Optional native DTR population (provider-local). PROVIDER_DTR_NATIVE switches DTR
@@ -381,13 +393,10 @@ type config struct {
 	// "off" (never). Set by CDS_FHIR_SERVER_READ; a value other than off needs
 	// PROVIDER_DAVINCI_INGRESS.
 	FHIRServerRead string
-	// acceptUnknownMembersAlias holds the deprecated SHN_ACCEPT_UNKNOWN_MEMBERS. Set,
-	// it asks for what is now the default, so it only warns; unless it reads "0"
-	// or "false", together with REQUIRE_KNOWN_MEMBERS=true it contradicts it, and
-	// loadConfig refuses to boot.
-	acceptUnknownMembersAlias string
 	// ignoredSettingLines holds a boot warning for each of ignoredSettings still
-	// set: nothing reads them any more, so they only warn.
+	// set: nothing reads them any more, so they only warn. It also holds one
+	// for each of noEffectSettings set: a dependency reads them, and the
+	// gateway makes them do nothing.
 	ignoredSettingLines []string
 
 	// IngressBaseURL and IngressClients are resolved from ProviderDavinciIngressBaseURL
@@ -420,8 +429,7 @@ var validRoles = map[string]bool{
 
 // validOriginationProfile reports whether v is one of the ORIGINATION_PROFILE values
 // the engine accepts (engine.OriginationProfiles, the origination lanes). Unset is not
-// one; loadConfig normalizes an unset value to "demo" on ROLE=provider and leaves it
-// unset on every other role.
+// one: it is module 1 off.
 func validOriginationProfile(v string) bool {
 	return slices.Contains(engine.OriginationProfiles(), v)
 }
@@ -512,14 +520,39 @@ var removedSettings = []struct{ key, replacedBy string }{
 	{"PAYER_DAVINCI_DISPATCH_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)"},
 }
 
-// ignoredSettings are settings shn-gateway v0.63.0 stopped reading, each with
-// what it served. Unlike removedSettings, a deployment that still sets one
-// starts as before (the setting switched nothing it relays or refuses) and logs
-// one warning per setting, so the leftover is never silent either.
-var ignoredSettings = []struct{ key, served string }{
-	{"PATIENT_ACCESS_API", "the Patient Access API"},
-	{"AUDIT_URL", "the Patient Access API's audit record"},
-	{"PHG_URL", "the provider gateway's read of the PHG's denial view"},
+// ignoredSettings are settings this gateway no longer reads, each with the
+// release from which it changed nothing and what it served. Unlike removedSettings, a
+// deployment that still sets one starts as before (the setting switched nothing
+// it relays or refuses) and logs one warning per setting, so the leftover is
+// never silent either.
+var ignoredSettings = []struct{ key, release, served string }{
+	{"PATIENT_ACCESS_API", "v0.63.0", "the Patient Access API"},
+	{"AUDIT_URL", "v0.63.0", "the Patient Access API's audit record"},
+	{"PHG_URL", "v0.63.0", "the provider gateway's read of the PHG's denial view"},
+	{"PAYER_DAVINCI_PAS_NATIVE", "v0.39.0", "its switch: PAS submit and update always forward to the payer's own system"},
+	{"PAYER_DAVINCI_STRICT_EXTENSIONS", "v1.0.0", "the strict-extensions overlay it reserved, which switched nothing"},
+	{"SHN_ACCEPT_UNKNOWN_MEMBERS", "v1.0.0", "the alias of carrying members the system of record does not hold, which is the default (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)"},
+}
+
+// noEffectSettings are settings a dependency the gateway links reads for
+// itself, and the gateway makes a no-op, each with the dependency and how. A
+// deployment that sets one starts as before and logs one warning, so the
+// setting never seems to work when it does nothing.
+var noEffectSettings = []struct{ key, reader, why string }{
+	{"OTEL_GO_X_DEPRECATED_RUNTIME_METRICS", "the OpenTelemetry Go runtime instrumentation",
+		"the deprecated process.runtime.go.* and runtime.uptime metrics it would add are dropped from every export"},
+}
+
+// noEffectSettingLines returns the boot warning for each of noEffectSettings
+// that getenv sets, in table order.
+func noEffectSettingLines(getenv func(string) string) []string {
+	var lines []string
+	for _, s := range noEffectSettings {
+		if getenv(s.key) != "" {
+			lines = append(lines, fmt.Sprintf("gateway: WARNING: %s has no effect: %s reads it, and %s", s.key, s.reader, s.why))
+		}
+	}
+	return lines
 }
 
 // ignoredSettingLines returns the boot warning for each of ignoredSettings that
@@ -528,7 +561,7 @@ func ignoredSettingLines(getenv func(string) string) []string {
 	var lines []string
 	for _, ignored := range ignoredSettings {
 		if getenv(ignored.key) != "" {
-			lines = append(lines, fmt.Sprintf("gateway: WARNING: %s is set but no longer read: shn-gateway v0.63.0 removed %s", ignored.key, ignored.served))
+			lines = append(lines, fmt.Sprintf("gateway: WARNING: %s is set but no longer read: shn-gateway %s removed %s", ignored.key, ignored.release, ignored.served))
 		}
 	}
 	return lines
@@ -615,7 +648,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		FHIRCertifyURL22:      getenv("FHIR_CERTIFY_URL_2_2"),
 		DefaultValidatorLanes: getenv("FHIR_DEFAULT_VALIDATOR_LANES"),
 		StoreDatabaseURL:      getenv("SHN_STORE_DATABASE_URL"),
-		NPI:                   def("NPI", "1234567890"),
+		NPI:                   getenv("NPI"),
 		FHIRDataURL:           getenv("FHIR_DATA_URL"),
 		FHIRTokenURL:          getenv("FHIR_TOKEN_URL"),
 		FHIRClientID:          getenv("FHIR_CLIENT_ID"),
@@ -636,11 +669,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciScope:                 def("PAYER_DAVINCI_SCOPE", "system/*.read"),
 		PayerDavinciClientKID:             getenv("PAYER_DAVINCI_CLIENT_KID"),
 		PayerDavinciClientSecret:          getenv("PAYER_DAVINCI_CLIENT_SECRET"),
-		PayerDavinciPASNativeSet:          getenv("PAYER_DAVINCI_PAS_NATIVE") != "",
 		PayerDavinciCRDServiceID:          getenv("PAYER_DAVINCI_CRD_SERVICE_ID"),
 		PayerDavinciDispatchServiceID:     getenv("PAYER_DAVINCI_DISPATCH_SERVICE_ID"),
 		PayerDavinciContractVersions:      splitTrimmed(getenv("PAYER_DAVINCI_CONTRACT_VERSIONS")),
-		PayerDavinciStrictExtensions:      getenv("PAYER_DAVINCI_STRICT_EXTENSIONS") == "true",
 		PayerDavinciBackendHeadersRaw:     getenv("PAYER_DAVINCI_BACKEND_HEADERS"),
 		payerDavinciBackendCorrelationRaw: getenv("PAYER_DAVINCI_BACKEND_CORRELATION"),
 		payerDavinciBackendTimeoutRaw:     getenv("PAYER_DAVINCI_BACKEND_TIMEOUT"),
@@ -666,39 +697,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
 		ScenarioCallersFile:               getenv("SCENARIO_CALLERS_FILE"),
 
-		acceptUnknownMembersAlias: getenv("SHN_ACCEPT_UNKNOWN_MEMBERS"),
-		ignoredSettingLines:       ignoredSettingLines(getenv),
+		ignoredSettingLines: append(ignoredSettingLines(getenv), noEffectSettingLines(getenv)...),
 
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
 
-	// Normalize the lane identity ONCE, here, at the config boundary, rather than letting
-	// every downstream predicate special-case the unset default. OriginationProfile's own
-	// doc comment above already declares the contract: "\"\" and \"demo\" keep the
-	// self-contained demo order shape" — they are the SAME lane, so they should be the SAME
-	// value from this point on. Before this, an unset ORIGINATION_PROFILE reached the
-	// engine as a THIRD, undeclared value that individual predicates (isDemoProfile,
-	// targetsBrPayer, and their ad-hoc callers) had to separately remember to treat as demo
-	// — and twice didn't, independently, at two different call sites (the ingress-$validate
-	// skip, then the UC-08 not-covered→deny proceed). Normalizing here closes the whole
-	// trap class instead of patching its next instance.
-	//
-	// Scoped to ROLE=provider: OriginationProfile is a PROVIDER-origination concept only
-	// (it selects which order set /scenario/* handlers build from) — payer/facility/phg
-	// roles never read it. Normalizing unconditionally would make every OTHER role's
-	// unset-by-construction OriginationProfile ALSO read as "demo", which would then
-	// wrongly trip the operatedPopulateProfile PROVIDER_DTR_POPULATE_URL requirement below
-	// for deployments that have no DTR/populate concept at all.
-	if cfg.Role == "provider" && cfg.OriginationProfile == "" {
-		cfg.OriginationProfile = "demo"
-	}
+	// ORIGINATION_PROFILE is the participant's declaration that its system cannot
+	// speak Da Vinci itself, so this gateway runs module 1 for it. Unset, module 1
+	// is off: the gateway serves its ingress and relays, and mounts no /scenario
+	// route.
 	// Any other value is refused on every role. The engine's origination predicates
 	// compare the value exactly, so an unrecognised one (a retired lane, a typo, another
 	// case, stray whitespace) matched no lane and built its PAS request with a payer
 	// Organization the payer's own system never supplied, rather than failing.
 	if cfg.OriginationProfile != "" && !validOriginationProfile(cfg.OriginationProfile) {
 		return config{}, fmt.Errorf("gateway: invalid ORIGINATION_PROFILE %q (must be %s, or unset)", cfg.OriginationProfile, strings.Join(engine.OriginationProfiles(), "|"))
+	}
+	// NPI is optional: it names the ordering clinician only where the
+	// participant's own records name none. A value that is not an NPI would be
+	// stated on the participant's behalf as one, so it refuses boot.
+	if cfg.NPI != "" && !engine.ValidNPI(cfg.NPI) {
+		return config{}, fmt.Errorf("gateway: NPI must be a ten-digit NPI with a valid check digit, got %q", cfg.NPI)
 	}
 
 	for _, pair := range optionalURLs(cfg) {
@@ -760,10 +780,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// ordinary loadConfig bool idiom, matching every other config bool.
 	cfg.DemoEdgeCapture = getenv("SHN_DEMO_EDGE_CAPTURE") == "true"
 
-	// THE default: an absent CONFORMANCE_ENFORCEMENT means observe. Every
-	// check runs and each defect is recorded, and nothing is refused for
-	// conformance: a participant opts in to refusal (structural for structure,
-	// strict for every defect) or out of the checks (none). This is the ONLY place it happens. Everything else in the tree is strict by
+	// THE default: an absent CONFORMANCE_ENFORCEMENT means none (D116). Payload
+	// conformance is a participant's opt-in, never the network's default: a
+	// gateway that states no level runs no payload check and records no
+	// finding, exactly as at none (one code path), and needs no validator. A
+	// participant opts in to recording (observe) or to refusal (structural for
+	// structure, strict for every defect). The network rules and module 2's
+	// certification of a payload this gateway translated refuse at every level,
+	// this one included. This is the ONLY place it happens. Everything else in the tree is strict by
 	// engine.ConformanceEnforcement's zero value, and every gate pins its
 	// level explicitly. A DEPLOYED gateway states its level explicitly too,
 	// but not always to strict: a lane a partner's bytes can reach runs
@@ -777,8 +801,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		cfg.ConformanceEnforcement = level
 	} else {
-		cfg.ConformanceEnforcement = engine.EnforcementObserve
+		cfg.ConformanceEnforcement = engine.EnforcementNone
+		cfg.ConformanceEnforcementUnset = true
 	}
+	peers, err := engine.ParseToleratePeers(getenv("CONFORMANCE_TOLERATE_PEERS"))
+	if err != nil {
+		return config{}, fmt.Errorf("gateway: %w", err)
+	}
+	cfg.ConformanceToleratePeers = peers
 
 	// Members the system of record does not hold are carried unless the
 	// participant opts in to checking them. Only "true" and "false" are values.
@@ -788,9 +818,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.RequireKnownMembers = true
 	default:
 		return config{}, fmt.Errorf("gateway: REQUIRE_KNOWN_MEMBERS must be true or false, got %q", raw)
-	}
-	if alias := cfg.acceptUnknownMembersAlias; cfg.RequireKnownMembers && alias != "" && alias != "0" && alias != "false" {
-		return config{}, fmt.Errorf("gateway: SHN_ACCEPT_UNKNOWN_MEMBERS and REQUIRE_KNOWN_MEMBERS=true contradict each other; remove SHN_ACCEPT_UNKNOWN_MEMBERS (deprecated: carrying unknown members is the default)")
 	}
 	// A payer that keeps no system of record (build refuses one on any
 	// other gateway) has no members to know: knowing them needs a store.
@@ -1010,8 +1037,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// Every origination lane that talks to a REAL payer needs an OPERATED $populate: the
 	// questionnaires a real payer advertises are its own resources, and the managed filler
 	// only ever knew the retired in-process questionnaire tree. So "demo" carries the same
-	// requirement "provider-data" always did.
-	if operatedPopulateProfile(cfg.OriginationProfile) && cfg.ProviderDTRPopulateURL == "" {
+	// requirement "provider-data" always did. Only a provider originates: a payer's or a
+	// facility's gateway that sets a profile populates nothing, so it needs no endpoint.
+	if requiresOperatedPopulate(cfg.Role, cfg.OriginationProfile) && cfg.ProviderDTRPopulateURL == "" {
 		return config{}, fmt.Errorf("gateway: ORIGINATION_PROFILE=%s requires PROVIDER_DTR_POPULATE_URL (the operated $populate endpoint)", cfg.OriginationProfile)
 	}
 
@@ -1039,6 +1067,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.ScenarioCallersFile != "" {
 		if role != "provider" {
 			return config{}, fmt.Errorf("gateway: SCENARIO_CALLERS_FILE is provider-only (role=%q): no other role serves /scenario", role)
+		}
+		if cfg.OriginationProfile == "" {
+			return config{}, fmt.Errorf("gateway: SCENARIO_CALLERS_FILE requires ORIGINATION_PROFILE: with none, module 1 is off and no route serves /scenario")
 		}
 		callers, err := loadScenarioCallers(cfg.ScenarioCallersFile)
 		if err != nil {
@@ -1403,6 +1434,7 @@ func fhirSmartConfig(cfg config) (smartauth.Config, error) {
 		TokenURL: cfg.FHIRTokenURL, ClientID: cfg.FHIRClientID, Scope: cfg.FHIRClientScope,
 		Observer: cfg.tokenNotes,
 	}
+	tagSmart(cfg.certs, &sc, cfg.certs.Wrap(endpointcert.Of(endpointcert.FHIR), nil), endpointcert.FHIRToken)
 	if cfg.FHIRClientSecret != "" {
 		sc.ClientSecret = cfg.FHIRClientSecret // client_secret_post; no key material
 		return sc, nil
@@ -1423,6 +1455,7 @@ func payerDavinciSmartConfig(cfg config) (smartauth.Config, error) {
 		TokenURL: cfg.PayerDavinciTokenURL, ClientID: cfg.PayerDavinciClientID, Scope: cfg.PayerDavinciScope,
 		Observer: cfg.tokenNotes,
 	}
+	tagSmart(cfg.certs, &sc, payerTransport(cfg.certs), endpointcert.PayerToken)
 	if cfg.PayerDavinciClientSecret != "" {
 		sc.ClientSecret = cfg.PayerDavinciClientSecret // client_secret_post; no key material
 		return sc, nil
@@ -1482,7 +1515,7 @@ func payerDavinciTokenFetch(cfg config) func(context.Context) error {
 // counterpart, mirroring providerDTRPopulateHTTPClient's Config construction.
 // Same fresh-TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
 func providerDTRPopulateTokenFetch(cfg config) func(context.Context) error {
-	sc := smartauth.Config{TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope, Observer: cfg.tokenNotes}
+	sc := providerDTRPopulateSmartBase(cfg)
 	if cfg.ProviderDTRPopulateClientSecret != "" {
 		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret
 	} else {
@@ -1523,6 +1556,10 @@ type resolvedEndpoints struct {
 	// HubAcceptsInvolved: the network's Hub reads an envelope's involved list
 	// (the descriptor lists it in hubAccepts). Read once, at start.
 	HubAcceptsInvolved bool
+	// Audit is discovery's endpoints.audit, where the audit outbox sends. Read
+	// once, at start, with no setting to override it; empty is "no audit
+	// endpoint known", never an empty endpoint.
+	Audit string
 }
 
 // resolveDiscovery fetches the /discovery descriptor and resolves the trust
@@ -1531,24 +1568,41 @@ type resolvedEndpoints struct {
 // Mirrors cmd/gateway/main.go resolveIdentity's discovery branch using public
 // shnsdk symbols only. FAIL-CLOSED: an unreachable discovery / key fetch errors.
 func resolveDiscovery(ctx context.Context, c *http.Client, cfg config) (trustAnchors, resolvedEndpoints, error) {
-	return resolveDiscoveryWaiting(ctx, bootClient(c, bootFetchWaits, bootFetchBudget), cfg)
+	boot := func(k endpointcert.Kind) *http.Client {
+		return bootClient(cfg.certs.Client(endpointcert.Of(k), c), bootFetchWaits, bootFetchBudget)
+	}
+	return resolveDiscoveryWaiting(ctx, discoveryClients{doc: boot(endpointcert.Discovery), authzKey: boot(endpointcert.AuthorizationKey), hubKey: boot(endpointcert.HubKey)}, cfg)
 }
 
-// resolveDiscoveryWaiting is resolveDiscovery with c already the boot client.
-func resolveDiscoveryWaiting(ctx context.Context, c *http.Client, cfg config) (trustAnchors, resolvedEndpoints, error) {
+// discoveryClients are the boot clients of the discovery document and the
+// two trust-anchor keys, each with its own setting's endpoint kind: a key
+// URL may name a host of its own. The keys are read once, at boot, so their
+// certificates are the ones that boot's handshakes saw.
+type discoveryClients struct{ doc, authzKey, hubKey *http.Client }
+
+// resolveDiscoveryWaiting is resolveDiscovery with its clients already the
+// boot clients.
+func resolveDiscoveryWaiting(ctx context.Context, c discoveryClients, cfg config) (trustAnchors, resolvedEndpoints, error) {
 	var ta trustAnchors
 	var ep resolvedEndpoints
 
+	var raw json.RawMessage
+	if err := getJSON(ctx, c.doc, cfg.DiscoveryURL, &raw); err != nil {
+		return ta, ep, wireUnknown(err)
+	}
 	var disc shnsdk.Discovery
-	if err := getJSON(ctx, c, cfg.DiscoveryURL, &disc); err != nil {
-		return ta, ep, fmt.Errorf("fetch discovery: %w", err)
+	if err := json.Unmarshal(raw, &disc); err != nil {
+		return ta, ep, wireUnknown(err)
+	}
+	if err := checkWireAccepted(raw, cfg.DiscoveryURL); err != nil {
+		return ta, ep, err
 	}
 
-	authzPub, err := fetchEd25519Key(ctx, c, firstNonEmpty(cfg.AuthzPubkeyURL, disc.AuthzPublicKeyURL))
+	authzPub, err := fetchEd25519Key(ctx, c.authzKey, firstNonEmpty(cfg.AuthzPubkeyURL, disc.AuthzPublicKeyURL))
 	if err != nil {
 		return ta, ep, fmt.Errorf("fetch authz pubkey: %w", err)
 	}
-	hubTxPub, err := shnsdk.FetchHubTransportKey(ctx, c, firstNonEmpty(cfg.HubTransportKeyURL, disc.HubTransportKeyURL))
+	hubTxPub, err := shnsdk.FetchHubTransportKey(ctx, c.hubKey, firstNonEmpty(cfg.HubTransportKeyURL, disc.HubTransportKeyURL))
 	if err != nil {
 		return ta, ep, fmt.Errorf("fetch hub transport key: %w", err)
 	}
@@ -1562,6 +1616,7 @@ func resolveDiscoveryWaiting(ctx context.Context, c *http.Client, cfg config) (t
 		Consent:      disc.Endpoints.Consent,
 
 		HubAcceptsInvolved: disc.HubAcceptsField(shnsdk.HubAcceptsInvolved),
+		Audit:              disc.Endpoints.Audit,
 	}
 	return ta, ep, nil
 }
@@ -1622,6 +1677,11 @@ func firstNonEmpty(vals ...string) string {
 // boot-time registry SNAPSHOT, and returns the handler WITHOUT serving, so the
 // boot gate can drive it.
 type built struct {
+	// httpServerMetered is whether build wrapped the main listener in the HTTP
+	// server duration (MON-R29), recorded where it wraps it, so this package's
+	// tests prove a gateway that exports nothing leaves the listener as it is
+	// (MON-R1).
+	httpServerMetered bool
 	// requireKnownMembers is the known-member opt-in exactly as build() handed it
 	// to engine.New, recorded so this package's tests prove the variable reaches
 	// the engine without a published test accessor.
@@ -1638,6 +1698,9 @@ type built struct {
 	// fhirServerRead is the fhirServer read mode exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	fhirServerRead string
+	// operatedPopulate reports whether build() handed engine.New the operated
+	// $populate populator, recorded for the same reason.
+	operatedPopulate bool
 
 	diagnostic *diagnosticSource
 	gateway    *engine.Gateway
@@ -1648,7 +1711,11 @@ type built struct {
 	handler      http.Handler
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
 	registrarURL string
-	client       *http.Client
+	client       *http.Client // the registrar poller's: registrar-tagged
+
+	// certs is the outbound certificate recorder every client above was
+	// tagged by (MON-R25), for the expiry gauge.
+	certs *endpointcert.Recorder
 
 	// tlsCert is the optional in-container TLS keypair for the MAIN listener,
 	// nil when TLS_CERT_FILE/TLS_KEY_FILE are unset (the default). The observer
@@ -1697,16 +1764,40 @@ type built struct {
 	// (startWorkers): only where certification evidence is collected.
 	warmCertification bool
 
+	// auditAppender is the audit outbox's client: Run starts its sender in
+	// startWorkers and closes it there.
+	auditAppender *auditappend.Appender
+
 	// keyRefresh is the shared ingress-key background reload
 	// ((*pgstore.IngressKeyStore).RunRefresh), non-nil only when
 	// SHN_STORE_DATABASE_URL selected the shared stores. Only Run starts it —
 	// build starts only bounded default-lane qualification workers, not pollers.
 	keyRefresh func(context.Context)
 
-	// poolStats samples the shared-state pool into EMF every
-	// storePoolMetricInterval. Non-nil only when BOTH a store DSN and
-	// METRICS_SERVICE are set. Only Run starts it, for the same reason as keyRefresh.
+	// poolStats samples the shared-state pool into the metrics every
+	// storePoolMetricInterval. Non-nil only when BOTH a store DSN and a
+	// metrics sink are on. Only Run starts it, for the same reason as keyRefresh.
 	poolStats func(context.Context)
+
+	// laneStats samples the validator lanes' qualification into the metrics
+	// (the ValidatorLane gauge) every validatorLaneMetricInterval. Non-nil
+	// only when a metrics sink is on; only Run starts it.
+	laneStats func(context.Context)
+	// opsStats samples the operational gauges (opsmetrics.go) into the
+	// metrics every opsMetricInterval; nil with no metrics sink.
+	opsStats func(context.Context)
+	// feed is the registrar feed's freshness; nil without a registrar.
+	feed *feedFreshness
+
+	// activeStats writes the EMF ActiveRequests gauge, the peak in flight,
+	// every activeRequestsMetricInterval (MON-R23). Non-nil only when the EMF
+	// sink is on; only Run starts it.
+	activeStats func(context.Context)
+
+	// telemetry is the monitoring export (MON-R1): Run starts its export loop
+	// with the other workers, and its final export runs last at stop, after
+	// the audit outbox drains and the observe checks flush (MON-R14).
+	telemetry *otelsetup.Telemetry
 }
 
 // The payer gateway's deadline for its own system (PAYER_DAVINCI_BACKEND_TIMEOUT):
@@ -1738,6 +1829,12 @@ const (
 	// METRICS_SERVICE opts in. Long enough to be free, short enough that a
 	// saturation that starts expiring store contexts is visible within a minute.
 	storePoolMetricInterval = 30 * time.Second
+	// validatorLaneMetricInterval is how often the ValidatorLane gauge is
+	// sampled: a lane's state changes rarely, so once a minute.
+	validatorLaneMetricInterval = time.Minute
+	// activeRequestsMetricInterval is how often the EMF ActiveRequests gauge
+	// writes the peak in flight since the last sample.
+	activeRequestsMetricInterval = time.Minute
 )
 
 // storePoolConfig parses the shared-state DSN and applies the fleet's own pool posture:
@@ -1769,7 +1866,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if err != nil {
 		return b, err
 	}
+	cfg.certs = endpointcert.NewWithClock(clock)
+	recordTrustRoots(cfg.certs, getenv)
 	cfg.diagnostic = newDiagnosticSource(getenv, cfg.Role, stdout, clock)
+	if cfg.diagnostic != nil {
+		cfg.diagnostic.publisher.Client = cfg.certs.Client(endpointcert.Of(endpointcert.Diagnostic), cfg.diagnostic.publisher.Client)
+	}
 	cfg.tokenNotes = func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }
 
 	// Identity bundle (shn register / Init output) — recovers HolderID from manifest.json.
@@ -1788,10 +1890,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		return b, fmt.Errorf("gateway: ROLE=%s but this bundle registered as %s — mount the matching bundle or fix ROLE", cfg.Role, r)
 	}
 
-	client := shnsdk.NewClient()
+	// template is what every network client below is a tagged copy of
+	// (outbound.go): the same 30 s timeout and the same transport, Wrapped
+	// with its kind. Only the checks runner holds it itself, as the fallback
+	// for a target with no client of its own; every target that probes over
+	// the network has one.
+	template := shnsdk.NewClient()
+	kindClient := func(k endpointcert.Kind) *http.Client { return cfg.certs.Client(endpointcert.Of(k), template) }
 
 	// Discovery resolution: trust anchors + endpoints (incl. registrar + validator); explicit env wins.
-	trust, endpoints, err := resolveDiscovery(ctx, client, cfg)
+	trust, endpoints, err := resolveDiscovery(ctx, template, cfg)
 	if err != nil {
 		return b, err
 	}
@@ -1808,7 +1916,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// Default declared lanes qualify before traffic admission. Explicit per-line
 	// URLs retain their existing startup semantics; undeclared defaults qualify
 	// in bounded background workers owned by this app lifecycle.
-	validatorLanes, lanes, err := discoverValidatorLanes(ctx, getenv, cfg.ContractVersions, validator, cfg, engine.DefaultLaneURL, qualifyDefaultLane)
+	if ov, ok := validator.(*shnsdk.OperationValidator); ok {
+		engine.TagValidatorClient(ov, cfg.certs, validatorLane(canonicalLine()))
+	}
+	// One qualifier value for routing and certification alike: certification
+	// takes routing's pass on a default lane only from the same qualifier.
+	qualify := laneQualifier(cfg.certs)
+	validatorLanes, lanes, err := discoverValidatorLanes(ctx, getenv, cfg.ContractVersions, validator, cfg, engine.DefaultLaneURL, qualify)
 	if err != nil {
 		return b, err
 	}
@@ -1831,10 +1945,15 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// post-boot convergence; the boot gate drives build() and asserts this snapshot
 	// resolves the counterpart — deterministic, no ticker.
 	reg := shnsdk.NewRegistry()
+	registrarClient := kindClient(endpointcert.Registrar)
+	var feed *feedFreshness
 	if registrarURL != "" {
-		if _, err := convergeRegistry(ctx, client, registrarURL, reg); err != nil {
+		feed = newFeedFreshness(clock)
+		n, err := convergeRegistry(ctx, registrarClient, registrarURL, reg)
+		if err != nil {
 			return b, fmt.Errorf("converge peer registry from %s: %w", registrarURL, err)
 		}
+		feed.succeeded(n)
 	}
 
 	// SoR: the holder's own FHIR system of record. FAIL-CLOSED — there is no in-process
@@ -1854,8 +1973,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if herr != nil {
 			return b, herr
 		}
-		if hc == nil && cfg.diagnostic != nil {
-			hc = cfg.diagnostic.client(http.DefaultClient)
+		if hc == nil {
+			hc = cfg.certs.Client(endpointcert.Of(endpointcert.FHIR), http.DefaultClient)
+			if cfg.diagnostic != nil {
+				hc = cfg.diagnostic.client(hc)
+			}
 		}
 		sor = fhirsor.NewFromURL(cfg.FHIRDataURL, hc)
 	}
@@ -1882,6 +2004,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		keyRefresh  func(context.Context)
 		closeStore  func()
 		poolStats   func(context.Context)
+		laneStats   func(context.Context)
+		opsStats    func(context.Context)
+		keyTimes    func() pgstore.IngressKeyTimes
+		activeStats func(context.Context)
 		// storeErrHooks are the pgstore seams' own error hooks, wired to the same EMF
 		// counter as the engine's once the emitter exists (below). They exist for the
 		// failures a store ABSORBS rather than returns — the exchange seam's best-effort
@@ -1890,12 +2016,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// request-path errors are NOT wired here: they reach the engine
 		// (VerificationKey's third return, SigningKey's error), which counts them once.
 		storeErrHooks []func(func(store string))
+		// auditStore is the audit outbox: gw_audit_outbox under a store database,
+		// else in-process and lost at restart.
+		auditStore auditappend.Store = auditappend.NewMemStore()
 	)
 	if cfg.StoreDatabaseURL != "" {
 		poolCfg, perr := storePoolConfig(cfg.StoreDatabaseURL, cfg.StoreMaxConns)
 		if perr != nil {
 			return b, perr
 		}
+		tagStoreTLS(cfg.certs, &poolCfg.ConnConfig.Config)
 		p, perr := pgxpool.NewWithConfig(ctx, poolCfg)
 		if perr != nil {
 			return b, fmt.Errorf("gateway: pgxpool.New(store): %w", perr)
@@ -1906,6 +2036,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		store = pg
 		pool = p
+		auditStore = pgstore.NewAuditOutbox(p, bundle.Identity.HolderID)
 
 		replay = pgstore.NewReplayStore(p, bundle.Identity.HolderID, clock)
 		exs := pgstore.NewExchangeStore(p, bundle.Identity.HolderID, cfg.ExchangeTTL, clock)
@@ -1922,6 +2053,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.ProviderDavinciIngress {
 			ks := pgstore.NewIngressKeyStore(p, bundle.Identity.HolderID, clock)
 			ingressKeys = ks
+			keyTimes = ks.KeyTimes
 			// The refresh loop's own error hook — the only key-store failure the engine
 			// never sees (nothing is waiting on a background reload, so nothing is
 			// returned). It is set below, with the emitter, and stays nil when metrics are
@@ -1945,7 +2077,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// two payer-role gateways from each other. feedCell is created ONLY when a
 	// registrar is configured (mirrors the poller-goroutine gate in Run); its
 	// Check is NOT nil-safe, so it must only be Register'd inside that branch.
-	hreg := health.New(bundle.Identity.HolderID, getenv("SHN_VERSION"))
+	healthVersion, versionLine := buildVersion(getenv("SHN_VERSION"))
+	log.Print(versionLine)
+	hreg := health.New(bundle.Identity.HolderID, healthVersion)
 	var feedCell *health.PollerCell
 	if registrarURL != "" {
 		feedCell = health.NewPollerCell("registrar-poller", 30*time.Second)
@@ -1981,7 +2115,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		HubTransportPub:          trust.HubTransportPub,
 		HubURL:                   firstNonEmpty(cfg.HubURL, endpoints.Hub),
 		Reg:                      reg, // populated by the snapshot above
-		RegistryRefresh:          registryRefresh(client, registrarURL, reg),
+		RegistryRefresh:          registryRefresh(registrarClient, registrarURL, reg, feed),
 		Validator:                validator,
 		ValidatorsByContractLine: engine.ContractLineLanes(validatorLanes, lanes.defaults, lanes.fallbacks, cfg.ContractVersions),
 		// D1a: the boot-validated declared set — read by leg selection, the published
@@ -1995,17 +2129,21 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// DemoEdgeCapture: false in every shipped deploy; SHN_DEMO_EDGE_CAPTURE
 		// is the sole non-test way to set it.
 		DemoEdgeCapture: cfg.DemoEdgeCapture,
-		// ConformanceEnforcement: observe unless CONFORMANCE_ENFORCEMENT says
-		// none, structural or strict (loadConfig above is what makes an absent value
-		// observe).
-		ConformanceEnforcement: cfg.ConformanceEnforcement,
-		AdvertisedCDSHooks:     cfg.AdvertisedCDSHooks,
-		SoR:                    sor,
-		Store:                  store,
-		Clock:                  clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
-		Client:                 client,
-		NPI:                    cfg.NPI,
-		ConsentURL:             firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
+		// ConformanceEnforcement: none unless CONFORMANCE_ENFORCEMENT says
+		// observe, structural or strict (loadConfig above is what makes an absent
+		// value none).
+		ConformanceEnforcement:   cfg.ConformanceEnforcement,
+		ConformanceToleratePeers: cfg.ConformanceToleratePeers,
+		AdvertisedCDSHooks:       cfg.AdvertisedCDSHooks,
+		SoR:                      sor,
+		Store:                    store,
+		Clock:                    clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
+		Client:                   kindClient(endpointcert.Hub),
+		AuthzClient:              kindClient(endpointcert.Authorization),
+		ConsentClient:            kindClient(endpointcert.Consent),
+		CertRecorder:             cfg.certs,
+		NPI:                      cfg.NPI,
+		ConsentURL:               firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
 
 		OriginationProfile: cfg.OriginationProfile,
 		// Strict extensions (FR-G52): g.strictPeer is production-dormant BY DESIGN (always false —
@@ -2047,14 +2185,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			return b, perr
 		}
 		if pdc == nil {
-			pdc = cfg.diagnostic.client(client) // unauthenticated forward
-		}
-		// PAS forwarding is no longer a switch: the split counterparty that used to keep the
-		// PAS pair on an in-process fallback is deleted (§3.2), so EVERY Da Vinci leg —
-		// PAS included — reaches the payer's own system. Say so only to a stack that still
-		// sets the key, to any value.
-		if cfg.PayerDavinciPASNativeSet {
-			fmt.Fprintln(stdout, "gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch — PAS submit and update always forward to the payer's own system, like every other Da Vinci leg (the in-process payer is retired); remove it")
+			// unauthenticated forward: the template's timeout over the payer's tagged transports
+			pdc = cfg.diagnostic.client(&http.Client{Timeout: template.Timeout, Transport: payerTransport(cfg.certs)})
 		}
 		// FR-G26: the partner's CDS services are chosen per request by the request's hook
 		// (engine/workstream_pa_cds_services.go). The listing is read here once, best effort, to report which
@@ -2066,7 +2198,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.PayerDavinciCDSBaseURL != "" {
 			cdsBase = cfg.PayerDavinciCDSBaseURL
 		}
-		cdsServices, discErr := engine.DiscoverCDSServices(ctx, pdc, cdsBase, cfg.PayerDavinciBackendHeaders)
+		cdsServices, discErr := engine.DiscoverCDSServices(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), pdc, cdsBase, cfg.PayerDavinciBackendHeaders)
 		if discErr != nil {
 			fmt.Fprintf(stdout, "gateway: WARNING the payer's CDS service listing is not readable yet (%v); CRD requests are refused until it is\n", discErr)
 		} else {
@@ -2090,11 +2222,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// set — the same accessor selection, the CapabilityStatements and the
 			// registry declaration read — never the library build constant.
 			engine.WithOwnContractVersions(cfg.ContractVersions),
-			// Strict extensions (FR-G52): DORMANT plumbing (native.go's Handle never consults it, and
-			// g.strictPeer never reads it either — strictPeer is
-			// unconditionally false, its own comment explains why). Goes
-			// live together with transform-at-the-native-forward-edge.
-			engine.WithStrictExtensions(cfg.PayerDavinciStrictExtensions),
 			// Endpoint evidence: same-origin-drop notes ride the file's existing WARNING-line
 			// stdout precedent (e.g. the unauthenticated-forward warning above).
 			engine.WithEndpointEvidenceObserver(func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
@@ -2152,7 +2279,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		} else {
 			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL unset — coverage eligibility is answered from the payer's records\n")
 		}
-		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, cfg.PayerDavinciCRDServiceID, store, clock, nativeOpts...)
+		nativeOpts = append(nativeOpts, engine.WithCRDService(cfg.PayerDavinciCRDServiceID), engine.WithPASStore(store))
+		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, clock, nativeOpts...)
 		if discErr == nil {
 			native.PrimeCDSServices(cdsServices)
 		}
@@ -2162,7 +2290,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// (R-8 near-relay): tell the engine to skip the DTR egress foreign-$validate (FR-G28).
 		gwCfg.PayerDavinciNative = true
 	}
-	if cfg.ProviderDTRNative || operatedPopulateProfile(cfg.OriginationProfile) {
+	// gwOpts are the gateway's options (engine.Option), applied by New.
+	var gwOpts []engine.Option
+	operatedPopulate := false
+	if cfg.ProviderDTRNative || requiresOperatedPopulate(cfg.Role, cfg.OriginationProfile) {
 		// Operated-CQL $populate against the provider tenant (the crux of the provider-data
 		// and demo lanes — both answer a REAL payer's questionnaire, which the managed
 		// filler cannot fill). PROVIDER_DTR_POPULATE_URL is validated at loadConfig.
@@ -2177,9 +2308,10 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			return b, perr
 		}
 		if ppc == nil {
-			ppc = cfg.diagnostic.client(client) // unauthenticated forward
+			ppc = cfg.diagnostic.client(kindClient(endpointcert.Populate)) // unauthenticated forward
 		}
-		gwCfg.Populator = engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))
+		gwOpts = append(gwOpts, engine.WithPopulator(engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))))
+		operatedPopulate = true
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
@@ -2199,10 +2331,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	} else {
 		log.Printf("gateway: the network's Hub does not list involved patients in hubAccepts — legs carry no involved list; restart the gateway after the network starts listing it")
 	}
-	// Stated in every state, so whether a provider gateway authenticates its
-	// /scenario callers, and whom it admits, can be read from its boot line.
+	// Stated in every state, so whether a provider gateway runs module 1, and
+	// whom its /scenario routes admit, can be read from its boot line.
 	if gwCfg.Role == "provider" {
-		log.Printf("gateway: %s", scenarioCallersLine(gwCfg.ScenarioCallers))
+		if cfg.OriginationProfile == "" {
+			log.Printf("gateway: ORIGINATION_PROFILE unset — module 1 is off, and no /scenario route is served")
+			if unused := moduleOneSettingsSet(cfg); len(unused) > 0 {
+				log.Printf("gateway: WARNING %s set but unused: only module 1 reads them, and it is off (ORIGINATION_PROFILE unset)", strings.Join(unused, ", "))
+			}
+		} else {
+			log.Printf("gateway: %s", scenarioCallersLine(gwCfg.ScenarioCallers))
+		}
 	}
 	// Stated in both states, so a deployment's enrichment posture can be read
 	// from its boot line.
@@ -2220,9 +2359,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		default:
 			log.Printf("gateway: CDS_FHIR_SERVER_READ=private (the default) — a CRD request with no coverage, for a member the system of record does not hold, has its Coverage read through its own fhirServer (an https server in this participant's network or on the internet, never a loopback, link-local or metadata address), only to choose the payer; nothing read is carried; CDS_FHIR_SERVER_READ=off turns it off")
 		}
-	}
-	if cfg.acceptUnknownMembersAlias != "" {
-		log.Printf("gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is deprecated and will be removed: carrying members the system of record does not hold is now the default; remove the variable (REQUIRE_KNOWN_MEMBERS=true opts in to refusing them)")
 	}
 	for _, line := range cfg.ignoredSettingLines {
 		log.Print(line)
@@ -2262,17 +2398,69 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwCfg.Observer = hub.Emit
 	}
 
-	// EMF leg metrics: opt-in via METRICS_SERVICE. EMF rides
-	// stdout → awslogs → CloudWatch; sdk/metrics is fire-and-forget and
-	// conformance-neutral (TestLegMetric_ConformanceNeutral).
-	var exchangeMetrics func(engine.ExchangeRecord)
+	// Metrics: one registry, the one recording point (MON-R16), feeding the
+	// built-in per-exchange summary always (/internal/stats, MON-R30), the EMF
+	// sink when METRICS_SERVICE is set (EMF rides stdout → awslogs →
+	// CloudWatch) and the OpenTelemetry sink when a monitoring setting turns an
+	// exporter on; with neither, nothing leaves the gateway (MON-R1). Recording is
+	// fire-and-forget and conformance-neutral (TestLegMetric_ConformanceNeutral),
+	// and no monitoring setting stops a gateway from booting (MON-R44).
+	tel := otelsetup.Build(otelsetup.Load(getenv, otelSettingNames()), otelsetup.Identity{
+		Version: healthVersion, HolderID: bundle.Identity.HolderID, Role: cfg.Role,
+		MetricsService: cfg.MetricsService, MetricsEnv: getenv("METRICS_ENV"), Hostname: os.Hostname,
+	}, otelsetup.Options{Now: clock, Certs: cfg.certs})
+	for _, line := range tel.Lines() {
+		log.Print(line)
+	}
+	defer func() {
+		if !admitted {
+			// A gateway that does not start exports nothing.
+			tel.Discard()
+		}
+	}()
+	var sinks []telemetry.Sink
 	if cfg.MetricsService != "" {
-		em := metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil)
-		gwCfg.LegMetric = legMetricHook(em, cfg.MetricsService, cfg.Role)
-		exchangeMetrics = exchangeMetricHook(em, cfg.MetricsService)
-		storeErr := storeErrorMetricHook(em, cfg.MetricsService)
+		emf := telemetry.NewEMF(metrics.New(stdout, cfg.MetricsNamespace, map[string]string{"Env": cfg.MetricsEnv}, nil), cfg.MetricsService, cfg.Role)
+		sinks = append(sinks, emf)
+		activeStats = activeRequestsMetricLoop(emf, activeRequestsMetricInterval)
+	}
+	if s := tel.Sink(); s != nil {
+		sinks = append(sinks, s)
+	}
+	// The built-in per-exchange summary is always on (MON-R30), named for
+	// this replica as its exported metrics are (MON-R46). It reads only the
+	// exchange and backend instruments, so the other hooks, and their loops,
+	// run only when something exports.
+	exported := len(sinks) > 0
+	exchangeStats := stats.New(tel.ServiceInstanceID(), clock)
+	sinks = append(sinks, exchangeStats)
+	metricsReg := telemetry.New(sinks...)
+	tel.Bind(metricsReg)
+	exchangeMetrics := exchangeMetricHook(metricsReg)
+	var auditM auditappend.Metrics = auditMetrics{reg: metricsReg}
+	if exported {
+		gwCfg.LegMetric = legMetricHook(metricsReg)
+		storeErr := storeErrorMetricHook(metricsReg)
 		gwCfg.StoreErrorMetric = storeErr
-		gwCfg.InvolvedMetric = involvedOmittedMetricHook(em, cfg.MetricsService)
+		gwCfg.InvolvedMetric = involvedOmittedMetricHook(metricsReg)
+		gwCfg.TokenMetric = tokenMetricHook(metricsReg)
+		// The exchange additions (MON-R23, MON-R24).
+		gwCfg.ActiveRequestMetric = activeRequestHook(metricsReg)
+		gwCfg.FindingMetric = findingMetricHook(metricsReg)
+		gwCfg.ValidatorMetric = validatorMetricHook(metricsReg)
+		gwCfg.ObserveCheckDroppedMetric = observeCheckDroppedHook(metricsReg)
+		// The validator lanes: every default lane's qualification attempt, and
+		// every lane's state as a gauge, so a lane left unqualified is a number
+		// an alarm reads, not a log line.
+		attempted := validatorLaneAttemptHook(metricsReg)
+		lanes.attempted.Store(&attempted)
+		laneStats = validatorLaneMetricLoop(metricsReg, func() []laneGauge {
+			return laneGauges(lanes, gwCfg.CertificationValidatorsByLine, payloadChecksConsumeLanes(cfg.ConformanceEnforcement))
+		}, validatorLaneMetricInterval)
+		opsStats = opsMetricLoop(metricsReg, opsSources{
+			info:  infoPoints(gatewayInfoWire, cfg.ContractVersions, cfg.ConformanceEnforcement.String()),
+			certs: cfg.certs, keys: keyTimes, feed: feed, now: clock,
+		}, opsMetricInterval)
 		// One counter, one `store` dimension, whichever layer noticed the failure.
 		for _, wire := range storeErrHooks {
 			wire(storeErr)
@@ -2281,7 +2469,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// Saturation of the one pool every seam shares is what turns a healthy
 			// database into expiring store contexts; it is invisible without this.
 			p := pool
-			poolStats = storePoolMetricLoop(em, cfg.MetricsService, func() storePoolStat {
+			poolStats = storePoolMetricLoop(metricsReg, func() storePoolStat {
 				st := p.Stat()
 				return storePoolStat{
 					TotalConns:        st.TotalConns(),
@@ -2300,8 +2488,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// engine.New(gwCfg).Handler()) so the observer mux composed just below
 	// can wire the demo capture-fetch endpoint against this SAME gateway
 	// instance's own edge-capture store.
-	gwCfg.CertificationValidatorsByLine = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), lanes.defaults, qualifyDefaultLane)
-	gw, err := engine.New(gwCfg)
+	gwCfg.CertificationValidatorsByLine, err = certificationValidators(getenv, cfg, firstNonEmpty(cfg.FHIRValidateURL, endpoints.FHIRValidate), lanes.defaults, qualify)
+	if err != nil {
+		return b, err
+	}
+	gw, err := engine.New(gwCfg, gwOpts...)
 	if err != nil {
 		// No worker will ever own the gated clients: close them (nothing has
 		// started their qualification loops, which start with the worker).
@@ -2320,6 +2511,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 
 	tlsCert, err := loadTLSCert(cfg.TLSCertFile, cfg.TLSKeyFile)
+	cfg.certs.RecordOwn(endpointcert.Ingress, "TLS_CERT_FILE", tlsCert)
 	if err != nil {
 		return b, err
 	}
@@ -2337,13 +2529,53 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// The resolved level, on the operator log at boot: a fleet check reads it here
 	// rather than from the task definition, where an absent value and a delivered
 	// value the binary ignored would look the same.
-	fmt.Fprintf(stdout, "gateway: conformance enforcement=%s\n", cfg.ConformanceEnforcement)
+	if cfg.ConformanceEnforcementUnset {
+		fmt.Fprintf(stdout, "gateway: conformance enforcement=%s (CONFORMANCE_ENFORCEMENT unset)\n", cfg.ConformanceEnforcement)
+	} else {
+		fmt.Fprintf(stdout, "gateway: conformance enforcement=%s\n", cfg.ConformanceEnforcement)
+	}
+	// The payers tolerated, likewise: none is the default, and an operator sees which.
+	tolerated := "none"
+	if len(cfg.ConformanceToleratePeers) > 0 {
+		ids := make([]string, len(cfg.ConformanceToleratePeers))
+		for i, p := range cfg.ConformanceToleratePeers {
+			ids[i] = p.System + "|" + p.Value
+		}
+		tolerated = strings.Join(ids, ",")
+	}
+	fmt.Fprintf(stdout, "gateway: conformance tolerated peers=%s\n", tolerated)
 
 	// /internal/* is the operator/control-plane surface: never forwarded at the
 	// hosted edge (the hosted control plane pins that), token- or loopback-gated
 	// here. Inserted at this seam — shared by every role — rather
 	// than the per-role engine mux.
-	checksRunner := checks.NewRunner(checkTargets(cfg), client, clock)
+	// The audit outbox: the gateway's own records, checked,
+	// signed with its holder key, queued and sent to the Audit Plane. Nothing
+	// appends yet.
+	auditAppender, err := auditappend.New(auditappend.Config{
+		Holder: bundle.Identity.HolderID, SignPriv: bundle.Identity.SignPriv,
+		Endpoint: endpoints.Audit, Store: auditStore, Client: kindClient(endpointcert.Audit), Metrics: auditM, Now: clock, Jitter: rand.Float64,
+		Logf: log.Printf,
+	})
+	if err != nil {
+		return b, fmt.Errorf("gateway: audit outbox: %w", err)
+	}
+	if !auditappend.HolderOK(bundle.Identity.HolderID) {
+		log.Printf("gateway: audit: holder id is outside the shape an audit record allows; every record would be refused (counted dropped{invalid})")
+	}
+	outbox := "in-process, lost at restart"
+	if auditStore.Durable() {
+		outbox = "postgres"
+	}
+	if auditAppender.EndpointKnown() {
+		log.Printf("gateway: audit: records go to %s (outbox: %s)", checksTargetOf(endpoints.Audit), outbox)
+	} else {
+		log.Printf("gateway: audit: discovery names no audit endpoint; records are queued, not sent (outbox: %s; see /internal/checks AUDIT_ENDPOINT)", outbox)
+	}
+
+	// The telemetry targets are local (KindLocal): they read cached state and
+	// dial nothing, so they carry no client of their own.
+	checksRunner := checks.NewRunner(append(tagCheckTargets(cfg.certs, append(append(checkTargets(cfg), auditCheckTarget(endpoints.Audit)), lanes.checkTargets()...), template), telemetryCheckTargets(tel, tel.Endpoint())...), template, clock)
 	// Endpoint evidence: feed each completed checks cycle's PAYER_DAVINCI_WELL_KNOWN
 	// (davinci-config probe) evidence into the native responder — the REAL
 	// app-wiring hook (checks.Runner.OnResults, checks.go) from a live
@@ -2359,22 +2591,23 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			}
 		}
 	}
-	checksH := checks.Handler(checksRunner, cfg.ChecksToken)
-	inner := health.Wrap(hreg, gw.Handler())
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/internal/checks" {
-			checksH.ServeHTTP(w, r)
-			return
-		}
-		inner.ServeHTTP(w, r)
-	})
+	var handler http.Handler = mainListener(checksRunner, cfg.ChecksToken, exchangeStats.Handler(), health.Wrap(hreg, gw.Handler()))
+	// The HTTP server duration (MON-R29), only when something exports: the
+	// per-exchange summary does not read it.
+	httpServerMetered := false
+	if exported {
+		handler = httpServerMetrics(metricsReg, clock, handler)
+		httpServerMetered = true
+	}
 
 	b = built{
+		httpServerMetered:    httpServerMetered,
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
 		requireSharedLine:    gwCfg.RequireSharedLine,
 		translateIGLines:     gwCfg.TranslateIGLines,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 		fhirServerRead:       gwCfg.FHIRServerRead,
+		operatedPopulate:     operatedPopulate,
 		responder:            gwCfg.Responder,
 
 		diagnostic:      cfg.diagnostic,
@@ -2383,17 +2616,24 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		handler:         handler,
 		reg:             reg,
 		registrarURL:    registrarURL,
-		client:          client,
+		client:          registrarClient,
+		certs:           cfg.certs,
 		tlsCert:         tlsCert,
 		observerAddr:    cfg.ObserverAddr,
 		observerHandler: obsHandler,
 		healthCell:      feedCell,
+		feed:            feed,
 		checksRunner:    checksRunner,
 		nativeResponder: evidenceSink,
 		keyRefresh:      keyRefresh,
 		closeStore:      closeStore,
 		lanes:           lanes,
 		poolStats:       poolStats,
+		auditAppender:   auditAppender,
+		laneStats:       laneStats,
+		opsStats:        opsStats,
+		activeStats:     activeStats,
+		telemetry:       tel,
 		certification:   gwCfg.CertificationValidatorsByLine,
 		// Certification evidence is collected only where payload checks consume
 		// lanes (the engine starts no certification worker otherwise), so only
@@ -2446,6 +2686,10 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	// are delivered by its drain.
 	stopDiagnostic := b.startDiagnostic(ctx)
 	defer stopDiagnostic()
+	// The final metrics export runs just before it: after the listener, the
+	// cut handlers, the audit outbox's drain and the observe flush, so it
+	// carries what they counted (MON-R14).
+	defer b.telemetry.Shutdown(context.Background())
 	defer func() {
 		_ = b.gateway.Close()
 		b.lanes.Close()
@@ -2486,13 +2730,18 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
-		return stopServing(main, &handlers, 5*time.Second, cutHandlerWait)
+		return stopServing(main, &handlers, listenerShutdownWait, cutHandlerWait)
 	}
 }
 
-// cutHandlerWait bounds how long a stop waits for the handlers of requests it
-// cut to return.
-const cutHandlerWait = 2 * time.Second
+// The first two steps of a stop (DEPLOYMENT.md, "Stopping the gateway"):
+// listenerShutdownWait bounds how long the listener waits for the requests in
+// flight, and cutHandlerWait how long a stop then waits for the handlers of
+// the requests it cut to return.
+const (
+	listenerShutdownWait = 5 * time.Second
+	cutHandlerWait       = 2 * time.Second
+)
 
 // countHandlers counts h's requests in flight in handlers.
 func countHandlers(h http.Handler, handlers *sync.WaitGroup) http.Handler {
@@ -2547,7 +2796,9 @@ func (b built) startWorkers(parent context.Context) func() {
 		workers.Go(func() { run(ctx) })
 	}
 	if b.registrarURL != "" {
-		start(func(ctx context.Context) { pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell) })
+		start(func(ctx context.Context) {
+			pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell, b.feed)
+		})
 	}
 	// Shared ingress-key reload: non-nil only under SHN_STORE_DATABASE_URL, and
 	// started here rather than in build for the same reason as the poller above —
@@ -2560,17 +2811,42 @@ func (b built) startWorkers(parent context.Context) func() {
 	if b.poolStats != nil {
 		start(b.poolStats)
 	}
+	if b.laneStats != nil {
+		start(b.laneStats)
+	}
+	if b.opsStats != nil {
+		start(b.opsStats)
+	}
+	if b.activeStats != nil {
+		start(b.activeStats)
+	}
+	// The monitoring export loop (MON-R4): a no-op when nothing is exported.
+	start(b.telemetry.Run)
+	// The Prometheus pull listener (MON-R6), on its own bind: a no-op when
+	// pull is off, and a bind that fails turns pull off, never the gateway
+	// (MON-R44).
+	start(b.telemetry.ServePull)
 	// Boot-time connectivity checks run without blocking listener startup;
 	// build() must return without waiting on partner endpoints.
 	start(func(ctx context.Context) { _, _ = b.checksRunner.Run(ctx) }) // results land in Last()
 	// The certification warm-up likewise runs beside the listener, never before
 	// it (warmCertification).
 	if b.warmCertification {
-		start(func(ctx context.Context) { warmCertification(ctx, b.certification) })
+		start(func(ctx context.Context) { warmCertification(ctx, b.certification, b.certs) })
+	}
+	// The audit outbox's sender. It ends with the other workers at the stop
+	// signal; Close runs in the cleanup below, which Run calls only after the
+	// listener has drained (stopServing), so an in-memory outbox is drained and
+	// counted once nothing more can append.
+	if b.auditAppender != nil {
+		start(b.auditAppender.Run)
 	}
 	return func() {
 		cancel()
 		workers.Wait()
+		if b.auditAppender != nil {
+			b.auditAppender.Close()
+		}
 	}
 }
 
@@ -2621,6 +2897,8 @@ func HandlerWithClock(ctx context.Context, getenv func(string) string, stdout io
 		if b.closeStore != nil {
 			b.closeStore()
 		}
+		// The final metrics export, after everything that counts (MON-R14).
+		b.telemetry.Shutdown(context.Background())
 		// Last, so the events emitted while the gateway and its lanes close
 		// are delivered by the publisher's drain.
 		stopDiagnostic()
@@ -2688,11 +2966,15 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 		}
 		switch {
 		case fake:
-			lanes[line] = engine.NewLineFakeValidator(line)
+			v, err := lineFakeValidator(line)
+			if err != nil {
+				return nil, err
+			}
+			lanes[line] = v
 		case line == canonicalLine && canonical != nil:
 			lanes[line] = canonical
 		case urlForLine[line] != "":
-			lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
+			lanes[line] = taggedValidator(cfg.certs, line, urlForLine[line])
 		case !payloadChecksConsumeLanes(cfg.ConformanceEnforcement):
 			// No payload check consumes a lane, so a declared line needs none to
 			// be built and answered at: it is served unlaned (the engine's
@@ -2731,11 +3013,15 @@ func validatorLanesForDeclared(getenv func(string) string, declared []string, ca
 			}
 			switch {
 			case fake:
-				lanes[line] = engine.NewLineFakeValidator(line)
+				v, err := lineFakeValidator(line)
+				if err != nil {
+					return nil, err
+				}
+				lanes[line] = v
 			case line == canonicalLine && canonical != nil:
 				lanes[line] = canonical
 			case urlForLine[line] != "":
-				lanes[line] = shnsdk.NewOperationValidator(urlForLine[line])
+				lanes[line] = taggedValidator(cfg.certs, line, urlForLine[line])
 			default:
 				// No env configured for this undeclared native line — stays
 				// absent from the map (its contract lines resolve unlaned,
@@ -2774,7 +3060,7 @@ func payloadChecksConsumeLanes(level engine.ConformanceEnforcement) bool {
 func selectValidator(getenv func(string) string, validatorURL string, level engine.ConformanceEnforcement) (shnsdk.Validator, error) {
 	switch {
 	case fakeValidator(getenv):
-		return engine.NewLineFakeValidator(shnsdk.LineOf(engine.CanonicalContractVersion())), nil
+		return lineFakeValidator(shnsdk.LineOf(engine.CanonicalContractVersion()))
 	case validatorURL != "":
 		return shnsdk.NewOperationValidator(validatorURL), nil // $validate wrapper (NOT a thin HTTP validator)
 	case !payloadChecksConsumeLanes(level):
@@ -2788,11 +3074,11 @@ func selectValidator(getenv func(string) string, validatorURL string, level engi
 // needs none. A gateway at none checks no payload, certifies nothing it builds
 // and bridges no IG line without a lane, so it claims nothing a validator would
 // have to back.
-const noneRemedy = "or set CONFORMANCE_ENFORCEMENT=none to check no payload (this gateway then needs no validator)"
+const noneRemedy = "or set CONFORMANCE_ENFORCEMENT=none, or leave it unset, to check no payload (this gateway then needs no validator)"
 
 // noValidatorLog is the boot line of a gateway with no validator anywhere: no
 // canonical validator, no per-line lane and no default lane. Only none boots so.
-const noValidatorLog = "gateway: no FHIR validator: CONFORMANCE_ENFORCEMENT=none, and no FHIR_VALIDATE_URL (env or /discovery), FHIR_VALIDATE_URL_<line> or default validator lane is configured: " +
+const noValidatorLog = "gateway: no FHIR validator: conformance enforcement is none, and no FHIR_VALIDATE_URL (env or /discovery), FHIR_VALIDATE_URL_<line> or default validator lane is configured: " +
 	"no payload is checked, each declared line is served unlaned, and no IG line is bridged"
 
 // convergeRegistry snapshots the /holders feed into reg (Holder → RegistryEntry).
@@ -2827,12 +3113,15 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 // without a registrar (a static registry has nothing to re-read). It and the
 // poller may converge reg at the same time; a read older than the other's
 // writes is overwritten again by the next poll.
-func registryRefresh(c *http.Client, registrarURL string, reg shnsdk.Registry) func(context.Context) error {
+func registryRefresh(c *http.Client, registrarURL string, reg shnsdk.Registry, feed *feedFreshness) func(context.Context) error {
 	if registrarURL == "" {
 		return nil
 	}
 	return func(ctx context.Context) error {
-		_, err := convergeRegistry(ctx, c, registrarURL, reg)
+		n, err := convergeRegistry(ctx, c, registrarURL, reg)
+		if err == nil {
+			feed.succeeded(n)
+		}
 		return err
 	}
 }
@@ -2844,7 +3133,7 @@ func registryRefresh(c *http.Client, registrarURL string, reg shnsdk.Registry) f
 // (best-effort), now it surfaces as a degraded check until the next success.
 // cell may be nil (registrarURL configured post-boot is not a supported path
 // today, but PollerCell's Record* methods are nil-safe regardless).
-func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry, every time.Duration, cell *health.PollerCell) {
+func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shnsdk.Registry, every time.Duration, cell *health.PollerCell, feed *feedFreshness) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -2857,6 +3146,7 @@ func pollFeed(ctx context.Context, c *http.Client, registrarURL string, reg shns
 				cell.RecordError(err)
 			} else {
 				cell.RecordSuccess(n)
+				feed.succeeded(n)
 			}
 		}
 	}
@@ -2916,10 +3206,7 @@ func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
 	if cfg.ProviderDTRPopulateTokenURL == "" {
 		return nil, nil // unauthenticated (deliberate; warned at build)
 	}
-	sc := smartauth.Config{
-		TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope,
-		Observer: cfg.tokenNotes,
-	}
+	sc := providerDTRPopulateSmartBase(cfg)
 	if cfg.ProviderDTRPopulateClientSecret != "" {
 		sc.ClientSecret = cfg.ProviderDTRPopulateClientSecret // client_secret_post; no key material
 	} else {
@@ -2935,6 +3222,18 @@ func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
 		return nil, fmt.Errorf("populate smartauth client: %w", err)
 	}
 	return hc, nil
+}
+
+// providerDTRPopulateSmartBase is the PROVIDER_DTR_POPULATE_* SMART config
+// before its credential: the client, scope and tagged transports both the
+// $populate client and its token check use.
+func providerDTRPopulateSmartBase(cfg config) smartauth.Config {
+	sc := smartauth.Config{
+		TokenURL: cfg.ProviderDTRPopulateTokenURL, ClientID: cfg.ProviderDTRPopulateClientID, Scope: cfg.ProviderDTRPopulateScope,
+		Observer: cfg.tokenNotes,
+	}
+	tagSmart(cfg.certs, &sc, cfg.certs.Wrap(endpointcert.Of(endpointcert.Populate), nil), endpointcert.PopulateToken)
+	return sc
 }
 
 // loadSmartKey reads a PEM-encoded EC or RSA private key from path. Only ES384
@@ -2959,6 +3258,13 @@ func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
 // payer's own resource, and the managed filler only knew the retired in-process tree.
 func operatedPopulateProfile(profile string) bool {
 	return profile == "provider-data" || profile == "demo"
+}
+
+// requiresOperatedPopulate reports whether a gateway of role, with origination profile
+// profile, needs the operated $populate endpoint: only a provider originates, so only a
+// provider's profile does.
+func requiresOperatedPopulate(role, profile string) bool {
+	return role == "provider" && operatedPopulateProfile(profile)
 }
 
 func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
@@ -3005,11 +3311,12 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 // gateway's own routing validator. Nothing here feeds routing: a certify-only
 // address is not a lane (validatorLanesForDeclared never reads it), and a gated
 // client's own qualification never changes routing's lanes. Each gated client
-// runs its own background qualification loop (qualify is the same qualifier
-// routing uses) from the certification worker's start, only where evidence is
-// collected, so a validator that comes up late is certified against within one
-// interval of coming up.
-func certificationValidators(getenv func(string) string, cfg config, canonical string, defaults map[string]*engine.DiscoveredLane, qualify engine.LaneQualifier) map[string]shnsdk.Validator {
+// runs its own background qualification loop from the certification worker's
+// start, only where evidence is collected. qualify is the same qualifier
+// routing uses, so a default lane's client defers to routing's retries and
+// takes routing's identical pass as its first qualification; a validator that
+// comes up late is certified against within one retry wait of coming up.
+func certificationValidators(getenv func(string) string, cfg config, canonical string, defaults map[string]*engine.DiscoveredLane, qualify engine.LaneQualifier) (map[string]shnsdk.Validator, error) {
 	endpoints := map[string]string{
 		"2.0": canonical,
 		"2.1": firstNonEmpty(cfg.FHIRCertifyURL21, cfg.FHIRValidateURL21),
@@ -3018,13 +3325,20 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 	out := make(map[string]shnsdk.Validator, len(endpoints))
 	for line, endpoint := range endpoints {
 		if fakeValidator(getenv) {
-			out[line] = engine.NewLineFakeValidator(line)
+			v, err := lineFakeValidator(line)
+			if err != nil {
+				engine.CloseCertificationClients(out)
+				return nil, err
+			}
+			out[line] = v
 			continue
 		}
 		if endpoint == "" {
 			suffix := strings.ReplaceAll(line, ".", "_")
 			if d := defaults[line]; d != nil {
-				out[line] = engine.NewGatedCertificationValidator(d, qualify, "FHIR_CERTIFY_URL_"+suffix+" and FHIR_VALIDATE_URL_"+suffix+" are not configured")
+				g := engine.NewGatedCertificationValidator(d, qualify, "FHIR_CERTIFY_URL_"+suffix+" and FHIR_VALIDATE_URL_"+suffix+" are not configured")
+				engine.TagValidatorClient(g.CertificationClient(), cfg.certs, certifyLane(line))
+				out[line] = g
 			} else if cfg.DefaultValidatorLanes == defaultValidatorLanesNone && line != "2.0" {
 				// No default lane exists to qualify: the evidence names the lane to
 				// configure, and nothing is ever dialed for it.
@@ -3033,12 +3347,12 @@ func certificationValidators(getenv func(string) string, cfg config, canonical s
 			continue
 		}
 		if line == "2.0" {
-			out[line] = certificationClient(endpoint)
+			out[line] = certifyClient(cfg.certs, line, endpoint)
 			continue
 		}
-		out[line] = engine.NewQualifiedCertificationValidator(line, certificationClient(endpoint), qualify)
+		out[line] = engine.NewQualifiedCertificationValidator(line, certifyClient(cfg.certs, line, endpoint), qualify)
 	}
-	return out
+	return out, nil
 }
 
 // certificationClient builds the client for a certification endpoint configured
@@ -3140,6 +3454,26 @@ type unconfiguredCertification struct{ reason string }
 
 func (u unconfiguredCertification) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
 	return shnsdk.Result{}, &engine.CertificationLaneUnavailable{Reason: u.reason}
+}
+
+// moduleOneSettingsSet are the settings cfg sets that only module 1 reads: the
+// clinician NPI and the operated $populate connector.
+func moduleOneSettingsSet(cfg config) []string {
+	var set []string
+	for _, s := range []struct {
+		key string
+		on  bool
+	}{
+		{"NPI", cfg.NPI != ""},
+		{"PROVIDER_DTR_NATIVE", cfg.ProviderDTRNative},
+		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL != ""},
+		{"PROVIDER_DTR_POPULATE_TOKEN_URL", cfg.ProviderDTRPopulateTokenURL != ""},
+	} {
+		if s.on {
+			set = append(set, s.key)
+		}
+	}
+	return set
 }
 
 // scenarioCallersLine is the boot line about a provider gateway's /scenario

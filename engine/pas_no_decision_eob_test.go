@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // pas_no_decision_eob_test.go — a payer gateway records the payer's decision

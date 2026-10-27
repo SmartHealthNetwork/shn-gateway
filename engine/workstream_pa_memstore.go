@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_memstore.go — the PA workstream's state in the in-memory Store
 // (memstore.go): the payer-side pended-claim ledger and the in-memory
 // continuation store. The memory store holds it as the PA workstream's

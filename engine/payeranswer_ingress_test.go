@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -6,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,10 +18,10 @@ import (
 )
 
 // The ingress check of a payer's answer on a leg a provider gateway originated
-// (validateFHIRPayerIngress): skipped only for the network's reference payer
-// identities on a lane that relays their bytes; for every other payer, governed at
-// the gateway's level and certified against the lines this gateway supports, the
-// routed line first, refused only when it conforms to none.
+// (validateFHIRPayerIngress): for every payer, governed at the gateway's level and
+// certified against the lines this gateway supports, the routed line first, refused
+// only when it conforms to none, unless the participant tolerates that payer
+// (CONFORMANCE_TOLERATE_PEERS).
 
 // scriptedVerdict is what a scripted lane answers about a payer's answer.
 type scriptedVerdict int
@@ -152,34 +155,86 @@ var (
 	partner = shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00002"}
 )
 
-// The network's reference payers, by identity, on either lane that relays their
-// bytes, are not certified at any level: no validator call, no finding, the answer
-// relayed — even at strict, and even when every lane would refuse it.
-func TestPayerAnswerIngress_ReferencePayersAreNotCertified(t *testing.T) {
+// No payer is exempt by default (D122): the network's reference payers, on either
+// lane that relays their bytes, are judged at the gateway's level like any payer,
+// refused at structural and strict when their answer conforms to no line. A
+// participant that lists a payer in CONFORMANCE_TOLERATE_PEERS has a defect its
+// level would refuse recorded instead, the finding marked tolerated; at observe
+// nothing would refuse, so nothing is marked; at none nothing runs.
+func TestPayerAnswerIngress_ReferencePayersAreJudgedUnlessTolerated(t *testing.T) {
+	legs := []struct{ legType, contract string }{{"dtr-questionnaire-fetch", "pa.dtr"}, {"pas-claim", "pa.pas"}, {"pas-claim-update", "pa.pas"}}
 	for _, profile := range providerLanes {
 		for _, payer := range ReferencePayerIdentities() {
 			for _, level := range everyLevel {
-				g, log, findings := payerIngressGateway(t, profile, level, allLinesFailed)
-				for _, leg := range []struct{ legType, contract string }{{"dtr-questionnaire-fetch", "pa.dtr"}, {"pas-claim", "pa.pas"}, {"pas-claim-update", "pa.pas"}} {
-					status, msg := drainedPayerIngress(g, answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer)
-					if status != 0 {
-						t.Errorf("%s/%s/%s %s: status %d %q, want the reference answer relayed", profile, payer.Value, level, leg.legType, status, msg)
+				for _, listed := range []bool{false, true} {
+					g, log, findings := payerIngressGateway(t, profile, level, allLinesFailed)
+					if listed {
+						g.cfg.ConformanceToleratePeers = []shnsdk.PayerIdentifier{partner, payer}
 					}
-				}
-				if log.count() != 0 || len(*findings) != 0 {
-					t.Errorf("%s/%s/%s: %d validator calls, %d findings; a reference payer's answer is never certified", profile, payer.Value, level, log.count(), len(*findings))
+					for _, leg := range legs {
+						status, msg := drainedPayerIngress(g, answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer)
+						refuses := !listed && (level == EnforcementStructural || level == EnforcementStrict)
+						if (status != 0) != refuses {
+							t.Errorf("%s/%s/%s/listed=%v %s: status %d %q, want refused %v", profile, payer.Value, level, listed, leg.legType, status, msg, refuses)
+						}
+					}
+					if level == EnforcementNone {
+						if log.count() != 0 || len(*findings) != 0 {
+							t.Errorf("%s/%s/none: %d validator calls, %d findings", profile, payer.Value, log.count(), len(*findings))
+						}
+						continue
+					}
+					if len(*findings) != len(legs) {
+						t.Fatalf("%s/%s/%s/listed=%v: findings %+v", profile, payer.Value, level, listed, *findings)
+					}
+					for _, f := range *findings {
+						wantTolerated := listed && level != EnforcementObserve
+						if f.Tolerated != wantTolerated || (wantTolerated && f.Decision != Record.String()) {
+							t.Errorf("%s/%s/%s/listed=%v: finding %+v, want tolerated %v", profile, payer.Value, level, listed, f, wantTolerated)
+						}
+					}
 				}
 			}
 		}
 	}
 }
 
-// The skip needs both halves: a reference payer reached from a lane that does not
-// relay reference bytes is certified like any payer. Every lane New accepts relays
-// them, and a provider with no profile refuses to originate
-// (requireOriginationProfile), so no route reaches this case today; the row pins the
-// rule for any later lane that does not relay reference bytes. What routes do reach —
-// a partner payer on either lane is certified — is TestPayerAnswerIngress_PartnerPayerLevelMatrix.
+// A check that could not run is never tolerated: what the validator did not say
+// is not a verdict, so a listed payer's answer is refused 500 at strict as any
+// payer's is.
+func TestPayerAnswerIngress_AnUnavailableCheckIsNeverTolerated(t *testing.T) {
+	outage := map[string]scriptedVerdict{"2.0": scriptOutage, "2.1": scriptOutage, "2.2": scriptOutage}
+	g, _, findings := payerIngressGateway(t, "provider-data", EnforcementStrict, outage)
+	g.cfg.ConformanceToleratePeers = []shnsdk.PayerIdentifier{partner}
+	status, msg := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status %d %q, want 500", status, msg)
+	}
+	for _, f := range *findings {
+		if f.Tolerated {
+			t.Fatalf("an unavailable check marked tolerated: %+v", f)
+		}
+	}
+}
+
+// A payer the participant does not list is judged even when another is listed:
+// tolerance is per payer, matched against the identity the leg was routed by.
+func TestPayerAnswerIngress_ToleranceIsPerPayer(t *testing.T) {
+	g, _, findings := payerIngressGateway(t, "provider-data", EnforcementStrict, allLinesFailed)
+	g.cfg.ConformanceToleratePeers = ReferencePayerIdentities()
+	if status, _ := drainedPayerIngress(g, answerCtx("pas-claim"), []byte(answerBundle), "2.0", "pa.pas", partner); status == 0 {
+		t.Fatal("an unlisted payer's answer was tolerated")
+	}
+	if len(*findings) != 1 || (*findings)[0].Tolerated || (*findings)[0].Decision != Refuse.String() {
+		t.Fatalf("findings %+v", *findings)
+	}
+}
+
+// A reference payer is certified like any payer off the lanes that relay reference
+// bytes too. Every lane New accepts relays them, and a provider with no profile
+// mounts no /scenario route (originationRoutes), so no route reaches this case
+// today; the row pins the rule for any later lane. The reference payers on the lanes
+// that do relay their bytes are TestPayerAnswerIngress_ReferencePayersAreJudgedUnlessTolerated.
 func TestPayerAnswerIngress_ReferencePayerOffTheReferenceLanesIsCertified(t *testing.T) {
 	g, log, _ := payerIngressGateway(t, "", EnforcementStrict, allLinesFailed)
 	status, _ := drainedPayerIngress(g, answerCtx("dtr-questionnaire-fetch"), []byte(answerBundle), "2.0", "pa.dtr", shnsdk.CMSPayerIdentity)
@@ -464,12 +519,18 @@ func TestPayerAnswerIngress_CandidateOrder(t *testing.T) {
 	claimed20 := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"q","meta":{"profile":["` +
 		certificationDTR + `dtr-std-questionnaire|` + d20.PackageVersion + `"]}}}]}`
 	params := `{"resourceType":"Parameters","parameter":[{"name":"PackageBundle","resource":` + claimed20 + `}]}`
+	params22 := `{"resourceType":"Parameters","parameter":[{"name":"packagebundle","resource":` + claimed20 + `}]}`
 	for _, tc := range []struct {
 		routed, body string
 		want         []string
 	}{
 		{"2.1", claimed20, []string{"2.1", "2.0", "2.2"}},
-		{"2.1", params, []string{"2.1", "2.0", "2.2"}},
+		// A DTR package answer is judged at the lines of the names it uses alone
+		// (PackageBundle: 2.0 and 2.1; packagebundle: 2.2), the routed line first
+		// when it is one of them, then the lines it claims.
+		{"2.1", params, []string{"2.1", "2.0"}},
+		{"2.2", params, []string{"2.0", "2.1"}},
+		{"2.0", params22, []string{"2.2"}},
 		{"2.2", claimed20, []string{"2.2", "2.0", "2.1"}},
 		{"2.0", claimed20, []string{"2.0", "2.2", "2.1"}},
 		{"2.1", answerBundle, []string{"2.1", "2.2", "2.0"}},
@@ -728,26 +789,6 @@ func TestPayerAnswerIngress_ParametersPackageIsWrapped(t *testing.T) {
 	}
 }
 
-// The two SHN-operated bridging-demo payers front the reference payer, so their
-// answers are its bytes: no validator call at any level, on either lane.
-func TestPayerAnswerIngress_BridgeDemoPayersAreNotCertified(t *testing.T) {
-	for _, profile := range providerLanes {
-		for _, payer := range []shnsdk.PayerIdentifier{BridgeDemoPayerID, BridgeRefusePayerID} {
-			for _, level := range everyLevel {
-				g, log, findings := payerIngressGateway(t, profile, level, allLinesFailed)
-				for _, leg := range []struct{ legType, contract string }{{"dtr-questionnaire-fetch", "pa.dtr"}, {"pas-claim", "pa.pas"}, {"pas-claim-update", "pa.pas"}} {
-					if status, msg := drainedPayerIngress(g, answerCtx(leg.legType), []byte(answerBundle), "2.0", leg.contract, payer); status != 0 {
-						t.Errorf("%s/%s/%s %s: status %d %q, want relayed", profile, payer.Value, level, leg.legType, status, msg)
-					}
-				}
-				if log.count() != 0 || len(*findings) != 0 {
-					t.Errorf("%s/%s/%s: %d validator calls, %d findings, want none", profile, payer.Value, level, log.count(), len(*findings))
-				}
-			}
-		}
-	}
-}
-
 // The engine's reference set is closed and exactly the published identities: the
 // three reference payers and the two demo payers that front 00001.
 func TestReferencePayerIdentities(t *testing.T) {
@@ -756,6 +797,7 @@ func TestReferencePayerIdentities(t *testing.T) {
 	if got := ReferencePayerIdentities(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("reference payers %v", got)
 	}
+	isReferencePayer := func(p shnsdk.PayerIdentifier) bool { return slices.Contains(ReferencePayerIdentities(), p) }
 	if !isReferencePayer(shnsdk.CMSPayerIdentity) {
 		t.Fatal("shnsdk.CMSPayerIdentity is the 2.0 reference payer")
 	}

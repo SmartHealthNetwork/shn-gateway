@@ -3,6 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // ConformanceEnforcement is a participant's choice about what its own gateway
@@ -36,11 +40,16 @@ func (e ConformanceEnforcement) String() string {
 	return "strict"
 }
 
+// ConformanceLevels are the levels' names (ConformanceEnforcement.String,
+// TestConformanceVocabulariesAreTheirTypes), the closed list a finding's level
+// is one of (MON-R24).
+var ConformanceLevels = []string{"none", "observe", "structural", "strict"}
+
 // ParseConformanceEnforcement maps a setting's value to a level. It accepts
 // exactly the published values and errors on anything else, including empty:
 // the gateway/app env loader never calls it for an absent
-// CONFORMANCE_ENFORCEMENT, and sets EnforcementObserve itself instead (the
-// published default). A level that is not published is a boot error, never a
+// CONFORMANCE_ENFORCEMENT, and sets EnforcementNone itself instead (the
+// published default, D116). A level that is not published is a boot error, never a
 // reserved word.
 func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 	switch s {
@@ -96,6 +105,11 @@ func (d Decision) String() string {
 	}
 	return "refused"
 }
+
+// FindingActions are the decisions a finding records (Decision.String,
+// TestConformanceVocabulariesAreTheirTypes): what the gateway did to the
+// message (MON-R24).
+var FindingActions = []string{"relayed", "refused"}
 
 // findingEmitterBinder is implemented by a responder that records conformance
 // findings. A responder that does not implement it (a test wrapper, say)
@@ -213,10 +227,97 @@ type gatewayConformance struct {
 	g *Gateway
 }
 
-// conformance is the gateway's module 3, at the configured level. It is
-// configuration, never request-scoped.
+// ParseToleratePeers reads CONFORMANCE_TOLERATE_PEERS: payer identities as
+// <system>|<value>, comma-separated, each with both parts. Empty tolerates no
+// one; an entry without both parts, or listed twice, is refused.
+func ParseToleratePeers(s string) ([]shnsdk.PayerIdentifier, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var peers []shnsdk.PayerIdentifier
+	for _, entry := range strings.Split(s, ",") {
+		system, value, ok := strings.Cut(strings.TrimSpace(entry), "|")
+		p := shnsdk.PayerIdentifier{System: strings.TrimSpace(system), Value: strings.TrimSpace(value)}
+		if !ok || p.System == "" || p.Value == "" || strings.Contains(p.Value, "|") {
+			return nil, fmt.Errorf("CONFORMANCE_TOLERATE_PEERS entry %q is not <system>|<value>", strings.TrimSpace(entry))
+		}
+		if slices.Contains(peers, p) {
+			return nil, fmt.Errorf("CONFORMANCE_TOLERATE_PEERS lists %s|%s twice", p.System, p.Value)
+		}
+		peers = append(peers, p)
+	}
+	return peers, nil
+}
+
+// toleratesAll reports whether this participant tolerates every payer in
+// payers, the identities an exchange was routed by (ConformanceToleratePeers).
+// None tolerates no one.
+func (g *Gateway) toleratesAll(payers []shnsdk.PayerIdentifier) bool {
+	if len(payers) == 0 || len(g.cfg.ConformanceToleratePeers) == 0 {
+		return false
+	}
+	for _, p := range payers {
+		if !slices.Contains(g.cfg.ConformanceToleratePeers, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// tolerantModule is module 3 deciding a payer's answer from a payer the
+// participant tolerates (D122): a defect its level would refuse is recorded
+// instead. A check that could not run is decided as ever: what the validator
+// did not say is not a verdict to tolerate.
+type tolerantModule struct{ conformanceModule }
+
+func (m tolerantModule) Decide(kind CheckKind, rule string, v Verdict) Decision {
+	d := m.conformanceModule.Decide(kind, rule, v)
+	if d == Refuse && v != VerdictUnavailable {
+		return Record
+	}
+	return d
+}
+
+// toleratedDecision reports whether mod recorded, by its participant's
+// tolerance, a verdict its level would have refused.
+func toleratedDecision(mod conformanceModule, kind CheckKind, v Verdict, d Decision) bool {
+	if gc, ok := mod.(gatewayConformance); ok {
+		mod = gc.conformanceModule
+	}
+	t, ok := mod.(tolerantModule)
+	return ok && d == Record && t.conformanceModule.Decide(kind, "", v) == Refuse
+}
+
+// conformanceFor is module 3 for a payer's answer an exchange routed by payers
+// carried: tolerant when the participant tolerates every one of them.
+func (g *Gateway) conformanceFor(payers []shnsdk.PayerIdentifier) gatewayConformance {
+	m := g.conformance()
+	if g.toleratesAll(payers) {
+		m.conformanceModule = tolerantModule{m.conformanceModule}
+	}
+	return m
+}
+
+// conformance is the gateway's module 3, at the configured level, or absent
+// when the gateway opted out of loading it. It is configuration, never
+// request-scoped.
 func (g *Gateway) conformance() gatewayConformance {
+	if g.cfg.conformanceModuleAbsent {
+		return gatewayConformance{conformanceModule: newAbsentModule(), g: g}
+	}
 	return gatewayConformance{conformanceModule: NewConformancePolicy(g.cfg.ConformanceEnforcement), g: g}
+}
+
+// absentModule is module 3 not loaded: no payload check runs, and none
+// records a finding or refuses, whatever level is configured. It is the
+// module at none by construction, so absent answers exactly as none does.
+// Only an explicit opt-out selects it, and only a test build has one
+// (conformance_testdouble.go): an unset module, or an unset level, is never
+// absent.
+type absentModule struct{ ConformancePolicy }
+
+func newAbsentModule() absentModule {
+	return absentModule{ConformancePolicy: NewConformancePolicy(EnforcementNone)}
 }
 
 // The network rules. Binding the leg's authority and consent to one patient is

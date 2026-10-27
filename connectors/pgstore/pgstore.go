@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // Package pgstore is the durable (Postgres) implementation of the gateway's
 // Store seam — the holder's OWN business state: issued authorization numbers and
 // the pended-claim ledger (AI-1: metadata/decision only, never a cross-holder
@@ -274,13 +276,37 @@ CREATE TABLE IF NOT EXISTS gw_exchange_leg (
     FOREIGN KEY (holder_id, exchange_id) REFERENCES gw_exchange (holder_id, exchange_id)
         ON DELETE CASCADE
 );
+-- The audit outbox (gateway/internal/auditappend): the
+-- gateway's own version 2 audit records waiting for the Audit Plane, each
+-- deleted once the Plane accepts or refuses it, at most auditappend.Bound per
+-- holder (the oldest dropped first). body is the record unsigned, as the
+-- content guard passed it (auditappend.Check): each send signs it with the key
+-- the gateway runs with, so a rotated key sends it under the new key. It is
+-- metadata with no Content, so it is a named exception in the DDL fence.
+CREATE TABLE IF NOT EXISTS gw_audit_outbox (
+    holder_id       TEXT NOT NULL,
+    seq             BIGSERIAL,
+    record_id       TEXT NOT NULL,
+    body            BYTEA NOT NULL,
+    enqueued_at     TIMESTAMPTZ NOT NULL,
+    next_attempt_at TIMESTAMPTZ NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_status     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (holder_id, seq),
+    UNIQUE (holder_id, record_id),
+    CHECK (octet_length(record_id) = 26),
+    CHECK (octet_length(body) <= 65536),
+    CHECK (octet_length(last_status) <= 32)
+);
+CREATE INDEX IF NOT EXISTS gw_audit_outbox_due ON gw_audit_outbox (holder_id, next_attempt_at, seq);
 `
 
 // EnsureSchema creates the gateway tables (business Store: gw_auth_number,
 // gw_pended_claim with the pend ledger's gw_pended_claim_key, the continuation
 // store's gw_pa_continuation with gw_pa_continuation_item, and gw_eob, which
 // nothing writes or reads any more; shared replica state: gw_ingress_key,
-// gw_replay, gw_exchange, gw_exchange_leg) if absent (idempotent; plain DDL, no
+// gw_replay, gw_exchange, gw_exchange_leg; and the audit outbox,
+// gw_audit_outbox) if absent (idempotent; plain DDL, no
 // CREATE ROLE — least-privilege-friendly). Safe to call repeatedly AND concurrently:
 // `CREATE TABLE/INDEX IF NOT EXISTS` is NOT concurrency-safe on its own (concurrent
 // callers race in pg_type/pg_class and one fails with SQLSTATE 23505), and the four

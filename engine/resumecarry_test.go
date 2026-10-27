@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -108,7 +110,7 @@ func pinnedPendAt22(t *testing.T, trigger pinTrigger) (*Gateway, *pasFollowStub,
 func inquire(gw *Gateway, continuation string) (*httptest.ResponseRecorder, []ObserverEvent) {
 	var events []ObserverEvent
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-	gw.cfg.OriginationProfile = "demo" // the origination routes need a lane
+	declareOriginationProfile(gw, "demo") // the origination routes need a lane
 	rec := httptest.NewRecorder()
 	gw.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/pa/inquire",
 		strings.NewReader(`{"continuation":"`+continuation+`","waitSeconds":0}`)))

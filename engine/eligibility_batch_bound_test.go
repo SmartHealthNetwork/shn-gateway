@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -163,7 +165,7 @@ func TestEligibilityBatch_TheBoundCountsRequestsInEveryForm(t *testing.T) {
 // The gateway's published documents state the bound the code enforces.
 func TestEligibilityBatch_TheDocsStateTheBound(t *testing.T) {
 	want := "reads at most " + strconv.Itoa(maxEligibilityBatch) + " in one batch"
-	for _, doc := range []string{"../docs/CONFIGURATION.md", "../STABILITY.md"} {
+	for _, doc := range []string{"../docs/CONFIGURATION.md", "../CHANGELOG.md"} {
 		b, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)

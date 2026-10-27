@@ -1,0 +1,670 @@
+# HELP go_config_gogc_percent Heap size target percentage configured by the user, otherwise 100.
+# TYPE go_config_gogc_percent gauge
+# HELP go_goroutine_count Count of live goroutines.
+# TYPE go_goroutine_count gauge
+# HELP go_memory_allocated_bytes_total Memory allocated to the heap by the application.
+# TYPE go_memory_allocated_bytes_total counter
+# HELP go_memory_allocations_total Count of allocations to the heap by the application.
+# TYPE go_memory_allocations_total counter
+# HELP go_memory_gc_goal_bytes Heap size target for the end of the GC cycle.
+# TYPE go_memory_gc_goal_bytes gauge
+# HELP go_memory_used_bytes Memory used by the Go runtime.
+# TYPE go_memory_used_bytes gauge
+# HELP go_processor_limit The number of OS threads that can execute user-level Go code simultaneously.
+# TYPE go_processor_limit gauge
+# HELP http_server_request_duration_seconds Duration of HTTP server requests.
+# TYPE http_server_request_duration_seconds histogram
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.005"} 0
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.01"} 0
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.025"} 0
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.05"} 0
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.1"} 0
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.25"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="0.5"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="1"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="2.5"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="5"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="10"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="15"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="20"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="25"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="30"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="60"} 1
+http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",le="+Inf"} 1
+http_server_request_duration_seconds_sum{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http"} 0.25
+http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.005"} 0
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.01"} 0
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.025"} 0
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.05"} 0
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.1"} 0
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.25"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="0.5"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="1"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="2.5"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="5"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="10"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="15"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="20"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="25"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="30"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="60"} 1
+http_server_request_duration_seconds_bucket{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http",le="+Inf"} 1
+http_server_request_duration_seconds_sum{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http"} 0.25
+http_server_request_duration_seconds_count{error_type="502",http_request_method="POST",http_response_status_code="502",http_route="/Claim/$submit",network_protocol_version="1.1",url_scheme="http"} 1
+# HELP process_cpu_time_seconds_total Total CPU seconds broken down by different CPU modes.
+# TYPE process_cpu_time_seconds_total counter
+# HELP process_uptime_seconds The time the process has been running.
+# TYPE process_uptime_seconds gauge
+# HELP shn_gateway_active_requests Exchanges in flight. In EMF, the peak each minute.
+# TYPE shn_gateway_active_requests gauge
+shn_gateway_active_requests{shn_direction="inbound"} 1
+shn_gateway_active_requests{shn_direction="ingress"} 1
+# HELP shn_gateway_audit_appends_total Audit records the Audit Plane accepted.
+# TYPE shn_gateway_audit_appends_total counter
+shn_gateway_audit_appends_total 1
+# HELP shn_gateway_audit_drops_total Audit records that left the outbox without the Audit Plane's acceptance, by reason.
+# TYPE shn_gateway_audit_drops_total counter
+shn_gateway_audit_drops_total{shn_reason="conflict"} 5
+shn_gateway_audit_drops_total{shn_reason="invalid"} 2
+shn_gateway_audit_drops_total{shn_reason="overflow"} 1
+shn_gateway_audit_drops_total{shn_reason="refused"} 4
+shn_gateway_audit_drops_total{shn_reason="stopped"} 6
+shn_gateway_audit_drops_total{shn_reason="store"} 3
+# HELP shn_gateway_audit_endpoint_unknown Audit records queued while discovery names no audit endpoint.
+# TYPE shn_gateway_audit_endpoint_unknown gauge
+shn_gateway_audit_endpoint_unknown 5
+# HELP shn_gateway_audit_queue_depth Audit records queued in the outbox.
+# TYPE shn_gateway_audit_queue_depth gauge
+shn_gateway_audit_queue_depth 7
+# HELP shn_gateway_audit_retries_total Audit record sends retried, by reason.
+# TYPE shn_gateway_audit_retries_total counter
+shn_gateway_audit_retries_total{shn_reason="store"} 1
+shn_gateway_audit_retries_total{shn_reason="unavailable"} 1
+shn_gateway_audit_retries_total{shn_reason="unknown-sender"} 1
+shn_gateway_audit_retries_total{shn_reason="unreachable"} 1
+# HELP shn_gateway_authorization_token_duration_seconds Time to acquire an Authorization Framework token, its retry included.
+# TYPE shn_gateway_authorization_token_duration_seconds histogram
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.005"} 0
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.01"} 0
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.025"} 0
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.05"} 0
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.1"} 0
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.25"} 2
+shn_gateway_authorization_token_duration_seconds_bucket{le="0.5"} 4
+shn_gateway_authorization_token_duration_seconds_bucket{le="1"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="2.5"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="5"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="10"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="15"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="20"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="25"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="30"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="60"} 5
+shn_gateway_authorization_token_duration_seconds_bucket{le="+Inf"} 5
+shn_gateway_authorization_token_duration_seconds_sum 1.7999999999999998
+shn_gateway_authorization_token_duration_seconds_count 5
+# HELP shn_gateway_authorization_tokens_total Authorization Framework token acquisitions, by outcome.
+# TYPE shn_gateway_authorization_tokens_total counter
+shn_gateway_authorization_tokens_total{shn_outcome="denied"} 1
+shn_gateway_authorization_tokens_total{shn_outcome="failed"} 1
+shn_gateway_authorization_tokens_total{shn_outcome="ok"} 1
+shn_gateway_authorization_tokens_total{shn_outcome="other"} 1
+shn_gateway_authorization_tokens_total{shn_outcome="unavailable"} 1
+# HELP shn_gateway_backend_calls_total Calls to the participant's own system, by class.
+# TYPE shn_gateway_backend_calls_total counter
+shn_gateway_backend_calls_total{shn_backend_class="cancelled",shn_exchange="pas-claim"} 1
+shn_gateway_backend_calls_total{shn_backend_class="http-4xx",shn_exchange="dtr-questionnaire-fetch"} 1
+shn_gateway_backend_calls_total{shn_backend_class="http-5xx",shn_exchange="crd-order-select"} 1
+shn_gateway_backend_calls_total{shn_backend_class="ok",shn_exchange="pas-claim"} 1
+shn_gateway_backend_calls_total{shn_backend_class="other",shn_exchange="coverage-eligibility"} 1
+shn_gateway_backend_calls_total{shn_backend_class="other",shn_exchange="other"} 1
+shn_gateway_backend_calls_total{shn_backend_class="timeout",shn_exchange="crd-order-select"} 1
+# HELP shn_gateway_backend_duration_seconds Duration of a call to the participant's own system.
+# TYPE shn_gateway_backend_duration_seconds histogram
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.005"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.01"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.025"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.05"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="0.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="2.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="10"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="15"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="20"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="30"} 2
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="60"} 2
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="crd-order-select",le="+Inf"} 2
+shn_gateway_backend_duration_seconds_sum{shn_exchange="crd-order-select"} 30.08
+shn_gateway_backend_duration_seconds_count{shn_exchange="crd-order-select"} 2
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.005"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.01"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.025"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.05"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="0.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="2.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="10"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="15"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="20"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="30"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="60"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="dtr-questionnaire-fetch",le="+Inf"} 1
+shn_gateway_backend_duration_seconds_sum{shn_exchange="dtr-questionnaire-fetch"} 0.04
+shn_gateway_backend_duration_seconds_count{shn_exchange="dtr-questionnaire-fetch"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.005"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.01"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.025"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.05"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="0.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="2.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="10"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="15"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="20"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="30"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="60"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="other",le="+Inf"} 1
+shn_gateway_backend_duration_seconds_sum{shn_exchange="other"} 0.001
+shn_gateway_backend_duration_seconds_count{shn_exchange="other"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.005"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.01"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.025"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.05"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.1"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.25"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="0.5"} 0
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="1"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="2.5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="5"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="10"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="15"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="20"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="25"} 1
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="30"} 2
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="60"} 2
+shn_gateway_backend_duration_seconds_bucket{shn_exchange="pas-claim",le="+Inf"} 2
+shn_gateway_backend_duration_seconds_sum{shn_exchange="pas-claim"} 29.9
+shn_gateway_backend_duration_seconds_count{shn_exchange="pas-claim"} 2
+# HELP shn_gateway_certificate_expiry_seconds Seconds until the soonest certificate of each endpoint kind and role expires.
+# TYPE shn_gateway_certificate_expiry_seconds gauge
+shn_gateway_certificate_expiry_seconds{shn_cert_role="self",shn_endpoint_kind="ingress",shn_ig_line="none"} 5.184e+06
+shn_gateway_certificate_expiry_seconds{shn_cert_role="server",shn_endpoint_kind="hub",shn_ig_line="none"} 7.776e+06
+shn_gateway_certificate_expiry_seconds{shn_cert_role="server",shn_endpoint_kind="validator",shn_ig_line="2.2"} 1.728e+06
+shn_gateway_certificate_expiry_seconds{shn_cert_role="trust-root",shn_endpoint_kind="trust-root",shn_ig_line="none"} 432000
+# HELP shn_gateway_conformance_checks_dropped_total Observe checks dropped because the observe queue was full or closed.
+# TYPE shn_gateway_conformance_checks_dropped_total counter
+shn_gateway_conformance_checks_dropped_total 1
+# HELP shn_gateway_conformance_findings_total Conformance findings recorded, by level, kind, the decision recorded and whether the peer was tolerated.
+# TYPE shn_gateway_conformance_findings_total counter
+shn_gateway_conformance_findings_total{shn_conformance_level="observe",shn_exchange="pas-claim",shn_finding_action="relayed",shn_finding_kind="fhir-ingress",shn_finding_tolerated="false"} 1
+shn_gateway_conformance_findings_total{shn_conformance_level="other",shn_exchange="other",shn_finding_action="other",shn_finding_kind="other",shn_finding_tolerated="false"} 1
+shn_gateway_conformance_findings_total{shn_conformance_level="strict",shn_exchange="crd-order-select",shn_finding_action="refused",shn_finding_kind="cds-envelope",shn_finding_tolerated="false"} 1
+shn_gateway_conformance_findings_total{shn_conformance_level="strict",shn_exchange="pas-claim",shn_finding_action="relayed",shn_finding_kind="fhir-ingress",shn_finding_tolerated="true"} 1
+# HELP shn_gateway_dependency_age_seconds Seconds since a dependency was last read successfully.
+# TYPE shn_gateway_dependency_age_seconds gauge
+shn_gateway_dependency_age_seconds{shn_dependency="registrar-feed"} 42
+# HELP shn_gateway_exchange_duration_seconds Time from an exchange's arrival to its answer.
+# TYPE shn_gateway_exchange_duration_seconds histogram
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.005"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.01"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.025"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.05"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="0.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="2.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="10"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="15"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="20"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="30"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="60"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="coverage-eligibility",le="+Inf"} 1
+shn_gateway_exchange_duration_seconds_sum{shn_direction="inbound",shn_exchange="coverage-eligibility"} 0
+shn_gateway_exchange_duration_seconds_count{shn_direction="inbound",shn_exchange="coverage-eligibility"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.005"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.01"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.025"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.05"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="0.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="2.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="10"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="15"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="20"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="25"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="30"} 3
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="60"} 3
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="crd-order-select",le="+Inf"} 3
+shn_gateway_exchange_duration_seconds_sum{shn_direction="inbound",shn_exchange="crd-order-select"} 55.007
+shn_gateway_exchange_duration_seconds_count{shn_direction="inbound",shn_exchange="crd-order-select"} 3
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.005"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.01"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.025"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.05"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="0.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="2.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="10"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="15"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="20"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="30"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="60"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",le="+Inf"} 1
+shn_gateway_exchange_duration_seconds_sum{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch"} 0
+shn_gateway_exchange_duration_seconds_count{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.005"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.01"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.025"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.05"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.1"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.25"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="0.5"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1"} 0
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="2.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="10"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="15"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="20"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="30"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="60"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="+Inf"} 2
+shn_gateway_exchange_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim"} 30.5
+shn_gateway_exchange_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.005"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.01"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.025"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.05"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="0.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="2.5"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="5"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="10"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="15"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="20"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="25"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="30"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="60"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="+Inf"} 2
+shn_gateway_exchange_duration_seconds_sum{shn_direction="ingress",shn_exchange="pas-claim"} 2.348678
+shn_gateway_exchange_duration_seconds_count{shn_direction="ingress",shn_exchange="pas-claim"} 2
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.005"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.01"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.025"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.05"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="0.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="1"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="2.5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="5"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="10"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="15"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="20"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="25"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="30"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="60"} 1
+shn_gateway_exchange_duration_seconds_bucket{shn_direction="other",shn_exchange="other",le="+Inf"} 1
+shn_gateway_exchange_duration_seconds_sum{shn_direction="other",shn_exchange="other"} 0
+shn_gateway_exchange_duration_seconds_count{shn_direction="other",shn_exchange="other"} 1
+# HELP shn_gateway_exchange_request_size_bytes Size of an exchange's request body, when it was read to its end.
+# TYPE shn_gateway_exchange_request_size_bytes histogram
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1024"} 0
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="4096"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="16384"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="65536"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="262144"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1.048576e+06"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="4.194304e+06"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1.6777216e+07"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="6.7108864e+07"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="+Inf"} 1
+shn_gateway_exchange_request_size_bytes_sum{shn_direction="inbound",shn_exchange="pas-claim"} 4096
+shn_gateway_exchange_request_size_bytes_count{shn_direction="inbound",shn_exchange="pas-claim"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1024"} 0
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="4096"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="16384"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="65536"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="262144"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1.048576e+06"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="4.194304e+06"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1.6777216e+07"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="6.7108864e+07"} 1
+shn_gateway_exchange_request_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="+Inf"} 1
+shn_gateway_exchange_request_size_bytes_sum{shn_direction="ingress",shn_exchange="pas-claim"} 3000
+shn_gateway_exchange_request_size_bytes_count{shn_direction="ingress",shn_exchange="pas-claim"} 1
+# HELP shn_gateway_exchange_response_size_bytes Size of the answer body an exchange wrote.
+# TYPE shn_gateway_exchange_response_size_bytes histogram
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1024"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="4096"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="16384"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="65536"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="262144"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1.048576e+06"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="4.194304e+06"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="1.6777216e+07"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="6.7108864e+07"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="inbound",shn_exchange="pas-claim",le="+Inf"} 1
+shn_gateway_exchange_response_size_bytes_sum{shn_direction="inbound",shn_exchange="pas-claim"} 70000
+shn_gateway_exchange_response_size_bytes_count{shn_direction="inbound",shn_exchange="pas-claim"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1024"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="4096"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="16384"} 0
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="65536"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="262144"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1.048576e+06"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="4.194304e+06"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="1.6777216e+07"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="6.7108864e+07"} 1
+shn_gateway_exchange_response_size_bytes_bucket{shn_direction="ingress",shn_exchange="pas-claim",le="+Inf"} 1
+shn_gateway_exchange_response_size_bytes_sum{shn_direction="ingress",shn_exchange="pas-claim"} 65536
+shn_gateway_exchange_response_size_bytes_count{shn_direction="ingress",shn_exchange="pas-claim"} 1
+# HELP shn_gateway_exchange_stage_duration_seconds Time an exchange spent in each stage; an exchange's stages sum to its duration.
+# TYPE shn_gateway_exchange_stage_duration_seconds histogram
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.05"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.1"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.25"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="0.5"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward"} 0.9
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="forward"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.05"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="0.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads"} 0.1
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="reads"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.05"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.1"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="0.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest"} 0.15
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="rest"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.05"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.1"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.25"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="0.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal"} 0.3
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="seal"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.025"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.05"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="0.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap"} 0.02
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="unwrap"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.05"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="0.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write"} 0.03
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="inbound",shn_exchange="pas-claim",shn_stage="write"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.005"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.01"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.025"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.05"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.1"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.25"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="0.5"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="1"} 0
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="2.5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="5"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="10"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="15"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="20"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="30"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="60"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network",le="+Inf"} 1
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network"} 2
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="network"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.005"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.01"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.025"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.05"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.1"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.25"} 1
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="0.5"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="1"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="2.5"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="5"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="10"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="15"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="20"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="25"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="30"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="60"} 2
+shn_gateway_exchange_stage_duration_seconds_bucket{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self",le="+Inf"} 2
+shn_gateway_exchange_stage_duration_seconds_sum{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self"} 0.348678
+shn_gateway_exchange_stage_duration_seconds_count{shn_direction="ingress",shn_exchange="pas-claim",shn_stage="self"} 2
+# HELP shn_gateway_exchanges_total Exchanges this gateway answered, both directions.
+# TYPE shn_gateway_exchanges_total counter
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="coverage-eligibility",shn_outcome="upstream-error"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_outcome="other"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_outcome="refused"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_outcome="upstream-error"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="dtr-questionnaire-fetch",shn_outcome="upstream-error"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="pas-claim",shn_outcome="answered"} 1
+shn_gateway_exchanges_total{shn_direction="inbound",shn_exchange="pas-claim",shn_outcome="other"} 1
+shn_gateway_exchanges_total{shn_direction="ingress",shn_exchange="pas-claim",shn_outcome="answered"} 1
+shn_gateway_exchanges_total{shn_direction="ingress",shn_exchange="pas-claim",shn_outcome="refused"} 1
+shn_gateway_exchanges_total{shn_direction="other",shn_exchange="other",shn_outcome="other"} 1
+# HELP shn_gateway_info 1 for each IG line this gateway declares, with its wire protocol and conformance level.
+# TYPE shn_gateway_info gauge
+shn_gateway_info{shn_conformance_level="observe",shn_ig_line="2.1",shn_wire_protocol="2.0.0"} 1
+shn_gateway_info{shn_conformance_level="observe",shn_ig_line="2.2",shn_wire_protocol="2.0.0"} 1
+# HELP shn_gateway_ingress_key_age_seconds Age of the newest ingress signing key, in seconds.
+# TYPE shn_gateway_ingress_key_age_seconds gauge
+shn_gateway_ingress_key_age_seconds 75600
+# HELP shn_gateway_ingress_key_remaining_seconds Seconds until the current ingress signing key's not-after.
+# TYPE shn_gateway_ingress_key_remaining_seconds gauge
+shn_gateway_ingress_key_remaining_seconds 10800
+# HELP shn_gateway_involved_omitted_total Involved patients a leg left out of its list, by reason.
+# TYPE shn_gateway_involved_omitted_total counter
+shn_gateway_involved_omitted_total{shn_reason="authorization-failed"} 1
+shn_gateway_involved_omitted_total{shn_reason="authorization-refused"} 1
+shn_gateway_involved_omitted_total{shn_reason="budget"} 1
+shn_gateway_involved_omitted_total{shn_reason="involvement-not-carried"} 1
+shn_gateway_involved_omitted_total{shn_reason="overflow"} 1
+shn_gateway_involved_omitted_total{shn_reason="system-of-record-unavailable"} 1
+shn_gateway_involved_omitted_total{shn_reason="unknown-member"} 1
+# HELP shn_gateway_legs_total Origination leg events, by outcome.
+# TYPE shn_gateway_legs_total counter
+shn_gateway_legs_total{shn_outcome="answered"} 1
+shn_gateway_legs_total{shn_outcome="denied"} 1
+shn_gateway_legs_total{shn_outcome="failed"} 1
+shn_gateway_legs_total{shn_outcome="routed"} 1
+shn_gateway_legs_total{shn_outcome="unreachable"} 1
+# HELP shn_gateway_peers_known Holders the last successful registrar read converged.
+# TYPE shn_gateway_peers_known gauge
+shn_gateway_peers_known 3
+# HELP shn_gateway_refusals_total Exchanges refused, by the network rule and the party that refused.
+# TYPE shn_gateway_refusals_total counter
+shn_gateway_refusals_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="consent"} 1
+shn_gateway_refusals_total{shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="authentication"} 1
+# HELP shn_gateway_store_errors_total Shared-state store failures, by store.
+# TYPE shn_gateway_store_errors_total counter
+shn_gateway_store_errors_total{shn_store="exchange"} 1
+shn_gateway_store_errors_total{shn_store="ingresskey"} 1
+shn_gateway_store_errors_total{shn_store="pended"} 1
+shn_gateway_store_errors_total{shn_store="replay"} 1
+# HELP shn_gateway_store_pool_connections Shared-state pool connections, by state.
+# TYPE shn_gateway_store_pool_connections gauge
+shn_gateway_store_pool_connections{shn_pool_state="acquired"} 3
+shn_gateway_store_pool_connections{shn_pool_state="idle"} 4
+shn_gateway_store_pool_connections{shn_pool_state="total"} 7
+# HELP shn_gateway_store_pool_empty_acquires_total Shared-state pool acquires that waited for a connection.
+# TYPE shn_gateway_store_pool_empty_acquires_total counter
+shn_gateway_store_pool_empty_acquires_total 11
+# HELP shn_gateway_validator_duration_seconds Duration of a $validate call, by IG line and lane.
+# TYPE shn_gateway_validator_duration_seconds histogram
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.005"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.01"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.025"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.05"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.1"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.25"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="0.5"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="1"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="2.5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="10"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="15"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="20"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="25"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="30"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="60"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.1",shn_lane="certification",le="+Inf"} 1
+shn_gateway_validator_duration_seconds_sum{shn_ig_line="2.1",shn_lane="certification"} 2
+shn_gateway_validator_duration_seconds_count{shn_ig_line="2.1",shn_lane="certification"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.005"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.01"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.025"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.05"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.1"} 0
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.25"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="0.5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="1"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="2.5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="10"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="15"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="20"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="25"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="30"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="60"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="2.2",shn_lane="routing",le="+Inf"} 1
+shn_gateway_validator_duration_seconds_sum{shn_ig_line="2.2",shn_lane="routing"} 0.12
+shn_gateway_validator_duration_seconds_count{shn_ig_line="2.2",shn_lane="routing"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.005"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.01"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.025"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.05"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.1"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.25"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="0.5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="1"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="2.5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="5"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="10"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="15"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="20"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="25"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="30"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="60"} 1
+shn_gateway_validator_duration_seconds_bucket{shn_ig_line="other",shn_lane="other",le="+Inf"} 1
+shn_gateway_validator_duration_seconds_sum{shn_ig_line="other",shn_lane="other"} 0.001
+shn_gateway_validator_duration_seconds_count{shn_ig_line="other",shn_lane="other"} 1
+# HELP shn_gateway_validator_lane_attempts_total Default validator lane qualification attempts, by outcome.
+# TYPE shn_gateway_validator_lane_attempts_total counter
+shn_gateway_validator_lane_attempts_total{shn_ig_line="2.1",shn_lane="routing",shn_outcome="ready"} 1
+shn_gateway_validator_lane_attempts_total{shn_ig_line="2.2",shn_lane="routing",shn_outcome="failed"} 1
+# HELP shn_gateway_validator_lane_qualified 1 when a validator lane is qualified, else 0.
+# TYPE shn_gateway_validator_lane_qualified gauge
+shn_gateway_validator_lane_qualified{shn_ig_line="2.0",shn_lane="routing"} 1
+shn_gateway_validator_lane_qualified{shn_ig_line="2.2",shn_lane="certification"} 1
+shn_gateway_validator_lane_qualified{shn_ig_line="2.2",shn_lane="routing"} 0
+# HELP target_info Target metadata
+# TYPE target_info gauge
+target_info{deployment_environment_name="golden",service_instance_id="98f3f6d4-01aa-594c-b56b-4030d2f17cbb",service_name="golden-gw",service_version="v1.0.0-golden",shn_holder_id="h-golden-own",shn_role="payer"} 1

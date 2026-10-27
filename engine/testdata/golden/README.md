@@ -7,8 +7,8 @@ request bundles under each).
 
 They are read by this package's tests through two helpers:
 
-- `pasGolden` (`transform_pas_test.go`) — the cross-version transform suites in
-  `transform_pas_test.go`, `transform_dtr_test.go`, `transform_run_test.go` and
+- `pasGolden` (`workstream_pa_transform_pas_test.go`) — the cross-version transform suites in
+  `workstream_pa_transform_pas_test.go`, `workstream_pa_transform_dtr_test.go`, `transform_run_test.go` and
   `egressadapt_test.go`.
 - `readConformantGolden` (`pas_native_test.go`) — the conformant-request
   byte-match assertions.

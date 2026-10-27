@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // conformance_findingvalues_test.go — pins the ACTUAL findingContext value a
 // real handler or helper hands validateGoverned, one representative
 // ingress/egress pair per leg family (CRD, DTR incl. the adaptive path, PAS,
@@ -137,13 +139,12 @@ func TestPinnedFindingContext_CRDEgress(t *testing.T) {
 	env := newInProcessExchange(t)
 	spy := &findingSpyValidator{}
 	env.originator.cfg.Validator = spy
-	// The demo lane (what an unset ORIGINATION_PROFILE normalizes to in
-	// gateway/app.go's loadConfig) puts UC-02 on MBR-D-UC02, the member whose
+	// The demo lane puts UC-02 on MBR-D-UC02, the member whose
 	// open order in the census stand-in IS the UC-02 hospital-bed order. On
 	// the bare default lane UC-02 runs as MBR-COVERED, whose one order-bearing
 	// scenario is UC-03's oxygen arm, and orderSourceContext refuses the tuple
 	// mismatch 502 before any egress check runs.
-	env.originator.cfg.OriginationProfile = "demo"
+	declareOriginationProfile(env.originator, "demo")
 
 	rec := httptest.NewRecorder()
 	env.originator.handleUC02(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(env.originator, "/scenario/uc02", ""))))
@@ -624,14 +625,14 @@ func TestPinnedFindingContext_FederatedQueryEgress(t *testing.T) {
 // pendstate_pin_test.go's newPendResumeFixture — the same proven harness
 // TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane already drives
 // through handleUC05's real federated-query loop — to pin the ingress check's
-// findingContext: this call must never share the R-8 payer-ingress skip.
+// findingContext: this call is the facility's answer, never judged as a payer's.
 func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
 		pendedItem: "operative-diagnostic-report",
 		extraRoles: map[string]string{"facility": "metro-spine"},
 	})
-	gw.cfg.OriginationProfile = "demo"
+	declareOriginationProfile(gw, "demo")
 	spy := &findingSpyValidator{}
 	gw.cfg.Validator = spy
 
@@ -644,12 +645,9 @@ func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	// The ingress check validates the WHOLE CDex query result (the payer's
 	// request Task, extended and returned by the facility per
 	// shnsdk.BuildCDexQueryResult) — resourceType "Task", not the inner
-	// records Bundle. The demo lane deliberately exercises R-8's skip
-	// boundary: this same run's pas-claim/pas-claim-update peer responses ARE
-	// skip-eligible (relaysReferencePayerBytes) and so emit no validator call
-	// at all, which is exactly why federated-query must never share that
-	// skip — a shared skip would leave this call with nothing to check
-	// either.
+	// records Bundle. The demo lane is the lane whose payer answers were once
+	// exempt from the check; the facility's answer never was, and is checked as
+	// itself.
 	call := spy.nth(t, 1, "Task")
 	assertTag(t, "federated query ingress (the facility's answer, as the requesting provider sees it)", call.fc, wantTag{
 		legType: "federated-query", whose: "peer", seam: "originate", corrPresent: true,

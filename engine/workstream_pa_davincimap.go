@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_davincimap.go — readers around the Da Vinci wire operations. A payer's
 // $questionnaire-package answer is relayed exactly (workstream_pa_native_forward.go), and
 // extractQuestionnaireFromPackage (consumer-side, called from module1_originate.go) reads

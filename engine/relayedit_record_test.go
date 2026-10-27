@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -381,7 +383,7 @@ func TestExchangeRecord_EditsAreCloned(t *testing.T) {
 	x := &exchangeRecorder{}
 	strip := editStrings(relay.EditCDSCallbackStrip)
 	x.rec.Edits, x.rec.RequestEdits, x.rec.AnswerEdits = slices.Clone(strip), slices.Clone(strip), slices.Clone(strip)
-	g.emitExchange(x, &exchangeWriter{ResponseWriter: httptest.NewRecorder(), x: x}, false)
+	g.emitExchange(x, &exchangeWriter{ResponseWriter: httptest.NewRecorder(), x: x}, &countingBody{}, false)
 	x.rec.Edits[0] = string(relay.EditPayorEdgeRestamp)
 	x.rec.RequestEdits[0] = string(relay.EditPayorEdgeRestamp)
 	x.rec.AnswerEdits[0] = string(relay.EditPayorEdgeRestamp)

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -94,7 +96,7 @@ func TestNativeForwardSendsEachLegsMediaType(t *testing.T) {
 	t.Run("DTR", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection"}`)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 			t.Fatal(err)
 		}
@@ -117,7 +119,7 @@ func TestNativeForwardSendsEachLegsMediaType(t *testing.T) {
 			_, _ = w.Write(approved)
 		}))
 		t.Cleanup(srv.Close)
-		n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+		n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 		if _, err := n.Handle(context.Background(), "pas-claim", "corr-media", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED")); err != nil {
 			t.Fatal(err)
 		}
@@ -128,7 +130,7 @@ func TestNativeForwardSendsEachLegsMediaType(t *testing.T) {
 	t.Run("CRD stays application/json even under a framed FHIR type", func(t *testing.T) {
 		p := newStubPartner(t)
 		p.respByPath["/cds-services/order-dispatch-crd"] = []byte(`{"cards":[]}`)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 		ctx := withRequestMediaType(context.Background(), mediaFHIRJSON)
 		if _, err := n.Handle(ctx, "crd-order-dispatch", "c", "pci", cdsRequest("order-dispatch")); err != nil {
 			t.Fatal(err)

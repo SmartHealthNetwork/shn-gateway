@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 import (
@@ -120,7 +122,7 @@ func TestIngressKeyPg_HolderLockDeadlineAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advance(24 * time.Hour)
+	advance(ingressKeyRotation) // rotation due
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	lock, err := pool.Begin(ctx)

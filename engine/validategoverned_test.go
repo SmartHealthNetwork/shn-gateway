@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -664,4 +666,53 @@ func TestValidateGovernedOutagesPerLevel(t *testing.T) {
 			}
 		}
 	}
+}
+
+// MON-R22: at none the governed check returns before its validate stage,
+// and that is the only difference. For each direction a check serves, the
+// result is exactly judgeLines's at none (no validator call, no finding, no
+// observer event), and the leg's record has no validate stage. A bridged
+// payload is SHN's own edit, module 2's fidelity check at every level: at
+// none it is still validated, refused when invalid, and timed.
+func TestValidateGoverned_NoneSkipsTheStageAndNothingElse_MONR22(t *testing.T) {
+	body := []byte(`{"resourceType":"Claim","id":"c1"}`)
+	recorder := func() *exchangeRecorder {
+		clock := &steppingClock{testClock{now: time.Unix(1_700_000_000, 0)}}
+		x := &exchangeRecorder{now: clock.Now}
+		x.rec.Direction = DirectionInbound
+		x.rec.Stages = &LegStages{}
+		return x
+	}
+	fc := findingContext{LegType: "pas-claim", Seam: "payer-native", Whose: "peer"}
+	for _, dir := range []string{"ingress", "egress"} {
+		t.Run(dir, func(t *testing.T) {
+			v := &recordingValidator{valid: false}
+			g, events := observeGateway(t, EnforcementNone, v)
+			lanes := []lineLane{{Line: "2.2", V: v, Decisive: true}}
+			x := recorder()
+			got := g.validateGovernedLinesBy(context.WithValue(context.Background(), exchangeRecorderKey{}, x), g.conformance(), fc, lanes, body, dir, "2.2", "", false, false)
+			want := g.judgeLines(context.WithValue(context.Background(), exchangeRecorderKey{}, recorder()), g.conformance(), fc, lanes, body, dir, "2.2", "", false, false)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("at none the check returned %+v, judgeLines %+v", got, want)
+			}
+			if len(v.calls) != 0 || len(*events) != 0 {
+				t.Fatalf("at none the check called the validator %d times and emitted %d events", len(v.calls), len(*events))
+			}
+			if x.rec.Stages.Validate != 0 {
+				t.Fatalf("a check that did not run took a validate stage of %v", x.rec.Stages.Validate)
+			}
+		})
+	}
+	t.Run("bridged", func(t *testing.T) {
+		v := &recordingValidator{valid: false}
+		g, _ := observeGateway(t, EnforcementNone, v)
+		x := recorder()
+		got := g.validateGovernedLinesBy(context.WithValue(context.Background(), exchangeRecorderKey{}, x), g.conformance(), fc, []lineLane{{Line: "2.2", V: v, Decisive: true}}, body, "egress", "2.2", "", true, false)
+		if len(v.calls) != 1 || got.Status == 0 {
+			t.Fatalf("a bridged payload at none: %d validator calls, result %+v; want it validated and refused", len(v.calls), got)
+		}
+		if x.rec.Stages.Validate == 0 {
+			t.Fatal("a bridged check at none took no validate stage")
+		}
+	})
 }

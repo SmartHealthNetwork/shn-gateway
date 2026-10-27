@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -12,6 +14,11 @@ import (
 	"path"
 	"time"
 )
+
+// diagnosticDrain bounds the publisher's delivery of what it holds at stop: a
+// step of the gateway's documented stop budget (DEPLOYMENT.md, "Stopping the
+// gateway").
+const diagnosticDrain = 10 * time.Second
 
 type diagnosticSource struct {
 	queue     *diagnostics.Queue
@@ -46,7 +53,7 @@ func newDiagnosticSource(getenv func(string) string, role string, out io.Writer,
 	// event rate; batched delivery drains it, and a sink that does not take
 	// batches gets one event per request. At a stop it delivers what is
 	// queued for up to 10 s, within a task's stop timeout.
-	d := &diagnosticSource{queue: diagnostics.NewQueue(diagnostics.Limits{MaxEvents: 4096, MaxBytes: 64 << 20}), budget: diagnostics.NewCaptureBudget(16<<20, 8), publisher: diagnostics.PublisherConfig{Source: source, URL: u.String(), HealthURL: health.String(), BatchURL: batch.String(), Drain: 10 * time.Second, Key: key, Clock: clock, Client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}}
+	d := &diagnosticSource{queue: diagnostics.NewQueue(diagnostics.Limits{MaxEvents: 4096, MaxBytes: 64 << 20}), budget: diagnostics.NewCaptureBudget(16<<20, 8), publisher: diagnostics.PublisherConfig{Source: source, URL: u.String(), HealthURL: health.String(), BatchURL: batch.String(), Drain: diagnosticDrain, Key: key, Clock: clock, Client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}}
 	if role == "provider" && getenv("DIAGNOSTIC_TRACE_KEY_FILE") != "" {
 		d.traceKey, err = readDiagnosticKey(getenv("DIAGNOSTIC_TRACE_KEY_FILE"))
 		if err != nil {
@@ -86,7 +93,13 @@ func (d *diagnosticSource) smart(sc *smartauth.Config) {
 		return
 	}
 	sc.Transport = d.transport(sc.Transport)
-	sc.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: d.transport(nil)}
+	token := &http.Client{Timeout: 10 * time.Second}
+	if sc.HTTPClient != nil {
+		c := *sc.HTTPClient // the tagged token client (tagSmart)
+		token = &c
+	}
+	token.Transport = d.transport(token.Transport)
+	sc.HTTPClient = token
 }
 func (d *diagnosticSource) client(base *http.Client) *http.Client {
 	if d == nil {

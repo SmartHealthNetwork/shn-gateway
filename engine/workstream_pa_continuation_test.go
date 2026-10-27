@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // workstream_pa_continuation_test.go — the in-memory continuation store's own rows.

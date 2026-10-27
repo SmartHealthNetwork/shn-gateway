@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -97,7 +99,7 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 		`{"resource":{"resourceType":"Library","id":"cql-lib-1"}},` +
 		`{"resource":{"resourceType":"ValueSet","id":"vs-1"}}]}`)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 
 	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci",
 		dtrFetchReq)
@@ -120,7 +122,7 @@ func TestNativeResponder_DTRForwardsPackageVerbatim(t *testing.T) {
 func TestNativeResponder_PartnerNon2xxIsRelayedVerbatim(t *testing.T) {
 	p := newStubPartner(t)
 	p.status = 500
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 	// Driven on the DTR leg: it is a read-only forward like the retired eligibility arm
 	// (§3.2 deleted that arm — eligibility never reaches a responder any more), and the
 	// non-2xx relay under test is leg-independent post() behaviour.
@@ -138,7 +140,7 @@ func TestNativeResponder_DTRForwardsQuestionnaireLessPackageVerbatim(t *testing.
 	p := newStubPartner(t)
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -157,7 +159,7 @@ func TestNativeResponder_NilStoreOKForReadOnly(t *testing.T) {
 		_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`))
 	}))
 	defer srv.Close()
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", nil, nil) // store=nil, clock=nil
+	n := NewNativeResponder(srv.Client(), srv.URL, nil, WithCRDService("shn-order-select")) // store=nil, clock=nil
 	// DTR is the read-only leg here: the eligibility arm this row used to drive was
 	// deleted with the split counterparty (§3.2 — eligibility is engine-side, R11).
 	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr-1", "PCI-1",
@@ -187,8 +189,7 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 
 	// Declared 2.2-only: the CRD leg (pa.crd, own 2.0) refuses without forwarding.
 	// Refused under the participant's own setting (RequireSharedLine); by default the pair is carried (line_carry_test.go).
-	n := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil,
-		WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"}), WithRequireSharedLine(true)) // duplicate on purpose
+	n := NewNativeResponder(partner.Client(), partner.URL, nil, WithCRDService("svc"), WithDeclaredContractVersions([]string{"pa.crd@2.2", "pa.crd@2.2"}), WithRequireSharedLine(true)) // duplicate on purpose
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select"))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -206,7 +207,7 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 	}
 
 	// Silent (no declaration): forwards.
-	n2 := NewNativeResponder(partner.Client(), partner.URL, "svc", nil, nil)
+	n2 := NewNativeResponder(partner.Client(), partner.URL, nil, WithCRDService("svc"))
 	if res, err := n2.Handle(context.Background(), "crd-order-select", "corr", "pci", cdsRequest("order-select")); err != nil || res.Status != 0 {
 		t.Fatalf("silent peer must forward: %+v / %v", res, err)
 	}
@@ -223,7 +224,7 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 // but happened to be a no-op for THIS fixture's inputs. If the native
 // responder or a forward it sends through ever grows an egressAdapt call (the
 // transform-at-the-forward-edge deferral going
-// live — the strictExtensions flag goes live together with it), this guard
+// live), this guard
 // fails LOUDLY and both this test and TestNativeForwardStaysArm1 need a
 // deliberate update, not a silent pass.
 func TestNativeForward_NeverCallsEgressAdapt(t *testing.T) {
@@ -339,8 +340,7 @@ func TestNativeForwardStaysArm1(t *testing.T) {
 	// No shared declared line (own defaults to pa.crd@2.0; peer declares
 	// pa.crd@2.2 only) — 2.2 IS this build's native set, an arm-2/3-worthy
 	// peer. Handle must refuse, never native-reach or chain.
-	nRefuse := NewNativeResponder(p.srv.Client(), p.srv.URL, "svc", nil, nil,
-		WithDeclaredContractVersions([]string{"pa.crd@2.2"}), WithRequireSharedLine(true))
+	nRefuse := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("svc"), WithDeclaredContractVersions([]string{"pa.crd@2.2"}), WithRequireSharedLine(true))
 	req := []byte(`{"hook":"order-select"}`)
 	res, err := nRefuse.Handle(context.Background(), "crd-order-select", "corr-refuse", "pci", req)
 	if err != nil {
@@ -355,8 +355,7 @@ func TestNativeForwardStaysArm1(t *testing.T) {
 
 	// Shared declared line: forwards VERBATIM, byte-identical, no
 	// leg.transformed-style processing exists on this path at all.
-	nAccept := NewNativeResponder(p.srv.Client(), p.srv.URL, "svc", nil, nil,
-		WithDeclaredContractVersions([]string{"pa.crd@2.0"}))
+	nAccept := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("svc"), WithDeclaredContractVersions([]string{"pa.crd@2.0"}))
 	if _, err := nAccept.Handle(context.Background(), "crd-order-select", "corr-accept", "pci", req); err != nil {
 		t.Fatalf("Handle (shared line): %v", err)
 	}
@@ -385,7 +384,7 @@ func TestNativeResponder_SplitBaseURLs(t *testing.T) {
 	}))
 	defer fhir.Close()
 
-	n := NewNativeResponder(fhir.Client(), fhir.URL, "order-sign-crd", nil, nil, WithCDSBaseURL(cds.URL))
+	n := NewNativeResponder(fhir.Client(), fhir.URL, nil, WithCRDService("order-sign-crd"), WithCDSBaseURL(cds.URL))
 	// CRD → CDS base
 	_, _ = n.Handle(context.Background(), "crd-order-select", "c", "p",
 		[]byte(`{"hook":"order-sign","context":{"patientId":"x"}}`))
@@ -421,7 +420,7 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
 	p.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 
 	t.Run("evidence token-matched to the routed line: the #<line> endpoint is used", func(t *testing.T) {
 		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": p.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
@@ -484,8 +483,7 @@ func TestEndpointEvidenceSameOriginEnforced(t *testing.T) {
 	defer evil.Close()
 
 	var notes []string
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil,
-		WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"), WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
 
 	n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": evil.URL + "/Questionnaire/$questionnaire-package"})
 	if len(notes) != 1 {
@@ -545,7 +543,7 @@ func TestOriginOfDefaultPortNormalization(t *testing.T) {
 // entry is still DROPPED, and a malformed/unparseable evidence URL is
 // dropped too (its own assertion, reviewer minor).
 func TestEndpointEvidenceSameOriginDefaultPortNormalized(t *testing.T) {
-	n := NewNativeResponder(http.DefaultClient, "https://payer.example", "svc", nil, nil)
+	n := NewNativeResponder(http.DefaultClient, "https://payer.example", nil, WithCRDService("svc"))
 
 	t.Run("base without a port, evidence with the scheme's default :443 -> HONORED", func(t *testing.T) {
 		n.SetEndpointEvidence(map[string]string{"pa.pas@2.2": "https://payer.example:443/Claim/$submit"})
@@ -565,8 +563,7 @@ func TestEndpointEvidenceSameOriginDefaultPortNormalized(t *testing.T) {
 
 	t.Run("malformed/unparseable evidence URL is dropped", func(t *testing.T) {
 		var notes []string
-		n2 := NewNativeResponder(http.DefaultClient, "https://payer.example", "svc", nil, nil,
-			WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
+		n2 := NewNativeResponder(http.DefaultClient, "https://payer.example", nil, WithCRDService("svc"), WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
 		n2.SetEndpointEvidence(map[string]string{"pa.pas@2.2": "://not-a-url"})
 		got := n2.EndpointEvidenceForTest()
 		if _, ok := got["pa.pas@2.2"]; ok {
@@ -584,7 +581,7 @@ func TestEndpointEvidenceSameOriginDefaultPortNormalized(t *testing.T) {
 func TestEndpointEvidenceRaceClean(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -609,38 +606,6 @@ func TestEndpointEvidenceRaceClean(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
-}
-
-// TestNativeStrictExtensionsFieldIsDormant (FR-G52): WithStrictExtensions
-// produces ZERO behavior delta on the native-forward path today — no
-// Handle-filter consult exists. Byte-identical fence: two otherwise-identical
-// responders, one with the flag on, answer identically.
-func TestNativeStrictExtensionsFieldIsDormant(t *testing.T) {
-	mk := func(strict bool) (*nativeResponder, *stubPartner) {
-		p := newStubPartner(t)
-		p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
-			`{"resource":{"resourceType":"Questionnaire","id":"q1","url":"http://x/q"}}]}`)
-		var opts []NativeOption
-		if strict {
-			opts = append(opts, WithStrictExtensions(true))
-		}
-		return NewNativeResponder(p.srv.Client(), p.srv.URL, "shn-order-select", nil, nil, opts...), p
-	}
-	off, _ := mk(false)
-	on, _ := mk(true)
-	// Driven on DTR: the eligibility leg this row used to drive is gone from the native
-	// responder (§3.2). The dormancy claim is leg-independent — no Handle arm consults
-	// the flag — so any forwarded leg is a faithful witness.
-	req := dtrFetchReq
-
-	resOff, errOff := off.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", req)
-	resOn, errOn := on.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", req)
-	if errOff != nil || errOn != nil {
-		t.Fatalf("Handle errors: strict=false -> %v, strict=true -> %v", errOff, errOn)
-	}
-	if resOff.Status != resOn.Status || string(responseBytes(resOff)) != string(responseBytes(resOn)) {
-		t.Fatalf("WithStrictExtensions must be dormant (byte-identical): off=%+v on=%+v", resOff, resOn)
-	}
 }
 
 // TestNativeResponder_PerOperationBases: a partner that serves CRD,
@@ -674,8 +639,7 @@ func TestNativeResponder_PerOperationBases(t *testing.T) {
 		cds, cdsPath := newBase(t, `{"cards":[],"systemActions":[]}`)
 		dtr, dtrPath := newBase(t, pkg)
 		pas, pasPath := newBase(t, pasAnswer)
-		n := NewNativeResponder(shared.Client(), shared.URL, "order-sign-crd", newCensusSoR(), fixedClock,
-			WithCDSBaseURL(cds.URL), WithDTRBaseURL(dtr.URL), WithPASBaseURL(pas.URL))
+		n := NewNativeResponder(shared.Client(), shared.URL, fixedClock, WithCRDService("order-sign-crd"), WithPASStore(newCensusSoR()), WithCDSBaseURL(cds.URL), WithDTRBaseURL(dtr.URL), WithPASBaseURL(pas.URL))
 
 		_, _ = n.Handle(context.Background(), "crd-order-select", "c", "p",
 			[]byte(`{"hook":"order-sign","context":{"patientId":"x"}}`))
@@ -713,8 +677,7 @@ func TestNativeResponder_PerOperationBases(t *testing.T) {
 
 	t.Run("neither per-operation base set: DTR and PAS stay on the shared base", func(t *testing.T) {
 		shared, sharedPath := newBase(t, pkg)
-		n := NewNativeResponder(shared.Client(), shared.URL, "order-sign-crd", newCensusSoR(), fixedClock,
-			WithDTRBaseURL(""), WithPASBaseURL(""))
+		n := NewNativeResponder(shared.Client(), shared.URL, fixedClock, WithCRDService("order-sign-crd"), WithPASStore(newCensusSoR()), WithDTRBaseURL(""), WithPASBaseURL(""))
 		if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "c", "p", dtrFetchReq); err != nil {
 			t.Fatalf("DTR Handle: %v", err)
 		}
@@ -741,9 +704,7 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 	shared.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
 
 	var notes []string
-	n := NewNativeResponder(shared.srv.Client(), shared.srv.URL, "shn-order-select", nil, nil,
-		WithDTRBaseURL(dtr.srv.URL),
-		WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
+	n := NewNativeResponder(shared.srv.Client(), shared.srv.URL, nil, WithCRDService("shn-order-select"), WithDTRBaseURL(dtr.srv.URL), WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
 
 	t.Run("a DTR entry on the DTR base's origin is kept, and the published endpoint beats the configured base+path", func(t *testing.T) {
 		notes = nil

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // demo_endpoint.go — two loopback demo endpoints on the observer listener:
 //
 //   - POST /demo/transform: a thin JSON shim over engine.RunTransformChain,

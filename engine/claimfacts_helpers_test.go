@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -105,8 +107,25 @@ func testRouteBody(g *Gateway, path, extra string) string {
 			}
 		}
 	}
+	// The attesting routes state their answer, as a driver does: the answer is
+	// the caller's own, and the gateway supplies none (testNoAnswer omits it).
+	if (seg == "uc06" || seg == "uc07") && !strings.HasSuffix(u.Path, "/start") && !strings.HasSuffix(u.Path, "/cancel") &&
+		!strings.Contains(extra, `"answer"`) && !strings.Contains(extra, testNoAnswer) {
+		if extra != "" {
+			extra += ","
+		}
+		extra += `"answer":` + strconv.Quote(testAnswer)
+	}
+	extra = strings.ReplaceAll(strings.ReplaceAll(extra, ","+testNoAnswer, ""), testNoAnswer, "")
 	return testStatedBody(g, member, extra, stated.Member != "")
 }
+
+// testAnswer is the attestation answer a test request states: an Oswestry
+// score, which the HomeHealthAssessment's free-text item accepts as well.
+const testAnswer = "42"
+
+// testNoAnswer, in a testRouteBody extra, states no answer.
+const testNoAnswer = `"noAnswer":true`
 
 // testStatedBody is testClaimBody naming member and the order member holds in
 // g's system of record. extraNamesMember: extra carries its own "member".

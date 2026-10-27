@@ -19,7 +19,8 @@ of reviewing a diff.
 ## Versioning and stability
 
 See [`STABILITY.md`](STABILITY.md) for what's safe to depend on across
-versions, and the release history at
+versions, [`CHANGELOG.md`](CHANGELOG.md) for what each release changed, and the
+release history at
 [github.com/SmartHealthNetwork/shn-gateway/releases](https://github.com/SmartHealthNetwork/shn-gateway/releases).
 
 ---

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -16,7 +18,7 @@ import (
 func TestNativePASRetainsApprovedBundle(t *testing.T) {
 	body := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	srv := stubPartnerSrv(t, 200, body)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 	result, err := n.Handle(context.Background(), "pas-claim", "corr-native", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
 	if err != nil || result.Status != 0 {
 		t.Fatalf("status=%d err=%v", result.Status, err)
@@ -46,7 +48,7 @@ func TestNativePAS_UnclosedPayerGraphRefusedNoCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := stubPartnerSrv(t, 200, unclosed)
-	n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", newCensusSoR(), fixedClock)
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(newCensusSoR()))
 	result, err := n.Handle(context.Background(), "pas-claim", "corr-unclosed", "PCI-1", originatorBuiltConformantBundle(t, "MBR-COVERED"))
 	if err != nil {
 		t.Fatalf("an unreadable payer answer is a refusal, not an error: %v", err)

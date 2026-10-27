@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import "github.com/SmartHealthNetwork/shn-gateway/engine/relay"

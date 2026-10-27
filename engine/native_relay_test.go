@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // native_relay_test.go — TestNativePost_* cover the relay-vs-fault split in
 // nativeResponder.post/get (relay-recipient-response): an upstream that PRODUCED
 // an HTTP response (any status) is a relayable LegResult; a no-response fault

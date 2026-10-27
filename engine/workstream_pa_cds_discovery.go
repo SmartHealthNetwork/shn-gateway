@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_cds_discovery.go — the CDS Hooks /cds-services discovery the provider ingress
 // advertises, and the services its POST /cds-services/{id} route dispatches: one per
 // hook the network carries. What is advertised is exactly what is dispatched

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -20,7 +22,7 @@ func TestNativeResponder_BackendHeadersOnEveryPartnerRequest(t *testing.T) {
 	p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
 	p.respByPath["/cds-services/order-sign"] = []byte(`{"cards":[]}`)
 	hdr := http.Header{"X-Route-Key": {"plan-7"}, "X-Tenant": {"t-1"}}
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "order-sign", nil, nil, WithBackendHeaders(hdr))
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithBackendHeaders(hdr))
 
 	want := func(t *testing.T, got http.Header, where string) {
 		t.Helper()
@@ -67,7 +69,7 @@ func TestNativeResponder_BackendHeadersOnEveryPartnerRequest(t *testing.T) {
 func TestNativeResponder_NoBackendHeadersByDefault(t *testing.T) {
 	p := newStubPartner(t)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
-	n := NewNativeResponder(p.srv.Client(), p.srv.URL, "", nil, nil)
+	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 	if _, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +99,7 @@ func TestNativeResponder_BackendHeadersNeverReachTokenEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNativeResponder(client, p.srv.URL, "", nil, nil, WithBackendHeaders(http.Header{"X-Route-Key": {"plan-7"}}))
+	n := NewNativeResponder(client, p.srv.URL, nil, WithBackendHeaders(http.Header{"X-Route-Key": {"plan-7"}}))
 	res, err := n.Handle(dtrPkgCtx(context.Background()), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 	if err != nil || res.Status != 0 {
 		t.Fatalf("Handle: status=%d err=%v", res.Status, err)

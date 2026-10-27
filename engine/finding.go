@@ -2,9 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"log"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
@@ -17,7 +14,7 @@ import (
 type findingContextKey struct{}
 
 // findingContext is what a conformance finding says about the leg the checked
-// bytes belong to. Seam uses the vocabulary certify.go already records
+// bytes belong to. Seam uses the vocabulary module3_certify.go already records
 // ("provider-ingress", "payer-native", …). Whose is "own" (this participant's
 // own system's bytes), "peer" (bytes received from a peer) or "network" (SHN's
 // own bridged edit).
@@ -91,6 +88,32 @@ const (
 	KindContent CheckKind = "content"
 )
 
+// CheckKinds are the CheckKind values, in declaration order: the closed list a
+// finding's kind is one of (a metric attribute folds against it, MON-R24).
+var CheckKinds = []string{
+	string(KindFHIRIngress), string(KindFHIREgress), string(KindFHIRBridged),
+	string(KindCDSEnvelope), string(KindNetwork), string(KindContent),
+}
+
+// FindingMetric is what the finding metric counts of one finding: closed
+// values only, never a payload, a line's diagnostics or an id.
+type FindingMetric struct {
+	// Exchange is the finding's leg (ExchangeKinds), Level its level
+	// (ConformanceLevels), Kind its CheckKind (CheckKinds) and Action its
+	// decision (FindingActions), each as recorded.
+	Exchange, Level, Kind, Action string
+	// Tolerated is the finding's own Tolerated flag.
+	Tolerated bool
+}
+
+// The validator lanes a $validate call is made through: routing, the lane a
+// check of a leg's payload uses; certification, the client module 3
+// certifies through.
+const (
+	ValidatorLaneRouting       = "routing"
+	ValidatorLaneCertification = "certification"
+)
+
 // ConformanceFinding is what a governed check saw, before it reaches either
 // carrier. Issues here is RAW validator diagnostic text, exactly as the
 // caller has it — emitFinding, and only emitFinding, redacts it through
@@ -119,6 +142,11 @@ type ConformanceFinding struct {
 	Edit                string   `json:"edit,omitempty"`
 	SourcePayloadSHA256 string   `json:"sourcePayloadSha256,omitempty"`
 	Issues              []string `json:"issues,omitempty"` // RAW diagnostics; see the struct comment — emitFinding redacts before either carrier sees this.
+	// Tolerated is set when the level would have refused a payer's answer and
+	// the participant tolerates that payer (CONFORMANCE_TOLERATE_PEERS, D122):
+	// the answer was recorded and carried instead. Never set on a check that
+	// could not run, which is never tolerated.
+	Tolerated bool `json:"tolerated,omitempty"`
 	// DeclaredLine and Lines are set only by a candidate-line certification (a
 	// payer's answer checked against the lines this gateway supports): the line the
 	// leg was routed at — the payer's declared line, or this gateway's own line for
@@ -161,77 +189,4 @@ func findingVerdict(v Verdict) string {
 		return "unavailable"
 	}
 	return "structural"
-}
-
-// emitFindingIn is emitFinding for a check made while answering a call: the
-// call's exchange record counts the finding too.
-func (g *Gateway) emitFindingIn(ctx context.Context, f ConformanceFinding) {
-	countingEmit(ctx, g.emitFinding)(f)
-}
-
-// countingEmit wraps a finding emitter so the exchange record of the call ctx
-// belongs to counts each finding it writes, and names the rule of one that
-// refuses. nil stays nil: an unwired emitter records nothing.
-func countingEmit(ctx context.Context, emit func(ConformanceFinding)) func(ConformanceFinding) {
-	if emit == nil {
-		return nil
-	}
-	x := exchangeOf(ctx)
-	return func(f ConformanceFinding) {
-		emit(bindFinding(ctx, f))
-		if x != nil {
-			x.checked(CheckKind(f.Kind), f.Rule, true, f.Decision == Refuse.String())
-		}
-	}
-}
-
-// bindFinding ties a finding to the call ctx belongs to: its binding fields
-// and, at observe, its leg's tally.
-func bindFinding(ctx context.Context, f ConformanceFinding) ConformanceFinding {
-	if fc := findingContextFrom(ctx); fc.Edit != "" {
-		f.Edit, f.SourcePayloadSHA256 = string(fc.Edit), fc.SourceSHA256
-	}
-	f.binding = findingBindingFrom(ctx)
-	f.tally = legTallyFrom(ctx)
-	return f
-}
-
-// emitFinding is the one place a governed check's finding is written to both
-// carriers, and the one place the redaction rule in ConformanceFinding's
-// comment is enforced: f.Issues arrives raw and is replaced with
-// certificationIssueMetadata's authored summary (count + size + hash) before
-// anything is marshalled, so the redacted form — never the raw diagnostics —
-// is what the log line and the observer event actually carry. It is called
-// before any decision is acted on, at every level that runs the check, so the
-// record of what was seen never depends on what was done about it.
-func (g *Gateway) emitFinding(f ConformanceFinding) {
-	f.Issues = certificationIssueMetadata(f.Issues)
-	b, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	log.Printf("gateway: conformance: %s", b)
-	g.observe(ObserverEvent{
-		Kind:          ConformanceObservedEvent,
-		Direction:     "validate",
-		LegType:       f.LegType,
-		CorrelationID: f.CorrelationID,
-		Detail:        string(b),
-	})
-	g.diagnosticFinding(f, string(b))
-}
-
-// findingIssuesShown bounds the issue list a strict refusal body echoes, the
-// same bound the CDS Hooks certifier already applies (workstream_pa_crd_forward.go).
-const findingIssuesShown = 5
-
-// boundIssues is the ONLY path by which validator diagnostic text leaves this
-// gateway: the strict refusal body returned to the sender (§5). A finding
-// never carries these strings.
-func boundIssues(issues []string) []string {
-	if len(issues) <= findingIssuesShown {
-		return issues
-	}
-	out := append([]string{}, issues[:findingIssuesShown]...)
-	return append(out, fmt.Sprintf("and %d more", len(issues)-findingIssuesShown))
 }

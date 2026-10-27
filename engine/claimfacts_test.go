@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -192,7 +194,7 @@ func TestOriginationRoute_EachRequiredFactAtEachLine(t *testing.T) {
 		}
 		return buildPASSubmitBundle(line, false, pasTailServiceRequest(), nil, testRequestingProvider(), testMemberCoverage(member),
 			testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-			"corr-facts", pasTailClock(), shnsdk.CMSPayerIdentity, in.facts())
+			"corr-facts", pasTailClock(), shnsdk.CMSPayerIdentity, in.facts(), nil)
 	}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, r := range required[line] {
@@ -299,7 +301,7 @@ func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T
 	for _, line := range []string{"2.0", "2.2"} {
 		sub, err := buildPASSubmitBundle(line, false, order, nil, testRequestingProvider(), testMemberCoverage(member),
 			testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-			"corr-sub", submittedAt, shnsdk.CMSPayerIdentity, testClaimFacts())
+			"corr-sub", submittedAt, shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -320,8 +322,8 @@ func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T
 			t.Fatalf("%s: %v", line, err)
 		}
 		// From PAS 2.1 the update carries the prior Claim, restating the submission; PAS
-		// 2.0's update names it by identifier and restates nothing (the line is compared
-		// here, not the SDK's PASDef flag, which this module's pinned shn-sdk predates).
+		// 2.0's update names it by identifier and restates nothing (shn-sdk's
+		// PASDef.UpdateCarriesPriorClaim).
 		if line != "2.0" && !bytes.Contains(upd, []byte(`"created":"2026-05-01T09:30:00Z"`)) {
 			t.Fatalf("%s: the prior-Claim entry does not restate the submission's own created", line)
 		}
@@ -406,7 +408,7 @@ func TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent(t *testing.T) {
 	facts.ClaimType = json.RawMessage(statedType)
 	sub, err := buildPASSubmitBundle("2.2", false, order, nil, testRequestingProvider(), testMemberCoverage(member),
 		testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-		"corr-sub", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), shnsdk.CMSPayerIdentity, facts)
+		"corr-sub", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), shnsdk.CMSPayerIdentity, facts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

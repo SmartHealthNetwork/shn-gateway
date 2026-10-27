@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"maps"
@@ -15,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -86,7 +89,7 @@ type explicitLane struct {
 // fails. Its checks dial a connection of their own each time, never one the
 // lane's $validate calls hold, and keep none.
 func newExplicitLane(lines []string, inner *shnsdk.OperationValidator) *explicitLane {
-	client := ownConnectionClient()
+	client := ownConnectionClient(inner)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &explicitLane{
 		lines: lines, inner: inner,
@@ -220,14 +223,28 @@ func (l *explicitLane) logState(event string) {
 
 // ownConnectionClient is the client a lane's metadata check uses: it dials a
 // connection of its own for each request, never one a lane's $validate calls
-// hold, keeps none, and follows no redirect.
-func ownConnectionClient() *http.Client {
+// hold, keeps none, and follows no redirect. When the lane client's
+// transport records its endpoint kind (endpointcert), the check's records
+// under the same kind (MON-R25); the check's transport is as it was.
+func ownConnectionClient(inner *shnsdk.OperationValidator) *http.Client {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = t.Clone() // an embedder may have replaced the default
 	}
 	transport.DisableKeepAlives, transport.ForceAttemptHTTP2 = true, false
-	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return &http.Client{Transport: endpointcert.Rewrap(laneTransport(inner), transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
+// laneTransport is the transport that records v's endpoint kind: a routing
+// validator's, or a certification client's inner one; nil for none.
+func laneTransport(v *shnsdk.OperationValidator) http.RoundTripper {
+	if v == nil || v.Client == nil {
+		return nil
+	}
+	if t, ok := v.Client.Transport.(certificationTransport); ok {
+		return t.inner
+	}
+	return v.Client.Transport
 }
 
 // explicitLaneProbeBudget bounds one metadata request to a lane.
@@ -329,4 +346,39 @@ func explicitLanes(lanes map[string]shnsdk.Validator) (map[string]shnsdk.Validat
 		out[key] = v
 	}
 	return out, all
+}
+
+// The lane failure classification reads these, so they stay core with the
+// lane registry; module 3's certification (module3_certify.go,
+// module3_certifylane.go) sets them.
+
+// callerGaveUp reports whether the caller stopped waiting for the lane. Under
+// the collector, a certification's own context is its candidate's, bounded by
+// the certification client's own limits (certificationCandidateTimeout, inside
+// certificationClientTimeout); it
+// running out while the collection's context (its deadline, the worker's
+// shutdown) is still live means the lane did not answer in time, not that the
+// caller gave up. Any other caller gave up when its context ended.
+func callerGaveUp(ctx context.Context) bool {
+	if collection, ok := ctx.Value(certificationCollectionKey{}).(context.Context); ok {
+		return collection.Err() != nil
+	}
+	return ctx.Err() != nil
+}
+
+// certificationCollectionKey carries a collection's own context (its deadline
+// and the worker's shutdown) on each candidate's context (callerGaveUp).
+type certificationCollectionKey struct{}
+
+// certificationHTTPError keeps bounded raw execution evidence separate from its
+// safe string representation. Wrapping the error cannot expose response bytes.
+type certificationHTTPError struct {
+	status int
+	reason string
+	raw    []byte
+}
+
+func (e *certificationHTTPError) Error() string {
+	hash := sha256.Sum256(e.raw)
+	return fmt.Sprintf("certification HTTP %d %s (response bytes=%d sha256=%x)", e.status, e.reason, len(e.raw), hash)
 }

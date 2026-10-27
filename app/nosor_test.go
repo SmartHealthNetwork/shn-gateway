@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 // nosor_test.go — a payer whose own system answers every exchange behind
@@ -45,7 +47,7 @@ func nosorBuildEnv(t *testing.T, role string, extra map[string]string) map[strin
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))
 	t.Cleanup(keys.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
 	dir := t.TempDir()

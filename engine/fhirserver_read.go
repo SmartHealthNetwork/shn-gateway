@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 )
 
 // Reading the Coverage through the request's own fhirServer (CDS Hooks): the
@@ -246,6 +248,10 @@ type fhirServerReader struct {
 	dial func(ctx context.Context, network, address string) (net.Conn, error)
 	// dialed, when set, sees each address the reader dials.
 	dialed func(netip.AddrPort)
+	// certs records the server certificate of each read's answer, as the
+	// crd-fhir-server kind (MON-R25), over the read's own guarded transport;
+	// nil records nothing.
+	certs *endpointcert.Recorder
 }
 
 func (r fhirServerReader) public() bool { return r.mode == FHIRServerReadPublic }
@@ -382,7 +388,7 @@ func (r fhirServerReader) client() *http.Client {
 		},
 	}
 	return &http.Client{
-		Transport: transport,
+		Transport: r.certs.Wrap(endpointcert.Of(endpointcert.CRDFHIRServer), transport),
 		Timeout:   fhirServerReadTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

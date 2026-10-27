@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // pendstate_pin_test.go — behavioral proof that the pended-line pin
 // actually threads through REAL scenarios, not just a
 // hand-built pendState. TestPendStatePinsContractLine (versionroute_test.go)
@@ -160,7 +162,7 @@ func (s *pendResumeSubstrate) openRequest(env shnsdk.Envelope, txType string) ([
 }
 
 func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}
@@ -368,10 +370,9 @@ func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendRe
 		SoR:                      base,
 		Store:                    base,
 		Clock:                    clock,
-		NPI:                      "1234567890",
-		Populator:                fakePopulator{canonical: fhirseed.LumbarMRIQuestionnaireCanonical},
+		NPI:                      "1234567893",
 		Client:                   &http.Client{Transport: stub},
-	})
+	}, WithPopulator(fakePopulator{canonical: fhirseed.LumbarMRIQuestionnaireCanonical}))
 	return gw, stub
 }
 
@@ -465,7 +466,7 @@ func TestScenarioToPendSelectsAndCompleteClinicianHonorsPin(t *testing.T) {
 	// honoring st.pasToken verbatim (no re-selection). ---
 	req2 := httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", "")))
 	rec2 := httptest.NewRecorder()
-	if ok := gw.completeClinician(rec2, req2, st, "", ""); !ok {
+	if ok := gw.completeClinician(rec2, req2, st, "42"); !ok {
 		t.Fatalf("completeClinician failed after mid-pend registry drift — the pin was not honored (a dropped/empty "+
 			"pasToken re-selects and hits the drifted registry): %d %s", rec2.Code, rec2.Body.String())
 	}
@@ -553,7 +554,7 @@ func TestCompletePatient_HonorsPinAcrossDifferentLineDrift(t *testing.T) {
 	// pas-claim-update leg. ---
 	req2 := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", "")))
 	rec2 := httptest.NewRecorder()
-	if ok := gw.completePatient(rec2, req2, st, ""); !ok {
+	if ok := gw.completePatient(rec2, req2, st, "42"); !ok {
 		t.Fatalf("completePatient failed after the mid-pend line drift: %d %s", rec2.Code, rec2.Body.String())
 	}
 	if rec2.Code != http.StatusOK {
@@ -638,7 +639,7 @@ func TestCompletePatient_ChainResumeRunsEgressAdapt(t *testing.T) {
 	// route (arm 3 again — the mesh never widened) and run it through egressAdapt.
 	req2 := httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", "")))
 	rec2 := httptest.NewRecorder()
-	if ok := gw.completePatient(rec2, req2, st, ""); !ok {
+	if ok := gw.completePatient(rec2, req2, st, "42"); !ok {
 		t.Fatalf("completePatient failed: %d %s", rec2.Code, rec2.Body.String())
 	}
 	if rec2.Code != http.StatusOK {
@@ -714,14 +715,10 @@ const federatedQueryIngressMutationMarker = "UC05_FQ_INGRESS_MUTATION_MARKER"
 // caught by gateway.go-level unit tests exercising the two validate functions
 // directly — go test ./engine/ stayed green if that ONE call site regressed back to
 // the wrong function, because nothing drove the regression through the actual leg.
-// This test does: it runs a live OriginationProfile="demo" lane (the lane whose
-// skip wrongly swallowed this exact leg before the R-8 scope fix) through the real
+// This test does: it runs a live OriginationProfile="demo" lane through the real
 // handleUC05 HTTP handler, with metro-spine's federated-query answer corrupted in a
-// way a validator would reject, and asserts the request fails. If the call site
-// ever regresses to validateFHIRPayerIngress, this lane is squarely inside
-// relaysReferencePayerBytes's demo-lane skip and the corrupted bytes would sail
-// through — this test's assertion on rec.Code == http.StatusOK is what makes that
-// regression visible (a passing status where a rejection was expected).
+// way a validator would reject, and asserts the request fails: the facility's answer
+// is checked as itself, at the routed line, on every lane.
 func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		// MBR-D-UC05, not MBR-UC05: sceneMember only resolves to the demo persona once
@@ -731,10 +728,8 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 		pendedItem: "operative-diagnostic-report",
 		extraRoles: map[string]string{"facility": "metro-spine"},
 	})
-	// The lane relaysReferencePayerBytes recognizes as skip-eligible — the SAME
-	// lane the R-8 scope fix (Finding 1) had to stop leaking the skip into this
-	// exact leg on.
-	gw.cfg.OriginationProfile = "demo"
+	// The demo lane, whose payer answers were once exempt from the check.
+	declareOriginationProfile(gw, "demo")
 	// Pinned to strict explicitly, not the default: the below-strict twin right
 	// below drives the SAME corrupted marker and asserts it relays instead.
 	gw.cfg.ConformanceEnforcement = EnforcementStrict
@@ -762,7 +757,7 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 	}
 	if rec.Code == http.StatusOK {
 		t.Fatalf("handleUC05 accepted a federated-query response the validator flags as invalid "+
-			"(demo lane) — the facility ingress leg must never share the R-8 payer-ingress skip; "+
+			"(demo lane) — the facility's answer is checked as itself; "+
 			"status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
@@ -785,7 +780,7 @@ func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 				pendedItem: "operative-diagnostic-report",
 				extraRoles: map[string]string{"facility": "metro-spine"},
 			})
-			gw.cfg.OriginationProfile = "demo"
+			declareOriginationProfile(gw, "demo")
 			gw.cfg.ConformanceEnforcement = level
 			var mu sync.Mutex
 			var events []ObserverEvent
@@ -978,7 +973,7 @@ func uc07PendOpts() pendFixtureOpts {
 //
 // It has to be injected rather than produced by the pended leg itself because
 // NO SHN builder emits a 2.2-only top-level Claim extension today (produce-iff;
-// transform_pas.go's pas22OnlyClaimExtensions doc note), so a real SHN-
+// workstream_pa_transform_pas.go's pas22OnlyClaimExtensions doc note), so a real SHN-
 // originated pend carries nothing — which is exactly what
 // TestScenarioToPend_CarriesNothingWhenTheChainCarriesNothing pins. The
 // injection stands in for the payload that WILL carry: a forwarded/native 2.2
@@ -1102,7 +1097,7 @@ func TestCompleteClinician_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 	st.carriedEntries = realPASCarryEntries(t)
 
 	rec2 := httptest.NewRecorder()
-	if gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "", "") {
+	if gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "42") {
 		t.Fatalf("completeClinician resumed GREEN over a stripped carry — the restore would have silently "+
 			"no-opped and the amendment would answer the pend without content its own loss record declares: %s",
 			rec2.Body.String())
@@ -1126,7 +1121,7 @@ func TestCompletePatient_PendedCarryStrippedMidPendRefuses(t *testing.T) {
 	st.carriedEntries = realPASCarryEntries(t)
 
 	rec2 := httptest.NewRecorder()
-	if gw.completePatient(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", ""))), st, "") {
+	if gw.completePatient(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", ""))), st, "42") {
 		t.Fatalf("completePatient resumed GREEN over a stripped carry: %s", rec2.Body.String())
 	}
 	assertPendCarryRefusal(t, stub, rec2, *failed, "completePatient")
@@ -1145,7 +1140,7 @@ func TestCompleteClinician_UnstrippedPendResumesGreen(t *testing.T) {
 		t.Fatalf("scenarioToPend failed: %d %s", rec1.Code, rec1.Body.String())
 	}
 	rec2 := httptest.NewRecorder()
-	if !gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "", "") {
+	if !gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "42") {
 		t.Fatalf("control: completeClinician must resume green over an unstripped pend: %d %s", rec2.Code, rec2.Body.String())
 	}
 	if !legAttempted(stub.legTypes, "pas-claim-update") {
@@ -1171,7 +1166,7 @@ func TestPendCarryGuardSkipsANonRestoringResumeChain(t *testing.T) {
 	st.carriedEntries = realPASCarryEntries(t)
 
 	rec2 := httptest.NewRecorder()
-	if !gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "", "") {
+	if !gw.completeClinician(rec2, httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(testRouteBody(gw, "/scenario/uc06/complete", ""))), st, "42") {
 		t.Fatalf("a DOWN-walking resume chain restores nothing, so the guard must not fire: %d %s",
 			rec2.Code, rec2.Body.String())
 	}
@@ -1282,8 +1277,8 @@ func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 		t.Fatalf("%s does not pre-select the pas-claim line via g.selectLegLineOrFail before its pas-claim leg", fnName)
 	}
 	for _, build := range []string{
-		"buildAuthoredPASSubmit(route.BuildLine,",
-		"buildAuthoredPASUpdate(route.BuildLine,",
+		"buildModuleOnePASSubmit(route.BuildLine,",
+		"buildModuleOnePASUpdate(route.BuildLine,",
 	} {
 		at := strings.Index(fn, build)
 		if at < 0 {

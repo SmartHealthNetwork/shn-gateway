@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -130,7 +132,7 @@ func newShutdownFlush(t *testing.T) *shutdownFlush {
 	}))
 	t.Cleanup(authz.Close)
 	disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"endpoints":{"authz":%q},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, authz.URL, keys.URL, keys.URL)
+		fmt.Fprintf(w, `{`+acceptingWire+`"endpoints":{"authz":%q},"authzPublicKeyURL":%q,"hubTransportKeyURL":%q}`, authz.URL, keys.URL, keys.URL)
 	}))
 	t.Cleanup(disc.Close)
 	var err error

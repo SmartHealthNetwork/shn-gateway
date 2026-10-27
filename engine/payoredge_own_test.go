@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 // The payer-edge ownership rows: which inbound Coverage payor identities this
@@ -124,8 +126,8 @@ func TestPayorEdgeOwn_SecondIdentityReachesTheBackendIdentity(t *testing.T) {
 
 	var notes []string
 	reg := ownFeed(t, map[string][]shnsdk.PayerIdentifier{"payer": {payorConformance, payorEHRAssigned}})
-	n := NewNativeResponder(srv.Client(), srv.URL, "order-sign", newCensusSoR(), fixedClock,
-		publishing(reg, "payer", &notes)...)
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock,
+		append([]NativeOption{WithCRDService("order-sign"), WithPASStore(newCensusSoR())}, publishing(reg, "payer", &notes)...)...)
 	if res := handlePAS(t, n, submitNaming(t, payorEHRAssigned)); res.Status != 0 {
 		t.Fatalf("the payer's own system refused the request: %d %s (it received payor %s|%s)",
 			res.Status, res.Message, seen.System, seen.Value)

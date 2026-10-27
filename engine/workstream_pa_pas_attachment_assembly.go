@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -13,16 +15,21 @@ import (
 )
 
 // buildAuthoredPASSubmit preserves the holder-authored attachment while the
-// SDK owns the PAS envelope and its final resource identities.
-func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs) ([]byte, error) {
+// SDK owns the PAS envelope and its final resource identities. Each extend
+// step runs on the SDK's bundle before the attachment is completed, so the
+// completion sees every entry the request carries.
+func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
 	body, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, in)
-	if err != nil || len(in.QR) == 0 {
+	if err != nil {
+		return body, err
+	}
+	if body, err = extendAuthoredPAS(body, extend); err != nil || len(in.QR) == 0 {
 		return body, err
 	}
 	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
 }
 
-func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs) ([]byte, error) {
+func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
 	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
 	if err != nil {
 		return nil, err
@@ -31,7 +38,21 @@ func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs) 
 	if err != nil || dtrString(order["resourceType"].raw) != "ServiceRequest" || len(in.QR) == 0 {
 		return nil, fmt.Errorf("authored PAS update requires a ServiceRequest and QuestionnaireResponse")
 	}
+	if body, err = extendAuthoredPAS(body, extend); err != nil {
+		return nil, err
+	}
 	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+}
+
+// extendAuthoredPAS runs the build's extend steps in order.
+func extendAuthoredPAS(body []byte, extend []func([]byte) ([]byte, error)) ([]byte, error) {
+	for _, step := range extend {
+		var err error
+		if body, err = step(body); err != nil {
+			return nil, err
+		}
+	}
+	return body, nil
 }
 
 type authoredPASValue struct {

@@ -1,0 +1,34 @@
+# SHN gateway metrics to Datadog.
+# Gateway: OTEL_METRICS_EXPORTER=otlp, OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318,
+#          OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta (Datadog's preferred temporality).
+# Collector env: DD_API_KEY (secret), DD_SITE (for example datadoghq.com).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+
+exporters:
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+    metrics:
+      histograms:
+        mode: distributions
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [datadog]

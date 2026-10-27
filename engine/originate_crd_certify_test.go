@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -48,8 +50,10 @@ func (c *crdFindings) observe(e ObserverEvent) {
 // A CRD answer to a leg the provider's gateway originates is certified against
 // the CDS Hooks response rules at the gateway's own level, as a relayed one
 // is: none carries it unchecked, observe records and carries, structural
-// refuses a structural rule and records a deeper one, strict refuses both. A
-// repeated member name is message integrity and refuses at every level.
+// refuses a structural rule and records a deeper one, strict refuses both;
+// with module 3 absent it is carried unchecked, as at none. A repeated member
+// name is message integrity and refuses at every level, and with the module
+// absent.
 func TestOriginatedCRD_AnswerCertifiedAtTheProvidersLevel(t *testing.T) {
 	topic := map[string]any{"system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp", "code": "coverage-info"}
 	source := map[string]any{"label": "payer", "topic": topic}
@@ -60,17 +64,20 @@ func TestOriginatedCRD_AnswerCertifiedAtTheProvidersLevel(t *testing.T) {
 		level      ConformanceEnforcement
 		card       map[string]any
 		dupKey     bool
+		absent     bool // module 3 not loaded (the level is then strict)
 		wantStatus int
 		wantRule   string // "" = no finding
 		wantDec    string
 	}{
-		{"none carries a broken answer unchecked", EnforcementNone, structural, false, http.StatusOK, "", ""},
-		{"observe records and carries", EnforcementObserve, structural, false, http.StatusOK, "card.indicator", "relayed"},
-		{"structural refuses a structural rule", EnforcementStructural, structural, false, http.StatusBadGateway, "card.indicator", "refused"},
-		{"structural records a deeper rule", EnforcementStructural, deeper, false, http.StatusOK, "card.summary.length", "relayed"},
-		{"strict refuses a deeper rule", EnforcementStrict, deeper, false, http.StatusBadGateway, "card.summary.length", "refused"},
-		{"strict refuses a structural rule", EnforcementStrict, structural, false, http.StatusBadGateway, "card.indicator", "refused"},
-		{"none refuses a repeated member name", EnforcementNone, nil, true, http.StatusBadGateway, "", ""},
+		{"none carries a broken answer unchecked", EnforcementNone, structural, false, false, http.StatusOK, "", ""},
+		{"observe records and carries", EnforcementObserve, structural, false, false, http.StatusOK, "card.indicator", "relayed"},
+		{"structural refuses a structural rule", EnforcementStructural, structural, false, false, http.StatusBadGateway, "card.indicator", "refused"},
+		{"structural records a deeper rule", EnforcementStructural, deeper, false, false, http.StatusOK, "card.summary.length", "relayed"},
+		{"strict refuses a deeper rule", EnforcementStrict, deeper, false, false, http.StatusBadGateway, "card.summary.length", "refused"},
+		{"strict refuses a structural rule", EnforcementStrict, structural, false, false, http.StatusBadGateway, "card.indicator", "refused"},
+		{"none refuses a repeated member name", EnforcementNone, nil, true, false, http.StatusBadGateway, "", ""},
+		{"module absent carries a broken answer unchecked, as none does", EnforcementStrict, structural, false, true, http.StatusOK, "", ""},
+		{"module absent refuses a repeated member name", EnforcementStrict, nil, true, true, http.StatusBadGateway, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sor, _ := originSystem(t, prefetchMember)
@@ -86,6 +93,9 @@ func TestOriginatedCRD_AnswerCertifiedAtTheProvidersLevel(t *testing.T) {
 				return 0, answer
 			})
 			g.cfg.ConformanceEnforcement = tc.level
+			if tc.absent {
+				disableConformanceModule(&g.cfg)
+			}
 			var found crdFindings
 			g.cfg.Observer = found.observe
 

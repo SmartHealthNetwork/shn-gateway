@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -9,8 +11,9 @@ import (
 
 // The readers of a native PAS answer moved to package pasanswer, the Prior
 // Authorization workstream's own. The names below forward to them, unchanged
-// in behaviour, until v1.0.0, the inquiry answer's readers
-// (ConsistentPASInquiryAnswerSubjects, PASInquiryAnswerReadsAt) included.
+// in behaviour, until a later minor release removes them, the inquiry
+// answer's readers (ConsistentPASInquiryAnswerSubjects,
+// PASInquiryAnswerReadsAt) included.
 
 // NativePASFacts describes the existing native submit response contract. It
 // keeps its own type, field for field the same as pasanswer.NativePASFacts

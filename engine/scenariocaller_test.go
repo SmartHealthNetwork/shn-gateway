@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -337,16 +339,24 @@ func TestScenarioCaller_TheRouteReadsTheSignedBody(t *testing.T) {
 	}
 }
 
-// The caller is refused before anything else a route checks: on a gateway
-// with no origination profile, an unsigned request to an originating route
-// is refused 401 as an unauthorized caller, not 503 for the profile, and
-// sends nothing.
-func TestScenarioCaller_RefusedBeforeTheProfileCheck(t *testing.T) {
+// With no origination profile module 1 is off, so there is no /scenario route
+// whose caller to authenticate: an unsigned request is the mux's own 404, and
+// sends and records nothing. The same request with a profile is refused 401
+// as an unauthorized caller.
+func TestScenarioCaller_NoRouteWithoutProfile(t *testing.T) {
 	pub, _ := callerKey(t)
 	g, counter, events := scenarioCallerProvider(t, map[string]ed25519.PublicKey{"monitor": pub}, func(c *Config) { c.OriginationProfile = "" })
+	*events = nil
+	if rec := serve(g, "POST /scenario/uc03", `{}`); rec.Code != http.StatusNotFound {
+		t.Errorf("an unsigned uc03 with no profile: %d %s, want 404", rec.Code, rec.Body.String())
+	}
+	if counter.n != 0 || len(*events) != 0 {
+		t.Fatalf("the request caused %d outbound requests and %d events, want none", counter.n, len(*events))
+	}
+	g, counter, events = scenarioCallerProvider(t, map[string]ed25519.PublicKey{"monitor": pub}, func(c *Config) {})
 	body := testRouteBody(g, "/scenario/uc03", "") // reads the fixture's order: before the count
 	*events = nil
-	wantUnauthorized(t, "an unsigned uc03 with no profile", serve(g, "POST /scenario/uc03", body))
+	wantUnauthorized(t, "an unsigned uc03 with a profile", serve(g, "POST /scenario/uc03", body))
 	if counter.n != 0 || len(*events) != 0 {
 		t.Fatalf("the refused caller caused %d outbound requests and %d events, want none", counter.n, len(*events))
 	}

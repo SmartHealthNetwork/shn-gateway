@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // gateway/engine/manifest_export_test.go
 package engine
 

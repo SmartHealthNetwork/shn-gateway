@@ -7,7 +7,7 @@
 | A bug in the gateway, or a question about configuring or running it | A GitHub issue on this repository |
 | A security vulnerability | **Not** an issue — see [`SECURITY.md`](SECURITY.md) |
 | A developer account, client registration, or access to the preview network | The channel you used to request your developer account; if you don't have one yet, open an issue and we'll point you at it |
-| Which seams are safe to depend on across versions | [`STABILITY.md`](STABILITY.md) first, then an issue |
+| What is safe to depend on across versions | [`STABILITY.md`](STABILITY.md) first, then an issue |
 
 ## What to include in an issue
 

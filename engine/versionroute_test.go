@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -174,7 +176,7 @@ func TestPendStatePinsContractLine(t *testing.T) {
 	reg.Set("payer-x", shnsdk.RegistryEntry{ID: "payer-x", Role: "payer", ContractVersions: []string{"pa.pas@2.0"}})
 	// The participant refuses pairs with no shared line, so a fresh selection
 	// after the drift refuses; by default it would be carried at 2.0.
-	g := &Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}}
+	g := withModuleOne(&Gateway{cfg: Config{Reg: reg, RequireSharedLine: true}})
 	tok, err := g.selectLegToken("payer-x", "pas-claim")
 	if err != nil || tok != "pa.pas@2.0" {
 		t.Fatalf("select: (%q, %v)", tok, err)
@@ -410,9 +412,7 @@ func TestSelectRouteChainRankingFixedTargetPrefersShorterChain(t *testing.T) {
 // though the target line is native, exactly like
 // TestSelectRoutePrefersDeclaredThenNativeReachThenChain's third case. NO
 // assertion here routes through native.go — its arm-1-only pin
-// (TestNativeForwardStaysArm1) forbids that topology; the dormant-plumbing
-// byte-identical fence lives in native_test.go's
-// TestNativeStrictExtensionsFieldIsDormant.
+// (TestNativeForwardStaysArm1) forbids that topology.
 func TestStrictPeerRefusesCarryChain(t *testing.T) {
 	// pa.pas 2.0<->2.1's manifest row is Class=gated (compat.go) — a real,
 	// non-stub chain a strict peer must refuse AT SELECTION, naming the

@@ -5,7 +5,10 @@
 #   SHN_SECRETS         host path to the `shn register` bundle dir (mounted at /etc/shn)
 # The IG-loaded $validate sidecar is co-located here — no separate validator host, and
 # PHI never leaves the partner boundary (OWD-G9). FHIR_VALIDATE_URL defaults to the
-# local sidecar; everything else is discovery-resolved.
+# local sidecar; everything else is discovery-resolved. The gateway sends the sidecar
+# no payload until the partner chooses a level (only its connectivity check reaches
+# it): CONFORMANCE_ENFORCEMENT unset is none (no payload check, no finding recorded);
+# observe, structural or strict turn the checks on.
 services:
   validator:
     build:
@@ -23,6 +26,9 @@ services:
       start_period: 900s
 
   gateway:
+    # The gateway's stop takes up to 43 s (gateway/docs/DEPLOYMENT.md, "Stopping the
+    # gateway"); Docker's default of 10 s would cut it.
+    stop_grace_period: 45s
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -31,6 +37,12 @@ services:
       ROLE: ${ROLE:?set ROLE to provider|payer|facility|phg}
       SHN_SECRETS: /etc/shn
       FHIR_VALIDATE_URL: http://validator:8080/fhir
+      # The partner's level, passed through as the evaluation bundle does; unset
+      # is none.
+      CONFORMANCE_ENFORCEMENT: ${CONFORMANCE_ENFORCEMENT:-}
+      # The payers whose answers the gateway tolerates at its level; absent
+      # tolerates none.
+      CONFORMANCE_TOLERATE_PEERS: ${CONFORMANCE_TOLERATE_PEERS:-}
       PORT: "8080"
     volumes:
       - ${SHN_SECRETS:?set SHN_SECRETS to your shn register bundle dir}:/etc/shn:ro

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -118,7 +120,7 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "a call to the participant's own pre-population service with a request this gateway builds; no peer is on the wire"},
 	"certificationTransport.RoundTrip": {kind: excluded,
 		reason: "the certification validator's transport: observational $validate of observed bytes, never an exchange"},
-	"QualifyValidatorLane": {kind: excluded,
+	"QualifyValidatorLaneWith": {kind: excluded,
 		reason: "a validator lane's qualification: a metadata read, then the readiness corpus's committed synthetic fixtures; never an exchange"},
 	"laneAnswers": {kind: excluded,
 		reason: "whether an explicit validator lane can be reached: a metadata read with no body; never an exchange"},

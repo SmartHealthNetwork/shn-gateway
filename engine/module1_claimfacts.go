@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -111,9 +113,17 @@ type claimInputResult struct {
 	err error
 }
 
+// readsClaimFacts wraps an originating route: the Claim facts the request
+// states are read before its handler decodes the body for its own keys.
+func (g *Gateway) readsClaimFacts(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		h(w, withOriginationClaimInput(r))
+	}
+}
+
 // withOriginationClaimInput reads the claim input once, at the origination
-// route's entry (requireOriginationProfile), before any handler decodes the
-// body for its own keys, and keeps it on the request context.
+// route's entry (readsClaimFacts), before any handler decodes the body for its
+// own keys, and keeps it on the request context.
 func withOriginationClaimInput(r *http.Request) *http.Request {
 	in, err := readOriginationClaimInput(r)
 	return r.WithContext(context.WithValue(r.Context(), claimInputKey{}, claimInputResult{in, err}))
@@ -327,16 +337,45 @@ func (g *Gateway) claimFactsBeforeAnyLeg(w http.ResponseWriter, r *http.Request,
 // claim passes before its first leg: the request states its claim facts for
 // order, the order the member holds (claimInputForOrder), and states every fact
 // the PAS build at the line routed to recipient requires, the amendment's too
-// on a route that sends one (claimFactsBeforeAnyLeg). Both prefixes a PAS
-// origination runs, order-select (runCRDThenDTROrder) and order-dispatch
-// (runCRDDispatch), call it once the recipient is resolved and before their
-// first leg; TestPASOriginationsCheckFactsBeforeAnyLeg pins that statically.
-// On a refusal it writes the response and returns false.
-func (g *Gateway) pasOriginationBeforeAnyLeg(w http.ResponseWriter, r *http.Request, recipient string, order []byte) bool {
+// on a route that sends one (claimFactsBeforeAnyLeg). It also reads the
+// records the order's requester leads to (orderRequesterRecords), which every
+// PAS request about the order carries: read once, here, so a clinician the
+// participant's system cannot supply is refused before anything is sent. Both
+// prefixes a PAS origination runs, order-select (runCRDThenDTROrder) and
+// order-dispatch (runCRDDispatch), call it once the recipient is resolved and
+// before their first leg; TestPASOriginationsCheckFactsBeforeAnyLeg pins that
+// statically. On a refusal it writes the response and returns false.
+func (g *Gateway) pasOriginationBeforeAnyLeg(w http.ResponseWriter, r *http.Request, recipient string, order []byte) ([][]byte, bool) {
 	if _, ok := claimInputForOrder(w, r, order); !ok {
-		return false
+		return nil, false
 	}
-	return g.claimFactsBeforeAnyLeg(w, r, recipient)
+	if !g.claimFactsBeforeAnyLeg(w, r, recipient) {
+		return nil, false
+	}
+	requester, refusal := g.orderRequesterRecords(r.Context(), order)
+	switch {
+	case refusal != nil && refusal.fidelity:
+		// The PAS leg this origination would end in cannot be built
+		// faithfully, so nothing is sent: the fidelity of SHN's own build.
+		g.refuseOwnBuild(w, recipient, "pas-claim", refusal.msg)
+		return nil, false
+	case refusal != nil:
+		writeJSON(w, refusal.status, map[string]string{"error": refusal.msg})
+		return nil, false
+	}
+	// An origination that attests with a clinician NPI and holds every source
+	// of it now (attestsBeforeAnyLeg) resolves the attesting clinician here,
+	// from the records just read: no source naming one refuses before any leg.
+	if attestsBeforeAnyLeg(r.Context()) {
+		if _, status, msg := g.attestingNPI(r.Context(), order, requester); status == http.StatusUnprocessableEntity {
+			g.refuseOwnBuild(w, recipient, "pas-claim", msg)
+			return nil, false
+		} else if status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return nil, false
+		}
+	}
+	return requester, true
 }
 
 // resumeAmendment is what a resume (/complete, or the single call's resume

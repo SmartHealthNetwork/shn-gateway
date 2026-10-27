@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -9,12 +11,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -110,12 +118,13 @@ func wantRefusal(t *testing.T, rec ExchangeRecord, status int, by, rule string) 
 }
 
 // Every closed list ends in "other" and names each value once, and the
-// exchange kinds are exactly the PA catalog's legs: a new leg cannot be
-// recorded as "other" by omission.
+// exchange kinds, routes and operations are exactly the compiled-in
+// workstreams': a new leg, route or operation cannot be recorded as "other"
+// by omission.
 func TestExchangeKindsAreThePACatalog(t *testing.T) {
 	for name, list := range map[string][]string{
 		"ExchangeDirections": ExchangeDirections, "ExchangeRoutes": ExchangeRoutes, "ExchangeKinds": ExchangeKinds,
-		"ExchangeOutcomes": ExchangeOutcomes, "RefusalParties": RefusalParties, "RefusalRules": RefusalRules,
+		"ExchangeOperations": ExchangeOperations, "ExchangeOutcomes": ExchangeOutcomes, "RefusalParties": RefusalParties, "RefusalRules": RefusalRules,
 		"BackendErrorClasses": BackendErrorClasses,
 	} {
 		if list[len(list)-1] != ExchangeOther {
@@ -137,6 +146,9 @@ func TestExchangeKindsAreThePACatalog(t *testing.T) {
 	}
 	if want := append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther); !slices.Equal(ExchangeRoutes, want) {
 		t.Errorf("ExchangeRoutes %v, want the workstreams' ingress routes and the inbound route %v", ExchangeRoutes, want)
+	}
+	if want := append(workstreamOperations(), ExchangeOther); !slices.Equal(ExchangeOperations, want) {
+		t.Errorf("ExchangeOperations %v, want the workstreams' operations %v", ExchangeOperations, want)
 	}
 }
 
@@ -227,6 +239,8 @@ type hubAnswers struct {
 	reason    string
 	delivered string
 	fail      bool
+	// unreadable answers 200 with a body that cannot be read.
+	unreadable bool
 }
 
 func (h hubAnswers) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -237,6 +251,9 @@ func (h hubAnswers) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("dial tcp: connection refused")
 	}
 	hdr := http.Header{"Content-Type": []string{"application/json"}}
+	if h.unreadable {
+		return &http.Response{StatusCode: http.StatusOK, Header: hdr, Body: io.NopCloser(iotest.ErrReader(errors.New("connection reset mid-body")))}, nil
+	}
 	if h.delivered != "" {
 		hdr.Set(HubDeliveredHeader, h.delivered)
 	}
@@ -829,7 +846,7 @@ func TestExchangeRecord_InboundListingUnavailable(t *testing.T) {
 			_, _ = w.Write([]byte(`{"services":[{"hook":"order-select"}]}`))
 		}))
 		t.Cleanup(listing.Close)
-		n := NewNativeResponder(listing.Client(), listing.URL, "shn-order-select", p.store, fixedClock)
+		n := NewNativeResponder(listing.Client(), listing.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(p.store))
 		n.bindFindingEmitter(p.g.emitFinding)
 		p.g.cfg.Responder = n
 		ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
@@ -1319,7 +1336,7 @@ func TestExchangeRecord_BackendReadAndListing(t *testing.T) {
 		}))
 		t.Cleanup(broken.Close)
 		p, got := newRecordingLevelPayer(t, EnforcementObserve)
-		n := NewNativeResponder(broken.Client(), broken.URL, "shn-order-select", p.store, fixedClock)
+		n := NewNativeResponder(broken.Client(), broken.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(p.store))
 		n.bindFindingEmitter(p.g.emitFinding)
 		p.g.cfg.Responder = n
 		p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
@@ -1332,7 +1349,7 @@ func TestExchangeRecord_BackendReadAndListing(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(listing)) }))
 			t.Cleanup(srv.Close)
 			p, got := newRecordingLevelPayer(t, EnforcementObserve)
-			n := NewNativeResponder(srv.Client(), srv.URL, "shn-order-select", p.store, fixedClock)
+			n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithCRDService("shn-order-select"), WithPASStore(p.store))
 			n.bindFindingEmitter(p.g.emitFinding)
 			p.g.cfg.Responder = n
 			p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
@@ -1536,7 +1553,7 @@ func TestExchangeRecord_CancelledBackendCall(t *testing.T) {
 					return resp, err
 				})}
 			}
-			n := NewNativeResponder(client, srv.URL, "shn-order-select", nil, fixedClock)
+			n := NewNativeResponder(client, srv.URL, fixedClock, WithCRDService("shn-order-select"))
 			var got exchangeRecords
 			g := &Gateway{cfg: Config{ExchangeObserved: got.observe, Role: "payer"}}
 			g.recordExchange(RouteSubstrateInbound, DirectionInbound, func(w http.ResponseWriter, r *http.Request) {
@@ -1576,7 +1593,7 @@ func TestExchangeRecord_CancelledWhileTheRequestIsLive(t *testing.T) {
 	})
 	post := func(client *http.Client) func(context.Context) {
 		return func(ctx context.Context) {
-			n := NewNativeResponder(client, "http://payer.test", "shn-order-select", nil, fixedClock)
+			n := NewNativeResponder(client, "http://payer.test", fixedClock, WithCRDService("shn-order-select"))
 			if _, _, err := n.post(ctx, "http://payer.test", "/cds-services/shn-order-select", relay.Exact(relay.NewBody([]byte(`{}`), relay.OriginPeerFrame), "application/json"), "crd-order-select", "crd"); err == nil {
 				t.Error("a failed call succeeded")
 			}
@@ -1627,7 +1644,7 @@ func TestExchangeRecord_CancelledWhileTheRequestIsLive(t *testing.T) {
 }
 
 // ReadSystemOfRecord returns a store-less gateway's reader as it was given,
-// as STABILITY.md says.
+// as CHANGELOG.md says.
 func TestReadSystemOfRecord_NoSystemOfRecordAsGiven(t *testing.T) {
 	if got, ok := ReadSystemOfRecord(NoSystemOfRecord()).(noSystemOfRecord); !ok || got != (noSystemOfRecord{}) {
 		t.Fatalf("got %T, want the store-less reader itself", got)
@@ -1963,7 +1980,7 @@ func TestExchangeRecord_ListingIsTheBackendWhenNothingIsForwarded(t *testing.T) 
 		_, _ = w.Write([]byte(`{"services":[]}`))
 	}))
 	t.Cleanup(srv.Close)
-	n := NewNativeResponder(srv.Client(), srv.URL, "", p.store, fixedClock)
+	n := NewNativeResponder(srv.Client(), srv.URL, fixedClock, WithPASStore(p.store))
 	n.bindFindingEmitter(p.g.emitFinding)
 	p.g.cfg.Responder = n
 	ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
@@ -2204,10 +2221,303 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 	if got := asSet(ExchangeRoutes); !slices.Equal(got, asSet(wantRoutes)) {
 		t.Errorf("ExchangeRoutes %v, want %v", got, asSet(wantRoutes))
 	}
+	// The values the core declared before the workstreams did,
+	// byte for byte: the CRD hooks and the DTR frame operations.
+	wantOps := []string{"order-select", "order-sign", "order-dispatch", "questionnaire-package", "next-question", ExchangeOther}
+	if got := asSet(ExchangeOperations); !slices.Equal(got, asSet(wantOps)) {
+		t.Errorf("ExchangeOperations %v, want %v", got, asSet(wantOps))
+	}
 	if got := ingressDiagnosticKind("provider", true); got != "provider.ingress.request" {
 		t.Errorf("a provider's ingress request kind %q, want provider.ingress.request", got)
 	}
 	if got := ingressDiagnosticKind("provider", false); got != "provider.ingress.response" {
 		t.Errorf("a provider's ingress response kind %q, want provider.ingress.response", got)
 	}
+}
+
+// MON-R23: an ingress call records its participant's request body and the
+// answer written to it, byte for byte.
+func TestExchangeRecord_IngressBodySizes_MONR23(t *testing.T) {
+	env := newInProcessExchange(t)
+	var got exchangeRecords
+	env.originator.cfg.ExchangeObserved = got.observe
+	env.payerReturns(LegResult{})
+	req := env.crdIngressRequest(t)
+	sent := req.ContentLength
+	w := httptest.NewRecorder()
+	env.originator.ingressRoute(RouteCRD)(w, req)
+	if w.Code != http.StatusOK || sent <= 0 {
+		t.Fatalf("status=%d, request length %d", w.Code, sent)
+	}
+	rec := got.only(t)
+	if rec.RequestBytes == nil || *rec.RequestBytes != sent {
+		t.Fatalf("request bytes %v, want %d", rec.RequestBytes, sent)
+	}
+	if rec.ResponseBytes == nil || *rec.ResponseBytes != int64(w.Body.Len()) {
+		t.Fatalf("response bytes %v, want %d", rec.ResponseBytes, w.Body.Len())
+	}
+}
+
+// MON-R23: an inbound leg records the envelope it read from the Hub, which is
+// larger than the payload it seals, and the answer it wrote back.
+func TestExchangeRecord_InboundBodySizes_MONR23(t *testing.T) {
+	p, got := newRecordingLevelPayer(t, EnforcementObserve)
+	payload := conformantCRD("MBR-COVERED", "72148")
+	p.send(t, "crd-order-select", "", payload)
+	rec := got.only(t)
+	if rec.RequestBytes == nil || *rec.RequestBytes <= int64(len(payload)) {
+		t.Fatalf("request bytes %v, want the envelope, more than the %d-byte payload", rec.RequestBytes, len(payload))
+	}
+	if rec.ResponseBytes == nil || *rec.ResponseBytes <= 0 {
+		t.Fatalf("response bytes %v, want the answer's", rec.ResponseBytes)
+	}
+}
+
+// sizedCall records one ingress call to h with body, returning its record.
+func sizedCall(t *testing.T, body io.Reader, h http.HandlerFunc) (ExchangeRecord, *httptest.ResponseRecorder) {
+	t.Helper()
+	var got exchangeRecords
+	g := &Gateway{cfg: Config{ExchangeObserved: got.observe, HolderID: "provider"}}
+	w := httptest.NewRecorder()
+	g.recordExchange(RouteCRD, DirectionIngress, h)(w, httptest.NewRequest(http.MethodPost, "/", body))
+	return got.only(t), w
+}
+
+// MON-R23: a request body not read to its end has no known size, and records
+// none rather than the bytes read: one refused unread, and one cut off at a
+// limit. A call with no body has a known size, 0.
+func TestExchangeRecord_UnknownRequestSizeIsAbsent_MONR23(t *testing.T) {
+	const body = `{"resourceType":"Parameters"}`
+	rec, w := sizedCall(t, strings.NewReader(body), func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused", http.StatusUnauthorized)
+	})
+	if rec.RequestBytes != nil || rec.ResponseBytes == nil || *rec.ResponseBytes != int64(w.Body.Len()) {
+		t.Fatalf("unread: request %v, response %v (answer %d bytes)", rec.RequestBytes, rec.ResponseBytes, w.Body.Len())
+	}
+	rec, _ = sizedCall(t, strings.NewReader(body), func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(io.LimitReader(r.Body, 4))
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	})
+	if rec.RequestBytes != nil {
+		t.Fatalf("cut off at a limit: request %v", *rec.RequestBytes)
+	}
+	rec, _ = sizedCall(t, strings.NewReader(body), func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+	})
+	if rec.RequestBytes == nil || *rec.RequestBytes != int64(len(body)) || rec.ResponseBytes == nil || *rec.ResponseBytes != 0 {
+		t.Fatalf("read to its end: request %v, response %v", rec.RequestBytes, rec.ResponseBytes)
+	}
+	rec, _ = sizedCall(t, nil, func(w http.ResponseWriter, r *http.Request) {})
+	if rec.RequestBytes == nil || *rec.RequestBytes != 0 {
+		t.Fatalf("no body: request %v, want 0", rec.RequestBytes)
+	}
+}
+
+// MON-R23: a handler that panicked wrote no answer this gateway can size.
+func TestExchangeRecord_PanicHasNoResponseSize_MONR23(t *testing.T) {
+	var got exchangeRecords
+	g := &Gateway{cfg: Config{ExchangeObserved: got.observe, HolderID: "provider"}}
+	func() {
+		defer func() { _ = recover() }()
+		g.recordExchange(RouteCRD, DirectionIngress, func(w http.ResponseWriter, r *http.Request) {
+			panic("boom")
+		})(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+	}()
+	if rec := got.only(t); rec.ResponseBytes != nil {
+		t.Fatalf("response bytes %d after a panic", *rec.ResponseBytes)
+	}
+}
+
+// MON-R23: a call on an exchange route is in flight from its arrival until
+// its answer is written, a panicking one included, and the hook counts it
+// whether or not the exchange record is on.
+func TestActiveRequestMetric_MONR23(t *testing.T) {
+	var mu sync.Mutex
+	level := map[string]int{}
+	var during int
+	hook := func(dir string, delta int) {
+		mu.Lock()
+		defer mu.Unlock()
+		level[dir] += delta
+	}
+	for _, observed := range []bool{true, false} {
+		var got exchangeRecords
+		g := &Gateway{cfg: Config{ActiveRequestMetric: hook, HolderID: "provider"}}
+		if observed {
+			g.cfg.ExchangeObserved = got.observe
+		}
+		g.recordExchange(RouteSubstrateInbound, DirectionInbound, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			during = level[DirectionInbound]
+			mu.Unlock()
+		})(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+		if during != 1 || level[DirectionInbound] != 0 {
+			t.Fatalf("observed=%v: %d in flight during the call, %d after; want 1 and 0", observed, during, level[DirectionInbound])
+		}
+	}
+	g := &Gateway{cfg: Config{ActiveRequestMetric: hook, HolderID: "provider"}}
+	func() {
+		defer func() { _ = recover() }()
+		g.recordExchange(RouteCRD, DirectionIngress, func(http.ResponseWriter, *http.Request) { panic("boom") })(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+	}()
+	if level[DirectionIngress] != 0 {
+		t.Fatalf("%d in flight after a panicking call, want 0", level[DirectionIngress])
+	}
+}
+
+// MON-R24: each finding the gateway records is counted once, with the
+// finding's own leg, level, kind and decision, and its tolerated flag as
+// recorded; each $validate call it made is timed on the routing lane.
+func TestFindingAndValidatorMetrics_MONR24(t *testing.T) {
+	const marker = "REJECTED-MARKER"
+	g, _, _ := findingGateway(t, &shnsdk.FakeValidator{RejectIfContains: marker})
+	var findings []FindingMetric
+	g.cfg.FindingMetric = func(f FindingMetric) { findings = append(findings, f) }
+	var lanes []string
+	g.cfg.ValidatorMetric = func(_, lane string, _ time.Duration) { lanes = append(lanes, lane) }
+	ctx := withFindingContext(context.Background(), findingContext{LegType: "crd-order-select", Seam: "provider-ingress", Whose: "peer"})
+	if status, _ := g.validateFHIR(ctx, []byte(`{"resourceType":"Coverage","id":"`+marker+`"}`), "ingress", ""); status == 0 {
+		t.Fatal("the invalid resource was not refused")
+	}
+	want := FindingMetric{Exchange: "crd-order-select", Level: EnforcementStrict.String(), Kind: string(KindFHIRIngress), Action: Refuse.String()}
+	if len(findings) != 1 || findings[0] != want {
+		t.Fatalf("findings %+v, want [%+v]", findings, want)
+	}
+	if !slices.Equal(lanes, []string{ValidatorLaneRouting}) {
+		t.Fatalf("validator calls on lanes %v, want one on routing", lanes)
+	}
+	findings = nil
+	g.emitFinding(ConformanceFinding{Kind: string(KindFHIRIngress), LegType: "pas-claim", Level: "observe", Decision: Record.String(), Tolerated: true})
+	if len(findings) != 1 || !findings[0].Tolerated || findings[0].Action != Record.String() {
+		t.Fatalf("a tolerated finding was counted as %+v", findings)
+	}
+}
+
+// MON-R24: a check's validator call is timed exactly, once per call.
+func TestValidatorMetricTimesEachCall_MONR24(t *testing.T) {
+	const d = 5 * time.Millisecond
+	p, _, _, calls := frozenPayer(t, EnforcementStructural, nil, d, "")
+	var took []time.Duration
+	var mu sync.Mutex
+	p.g.cfg.ValidatorMetric = func(_, lane string, dt time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		if lane == ValidatorLaneRouting {
+			took = append(took, dt)
+		}
+	}
+	p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
+	if n := int(calls.Load()); n == 0 || len(took) != n {
+		t.Fatalf("%d validator calls, %d timed", n, len(took))
+	}
+	for _, dt := range took {
+		if dt != d {
+			t.Fatalf("a call timed %v, want %v", dt, d)
+		}
+	}
+}
+
+// MON-R24: an observe check dropped by a full queue is counted.
+func TestObserveCheckDroppedMetric_MONR24(t *testing.T) {
+	v := newBlockingValidator(invalidResult)
+	g, _ := observeGateway(t, EnforcementObserve, v)
+	t.Cleanup(func() { close(v.release) })
+	var dropped int
+	var mu sync.Mutex
+	g.cfg.ObserveCheckDroppedMetric = func() { mu.Lock(); dropped++; mu.Unlock() }
+	for i := 0; i < observeCheckWorkers; i++ {
+		g.validateFHIR(ingressCtx("corr-fill"), []byte(coverageJSON), "ingress", "")
+	}
+	for deadline := time.Now().Add(5 * time.Second); v.callCount() < observeCheckWorkers; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d workers took a check, want %d", v.callCount(), observeCheckWorkers)
+		}
+	}
+	for i := 0; i < observeCheckQueueCapacity; i++ {
+		g.validateFHIR(ingressCtx("corr-fill"), []byte(coverageJSON), "ingress", "")
+	}
+	g.validateFHIR(ingressCtx("leg-dropped"), []byte(coverageJSON), "ingress", "")
+	mu.Lock()
+	defer mu.Unlock()
+	if dropped != 1 || g.observeChecksDropped() != 1 {
+		t.Fatalf("hook counted %d drops, queue %d; want 1 and 1", dropped, g.observeChecksDropped())
+	}
+}
+
+// MON-R24: the conformance vocabularies a metric folds against are exactly
+// their types' names, each once.
+func TestConformanceVocabulariesAreTheirTypes(t *testing.T) {
+	levels := []string{EnforcementNone.String(), EnforcementObserve.String(), EnforcementStructural.String(), EnforcementStrict.String()}
+	if !slices.Equal(ConformanceLevels, levels) {
+		t.Errorf("ConformanceLevels %v, the levels' names %v", ConformanceLevels, levels)
+	}
+	if actions := []string{Record.String(), Refuse.String()}; !slices.Equal(FindingActions, actions) {
+		t.Errorf("FindingActions %v, the decisions' names %v", FindingActions, actions)
+	}
+	// Every constant the package declares of each type is in its list: a new
+	// kind, level or decision is named there, or folds to other.
+	declared := declaredConsts(t)
+	var kinds []string
+	for _, v := range declared["CheckKind"] {
+		kinds = append(kinds, v)
+	}
+	if !slices.Equal(CheckKinds, kinds) {
+		t.Errorf("CheckKinds %v, the declared kinds %v", CheckKinds, kinds)
+	}
+	if n := len(declared["ConformanceEnforcement"]); n != len(ConformanceLevels) {
+		t.Errorf("%d levels declared, %d named", n, len(ConformanceLevels))
+	}
+	if n := len(declared["Decision"]); n != len(FindingActions) {
+		t.Errorf("%d decisions declared, %d named", n, len(FindingActions))
+	}
+}
+
+// declaredConsts are the package's constants by declared type, in
+// declaration order: a string constant by its value, an iota one by its name.
+func declaredConsts(t *testing.T) map[string][]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string][]string{}
+	files := pkgs["engine"].Files
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		for _, d := range files[name].Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			typ := ""
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				if id, ok := vs.Type.(*ast.Ident); ok {
+					typ = id.Name
+				} else if vs.Type != nil || len(vs.Values) > 0 && !isIota(vs.Values[0]) {
+					typ = ""
+				}
+				if typ == "" {
+					continue
+				}
+				for i, n := range vs.Names {
+					if i < len(vs.Values) {
+						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							v, _ := strconv.Unquote(lit.Value)
+							out[typ] = append(out[typ], v)
+							continue
+						}
+					}
+					out[typ] = append(out[typ], n.Name)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// isIota reports whether e is the bare iota.
+func isIota(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "iota"
 }

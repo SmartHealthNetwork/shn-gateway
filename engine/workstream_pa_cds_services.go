@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_cds_services.go — choosing the payer's CDS service for a CDS Hooks request.
 //
 // The request's hook is the participant's own clinical event and is never
@@ -16,10 +18,38 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 )
+
+// CDSService is one entry of a CDS service listing.
+type CDSService struct {
+	ID   string `json:"id"`
+	Hook string `json:"hook"`
+}
+
+// cdsServiceListing caches the payer's listing. A listing younger than
+// cdsServiceListingTTL is used as is; an older one is read again. One read
+// runs at a time and nobody holds the lock while it runs: requests that still
+// have a listing younger than cdsServiceListingMaxAge use it meanwhile, and
+// requests without one wait for the read. A failed read keeps the last listing
+// (up to cdsServiceListingMaxAge) and is remembered for
+// cdsServiceListingRetryAfter.
+type cdsServiceListing struct {
+	mu       sync.Mutex
+	services []CDSService
+	read     time.Time
+	failed   time.Time
+	err      error
+	// reading is closed when the read in progress ends; nil when none runs.
+	reading chan struct{}
+	// joined, when set, is called each time a request starts waiting for the
+	// read in progress.
+	joined func()
+}
 
 // cdsServiceListingTTL is how long a payer's CDS service listing is reused
 // before it is read again.
@@ -105,36 +135,38 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 // PrimeCDSServices stores a listing read elsewhere (at boot) so the first
 // request does not read it again.
 func (n *nativeResponder) PrimeCDSServices(services []CDSService) {
-	n.cds.mu.Lock()
-	defer n.cds.mu.Unlock()
-	n.cds.services = slices.Clone(services)
-	n.cds.read = n.clock()
-	n.cds.failed, n.cds.err = time.Time{}, nil
+	c := &n.paNative().cds
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.services = slices.Clone(services)
+	c.read = n.clock()
+	c.failed, c.err = time.Time{}, nil
 }
 
 func (n *nativeResponder) cdsServices(ctx context.Context) ([]CDSService, error) {
+	c := &n.paNative().cds
 	for {
-		n.cds.mu.Lock()
+		c.mu.Lock()
 		now := n.clock()
-		held := !n.cds.read.IsZero()
-		if held && now.Sub(n.cds.read) < cdsServiceListingTTL {
-			services := n.cds.services
-			n.cds.mu.Unlock()
+		held := !c.read.IsZero()
+		if held && now.Sub(c.read) < cdsServiceListingTTL {
+			services := c.services
+			c.mu.Unlock()
 			return services, nil
 		}
-		usable := held && now.Sub(n.cds.read) < cdsServiceListingMaxAge
-		services := n.cds.services
-		if n.cds.err != nil && now.Sub(n.cds.failed) < cdsServiceListingRetryAfter {
-			err := n.cds.err
-			n.cds.mu.Unlock()
+		usable := held && now.Sub(c.read) < cdsServiceListingMaxAge
+		services := c.services
+		if c.err != nil && now.Sub(c.failed) < cdsServiceListingRetryAfter {
+			err := c.err
+			c.mu.Unlock()
 			if usable {
 				return services, nil
 			}
 			return nil, err
 		}
-		if reading := n.cds.reading; reading != nil {
-			joined := n.cds.joined
-			n.cds.mu.Unlock()
+		if reading := c.reading; reading != nil {
+			joined := c.joined
+			c.mu.Unlock()
 			if usable {
 				return services, nil
 			}
@@ -149,8 +181,8 @@ func (n *nativeResponder) cdsServices(ctx context.Context) ([]CDSService, error)
 			}
 		}
 		reading := make(chan struct{})
-		n.cds.reading = reading
-		n.cds.mu.Unlock()
+		c.reading = reading
+		c.mu.Unlock()
 		return n.readCDSServices(ctx, reading)
 	}
 }
@@ -159,31 +191,33 @@ func (n *nativeResponder) cdsServices(ctx context.Context) ([]CDSService, error)
 // The read is not tied to the lifetime of the request that started it: other
 // requests may be waiting for it (it is bounded by cdsServiceListingTimeout).
 func (n *nativeResponder) readCDSServices(ctx context.Context, reading chan struct{}) ([]CDSService, error) {
-	services, err := DiscoverCDSServices(context.WithoutCancel(ctx), n.client, n.cdsBaseURL, n.backendHeaders)
-	n.cds.mu.Lock()
-	defer n.cds.mu.Unlock()
+	c := &n.paNative().cds
+	services, err := DiscoverCDSServices(endpointcert.WithTag(context.WithoutCancel(ctx), endpointcert.Of(endpointcert.CDS)), n.client, n.paNative().cdsBaseURL, n.backendHeaders)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	defer close(reading)
-	n.cds.reading = nil
+	c.reading = nil
 	now := n.clock()
 	if err != nil {
-		n.cds.failed, n.cds.err = now, err
-		if !n.cds.read.IsZero() && now.Sub(n.cds.read) < cdsServiceListingMaxAge {
-			log.Printf("gateway: payer CDS service listing could not be read again (%v); using the listing read at %s", err, n.cds.read.UTC().Format(time.RFC3339))
-			return n.cds.services, nil
+		c.failed, c.err = now, err
+		if !c.read.IsZero() && now.Sub(c.read) < cdsServiceListingMaxAge {
+			log.Printf("gateway: payer CDS service listing could not be read again (%v); using the listing read at %s", err, c.read.UTC().Format(time.RFC3339))
+			return c.services, nil
 		}
 		return nil, err
 	}
-	n.cds.services, n.cds.read = services, now
-	n.cds.failed, n.cds.err = time.Time{}, nil
+	c.services, c.read = services, now
+	c.failed, c.err = time.Time{}, nil
 	return services, nil
 }
 
 // serviceOverride is the configured service id for leg ("" when none).
 func (n *nativeResponder) serviceOverride(leg string) string {
+	pa := n.paNative()
 	if leg == "crd-order-dispatch" {
-		return n.crdDispatchServiceID
+		return pa.crdDispatchServiceID
 	}
-	return n.crdServiceID
+	return pa.crdServiceID
 }
 
 // offeredHooksRefusal is the payer gateway's own refusal of a hook the payer

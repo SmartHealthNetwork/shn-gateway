@@ -6,9 +6,9 @@
 // a public package.
 //
 // The names moved here from package engine, which keeps them (engine.PendKeys
-// and the rest) as deprecated aliases and forwarders until v1.0.0, so a
-// store's method signatures naming the engine's types still implement the
-// ledger.
+// and the rest) as deprecated aliases and forwarders until a later minor
+// release removes them, so a store's method signatures naming the engine's
+// types still implement the ledger.
 //
 // WHY IT IS A SEPARATE, OPTIONAL INTERFACE. The engine Store's pended-claim
 // methods key a claim by (subjectPCI, correlationID) — the gateway's own
@@ -81,8 +81,8 @@ const (
 
 // PendRefusal says why an amendment could not bind a claim. The ledger records
 // and never gates: the amendment reaches the payer either way, and the reason is
-// noted for the operator (pend.amendment-unbound:<reason>), so the reasons stay
-// distinguishable from one another.
+// noted for the operator (pend.amendment-unbound, with the reason as its
+// detail), so the reasons stay distinguishable from one another.
 type PendRefusal string
 
 const (

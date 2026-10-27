@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_pasgraph_test.go — the rejection rows of the PAS response-graph closure rule
 // (workstream_pa_pasgraph.go). Each row is a valid graph with ONE mutation, refused: a
 // reference the graph does not carry, an identity two entries disagree on, a

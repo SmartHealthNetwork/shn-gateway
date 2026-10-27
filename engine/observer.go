@@ -350,8 +350,8 @@ func (g *Gateway) observeIngress(route string, h http.HandlerFunc) http.HandlerF
 // active).
 //
 // Unlike observingValidator this cannot hold *Gateway: the decoration must
-// land BEFORE New()'s Responder/Populator derivations capture cfg.SoR
-// (see the install site in New()), and g does not
+// land BEFORE New() builds the workstreams' states, whose managed populator
+// captures cfg.SoR (see the install site in New()), and g does not
 // exist yet at that point. It closes over the Observer func and Clock
 // directly instead.
 type observingSoR struct {

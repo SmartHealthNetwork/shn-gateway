@@ -29,17 +29,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // ExchangeRecord is one call this gateway answered, as it saw it.
@@ -115,6 +116,21 @@ type ExchangeRecord struct {
 	// Stages is the time an inbound leg spent in each stage of its answer
 	// (LegStages); nil on an ingress call.
 	Stages *LegStages
+	// Network is the time an ingress call waited on the network (MON-R22):
+	// from handing each sealed request to the transport for the Hub to
+	// reading the Hub's answer, or the transport's failure, so the Hub's and
+	// the peer's time together. It is wall time with at least one request
+	// outstanding, so it never exceeds Latency, and Latency less it is this
+	// gateway's own time. Nil on an inbound leg and on an ingress call that
+	// handed nothing to the transport for the Hub.
+	Network *NetworkWait
+	// RequestBytes and ResponseBytes are the sizes of the HTTP bodies of the
+	// call itself (MON-R23): on an ingress call, its participant's request and
+	// the answer written to it; on an inbound leg, the envelope from the Hub
+	// and the answer written back. RequestBytes is nil when the body was not
+	// read to its end (refused unread, or cut off at a limit), since its size
+	// is then not known; ResponseBytes is nil when the handler panicked.
+	RequestBytes, ResponseBytes *int64
 	// AnswerError is why an inbound leg's answer (the participant's, or this
 	// gateway's own refusal) could not be authorized (AnswerErrorClasses);
 	// empty otherwise.
@@ -214,6 +230,13 @@ type LegStages struct {
 	Write time.Duration
 }
 
+// NetworkWait is the time an ingress call waited on the Hub and its peer.
+type NetworkWait struct {
+	Latency time.Duration
+	// Calls counts the requests handed to the transport for the Hub.
+	Calls int
+}
+
 // BackendCall is one call to the participant's own system.
 type BackendCall struct {
 	// Status is the HTTP status its system answered; 0 when it gave none.
@@ -239,12 +262,12 @@ type FindingSummary struct {
 
 // ExchangeOther is the value recorded for anything a closed list does not name.
 //
-// Deprecated: use recording.ExchangeOther, which this is; it goes at the engine package split.
+// Deprecated: use recording.ExchangeOther, which this is; a later minor release removes it.
 const ExchangeOther = vocab.ExchangeOther
 
 // Directions.
 //
-// Deprecated: use package recording's names, which these are; they go at the engine package split.
+// Deprecated: use package recording's names, which these are; a later minor release removes them.
 const (
 	DirectionIngress = vocab.DirectionIngress
 	DirectionInbound = vocab.DirectionInbound
@@ -257,7 +280,7 @@ const RouteSubstrateInbound = "substrate-inbound"
 
 // Outcomes.
 //
-// Deprecated: use package recording's names, which these are; they go at the engine package split.
+// Deprecated: use package recording's names, which these are; a later minor release removes them.
 const (
 	ExchangeAnswered      = vocab.ExchangeAnswered
 	ExchangeRefused       = vocab.ExchangeRefused
@@ -267,7 +290,7 @@ const (
 
 // Refusing parties.
 //
-// Deprecated: use package recording's names, which these are; they go at the engine package split.
+// Deprecated: use package recording's names, which these are; a later minor release removes them.
 const (
 	RefusedByProviderGateway        = vocab.RefusedByProviderGateway
 	RefusedByHub                    = vocab.RefusedByHub
@@ -277,7 +300,7 @@ const (
 
 // Refusal rules.
 //
-// Deprecated: use package recording's names, which these are; they go at the engine package split.
+// Deprecated: use package recording's names, which these are; a later minor release removes them.
 const (
 	RefusalAuthentication = vocab.RefusalAuthentication
 	RefusalAuthority      = vocab.RefusalAuthority
@@ -293,7 +316,7 @@ const (
 
 // Backend error classes.
 //
-// Deprecated: use package recording's names, which these are; they go at the engine package split.
+// Deprecated: use package recording's names, which these are; a later minor release removes them.
 const (
 	BackendTimeout   = vocab.BackendTimeout
 	BackendConnect   = vocab.BackendConnect
@@ -312,7 +335,7 @@ const (
 // deprecated here; the routes, kinds and operations are the compiled-in
 // workstreams'.
 var (
-	// Deprecated: use recording.ExchangeDirections, which this is; it goes at the engine package split.
+	// Deprecated: use recording.ExchangeDirections, which this is; a later minor release removes it.
 	ExchangeDirections = vocab.ExchangeDirections
 	// ExchangeRoutes are the ingress routes the compiled-in workstreams
 	// declare, and the core's inbound route (set in init).
@@ -320,16 +343,18 @@ var (
 	// ExchangeKinds is every leg of the compiled-in workstreams' catalogs
 	// (set in init).
 	ExchangeKinds []string
-	// ExchangeOperations are the CDS hooks the CRD legs carry and the DTR
-	// operations a request frame names.
-	ExchangeOperations = []string{"order-select", "order-sign", "order-dispatch", shnsdk.FrameOperationQuestionnairePackage, shnsdk.FrameOperationNextQuestion, ExchangeOther}
-	// Deprecated: use recording.ExchangeOutcomes, which this is; it goes at the engine package split.
+	// ExchangeOperations are the operations the compiled-in workstreams'
+	// legs name: those their ingress records name (the CDS hooks of the CRD
+	// services) and the frame operations their taxonomies declare (set in
+	// init).
+	ExchangeOperations []string
+	// Deprecated: use recording.ExchangeOutcomes, which this is; a later minor release removes it.
 	ExchangeOutcomes = vocab.ExchangeOutcomes
-	// Deprecated: use recording.RefusalParties, which this is; it goes at the engine package split.
+	// Deprecated: use recording.RefusalParties, which this is; a later minor release removes it.
 	RefusalParties = vocab.RefusalParties
-	// Deprecated: use recording.RefusalRules, which this is; it goes at the engine package split.
+	// Deprecated: use recording.RefusalRules, which this is; a later minor release removes it.
 	RefusalRules = vocab.RefusalRules
-	// Deprecated: use recording.BackendErrorClasses, which this is; it goes at the engine package split.
+	// Deprecated: use recording.BackendErrorClasses, which this is; a later minor release removes it.
 	BackendErrorClasses = vocab.BackendErrorClasses
 	// AnswerErrorClasses say why an inbound leg's answer could not be
 	// authorized: the request ended before it (cancelled: the requester was
@@ -337,17 +362,19 @@ var (
 	// Framework denied it (auth) or never answered it (unreachable), or
 	// another failure (other).
 	//
-	// Deprecated: use recording.AnswerErrorClasses, which this is; it goes at the engine package split.
+	// Deprecated: use recording.AnswerErrorClasses, which this is; a later minor release removes it.
 	AnswerErrorClasses = vocab.AnswerErrorClasses
 )
 
-// init derives ExchangeRoutes and ExchangeKinds from the compiled-in
-// workstreams. It runs after every package-level variable is set: the
-// workstreams' ingress handlers record exchanges against these lists, so the
-// lists cannot be initializers of their own without an initialization cycle.
+// init derives ExchangeRoutes, ExchangeKinds and ExchangeOperations from the
+// compiled-in workstreams. It runs after every package-level variable is
+// set: the workstreams' ingress handlers record exchanges against these
+// lists, so the lists cannot be initializers of their own without an
+// initialization cycle.
 func init() {
 	ExchangeRoutes = append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther)
 	ExchangeKinds = append(workstreamKinds(), ExchangeOther)
+	ExchangeOperations = append(workstreamOperations(), ExchangeOther)
 }
 
 // closed returns v when list names it, else ExchangeOther.
@@ -365,7 +392,7 @@ type exchangeRecorderKey struct{}
 type exchangeRecorder struct {
 	mu  sync.Mutex
 	rec ExchangeRecord
-	// tally follows the leg's findings at observe (finding_tally.go); nil at
+	// tally follows the leg's findings at observe (module3_finding_tally.go); nil at
 	// every other level.
 	tally *legTally
 	// outcome/party/rule are the settled outcome, set by decided.
@@ -394,6 +421,9 @@ type exchangeRecorder struct {
 	// validating counts the synchronous validations in progress, so a
 	// nested one is timed once.
 	validating int
+	// hubOut counts the requests to the Hub outstanding, since hubSince.
+	hubOut   int
+	hubSince time.Time
 }
 
 func exchangeOf(ctx context.Context) *exchangeRecorder {
@@ -688,6 +718,40 @@ func (x *exchangeRecorder) stage(add func(*LegStages, time.Duration)) func() {
 	return func() {
 		d := x.clock().Sub(start)
 		x.with(func() { add(x.rec.Stages, d) })
+	}
+}
+
+// network times one request to the Hub, from handing it to the transport to
+// reading the answer: it returns the call that ends it. Requests outstanding
+// together are timed once, so the total never exceeds the call's Latency. A
+// nil recorder, or an inbound leg's, times nothing and reads no clock.
+func (x *exchangeRecorder) network() func() {
+	if x == nil {
+		return func() {}
+	}
+	var timed bool
+	x.with(func() {
+		if timed = x.rec.Direction == DirectionIngress; !timed {
+			return
+		}
+		if x.rec.Network == nil {
+			x.rec.Network = &NetworkWait{}
+		}
+		x.rec.Network.Calls++
+		if x.hubOut == 0 {
+			x.hubSince = x.clock()
+		}
+		x.hubOut++
+	})
+	if !timed {
+		return func() {}
+	}
+	return func() {
+		x.with(func() {
+			if x.hubOut--; x.hubOut == 0 {
+				x.rec.Network.Latency += x.clock().Sub(x.hubSince)
+			}
+		})
 	}
 }
 
@@ -1054,6 +1118,8 @@ type exchangeWriter struct {
 	http.ResponseWriter
 	x      *exchangeRecorder
 	status int
+	// written is the answer's body bytes written.
+	written atomic.Int64
 }
 
 func (w *exchangeWriter) WriteHeader(code int) {
@@ -1065,7 +1131,35 @@ func (w *exchangeWriter) WriteHeader(code int) {
 
 func (w *exchangeWriter) Write(b []byte) (int, error) {
 	defer w.x.stage(func(s *LegStages, d time.Duration) { s.Write += d })()
-	return w.ResponseWriter.Write(b)
+	n, err := w.ResponseWriter.Write(b)
+	w.written.Add(int64(n))
+	return n, err
+}
+
+// countingBody counts the request body's bytes as the handler reads them, and
+// whether it read them to the end: only then is the body's size known.
+type countingBody struct {
+	io.ReadCloser
+	n   atomic.Int64
+	eof atomic.Bool
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n.Add(int64(n))
+	if err == io.EOF {
+		b.eof.Store(true)
+	}
+	return n, err
+}
+
+// size is the body's size, nil when it is not known.
+func (b *countingBody) size() *int64 {
+	if !b.eof.Load() {
+		return nil
+	}
+	n := b.n.Load()
+	return &n
 }
 
 func (w *exchangeWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -1088,6 +1182,11 @@ func (g *Gateway) inboundRoute() http.HandlerFunc {
 // recordExchange wraps a route so each call produces one ExchangeRecord.
 func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if m := g.cfg.ActiveRequestMetric; m != nil {
+			dir := closed(ExchangeDirections, direction)
+			m(dir, 1)
+			defer m(dir, -1)
+		}
 		if g.cfg.ExchangeObserved == nil {
 			h(w, r)
 			return
@@ -1110,11 +1209,19 @@ func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) ht
 			x.rec.Stages = &LegStages{}
 		}
 		ew := &exchangeWriter{ResponseWriter: w, x: x}
+		rr := r.WithContext(context.WithValue(r.Context(), exchangeRecorderKey{}, x))
+		body := &countingBody{ReadCloser: r.Body}
+		if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
+			// No body: its size, 0, is known without a read.
+			body.ReadCloser = http.NoBody
+			body.eof.Store(true)
+		}
+		rr.Body = body
 		panicked := true
 		defer func() {
-			g.emitExchange(x, ew, panicked)
+			g.emitExchange(x, ew, body, panicked)
 		}()
-		h(ew, r.WithContext(context.WithValue(r.Context(), exchangeRecorderKey{}, x)))
+		h(ew, rr)
 		panicked = false
 	}
 }
@@ -1141,7 +1248,7 @@ func (g *Gateway) exchangeParty(direction string) string {
 
 // emitExchange settles the record and hands it to Config.ExchangeObserved. A
 // panicking consumer never reaches the request.
-func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked bool) {
+func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *countingBody, panicked bool) {
 	defer func() { _ = recover() }()
 	x.mu.Lock()
 	rec := x.rec
@@ -1164,12 +1271,22 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 		s := *rec.Stages
 		rec.Stages = &s
 	}
+	if rec.Network != nil {
+		n := *rec.Network
+		rec.Network = &n
+	}
+	hubOut, hubSince := x.hubOut, x.hubSince
 	outcome, by, rule, appStatus, guardRule := x.outcome, x.party, x.rule, x.appStatus, x.guardRule
 	backendFailed := rec.Backend != nil && rec.Backend.ErrorClass != "" && rec.Backend.ErrorClass != BackendCancelled
 	backendCancelled := x.cut
 	x.mu.Unlock()
 
 	rec.Latency = g.exchangeClock().Sub(rec.Start)
+	if hubOut > 0 {
+		// A request to the Hub still outstanding when the call ended (its
+		// handler returned or panicked) waited until then.
+		rec.Network.Latency += max(0, rec.Start.Add(rec.Latency).Sub(hubSince))
+	}
 	if rec.Stages != nil && !unwrapped {
 		// Refused before its dispatch with an answer it did not seal: the
 		// call's time in no other stage was the unwrap.
@@ -1177,6 +1294,11 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, panicked 
 		st.Unwrap = max(0, rec.Latency-(st.Reads+st.Forward+st.Validate+st.Seal+st.Ledger+st.Write))
 	}
 	rec.Status = w.status
+	rec.RequestBytes = body.size()
+	if !panicked {
+		n := w.written.Load()
+		rec.ResponseBytes = &n
+	}
 	if rec.Status == 0 && !panicked {
 		rec.Status = http.StatusOK // a handler that wrote nothing answered 200
 	}

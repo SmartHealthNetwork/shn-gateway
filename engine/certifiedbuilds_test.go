@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -77,8 +79,8 @@ func TestCertifiedBuildsNameTheirTest(t *testing.T) {
 	if len(certifiedBuilds) == 0 {
 		t.Fatal("certifiedBuilds is empty: the PAS inquiry is certified at every line")
 	}
-	for pair, test := range certifiedBuilds {
-		if test == "" || pair.Builder == carriedRequest {
+	for pair, c := range certifiedBuilds {
+		if c.Test == "" || pair.Builder == carriedRequest {
 			t.Errorf("%+v: a certified pair names its builder and its test", pair)
 		}
 		if !slices.Contains(nativeLinesForContract(pair.Contract), pair.Line) {

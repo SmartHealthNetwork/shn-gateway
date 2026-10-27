@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -45,7 +47,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("DeviceRequest (HomeOxygen) -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailDeviceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -72,7 +74,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("ServiceRequest single-shot -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -98,12 +100,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 	t.Run("non-br-payer profile -> never sets InfoChanged (byte-identical)", func(t *testing.T) {
 		// This row exercises buildPASSubmitBundle's brPayer=false ARM directly with a literal
 		// (no real caller passes false any more: relaysReferencePayerBytes(g.cfg.OriginationProfile)
-		// is unconditionally true for any real role=provider deployment, since gateway/app.go's
-		// loadConfig normalizes an unset ORIGINATION_PROFILE to "demo"). The arm itself stays —
+		// is true on both origination lanes, and with no profile module 1 is off and builds
+		// nothing). The arm itself stays —
 		// it is what keeps a lane that does NOT relay reference-payer bytes byte-identical — this
 		// row pins that the SHN-native shape it would produce keeps its pre-existing bytes.
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts())
+		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -162,7 +164,7 @@ func TestClassifyResolution_RealA1(t *testing.T) {
 // bridged payload even at ConformanceEnforcement=none. It forces a genuine
 // (non-gated) arm-3 route: own declares only pa.pas@2.1, the peer only
 // pa.pas@2.2, so selectChainRoute has no arm-1/2 escape and must pick the
-// pa.pas 2.1->2.2 hop — StepCarry (transform_pas.go's pasStep2122Up), which
+// pa.pas 2.1->2.2 hop — StepCarry (workstream_pa_transform_pas.go's pasStep2122Up), which
 // does NOT semantically refuse on a Claim-shaped submit bundle the way the
 // 2.0->2.1 StepGated hop does (TestTransformRefusalZeroBytes's row) — so
 // egressAdapt actually SUCCEEDS and route.Chain is genuinely non-empty by
@@ -206,7 +208,7 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
 	order := pasTailServiceRequest()
-	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, nil, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
 	respJSON := sub.respJSON
 	if err != nil {
 		t.Fatalf("submitPASClaim: unexpected error (want a clean 422 refusal, not an error path): %v", err)

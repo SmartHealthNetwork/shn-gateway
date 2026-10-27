@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // payor_test.go — the member→payor fence.
 //
 // The conformant lane routes payload-FIRST (AI-G13): the gateway derives the

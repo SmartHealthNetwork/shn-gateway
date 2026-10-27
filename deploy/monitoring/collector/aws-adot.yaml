@@ -1,0 +1,41 @@
+# SHN gateway metrics to Amazon Managed Service for Prometheus, through the AWS Distro for OpenTelemetry
+# (or the contrib Collector, which carries the same components).
+# The gateway already writes its EMF metrics to CloudWatch when METRICS_SERVICE is set; this recipe is for
+# a Prometheus workspace. Credentials come from the Collector's AWS role (no key in this file).
+# Gateway: OTEL_METRICS_EXPORTER=otlp, OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318.
+# Collector env: AWS_REGION, AMP_REMOTE_WRITE_URL (https://aps-workspaces.<region>.amazonaws.com/workspaces/<id>/api/v1/remote_write).
+extensions:
+  sigv4auth:
+    region: ${env:AWS_REGION}
+    service: aps
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+
+exporters:
+  prometheusremotewrite:
+    endpoint: ${env:AMP_REMOTE_WRITE_URL}
+    auth:
+      authenticator: sigv4auth
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  extensions: [sigv4auth]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]

@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // module1_originate.go — the provider-side scenario drivers (UC-01…08): originate a PA
 // exchange, run it through the Hub, and surface the result. Part of package gateway
 // (the Smart Gateway runs every holder role; this file is the provider-origination
@@ -17,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/personas"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -24,11 +27,9 @@ import (
 // (br-payer) DIRECTLY over HTTP, which needs the contained-insurer / absolute-refs /
 // payer-org-entry / DTR-coverage handling every br-payer-shaped request/response requires.
 // provider-data is the sole origination lane that dials br-payer's own HTTP surface — it must
-// not regress the contained-payor → uniform-A3 bug. This predicate does NOT decide the
-// payer-answer ingress skip — see relaysReferencePayerBytes and validateFHIRPayerIngress:
-// that concern is about WHOSE bytes are being relayed, not about which lane makes the HTTP
-// call. The demo lane relays the SAME reference-payer bytes (via the in-process mirror,
-// internal/brpayermirror) without ever dialing br-payer itself.
+// not regress the contained-payor → uniform-A3 bug. The demo lane relays the SAME
+// reference-payer bytes (via the in-process mirror, internal/brpayermirror) without ever
+// dialing br-payer itself.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
 // isDemoProfile reports whether the origination profile is the family-keyed demo lane
@@ -38,25 +39,23 @@ func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 // targetsBrPayer in HOW it reaches the reference payer (in-process mirror vs. a live HTTP
 // dial) — but NOT distinct on WHOSE bytes come back: since the in-process payer stub retired the
 // mirror relays the reference payer's OWN pinned bytes verbatim
-// (internal/brpayermirror/loopback.go), so this lane is treated as provider-data is: its
-// answers from a reference payer identity are not certified, and a partner payer's are — see
-// relaysReferencePayerBytes and validateFHIRPayerIngress.
+// (internal/brpayermirror/loopback.go), so this lane shapes its PAS requests as
+// provider-data does (relaysReferencePayerBytes).
 func isDemoProfile(profile string) bool { return profile == "demo" }
 
 // relaysReferencePayerBytes reports whether THIS lane's payer counterparty is the
 // network's reference payer, answering with the reference implementation's own bytes
 // relayed verbatim. Two origination lanes reach it today: provider-data over a live
 // HTTP dial (targetsBrPayer), and demo through the in-process mirror of it
-// (isDemoProfile). An unset ORIGINATION_PROFILE is normalized to "demo" once, at the
-// config boundary (gateway/app.go loadConfig), so no profile == "" case belongs here.
+// (isDemoProfile). With no profile, module 1 is off and mounts no route, so no
+// profile == "" case belongs here.
 //
 // The lane decides how the PAS request is shaped for that counterparty (the contained
 // insurer, absolute references and payer Organization entry the reference payer
-// resolves). It is only HALF of the ingress-check skip: validateFHIRPayerIngress skips
-// a payer's answer only when this is true AND the payer identity the leg was routed by
-// is one of the network's reference payers (isReferencePayer). A partner payer reached
-// from either lane is governed at the gateway's conformance level like any other peer.
-// Egress is unaffected on every lane: SHN-built bytes are always validated.
+// resolves). It decides nothing about checking a payer's answer: every payer's answer is
+// governed at the gateway's conformance level, and a participant that tolerates a
+// payer's known defects lists it (CONFORMANCE_TOLERATE_PEERS, D122). Egress is
+// unaffected on every lane: SHN-built bytes are always validated.
 func relaysReferencePayerBytes(profile string) bool {
 	return targetsBrPayer(profile) || isDemoProfile(profile)
 }
@@ -77,13 +76,12 @@ func OriginationProfiles() []string {
 	return append([]string(nil), originationProfiles...)
 }
 
-// checkOriginationProfile is New's check of Config.OriginationProfile. A value that
+// checkOriginationProfile is module 1's check of Config.OriginationProfile, run
+// through originationRoutes as New builds module 1's state. A value that
 // names no lane is refused on every role: the origination paths compare it exactly, so
 // it would match none of them and build a PAS request carrying a payer Organization no
-// system of record supplied. Unset is not refused here: a provider with no profile
-// still relays, and its originating routes refuse instead (requireOriginationProfile).
-// The published binary reads an unset ORIGINATION_PROFILE as demo on the provider role
-// before it builds a Config.
+// system of record supplied. Unset is not refused: it is module 1 off, and a provider
+// with no profile relays and mounts no /scenario route (originationRoutes).
 func checkOriginationProfile(profile string) error {
 	if profile != "" && !isOriginationProfile(profile) {
 		return fmt.Errorf("gateway: Config.OriginationProfile %q is not an origination profile (must be %s)", profile, strings.Join(originationProfiles, "|"))
@@ -101,9 +99,11 @@ const referencePayerSystem = "urn:oid:2.16.840.1.113883.6.300"
 // payer. A leg is routed by the payer identity the member's own Coverage names, so the
 // identity — not the holder that happens to answer for it — says whose answer it is.
 // Their DTR and PAS answers are the reference implementation's own bytes, which do not
-// yet conform (the 2.0 reference payer's DTR package fails DTR 2.0.1); a provider
-// gateway on a lane that relays them does not certify them (validateFHIRPayerIngress).
-// BridgeDemoPayerID and BridgeRefusePayerID, the two SHN-operated bridging-demo payers,
+// yet conform at every request (the 2.0 reference payer's orderless DTR package fails
+// DTR 2.0.1). No gateway exempts them (D122): SHN's own provider gateways list exactly
+// these identities in CONFORMANCE_TOLERATE_PEERS, which test/invariants pins to this
+// set, until their answers conform.
+// personas.BridgeDemoPayerID and BridgeRefusePayerID, the two SHN-operated bridging-demo payers,
 // are in the set only because they relay the reference payer's content: each fronts
 // 00001 as its backend, so their answers are the same reference bytes under the demo
 // payer's own identity. They leave the set with the rest of it once the reference
@@ -113,17 +113,14 @@ var referencePayerIdentities = map[shnsdk.PayerIdentifier]bool{
 	{System: referencePayerSystem, Value: "00001"}: true,
 	{System: referencePayerSystem, Value: "00300"}: true,
 	{System: referencePayerSystem, Value: "00301"}: true,
-	BridgeDemoPayerID:   true,
-	BridgeRefusePayerID: true,
+	personas.BridgeDemoPayerID:                     true,
+	personas.BridgeRefusePayerID:                   true,
 }
 
-// isReferencePayer reports whether payer is one of the network's reference payer
-// identities (referencePayerIdentities).
-func isReferencePayer(payer shnsdk.PayerIdentifier) bool { return referencePayerIdentities[payer] }
-
 // ReferencePayerIdentities returns the network's reference payer identities, sorted by
-// system then value — the identities whose answers a provider gateway relaying
-// reference-payer bytes does not certify. It is a copy: changing it changes nothing here.
+// system then value — the identities SHN's own provider gateways tolerate
+// (CONFORMANCE_TOLERATE_PEERS) until their answers conform. It is a copy: changing it
+// changes nothing here.
 func ReferencePayerIdentities() []shnsdk.PayerIdentifier {
 	out := make([]shnsdk.PayerIdentifier, 0, len(referencePayerIdentities))
 	for p := range referencePayerIdentities {
@@ -161,14 +158,14 @@ func (g *Gateway) attestsOnHHA() bool {
 //     selection).
 //   - *SemanticChangeError — the APPLY-time refusal: arm(3)'s chain IS selected (a real
 //     bridging chain exists and gets picked), but a gated step inside it refuses to
-//     fabricate a field it has no honest byte-level source for (transform_pas.go — pa.pas's
+//     fabricate a field it has no honest byte-level source for (workstream_pa_transform_pas.go — pa.pas's
 //     2.0->2.1 up-step is gated for every Claim payload). This is the shape the SECOND live
 //     run's fix (setting SHN_DEMO_EGRESS_NATIVE_LINES=2.0 on the deployment) produces:
 //     narrowing arm(2)'s native reach is what forces arm(3)'s chain to be the path taken at
 //     all — without the knob, this build's native pa.pas@2.2 reach wins first and the
 //     exchange is silently APPROVED (the run-2 regression this fix closes).
 //
-// Route callers match this with errors.As (transform_pas.go's own doc comment for
+// Route callers match this with errors.As (transform.go's own doc comment for
 // *SemanticChangeError says exactly this) to distinguish either designed-refusal shape
 // from any other applyChain/selectLegLine failure (a plain I/O/parse error, a
 // chainDisconnectedError, an unknown legType) — those are genuine faults and must NOT be
@@ -226,100 +223,6 @@ func (g *Gateway) selectLegLineOrBridgeRefuse(w http.ResponseWriter, recipient, 
 	}
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 	return legRoute{}, false
-}
-
-// FilledItem is the gateway-engine-LOCAL attribution surface for a DTR auto-filled
-// QR item (the scenario route's answer, QRItems field). The SDK's FillQuestionnaire drops the
-// FilledItem summary (UI-only); the gateway reconstructs it via fillSummary
-// from the ClinicalContext. JSON tags are byte-for-byte compatible with the original
-// dtr.FilledItem shape so the scenario response format is unchanged.
-type FilledItem struct {
-	LinkID    string `json:"linkId"`
-	Answer    string `json:"answer"`
-	Origin    string `json:"origin"`
-	SourceRef string `json:"sourceRef,omitempty"`
-}
-
-// fillSummary reconstructs the []FilledItem summary from the ClinicalContext —
-// the same leaves shnsdk.FillQuestionnaire answers, in the same order (the fill
-// carries no per-item summary, so the scenario answer's summary is rebuilt here). Items with
-// a negative/absent flag (prior-surgery=false, etc.) are omitted, matching the
-// fill. functional-status-oswestry is intentionally absent (no local source).
-func fillSummary(cc shnsdk.ClinicalContext) []FilledItem {
-	var out []FilledItem
-	out = append(out, FilledItem{
-		LinkID:    "conservative-therapy-weeks",
-		Answer:    itoa(cc.ConservativeTherapyWeeks),
-		Origin:    "auto",
-		SourceRef: cc.ConservativeTherapyRef,
-	})
-	out = append(out, FilledItem{
-		LinkID:    "neuro-deficit",
-		Answer:    boolStr(cc.NeuroDeficit),
-		Origin:    "auto",
-		SourceRef: cc.NeuroDeficitRef,
-	})
-	out = append(out, FilledItem{
-		LinkID:    "prior-imaging",
-		Answer:    boolStr(cc.PriorImaging),
-		Origin:    "auto",
-		SourceRef: cc.PriorImagingRef,
-	})
-	if cc.PriorSurgery {
-		out = append(out, FilledItem{
-			LinkID:    "prior-surgery",
-			Answer:    "true",
-			Origin:    "auto",
-			SourceRef: cc.PriorSurgeryRef,
-		})
-	}
-	if cc.HighDisability {
-		out = append(out, FilledItem{
-			LinkID:    "high-disability",
-			Answer:    "true",
-			Origin:    "auto",
-			SourceRef: cc.HighDisabilityRef,
-		})
-	}
-	if cc.PatientReported {
-		out = append(out, FilledItem{
-			LinkID: "patient-reported-required",
-			Answer: "true",
-			Origin: "auto",
-		})
-	}
-	return out
-}
-
-func itoa(n int) string {
-	const digits = "0123456789"
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = digits[n%10]
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }
 
 // ---- Provider role ----
@@ -620,6 +523,10 @@ type crdDtrResult struct {
 	sorID  string
 	pci    string
 	filled []FilledItem
+	// requester is the records the order's requester leads to, read from the
+	// participant's own system once, before any leg (pasOriginationBeforeAnyLeg).
+	// Every PAS request about the order carries them (carryOrderRequester).
+	requester [][]byte
 	// payer is the member's REAL payer identity, parsed from the member's open Coverage
 	// (OpenCoverage → ParsePayerIdentifier) at the fresh origination site (FR-G40). It threads
 	// to the payer-org-emitting PAS builders so the payload's payer derives from the patient's
@@ -748,10 +655,8 @@ func (g *Gateway) sceneMember(defaultMember, providerDataMember, demoMember stri
 // || isDemoProfile(profile) — true for provider-data (the live br-payer lane) AND demo (the
 // in-process mirror of the SAME br-payer family), since both target br-payer's J3490
 // NOT-COVERED family. The generic FR-G25/AI-1 STOP (false) is the DEFAULT for every other
-// caller, and — after gateway/app.go's loadConfig normalization — for every profile that
-// is neither provider-data nor demo (an unset
-// ORIGINATION_PROFILE is normalized to "demo" before the engine ever sees it, so it no longer
-// reaches this STOP path in a real deployment). The opt-in never yields an auth on a denial:
+// caller. No profile other than provider-data and demo reaches it: with none, module 1
+// is off and mounts no route. The opt-in never yields an auth on a denial:
 // handleUC08 asserts the PAS result is DENIED (its approved→502 guard), so a not-covered order
 // routed to PAS can only deny, never approve.
 func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, member, system, code, display, dx string, proceedOnNotCovered bool) (crdDtrResult, bool) {
@@ -807,7 +712,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// every fact the PAS build at the routed line requires (the amendment's
 	// too, on a route that sends one), or it is refused here, before any leg,
 	// exactly as the build would refuse it (pasOriginationBeforeAnyLeg).
-	if !g.pasOriginationBeforeAnyLeg(w, r, recipient, srJSON) {
+	requester, ok := g.pasOriginationBeforeAnyLeg(w, r, recipient, srJSON)
+	if !ok {
 		return crdDtrResult{}, false
 	}
 	// The order retains the identity and the bytes the participant's own system
@@ -862,7 +768,11 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		return crdDtrResult{}, false
 	}
 	// The order is signed and headed for prior authorization: order-sign.
-	crdReq, err := g.originatedOrderingRequest(hookOrderSign, crdCorr, recs, srJSON)
+	crdReq, err := g.originatedOrderingRequest(ctx, hookOrderSign, crdCorr, recs, srJSON)
+	if errors.Is(err, errNoOrderingClinician) {
+		g.refuseOwnBuild(w, recipient, "crd-order-select", "build order-sign request failed: "+err.Error())
+		return crdDtrResult{}, false
+	}
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-sign request failed: " + err.Error()})
 		return crdDtrResult{}, false
@@ -906,7 +816,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
 			// not-covered order can never yield an auth. Not-covered carries no questionnaire
 			// (NeedsDTR=false) → return the built order straight for the PAS submit.
-			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient}, true
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, requester: requester}, true
 		}
 		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
 		// Explicit terminal stop; patient-facing denial UX is deferred.
@@ -932,7 +842,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// Both are live: the reference payer advertises one on the L8000 and G0151
 	// families (so both route DTR) and none on E0424, which is PA-decided off the
 	// request alone and goes straight to PAS.
-	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient,
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, requester: requester,
 		crdOrder: answer.updatedOrder, crdAssertionID: answer.assertionID}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
@@ -1030,7 +940,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			return crdDtrResult{}, false
 		}
 		authored := g.cfg.Clock()
-		qrJSON, fill, err := g.cfg.Populator.Populate(ctx, packageJSON, PopulateContext{
+		qrJSON, fill, err := g.populator().Populate(ctx, packageJSON, PopulateContext{
 			Member:         member,
 			PatientRef:     patientRef,
 			SubjectFHIRRef: subjectFHIRRef,
@@ -1120,32 +1030,6 @@ func statusForPopulateErr(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
-}
-
-// setQuestionnaireResponseSubject rewrites the QR's subject.reference (JSON-level, preserving every
-// other field/order). Used to normalize the operated engine's store-resolvable subject (a scoped
-// FHIR id) back to the logical SHN ref after the QR-subject fence has verified it. On a parse
-// failure it returns the input unchanged (the egress validate that follows then rejects it).
-func setQuestionnaireResponseSubject(qrJSON []byte, ref string) []byte {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(qrJSON, &m); err != nil {
-		return qrJSON
-	}
-	subject, err := dtrObject(m["subject"])
-	if err != nil {
-		return qrJSON
-	}
-	subject["reference"] = dtrRaw(ref)
-	subj, err := json.Marshal(subject)
-	if err != nil {
-		return qrJSON
-	}
-	m["subject"] = subj
-	out, err := json.Marshal(m)
-	if err != nil {
-		return qrJSON
-	}
-	return out
 }
 
 // questionnaireResponseNumericAnswers walks the QR's nested items and returns, for every item that
@@ -1371,7 +1255,11 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	}
 	// A coverage check while the order is chosen, with no authorization to follow:
 	// order-select.
-	reqJSON, err := g.originatedOrderingRequest(hookOrderSelect, correlationID, recs, srJSON)
+	reqJSON, err := g.originatedOrderingRequest(ctx, hookOrderSelect, correlationID, recs, srJSON)
+	if errors.Is(err, errNoOrderingClinician) {
+		g.refuseOwnBuild(w, recipient, "crd-order-select", "build order-select request failed: "+err.Error())
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-select request failed: " + err.Error()})
 		return
@@ -1527,7 +1415,9 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 			"this origination is about %s|%s and the member's open order is %s|%s", o.system, o.code, system, code)})
 		return
 	}
-	res, ok := g.runCRDDispatch(w, r, member, order)
+	// The oxygen order is attested by its clinician, and every source of that
+	// clinician is in hand now: resolved before the first leg.
+	res, ok := g.runCRDDispatch(w, withAttestationBeforeAnyLeg(r), member, order)
 	if !ok {
 		return
 	}
@@ -1543,7 +1433,7 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	// §3 ruling: 6.1 (the one required item) is answered honestly through the requester's
 	// OWN attestation — source="manual", never "auto", never fabricated as clinical fact —
 	// merged into the ALREADY-populated QR so the genuine auto answers survive.
-	npi, status, msg := g.attestingNPI(r.Context(), res.orderJSON, "")
+	npi, status, msg := g.attestingNPI(r.Context(), res.orderJSON, res.requester)
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
@@ -1583,7 +1473,7 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	}
 	decision, status, msg, err := g.submitClaimAndFollow(r.Context(), r, pasFollowInputs{
 		pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, memberSystem: res.memberSystem,
-		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON,
+		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON, requester: res.requester,
 		supplierJSON: res.supplierJSON, source: res.qrSource, payer: res.payer, wait: wait,
 	})
 	if status != 0 {
@@ -1616,20 +1506,16 @@ func (g *Gateway) handleUC03Oxygen(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
-// uc03BridgeCode is the kit-bridging-visualization demo's OWN literal order tuple —
-// decoupled from originationCodes().uc03 (R3): the line-carry arm demonstrates a
-// pair with no certified translation being carried, which does not depend on the
-// family/code carried; the bridge-demo arm reuses the SAME literal (task2
-// brief) since both arms share one body. Kept literally UNCHANGED (L8000, order-select)
-// rather than following UC-03's oxygen re-key, so this demo-only exhibit stays
-// byte-identical to before R3.
-var uc03BridgeCode = orderTuple{systemHCPCSBuild, "L8000", DemoDisplayL8000, DemoDxL8000}
+// uc03BridgeCode is the kit-bridging-visualization demo's own order tuple
+// (personas.DemoOrderSet.UC03Bridge), deliberately decoupled from
+// originationCodes().uc03.
+var uc03BridgeCode = orderTupleOf(personas.DemoOrderCodes().UC03Bridge)
 
 // handleUC03Bridge is the kit-bridging-visualization demo's shared body for both
-// "bridge-demo" (MBR-BRIDGE-DEMO, engine.BridgeDemoPayerID — the full bridged SUCCESS:
+// "bridge-demo" (MBR-BRIDGE-DEMO, personas.BridgeDemoPayerID — the full bridged SUCCESS:
 // CRD/DTR cross the version boundary via the transform chains, PAS lands on the shared
 // line, approval with a payer-issued authNumber) and "line-carry" (MBR-BRIDGE-REFUSE,
-// engine.BridgeRefusePayerID — the peer declares only a PAS line no certified
+// personas.BridgeRefusePayerID — the peer declares only a PAS line no certified
 // translation reaches, so the submission is carried at its build line and the carry
 // recorded; under REQUIRE_SHARED_LINE, selectLegLineOrBridgeRefuse's pas-claim
 // contract-version line-select refuses it as routing BEFORE any bundle is built).
@@ -1695,7 +1581,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON)
+	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON, res.requester...)
 	if !providerOK {
 		return
 	}
@@ -1710,7 +1596,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 		return
 	}
 	claimFacts := claimIn.facts()
-	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -1718,7 +1604,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
-	})
+	}, res.requester)
 	if err != nil {
 		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
 		return
@@ -1844,7 +1730,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON)
+	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON, res.requester...)
 	if !providerOK {
 		return
 	}
@@ -1859,7 +1745,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimFacts := claimIn.facts()
-	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -1867,7 +1753,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
-	})
+	}, res.requester)
 	if err != nil {
 		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
 		return
@@ -2015,7 +1901,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		}
 		decision, status, msg, err := g.submitClaimAndFollow(ctx, r, pasFollowInputs{
 			pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, memberSystem: res.memberSystem,
-			recipient: res.recipient, orderRef: orderRef, orderJSON: res.srJSON,
+			recipient: res.recipient, orderRef: orderRef, orderJSON: res.srJSON, requester: res.requester,
 			source: res.qrSource, payer: res.payer, wait: wait,
 		})
 		if status != 0 {
@@ -2057,7 +1943,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON)
+	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON, res.requester...)
 	if !providerOK {
 		return
 	}
@@ -2072,7 +1958,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimFacts := claimIn.facts()
-	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -2080,7 +1966,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
-	})
+	}, res.requester)
 	if err != nil {
 		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
 		return
@@ -2176,7 +2062,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		ctx := withFindingContext(ctx, findingContext{
 			LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
 		})
-		updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		updateBundle, err := buildModuleOnePASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 			QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 			Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
 			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -2195,7 +2081,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			// The payer's own pend: the attached report is linked to the
 			// items it asks the report for, and to no other.
 			Pend: submitted.pendFor(targetLine),
-		})
+		}, res.requester)
 		if err != nil {
 			pasBuildFailure(w, err, "build update bundle failed")
 			return nil, nil, true, nil
@@ -2429,7 +2315,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON)
+	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON, res.requester...)
 	if !providerOK {
 		return
 	}
@@ -2444,7 +2330,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimFacts := claimIn.facts()
-	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -2452,7 +2338,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
-	})
+	}, res.requester)
 	if err != nil {
 		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
 		return
@@ -2549,10 +2435,8 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// Ingress-validate the facility's searchset BEFORE trusting/extracting its
 		// resources (defense in depth — every resource crossing the substrate is validated).
 		// MUST stay plain validateFHIR, never validateFHIRPayerIngress: the facility is not
-		// a payer, so this leg's bytes are never eligible for the reference-payer skip
-		// regardless of lane — this exact call site is the one that was once wrongly
-		// exempted, sharing the payer-directed skip with every other ingress leg on the
-		// same lane.
+		// a payer, so neither the payer-answer candidate lines nor a participant's
+		// tolerance of a payer applies to this leg's bytes.
 		fqCtx := withFindingContext(ctx, findingContext{
 			LegType: "federated-query", CorrelationID: fqCorr, Seam: "originate", Whose: "peer",
 		})
@@ -2605,7 +2489,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		ctx := withFindingContext(ctx, findingContext{
 			LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "own",
 		})
-		updateBundle, err := buildAuthoredPASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
+		updateBundle, err := buildModuleOnePASUpdate(route.BuildLine, shnsdk.ConformantClaimUpdateInputs{
 			QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 			Provenance: provJSON, DiagnosticReport: drJSON, Corr: updateCorr, OriginalCorr: pasCorr, Created: g.cfg.Clock(),
 			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -2624,7 +2508,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			// The payer's own pend: the attached report is linked to the
 			// items it asks the report for, and to no other.
 			Pend: submitted.pendFor(targetLine),
-		})
+		}, res.requester)
 		if err != nil {
 			pasBuildFailure(w, err, "build update bundle failed")
 			return nil, nil, true, nil
@@ -2756,7 +2640,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON)
+	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, res.srJSON, res.requester...)
 	if !providerOK {
 		return
 	}
@@ -2771,7 +2655,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimFacts := claimIn.facts()
-	bundleJSON, err := buildAuthoredPASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
+	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
@@ -2779,7 +2663,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
-	})
+	}, res.requester)
 	if err != nil {
 		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
 		return

@@ -3,7 +3,8 @@
 # validator. Opt-in (Docker + a provisioned `shn register --role
 # provider` bundle + reachability to the hosted Hub): boots compose.eval.yml (hapi +
 # gencerts + seed + gateway + br-provider), drives all 8 provider-data UCs against the
-# hosted conformance-payer through the gateway's real /scenario/ucNN routes, and proves
+# hosted conformance-payer through the gateway's real /scenario/ucNN routes with `shn
+# send-test`, the command the README gives a partner, and proves
 # the conformant (Da Vinci) lane's GENERATED cert end to end. A broken cert generator or
 # a broken UC must fail HERE, on the bundle we ship, not on a partner's first boot.
 set -euo pipefail
@@ -15,10 +16,17 @@ bash gateway/deploy/eval/brprovider/build.sh build            # image:, must exi
 # the value to its operator precisely so this export can exist without imposing strict on
 # the other two things that boot that same file — a partner's `docker compose up` (README)
 # and the partner's own payer self-test (payer/smoke.sh) — which take the published default
-# of observe and see a partner's defect recorded, not refused. Both halves are pinned by
+# (none from v1.0.0, observe before) and never see a partner's defect refused. Both halves are pinned by
 # the platform's invariants; do not move this export into the compose, and do not add one
 # to payer/smoke.sh.
 export CONFORMANCE_ENFORCEMENT=strict
+# The payer this gate drives is SHN's hosted conformance payer, a reference payer whose answers
+# do not yet conform at every request shape. Strict alone would refuse them, and
+# this gate would judge the reference payer instead of the bundle. So the gate tolerates the
+# reference payers, as SHN's own provider gateways do: a FHIR profile defect strict would refuse
+# in their DTR or PAS answers is recorded as a tolerated finding and the answer carried. Every
+# other payer, and every other check, stays strict. It goes once the reference payers conform, with SHN's own lists.
+export CONFORMANCE_TOLERATE_PEERS="urn:oid:2.16.840.1.113883.6.300|00001,urn:oid:2.16.840.1.113883.6.300|00300,urn:oid:2.16.840.1.113883.6.300|00301,urn:shn:demo-payer|SHN-BRIDGE-DEMO,urn:shn:demo-payer|SHN-BRIDGE-REFUSE"
 # The gateway's /scenario routes admit only the callers its bundle's scenario-callers.json
 # names (compose.eval.yml's SCENARIO_CALLERS_FILE). This gate makes its caller the way the
 # README's step 0 tells a partner to, `shn scenario-key --bundle`, on a copy of the
@@ -42,8 +50,9 @@ $compose up -d --build
 # its route on this gateway's lane (provider-data): member, order and claim facts
 # (persona_body.sh). The smoke states none of them; the descriptor is the one the gateway
 # itself reads (compose.eval.yml's SHN_DISCOVERY_URL).
+disc_url="${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}"
 desc=$(mktemp)
-curl -fsS "${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}" -o "$desc"
+curl -fsS "$disc_url" -o "$desc"
 body() { gateway/deploy/eval/persona_body.sh "$desc" "$1" provider-data "$2" "${3:-{\}}"; }
 
 # Readiness = retry the first real scenario until it returns well-formed JSON.
@@ -60,48 +69,21 @@ done
 [ "$ready" = 1 ] || { echo "gateway never became ready"; exit 1; }
 
 fail=0
-check() { # route  descriptor-scenario  amend(0|1)  route-keys  jq-predicate
-  # Guard the assignment: under set -e a failing curl (a connection error; a 4xx/5xx is an
-  # answer, read below) would otherwise abort the whole script here — skipping the remaining
-  # UCs AND the mandatory conformant-lane cert checks below. Record it and keep going.
-  local req
-  if ! req=$(body "$2" "$3" "$4"); then echo "✗ $2: the descriptor states no persona facts"; fail=1; return; fi
-  # A payer's pend is its answer; the reference payer pends these families on submit and decides
-  # later. ?wait=30 asks the gateway to follow the decision for up to 30 s (its own bound, through
-  # Claim/$inquire) before it answers, so the route answers the decision when the payer has made
-  # one, and the pend with its continuation when it has not. The signature binds the query too.
-  # The status is read separately so a refusal's body, which says why, is printed with it.
-  if ! out=$(curl -sS -w '\n%{http_code}' -X POST "localhost:8080/scenario/$1?wait=30" -H 'Content-Type: application/json' \
-       -H "X-Holder-Assertion: $(sign "$1?wait=30" "$req")" --data-raw "$req"); then
-    echo "✗ $2: request failed (no answer)"; fail=1; return
-  fi
-  code=${out##*$'\n'}; out=${out%$'\n'*}
-  case "$code" in
-    2??) ;;
-    *) echo "✗ $2: HTTP $code: $out"; fail=1; return ;;
-  esac
-  if echo "$out" | jq -e "$5" >/dev/null 2>&1; then echo "✓ $2"
-  elif cont=$(echo "$out" | jq -er 'select(.decision=="pended") | .continuation' 2>/dev/null); then
-    # The evaluation payer decides within the wait; a pend still open after it means something is
-    # wrong, so it fails this gate, said as what it is, with the continuation to resume it.
-    echo "✗ $2: pended, not decided within 30 s (continuation $cont): $out"; fail=1
-  else echo "✗ $2: $out"; fail=1; fi
-}
-# Assertions against the REAL structs (engine/module1_originate*.go).
-# Branch-body keys verified against the real handlers: handleScenario
-# (uc01) switches on req.Branch == "covered"/"notcovered" (module1_originate.go:151-159); handleUC05
-# switches on "", "consent", "noconsent" (module1_originate.go:1181-1187). uc02/03/04/06/07/08 don't
-# read the body at all, so "{}" is inert.
-check uc01 uc01            0 '{"branch":"covered"}'    '.covered==true'
-check uc01 uc01-notcovered 0 '{"branch":"notcovered"}' '.covered==false'
-check uc02 uc02            0 '{}'                      '.paRequired==false'
-check uc03 uc03            0 '{}'                      '.paRequired==true and (.authNumber|length>0)'
-check uc04 uc04            1 '{}'                      '(.authNumber|length>0)'
-check uc05 uc05            1 '{}'                      '(.authNumber|length>0)'
-check uc05 uc05-noconsent  1 '{"branch":"noconsent"}'  '.consentDenied==true'
-check uc06 uc06            1 '{}'                      '(.authNumber|length>0) and .attested==true'
-check uc07 uc07            1 '{}'                      '(.authNumber|length>0) and .attested==true'
-check uc08 uc08            0 '{}'                      '.denied==true'
+# The scenarios: `shn send-test` sends each one the persona the descriptor states for its route,
+# and the answer UC-06 and UC-07 state (the gateway supplies none), signed as the caller above.
+# The reference payer pends these families on submit and decides later: --follow 30 follows each
+# pend to the decision through POST /scenario/pa/inquire. A pend still open after it means
+# something is wrong, so it fails this gate (send-test's exit 3) as surely as a failed scenario.
+st=0
+# send-test reads <accounts>/discovery: pass the descriptor's URL without that last segment.
+disc_base=${disc_url%/}; disc_base=${disc_base%/discovery}
+"$work/shn" send-test --gateway http://127.0.0.1:8080 --discovery "$disc_base" \
+  --scenario-key "$work/scenario-caller-send-test.sign" --bundle "$SHN_SECRETS" --follow 30 || st=$?
+case "$st" in
+  0) ;;
+  3) echo "✗ send-test: a scenario was still pended after 30 s"; fail=1 ;;
+  *) echo "✗ send-test: exit $st"; fail=1 ;;
+esac
 
 # ── Conformant lane: exercise the GENERATED cert end to end ──
 # A broken cert generator must fail HERE, not silently on a partner's first boot.

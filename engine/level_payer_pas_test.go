@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -382,6 +384,30 @@ func TestLevelPayerPAS_DecisionTheLedgerCannotHold(t *testing.T) {
 			p.wantSideRecord(t, "pas-claim-update", pendDecisionNotRecordedEvent, decisionReadAsDenialWithAuthNumber)
 			if rec, found := p.pendOf(t, related); !found || rec.State != PendStatePended {
 				t.Fatalf("the prior authorization must stay pended, got found=%v %+v", found, rec)
+			}
+		})
+	}
+}
+
+// TestLevelPayerPASUpdate_UnboundAmendmentOnTheFeed: an amendment that binds
+// no pend this gateway recorded reaches the payer, its answer is relayed, and
+// the observer feed carries one pend.amendment-unbound on the update leg with
+// the reason as its detail, at every level.
+func TestLevelPayerPASUpdate_UnboundAmendmentOnTheFeed(t *testing.T) {
+	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
+	updateReq, _ := updateBundle(t)
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			p := newLevelPayer(t, level)
+			p.partner.respByPath[pasSubmitPath] = approved
+			got := p.send(t, "pas-claim-update", "", updateReq)
+			if got.status != http.StatusOK || !bytes.Equal(got.body, approved) {
+				t.Fatalf("the payer's answer must be relayed exactly, got %d %s", got.status, got.body)
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if len(p.unbound) != 1 || p.unbound[0].LegType != "pas-claim-update" || p.unbound[0].Detail != string(PendRefusalNotPended) {
+				t.Fatalf("want one %s on pas-claim-update with detail %q, got %+v", PendAmendmentUnboundEvent, PendRefusalNotPended, p.unbound)
 			}
 		})
 	}

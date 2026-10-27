@@ -1,0 +1,170 @@
+//go:build !shn_coreonly
+
+package engine
+
+import (
+	"bytes"
+	"context"
+	"testing"
+	"time"
+
+	"github.com/SmartHealthNetwork/shn-gateway/fhirseed"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+)
+
+// managedPopulator.Populate must produce EXACTLY the QR the inline path produced:
+// extract the Questionnaire from the package, read ClinicalContext, FillQuestionnaire.
+func TestManagedPopulator_ByteParityWithInlineFill(t *testing.T) {
+	sor := newCensusSoR() // the demo SoR personas
+	member := "MBR-COVERED"
+	pkg := wrapDemoLumbarPackage(t) // one-entry package around the demo lumbar Questionnaire
+
+	cc, ok := sor.ClinicalContext(member)
+	if !ok {
+		t.Fatal("no clinical context for member")
+	}
+	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
+	want, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), cc, shnsdk.QRContext{
+		PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
+		OrderRef: "ServiceRequest/sr-" + member, Authored: clock(),
+	})
+	if err != nil {
+		t.Fatalf("inline fill: %v", err)
+	}
+
+	mp := newManagedPopulator(sor)
+	got, fill, err := mp.Populate(context.Background(), pkg, PopulateContext{
+		Member: member, PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
+		OrderRef: "ServiceRequest/sr-" + member, Authored: clock(),
+	})
+	if err != nil {
+		t.Fatalf("managed populate: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("QR mismatch:\n got=%s\nwant=%s", got, want)
+	}
+	if len(fill) == 0 {
+		t.Fatal("expected non-empty fill summary from managed backend")
+	}
+}
+
+// TestManagedPopulatorBuildsAtLine proves managedPopulator.Populate threads
+// PopulateContext.Line into shnsdk.FillQuestionnaireAtLine (closes an
+// earlier KNOWN GAP): a 2.2 request produces a QR carrying the 2.2 wire markers
+// (per_line_uc_test.go's assertWireBuiltAtLines discipline — the intendedUse
+// code system + the qr-coverage extension, the only markers that distinguish
+// 2.2 from 2.0/2.1 on this build's own DTRLineDef), an empty Line is the
+// documented "" → 2.0 delegate (a regression fence: byte-identical to an
+// explicit "2.0" request, so the additive seam for kit/custom Populator
+// implementations never silently changes today's default output), and an
+// unknown line fails closed — mirroring every other AtLine builder
+// (FillQuestionnaireAtLine/FillQuestionnaireFromAnswersAtLine), never a silent
+// 2.0 fallback.
+func TestManagedPopulatorBuildsAtLine(t *testing.T) {
+	sor := newCensusSoR()
+	member := "MBR-COVERED"
+	pkg := wrapDemoLumbarPackage(t)
+	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
+	mp := newManagedPopulator(sor)
+
+	populateAt := func(t *testing.T, line string) ([]byte, error) {
+		t.Helper()
+		got, _, err := mp.Populate(context.Background(), pkg, PopulateContext{
+			Member: member, PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
+			OrderRef: "ServiceRequest/sr-" + member, Authored: clock(), Line: line,
+		})
+		return got, err
+	}
+
+	t.Run("2.2 carries the 2.2 wire markers", func(t *testing.T) {
+		got, err := populateAt(t, "2.2")
+		if err != nil {
+			t.Fatalf("Populate at line 2.2: %v", err)
+		}
+		def, ok := shnsdk.DTRLineDef("2.2")
+		if !ok {
+			t.Fatal("no DTRLineDef for 2.2")
+		}
+		if !bytes.Contains(got, []byte(def.IntendedUseCodeSystem)) {
+			t.Errorf("QR at line 2.2 missing intendedUse code system %q:\n%s", def.IntendedUseCodeSystem, got)
+		}
+		if !bytes.Contains(got, []byte("/StructureDefinition/qr-coverage")) {
+			t.Errorf("QR at line 2.2 missing qr-coverage extension:\n%s", got)
+		}
+	})
+
+	t.Run(`empty Line delegates to 2.0 (regression fence)`, func(t *testing.T) {
+		want, err := populateAt(t, "2.0")
+		if err != nil {
+			t.Fatalf("Populate at explicit line 2.0: %v", err)
+		}
+		got, err := populateAt(t, "")
+		if err != nil {
+			t.Fatalf("Populate with Line unset: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Line=\"\" QR != explicit Line=\"2.0\" QR:\n got=%s\nwant=%s", got, want)
+		}
+	})
+
+	t.Run("unknown line fails closed", func(t *testing.T) {
+		_, err := populateAt(t, "9.9")
+		if err == nil {
+			t.Fatal("Populate at unknown line 9.9: want error, got nil (fail-closed expected)")
+		}
+	})
+}
+
+// wrapDemoLumbarPackage builds the one-entry $questionnaire-package around the
+// demo lumbar Questionnaire (the shape module1_originate.go receives on the DTR-fetch leg).
+func wrapDemoLumbarPackage(t *testing.T) []byte {
+	t.Helper()
+	q := fhirseed.DemoLumbarQuestionnaire()
+	pkg, err := testQuestionnairePackage(q) // the test-only package builder (censusfixture_test.go)
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	return pkg
+}
+
+// TestNew_ManagedPopulatorIsTheDefault: a gateway New builds without
+// WithPopulator populates through the managed populator over its own system of
+// record, as New has decorated it; WithPopulator(nil) keeps that default.
+func TestNew_ManagedPopulatorIsTheDefault(t *testing.T) {
+	env := newInProcessExchange(t)
+	for _, tc := range []struct {
+		name string
+		opts []Option
+	}{
+		{"no option", nil},
+		{"WithPopulator(nil)", []Option{WithPopulator(nil)}},
+	} {
+		cfg := env.originator.cfg
+		cfg.Observer = func(ObserverEvent) {} // New decorates the system of record
+		g, err := New(cfg, tc.opts...)
+		if err != nil {
+			t.Fatalf("%s: New: %v", tc.name, err)
+		}
+		mp, ok := g.populator().(*managedPopulator)
+		if !ok {
+			t.Fatalf("%s: the gateway populates through %T, want the managed populator", tc.name, g.populator())
+		}
+		if _, ok := mp.sor.(observingSoR); !ok {
+			t.Fatalf("%s: the managed populator reads %T, want the system of record as New decorated it", tc.name, mp.sor)
+		}
+	}
+}
+
+// TestWithPopulator_ReplacesTheManagedDefault: the populator WithPopulator
+// sets is the one the gateway populates through.
+func TestWithPopulator_ReplacesTheManagedDefault(t *testing.T) {
+	env := newInProcessExchange(t)
+	want := fakePopulator{canonical: "http://example.org/q"}
+	g, err := New(env.originator.cfg, WithPopulator(want))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, ok := g.populator().(fakePopulator); !ok || got != want {
+		t.Fatalf("the gateway populates through %#v, want the one WithPopulator set (%#v)", g.populator(), want)
+	}
+}

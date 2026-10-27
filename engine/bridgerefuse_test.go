@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // bridgerefuse_test.go — direct unit tests for the kit-bridging-visualization demo's two
 // designed-refusal reshape sites (task2 brief A3a, fix-round: the second live run showed
 // the refusal can legitimately take EITHER of two shapes depending on infra posture):
@@ -13,7 +15,7 @@
 // TestSelectLegToken_RefusalIsLegible) — no HTTP substrate needed for the selection-time
 // tests, since selectLegLine only consults g.cfg.Reg/DeclaredContractVersions/Validator*;
 // the apply-time test drives the REAL chainFor/applyChain machinery (via g.egressAdapt)
-// against the same vendored golden fixture transform_pas_test.go uses, so the
+// against the same vendored golden fixture workstream_pa_transform_pas_test.go uses, so the
 // *SemanticChangeError it reshapes is genuine, not a synthetic stand-in.
 package engine
 
@@ -171,7 +173,7 @@ func TestWriteBridgeRefusal(t *testing.T) {
 
 // TestHandleUC03BridgeEgressAdapt_SemanticChangeErrorReshapesTo200 is the fix-round's
 // apply-time hermetic proof, driven against the REAL chainFor/applyChain machinery (the
-// same vendored golden fixture and up-direction gated step transform_pas_test.go's
+// same vendored golden fixture and up-direction gated step workstream_pa_transform_pas_test.go's
 // TestPasStep2021Up_RequestDirectionGated already proves refuses) rather than a synthetic
 // error — g.egressAdapt only needs route.Chain/payload/x; g.observe is nil-safe on a
 // zero-value Config, so no HTTP substrate is needed. This is exactly the shape the SECOND
@@ -185,7 +187,7 @@ func TestHandleUC03BridgeEgressAdapt_SemanticChangeErrorReshapesTo200(t *testing
 	}
 	route := legRoute{Token: "pa.pas@2.2", BuildLine: "2.0", Chain: steps}
 	// A request Bundle containing a Claim entry — pasStep2021Up's up-direction gate has no
-	// honest 2.1-mandatory source for it (transform_pas_test.go's own control fixture).
+	// honest 2.1-mandatory source for it (workstream_pa_transform_pas_test.go's own control fixture).
 	payload := pasGolden(t, "conformant/pas-submit-request.json")
 
 	g := &Gateway{cfg: Config{TranslateIGLines: true}}

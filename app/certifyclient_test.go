@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -61,7 +63,7 @@ func recordCertificationClients(t *testing.T) (built func() []string, asked func
 func TestAddressConfiguredCertificationClientsUseTheConstructor(t *testing.T) {
 	built, _ := recordCertificationClients(t)
 	cfg := config{FHIRCertifyURL21: "http://certify21.test/fhir", FHIRValidateURL22: "http://validate22.test/fhir"}
-	got := certificationValidators(func(string) string { return "" }, cfg, "http://canonical.test/fhir", nil, nil)
+	got := certValidators(t, func(string) string { return "" }, cfg, "http://canonical.test/fhir", nil, nil)
 	defer engine.CloseCertificationClients(got)
 	want := []string{"http://canonical.test/fhir", "http://certify21.test/fhir", "http://validate22.test/fhir"}
 	if b := built(); !slices.Equal(b, want) {
@@ -76,7 +78,7 @@ func TestAddressConfiguredCertificationClientsUseTheConstructor(t *testing.T) {
 // and sends its request through it.
 func TestCertificationWarmUpUsesTheConstructor(t *testing.T) {
 	built, asked := recordCertificationClients(t)
-	warmCertification(context.Background(), map[string]shnsdk.Validator{"2.1": &shnsdk.OperationValidator{BaseURL: "http://warm21.test/fhir"}})
+	warmCertification(context.Background(), map[string]shnsdk.Validator{"2.1": &shnsdk.OperationValidator{BaseURL: "http://warm21.test/fhir"}}, nil)
 	if b := built(); !slices.Equal(b, []string{"http://warm21.test/fhir"}) {
 		t.Fatalf("certificationClient built %v, want the warmed endpoint", b)
 	}

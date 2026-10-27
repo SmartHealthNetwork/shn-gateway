@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_fhirread_test.go — unit tests for the (C)-fence subject readers relocated from
 // sdk/ into the gateway module (standalone-build closure fix). Fixtures are built
 // with shnsdk builders (published v0.7.0) so the tests work against the same

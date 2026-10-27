@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -8,8 +10,8 @@ import (
 
 // sceneMember resolves the distinct provider-data member under provider-data, the
 // distinct demo member (§4.3) under demo, and the conformance-roster default member
-// when unset. New refuses any other value, and a provider with no profile refuses to
-// originate (requireOriginationProfile), so the default arm is reached by no route
+// when unset. New refuses any other value, and a provider with no profile mounts no
+// /scenario route (originationRoutes), so the default arm is reached by no route
 // today; the row pins the seam itself.
 func TestSceneMember_ProfileDispatch(t *testing.T) {
 	gp := &Gateway{cfg: Config{OriginationProfile: "provider-data"}}
@@ -21,8 +23,8 @@ func TestSceneMember_ProfileDispatch(t *testing.T) {
 		t.Fatalf("demo sceneMember = %q, want MBR-D-UC04", got)
 	}
 	// "" (absent OriginationProfile) reaches the same default arm at the ENGINE seam —
-	// never provider-data or demo by accident. (gateway/app normalizes "" to "demo" ONE
-	// level up, at the config boundary; this asserts the seam itself, not the boundary.)
+	// never provider-data or demo by accident. (With no profile module 1 is off and no
+	// route reaches it; this asserts the seam itself.)
 	ge := &Gateway{cfg: Config{OriginationProfile: ""}}
 	if got := ge.sceneMember("MBR-UC04", "MBR-PD-UC04", "MBR-D-UC04"); got != "MBR-UC04" {
 		t.Fatalf(`"" sceneMember = %q, want MBR-UC04 (the default arm)`, got)

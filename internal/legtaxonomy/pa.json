@@ -1,6 +1,11 @@
 {
   "workstream": "pa",
   "taxonomyVersion": 1,
+  "contracts": {
+    "pa.crd": ["2.0", "2.1", "2.2"],
+    "pa.dtr": ["2.0", "2.1", "2.2"],
+    "pa.pas": ["2.0", "2.1", "2.2"]
+  },
   "legs": [
     {
       "transactionType": "coverage-eligibility",

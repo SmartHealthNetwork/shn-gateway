@@ -23,21 +23,20 @@ import (
 type payorEdgeCarrier uint8
 
 const (
-	// payorEdgePASBundle: a prior-authorization request Bundle. Every
+	// payorEdgeClaimBundle: a Bundle of Claims and their Coverages. Every
 	// Coverage entry is mapped, and every Claim's insurer that names this
 	// payer.
-	payorEdgePASBundle payorEdgeCarrier = iota + 1
-	// payorEdgeDTRParameters: a $questionnaire-package Parameters. Every
-	// "coverage" parameter is mapped; the other parameter resources are the
-	// siblings a reference may resolve to. A payer gateway sends its
-	// payer's system a framed $questionnaire-package operation's own
-	// Parameters on this carrier.
-	payorEdgeDTRParameters
-	// payorEdgeCRDRequest: a CDS Hooks request. prefetch.coverage is a bare
-	// Coverage (the other non-Bundle prefetch resources are its siblings) or a
-	// Bundle (every Coverage entry is mapped; only the Bundle's own entries
-	// are its siblings). A reference found in neither place is refused.
-	payorEdgeCRDRequest
+	payorEdgeClaimBundle payorEdgeCarrier = iota + 1
+	// payorEdgeParametersCoverage: a Parameters whose "coverage" parameters
+	// carry the Coverages. Every "coverage" parameter is mapped; the other
+	// parameter resources are the siblings a reference may resolve to.
+	payorEdgeParametersCoverage
+	// payorEdgeCDSHooksPrefetch: a CDS Hooks request whose prefetch.coverage
+	// is a bare Coverage (the other non-Bundle prefetch resources are its
+	// siblings) or a Bundle (every Coverage entry is mapped; only the Bundle's
+	// own entries are its siblings). A reference found in neither place is
+	// refused.
+	payorEdgeCDSHooksPrefetch
 )
 
 // payorEdgeRefused is a request the payer-identity mapping refuses: the
@@ -183,11 +182,11 @@ func (l payorLocator) absentOrNull(obj relay.NodeID, key string) bool {
 
 // carriesNoCoverage reports whether a request on carrier that yields no
 // Coverage to map carries none at all, so that the mapping has no payor to
-// map and the request is sent as it arrived. It is never so for a
-// prior-authorization Bundle, which names its payer on its Coverage. A
-// questionnaire request may legitimately carry no coverage parameter. A CDS
+// map and the request is sent as it arrived. It is never so for a Claim
+// Bundle, which names its payer on its Coverage. A Parameters request may
+// legitimately carry no coverage parameter. A CDS
 // Hooks request carries none only when both hold: where the Coverage is read
-// is empty (crdCoverageSlotEmpty), and no object anywhere in the request is a
+// is empty (prefetchCoverageEmpty), and no object anywhere in the request is a
 // Coverage (holdsCoverage). The network routed it to this payer, and this
 // payer's own system answers it. Anything else (a prefetch or
 // prefetch.coverage that is not an object, a Bundle there whose entries are
@@ -196,20 +195,20 @@ func (l payorLocator) absentOrNull(obj relay.NodeID, key string) bool {
 // naming no readable payer.
 func (l payorLocator) carriesNoCoverage(carrier payorEdgeCarrier) bool {
 	switch carrier {
-	case payorEdgeDTRParameters:
+	case payorEdgeParametersCoverage:
 		return true
-	case payorEdgeCRDRequest:
-		return l.crdCoverageSlotEmpty() && !l.holdsCoverage()
+	case payorEdgeCDSHooksPrefetch:
+		return l.prefetchCoverageEmpty() && !l.holdsCoverage()
 	}
 	return false
 }
 
-// crdCoverageSlotEmpty reports whether a CDS Hooks request's
+// prefetchCoverageEmpty reports whether a CDS Hooks request's
 // prefetch.coverage holds nothing: prefetch, or prefetch.coverage, is absent
 // or null, or prefetch.coverage is a Bundle whose entry is absent, null, or
 // an array every element of which is an object whose resource is an object
 // with resourceType "OperationOutcome" (a search that found none).
-func (l payorLocator) crdCoverageSlotEmpty() bool {
+func (l payorLocator) prefetchCoverageEmpty() bool {
 	root := l.d.Root()
 	if l.d.Kind(root) != relay.KindObject {
 		return false
@@ -282,13 +281,13 @@ func (l payorLocator) sites(carrier payorEdgeCarrier) (coverages, claims []relay
 		return nil, nil, nil
 	}
 	switch carrier {
-	case payorEdgePASBundle:
+	case payorEdgeClaimBundle:
 		if l.text(root, "resourceType") != "Bundle" {
 			return nil, nil, nil
 		}
 		scope = l.bundleEntries(root)
 		return ofType(scope, "Coverage"), ofType(scope, "Claim"), scope
-	case payorEdgeDTRParameters:
+	case payorEdgeParametersCoverage:
 		for _, p := range l.arrayMember(root, "parameter") {
 			if l.d.Kind(p) != relay.KindObject {
 				continue
@@ -303,7 +302,7 @@ func (l payorLocator) sites(carrier payorEdgeCarrier) (coverages, claims []relay
 			}
 		}
 		return coverages, nil, scope
-	case payorEdgeCRDRequest:
+	case payorEdgeCDSHooksPrefetch:
 		pf, ok := l.objectMember(root, "prefetch")
 		if !ok {
 			return nil, nil, nil
@@ -417,7 +416,7 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 // is a request this payer owns.
 //
 // A request that carries no Coverage at all (carriesNoCoverage) has no payor
-// to map and is sent as it arrived; a prior-authorization Bundle with no
+// to map and is sent as it arrived; a Claim Bundle with no
 // Coverage is refused as one naming no readable payer. Otherwise every
 // Coverage's routing payor (payor[0], the one payer routing reads) must name
 // exactly one payer identity, and it must be one of own: a Coverage naming no

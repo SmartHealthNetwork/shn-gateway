@@ -11,6 +11,8 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 - [Networking](#networking)
 - [Observer stream (optional — local tooling)](#observer-stream-optional--local-tooling)
 - [Operational checks (optional)](#operational-checks-optional)
+- [Exchange stats (`/internal/stats`)](#exchange-stats-internalstats)
+- [The audit outbox](#the-audit-outbox)
 - [Connect your system of record](#connect-your-system-of-record)
 - [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
 - [Advanced overrides](#advanced-overrides-rarely-needed)
@@ -27,14 +29,24 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 
 | Env var | Description |
 |---|---|
-| `SHN_DISCOVERY_URL` | The single anchor — resolves the network's trust-plane endpoints (Hub, Authorization Framework, registrar, consent, audit, PHG, …) and trust anchors. Example: `https://accounts.shn-preview.org/discovery`. |
+| `SHN_DISCOVERY_URL` | The single anchor — resolves the network's trust-plane endpoints (Hub, Authorization Framework, registrar, consent, audit, PHG, …) and trust anchors. Example: `https://accounts.shn-preview.org/discovery`. The gateway starts only when this descriptor accepts wire protocol `2.0.0`, the version it sends (below). |
 | `ROLE` | `provider`, `payer`, `facility`, or `phg`. Must match the role you registered. |
 | `SHN_SECRETS` | Path to the bundle directory written by `shn register -out`. |
+
+**The start check.** The gateway sends wire protocol `2.0.0`'s leg names, so at start it reads the
+descriptor once and starts only when `wireProtocolVersionsAccepted` contains `2.0.0` (with the
+field absent, when `wireProtocolVersion` is `2.0.0`). Otherwise it does not start, and says so:
+`gateway: the network at <SHN_DISCOVERY_URL> does not accept wire protocol 2.0.0 (it accepts
+["1.1.0"]); … Point it at a network whose discovery accepts 2.0.0, or run a gateway before
+v1.0.0`. A descriptor it cannot fetch or read stops the start too, since it cannot confirm what
+the network accepts. There is no setting that skips the check.
 
 ## Validation (required to boot — FR-36) and conformance enforcement
 
 The gateway **refuses to start without a FHIR validator** at every enforcement
-level that checks a payload: `observe` (the default), `structural` and `strict`.
+level that checks a payload: `observe`, `structural` and `strict`. From v1.0.0 a
+gateway that leaves `CONFORMANCE_ENFORCEMENT` unset is at `none` (the default) and
+checks no payload; before v1.0.0 the default was `observe`.
 The published discovery descriptor does not advertise a validator, so at those
 levels you must supply one. From v0.63.0 a gateway at `none`, which checks no
 payload, starts without one ([below](#running-at-none-without-a-validator)).
@@ -46,7 +58,8 @@ with an invalid result, is your choice (`CONFORMANCE_ENFORCEMENT` below):
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | **Not supported.** From v0.63.0 a released gateway refuses to boot when it is set to any value, at every `CONFORMANCE_ENFORCEMENT` level: it selected a stand-in validator that accepted almost everything, and it remains only in SHN's own test builds. For a first wiring test, run [`deploy/eval`](../deploy/eval/README.md), which pairs the gateway with a real validator; to run your own, use the sidecar below; or, from v0.63.0, run at `CONFORMANCE_ENFORCEMENT=none`, which needs no validator ([below](#running-at-none-without-a-validator)). |
 | `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
-| `CONFORMANCE_ENFORCEMENT` | `none`, `observe` (the default when unset), `structural` or `strict`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, after its listener's 5-second shutdown and up to 2 seconds for the handlers it cuts, so give its container a stop timeout above about 17 seconds (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway STABILITY.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
+| `CONFORMANCE_ENFORCEMENT` | `none` (the default when unset, from v1.0.0), `observe` (the default when unset before v1.0.0), `structural` or `strict`. Payload conformance is your opt-in: left unset, a gateway from v1.0.0 runs no payload check, records no finding and needs no validator; its boot line says `conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is; a carried DTR questionnaire package request is not, and from v1.0.0 the payer's answer to one is, against the operation's output Parameters profile at the lines whose profile constrains the parameter names it uses): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, one step of its stop sequence, so give its container the 45-second stop timeout [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway) gives (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway CHANGELOG.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
+| `CONFORMANCE_TOLERATE_PEERS` | Optional, unset by default. From shn-gateway v1.0.0. The payers whose answers your gateway tolerates: payer identities as `<system>\|<value>` (the identity a member's Coverage names, which the exchange is routed by), comma-separated, for example `urn:oid:2.16.840.1.113883.6.300\|00001`. At `structural` or `strict`, a defect the FHIR profile check of a listed payer's DTR or PAS answer would refuse (an answer to a request your gateway sends, or to one it carries for your system through its Da Vinci ingress) is recorded instead and the answer carried; the finding is marked `tolerated: true`. Only that check is tolerated: the content rules on an answer (its IG line's answer graph, `answer.shape`, and its patient linkage, `patient.answer`) and the CDS Hooks answer check refuse as ever, as do network rules and the gateway's own edits; a check that could not run is never tolerated (`500` at `strict`). An answer from an exchange routed by several payer identities is tolerated only when every one is listed. Unset, or empty, tolerates no one: no payer, the network's reference payers included, is exempt by default. The list is logged at boot (`gateway: conformance tolerated peers=…`, `none` when unset); an entry without both parts, or listed twice, refuses to boot. At `none` and `observe` nothing is refused, so the list changes nothing. A hosted gateway cannot set it yet. |
 
 If `FHIR_VALIDATE_URL` is not set (and discovery advertises none), the gateway exits
 with `refusing to run without per-message validation (FR-36)` at `observe`,
@@ -160,7 +173,7 @@ gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
 | Env var | Description |
 |---|---|
 | `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR or PAS subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
-| `SHN_ACCEPT_UNKNOWN_MEMBERS` | Deprecated; removed in a later release. Carrying members your system of record does not hold is the default, so the gateway only logs a warning when it is set. Set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`, it contradicts it and the gateway refuses to boot. |
+| `SHN_ACCEPT_UNKNOWN_MEMBERS` | **No longer read** (from shn-gateway v1.0.0). Carrying members your system of record does not hold is the default, so a gateway that sets it, to any value, logs `gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read` at boot and starts; remove it. Beside `REQUIRE_KNOWN_MEMBERS=true` it no longer refuses to boot: `REQUIRE_KNOWN_MEMBERS` alone decides. Releases before v1.0.0 logged a deprecation warning, and refused to boot when it was set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`. |
 
 ## Networking
 
@@ -270,6 +283,15 @@ network, at every conformance level. There is nothing to configure:
 
   The stages do not overlap, and their sum is at most `latencyMs`; the rest
   is the gateway's own handling between them. Durations only.
+- From shn-gateway v1.0.0, on a call from your own system, `network` says how
+  long it waited on the network: `latencyMs` runs from handing each sealed
+  request to the transport for the Hub to reading the Hub's answer (or the
+  connection failing), the Hub's and the recipient's time together, and
+  `calls` counts the requests handed to the transport. Requests outstanding together are timed
+  once, so it is at most the call's `latencyMs`, and the difference is this
+  gateway's own time. It is absent on a leg from the network and on a call
+  that handed nothing to the transport for the Hub. A duration and a count
+  only.
 - From shn-gateway v0.61.0, when the answer to a leg (your system's, or this
   gateway's own refusal) could not be authorized, the requester is still
   answered `502 authorization failed`, and the access line's `answerError`
@@ -387,6 +409,241 @@ the published binary defaults OFF.
 | `METRICS_NAMESPACE` | CloudWatch metrics namespace. Default `SHN/Preview`. |
 | `METRICS_ENV` | EMF `Env` dimension value. Default `shn-preview`. |
 
+From v1.0.0, with `METRICS_SERVICE` set, the gateway also reports its validator lanes:
+the `ValidatorLane` gauge, every minute, 1 for a lane that has qualified and 0 for one
+that has not, by `line` and `lane` (`routing`, a Compose default lane routing admits;
+`certification`, a lane the certification evidence qualifies itself, reported at every
+level but `none`, where certification never starts); and `ValidatorLaneAttempt`, one
+count per qualification attempt of a default lane once the gateway is serving (the
+attempts a lane boot waits for are not counted), by `line`, `lane` and `outcome`
+(`ready` or `failed`). A gauge that stays 0 is a lane left unqualified.
+
+With `METRICS_SERVICE` set, or an OpenTelemetry exporter on, the gateway also reports its
+shared state and the patients a leg leaves out:
+
+- `StoreError` (`store`): one count per failure of the shared-state store, by store
+  (`exchange`, `replay`, `ingresskey` or `pended`). It is how a database outage shows:
+  a `replay` or `ingresskey` failure on a request is answered `503`, and a failed
+  background reload of the ingress key is counted as `ingresskey` too, though it answers
+  nothing. An `exchange` or `pended` failure leaves the request itself unaffected, and only
+  the record is skipped (for `pended`, the payer's answer still reaches the requester),
+  apart from `POST /scenario/reset`, which answers `503` when it cannot clear the exchange
+  records.
+- `StorePool` (`stat`), with `SHN_STORE_DATABASE_URL` set, every 30 seconds: the store's
+  connection pool, `TotalConns` (open), `AcquiredConns` (in use) and `IdleConns` (open and
+  free), and `EmptyAcquireCount`, the acquires since start that waited for a connection.
+  It is cumulative for the process, so alarm on its rate: a rising rate is a pool
+  saturating.
+- `InvolvedOmitted` (`reason`): one count per patient a leg's involved list left out,
+  by reason: `overflow`, `system-of-record-unavailable`, `unknown-member`,
+  `authorization-refused`, `authorization-failed`, `involvement-not-carried` or
+  `budget`.
+
+With `METRICS_SERVICE` set, or an OpenTelemetry exporter on, the gateway also reports
+its operational state every minute. A value it does not know is left out, never
+reported as 0.
+
+- `GatewayInfo` is 1 for each IG line the declared contract versions name, by `line`,
+  `wireProtocol` (the version this gateway sends) and `level` (`CONFORMANCE_ENFORCEMENT`).
+- `CertificateExpiry` is the seconds until a certificate expires, the soonest of each
+  `kind` and `role`, with `line` for the per-line `validator` and `certify` kinds and
+  `none` for the others. `role` is one of:
+  - `server`, what an endpoint presented on its last response, by the setting that
+    names it (`hub`, `payer-pas`, `fhir-token` and so on);
+  - `self`, the gateway's own certificates, read once when loaded: `ingress` (from
+    `TLS_CERT_FILE`), `otlp` (the OTLP client certificate,
+    `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` or its `_METRICS_` form) and `metrics-pull`
+    (the pull listener's, `METRICS_PULL_TLS_CERT_FILE`);
+  - `trust-root`, the soonest root of a bundle you added through `SSL_CERT_FILE` or
+    `SSL_CERT_DIR`, as one series; the image's and the system's own bundle files and
+    directories are not read, but a file of your own that combines the system's roots
+    with yours reports the soonest of all of them.
+
+  A server certificate's reading is left out once its endpoint has not answered for
+  24 hours, apart from the endpoints read once at start (`discovery`, `hub-key`,
+  `authorization-key`). `CertificateExpiryMin` is the soonest of the `server` and
+  `self` certificates, one stream to alarm on; a bundle can carry roots nothing uses,
+  so `trust-root` is left out of it.
+- `IngressKeyRemaining` is the seconds until the ingress signing key expires, and
+  `IngressKeyAge` the age of the newest key, with `SHN_STORE_DATABASE_URL` set. A
+  remaining time that keeps falling while the age grows past a day is a rotation that
+  has stalled.
+- `DependencyAge` and `DependencyAgeMax` are the seconds since the registrar feed was
+  last read successfully, by `dependency` (`registrar-feed`); the age keeps growing
+  while reads fail. `PeersKnown` is the holders the last successful read found.
+- `TokenAcquisition` counts each Authorization Framework token acquisition, its one retry
+  included, by `outcome`:
+  `ok`; `denied` (401 or 403); `unavailable` (no answer, a timeout, an answer cut off,
+  or 429, 502, 503 or 504); or `failed` (any other answer). `TokenLatency` is its
+  duration, its one retry included.
+
+From v1.0.0, with `METRICS_SERVICE` set, the gateway also writes these EMF
+metrics, each beside the ones above (which are unchanged), every dimension
+from a fixed list:
+
+- `ExchangeRefused` (`direction`, `rule`, `by`) for every refused call, and
+  `ExchangeRefusedByRule` (`rule`), the same count by rule alone, for an alarm
+  per rule. It leaves out the exchange, since CloudWatch bills each
+  combination of dimensions; the OpenTelemetry metric carries it.
+- `ExchangeStageLatency` (`direction`, `exchange`, `stage`): where a call's
+  time went. A leg from the network reports its seven stages (the access
+  line's `stages`) and `rest`, the time in none of them. A call from your
+  own system reports `network`, its wait on the Hub and the recipient (the
+  access line's `network.latencyMs`), and `self`, the rest. A call's stages
+  add up to its latency; each line is in whole milliseconds, truncated, as
+  `ExchangeLatency` is, so their sum may fall short of it by a millisecond a
+  stage. A stage the call did not enter is not reported.
+- `RequestBytes` and `ResponseBytes` (`direction`, `exchange`): the size of
+  the call's request body, when it was read to its end, and of the answer
+  written.
+- `ActiveRequests` (`direction`): the most calls in flight at once in the
+  minute.
+- `ConformanceFinding` (`level`, `kind`, `action`, `tolerated`) for each
+  conformance finding recorded, and `ObserveCheckDropped` for each observe
+  check dropped because its queue was full or closed: these appear only where
+  conformance checks run. `ConformanceFinding` leaves out the exchange, as
+  `ExchangeRefused` does; the OpenTelemetry metric carries it. `ValidatorLatency` (`line`, `lane`) is
+  each `$validate` call the gateway makes, its conformance checks' and the
+  DTR answer check SHN's own line edit relies on, which runs at every level
+  where a validator lane serves the line. A lane that is not configured, or
+  has not qualified, makes no call and records none.
+
+They add lines to a call's EMF output: for a leg from the network, up to 10
+more when answered (its stages, `rest` and its two sizes) and 12 when
+refused; for a call from your own system, up to 4 more when answered
+(`network`, `self` and its two sizes) and 6 when refused. Each `$validate`
+call adds a `ValidatorLatency` line and each finding a `ConformanceFinding`
+line, at any level where they happen. Beside these, each Authorization
+Framework token a call acquires writes a `TokenLatency` and a
+`TokenAcquisition` line, and a call from your own system writes a
+`LegOutcome` line for each step of its leg (routed, then its outcome), and
+a `LegError` line when the leg failed or was unreachable.
+[`MONITORING.md`](MONITORING.md), "What EMF costs", gives the lines each kind
+of exchange writes in all, and what they cost.
+
+## OpenTelemetry metrics export (optional)
+
+From v1.0.0 the gateway can push the same metrics over OTLP, or serve them for a
+Prometheus server to scrape, or both (every instrument and how to read it:
+[MONITORING.md](MONITORING.md)), configured by a closed subset of the
+OpenTelemetry SDK's environment settings. It is independent of the
+CloudWatch metrics above: each, both or neither. The metrics carry no payload, no
+peer's identity and no identifier; the gateway's own holder id appears only on the
+resource. Recording never waits on an export, and a vendor that is slow, down or
+refusing changes no exchange.
+
+| Env var | Description |
+|---|---|
+| `OTEL_CONFIG_FILE` | The path of an OpenTelemetry configuration file (`file_format` 1.0). When set, the file governs and every other `OTEL_*` setting in this table is ignored, `OTEL_SDK_DISABLED` included; see "The configuration file" below. |
+| `OTEL_METRICS_EXPORTER` | `otlp` turns OTLP push on, `prometheus` the Prometheus pull listener, `otlp,prometheus` both. Unset, or `none`, exports nothing. |
+| `OTEL_SDK_DISABLED` | `true` exports nothing, whatever else is set. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | `http/protobuf` (default) or `grpc`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | The collector or vendor URL, `http://` or `https://`. For `http/protobuf`, `/v1/metrics` is appended to the general form; the metrics form is used as given. Default `http://localhost:4318/v1/metrics`, or `http://localhost:4317` for `grpc`. A plain `http://` endpoint on another host is allowed, and logged at boot. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_METRICS_HEADERS` | Comma-separated `key=value` headers sent with every export, values percent-encoded (for example `authorization=Bearer%20<token>`). Values are never logged. |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE`, `OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY`, `OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY` | PEM files: the CA certificates to trust, and a client certificate and key for mTLS. They need an `https://` endpoint. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_METRICS_COMPRESSION` | One export request's timeout in milliseconds (default 10000), and `gzip` or `none` (default). |
+| `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | Milliseconds between exports (default 60000) and the bound on one export (default 30000). |
+| `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `cumulative` (default), `delta` or `lowmemory`. OTLP push only: a scrape is always cumulative. |
+| `OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION` | `explicit_bucket_histogram` (default; SHN's buckets from 5 ms to 60 s) or `base2_exponential_bucket_histogram`. OTLP push only: a scrape always has SHN's buckets. |
+| `OTEL_EXPORTER_PROMETHEUS_HOST`, `OTEL_EXPORTER_PROMETHEUS_PORT` | The pull listener's bind (default `localhost` and `9464`), its own, never the gateway's listener: it serves `GET /metrics` (and `HEAD`) and nothing else. A loopback bind (`localhost`, or a loopback address such as `127.0.0.1` or `::1`; any other host name counts as another host, and `localhost` must bind a loopback address or nothing is served) needs nothing more. Any other host, `0.0.0.0` included, is served only over TLS and only with `METRICS_PULL_TOKEN`, `METRICS_PULL_CLIENT_CA_FILE` or both; without them nothing is served there and `telemetry-config` says so. A bind that fails (the port taken) turns pull off the same way; the gateway runs on. |
+| `METRICS_PULL_TLS_CERT_FILE`, `METRICS_PULL_TLS_KEY_FILE` | PEM certificate and key the pull listener serves TLS with, read once at start (as is the client CA file): a renewed certificate takes a restart. |
+| `METRICS_PULL_TOKEN` | A bearer token every scrape must send (`Authorization: Bearer <token>`); a scrape without it, or with another, gets `401`. Letters, digits and `-._~+/`, optionally ending in `=`. Separate from `CHECKS_TOKEN`; never logged. |
+| `METRICS_PULL_CLIENT_CA_FILE` | PEM CA certificates: every scrape must present a client certificate they sign (mTLS). Needs the TLS certificate and key. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | The resource's `service.name` (else `OTEL_RESOURCE_ATTRIBUTES`' `service.name`, else `METRICS_SERVICE`, else `shn-gateway`) and further resource attributes. The resource also carries `service.version`, `service.instance.id` (stable for a host), `deployment.environment.name` (from `METRICS_ENV`, when it is set), `shn.holder_id` and `shn.role`; `OTEL_RESOURCE_ATTRIBUTES` cannot set `service.version` or any `shn.*` attribute. |
+
+The gateway follows the OpenTelemetry specification for these settings except in two
+documented ways:
+
+- **Off by default.** `OTEL_METRICS_EXPORTER` unset means `none`, where the
+  specification's default is `otlp`: a gateway exports nothing unless you ask.
+- **A setting that is not valid never stops the gateway, and never sends metrics to a
+  guessed place.** The gateway always boots and logs a line naming the setting (never
+  its value) and the fix, and the `telemetry-config` check fails. A setting that only
+  tunes export (the interval, the timeouts, the temporality, the histogram aggregation,
+  the compression) falls back to its default and export continues. A metrics form that
+  is not valid is treated as unset, so a valid general form applies. A setting that
+  decides where metrics go or how they authenticate (the endpoint, the protocol, the
+  headers, the certificates) turns OTLP export off when no valid form of it remains:
+  it never falls back to the built-in localhost default in place of a value you set. An
+  entry of `OTEL_METRICS_EXPORTER` the gateway does not recognize is dropped and named,
+  and the entries it does recognize still run. A pull setting that is not valid turns
+  the pull listener off, and OTLP push, when on, runs on.
+
+Whenever an exporter is on, push or pull, it also carries the Go runtime's metrics
+(`go.memory.used`, `go.memory.limit`, `go.memory.allocated`, `go.memory.allocations`,
+`go.memory.gc.goal`, `go.goroutine.count`, `go.processor.limit` and `go.config.gogc`)
+and the process's: `process.cpu.time` by `cpu.mode` (`user`,
+`system`), `process.memory.usage` (the resident memory, on Linux; left out elsewhere) and
+`process.uptime`. They follow the OpenTelemetry semantic conventions' names and units, and
+are not written to CloudWatch.
+
+Trace, log and propagator settings, and any other `OTEL_*` setting the gateway does not
+read, are named in one boot warning and ignored, and so are the pull settings when
+`OTEL_METRICS_EXPORTER` does not name `prometheus`. `OTEL_GO_X_DEPRECATED_RUNTIME_METRICS`
+has no effect: the deprecated `process.runtime.go.*` and `runtime.uptime` metrics it would
+add are never exported, and a boot warning says so. `/internal/checks` reports `telemetry-config`
+whenever a monitoring setting, or any other `OTEL_*` setting, is set, and `telemetry-export` (the newest export's
+outcome, read without contacting the vendor) while OTLP export is on; both are
+`advisory`, so neither ever reads as the gateway not being ready. At stop, the final export runs after the audit outbox drains and the
+observe checks flush, within 5 s: one step of the stop
+([DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway), "Stopping the gateway").
+
+**The configuration file.** With `OTEL_CONFIG_FILE` set, the gateway reads that file as an
+OpenTelemetry configuration file (`file_format` 1.0), with `${VAR}` references replaced from
+its environment, and ignores the other `OTEL_*` settings. The file builds the same export
+as the settings above, with the same checks, defaults and boot lines:
+
+- `disabled: true` exports nothing. A file with no `meter_provider`, or no reader the
+  gateway supports, exports nothing.
+- One `periodic` reader with an `otlp_http` or `otlp_grpc` exporter is the OTLP export: its
+  `endpoint` (used as given), `headers` and `headers_list` (`headers` win), `timeout`,
+  `compression`, `temporality_preference`, `default_histogram_aggregation` and `tls`
+  files, and the reader's `interval`, `timeout` and `cardinality_limits`. A cardinality
+  limit can only lower the gateway's own limit for an instrument kind, never raise it,
+  and only a reader that exports sets one. A timeout or interval of 0 (no limit) is not
+  supported: the default applies, and it is reported. A header whose value is null (an
+  unset or empty `${VAR}`) is not sent, and reported.
+- One `pull` reader with a `prometheus/development` exporter is the Prometheus pull
+  listener: its `host` and `port` (defaults `localhost` and `9464`), protected exactly as
+  in the table above by `METRICS_PULL_TOKEN`, `METRICS_PULL_TLS_CERT_FILE`,
+  `METRICS_PULL_TLS_KEY_FILE` and `METRICS_PULL_CLIENT_CA_FILE`, which the file has no
+  place for: a host other than this machine's without TLS and a token or client CA
+  serves nothing (the four settings, set beside a file with no pull reader, are named in a
+  boot warning). The series are named as in environment mode, so
+  `without_scope_info: false`, `without_target_info: true`, a `translation_strategy`
+  other than `underscore_escaping_with_suffixes`, `with_resource_constant_labels`, any
+  other key, the reader's `producers` and its `cardinality_limits` are ignored and
+  reported. The file's views apply to what it serves too, except that a view's
+  `base2_exponential_bucket_histogram` is served on the metric's own buckets (the text
+  format has no exponential histogram), and reported.
+- `resource` `attributes` and `attributes_list` set the resource, `service.name` among
+  them; the gateway's own attributes (`service.version` and `shn.*`) cannot be set there.
+- `views` apply over the gateway's own: a view may rename a metric, change its
+  description or aggregation, or drop attributes (`attribute_keys` `included` or
+  `excluded`); it cannot add an attribute. The first view that matches an instrument
+  applies, so an instrument is never exported twice. `explicit_bucket_histogram` without
+  `boundaries` gives the instrument's own explicit buckets, even where the reader's
+  default aggregation is exponential. Ignored and reported: a view's
+  `aggregation_cardinality_limit` (set limits by instrument kind on the reader instead),
+  `record_min_max`, and an exponential histogram's `max_scale` and `max_size` (the
+  gateway's is 160 buckets, scale up to 20). A view that selects nothing (an empty string selects nothing), renames every
+  instrument a wildcard selects, or lists boundaries out of order is reported and left
+  out.
+- `tracer_provider`, `logger_provider` and `propagator` are named in one boot warning and
+  ignored: the gateway exports metrics only.
+- Reported through `telemetry-config` and turned off, each alone: a second `periodic`
+  reader (send to several destinations through an OpenTelemetry Collector), a second
+  `pull` reader, a `console` or other exporter, `encoding: json`, and any
+  setting that is not valid, named by its place in the file (for example
+  `meter_provider.readers[0].periodic.exporter.otlp_http.endpoint`). Ignored and reported:
+  `producers`, an `exemplar_filter` other than `always_off` (exemplars stay off),
+  `tls.insecure` (the endpoint's scheme decides), `attribute_limits`, `resource`
+  `schema_url`, and a `file_format` other than 1.0 (read as 1.0). A client certificate
+  without its key, or the reverse, is named by the half that is missing.
+- A file that cannot be read or does not parse exports nothing, reported as
+  `OTEL_CONFIG_FILE`; the gateway never falls back to the other settings in its place.
+  The report never quotes the file, which can hold header values.
+
 ## Operational checks (optional)
 
 The gateway can probe its own outbound dependencies — your FHIR system of
@@ -398,6 +655,17 @@ demand. This is an operator diagnostic only: a failing probe never affects
 | Env var | Description |
 |---|---|
 | `CHECKS_TOKEN` | Bearer token that gates `GET`/`POST /internal/checks`. When set, a request must present `Authorization: Bearer <token>` exactly, or it gets `401`. When unset (the default), the endpoint instead accepts only requests that reach it directly from the gateway's own host (loopback), returning `403` for anything else — **note that behind any reverse proxy or load balancer, the connecting address the gateway sees is the proxy's, not the original caller's**, so leaving `CHECKS_TOKEN` unset behind a proxy means only that proxy's own host can reach it, not any external caller. Set a token to allow probing from off-host operator tooling. |
+| `SHN_VERSION` | Overrides the version string `GET /health` reports as `version`. Unset, it reports the build's own version (below). SHN's own hosted deployments may set it; a partner's gateway need not. When it differs from the build's version, the boot line names both. |
+
+**The build's own version.** Each gateway binary knows its version, and logs it at boot
+(`gateway: build version v1.0.0 (stamp)`). A released image is stamped with its release tag
+when it is built: `docker build --build-arg GATEWAY_VERSION=v1.0.0 .` in a clone of the
+release. A build without the argument uses the version Go records for the module: the
+release tag for `go install github.com/SmartHealthNetwork/shn-gateway/cmd/gateway@v1.0.0`, or
+for a build from a clone at that tag. Otherwise it reads as `v0.0.0-unstamped`, which no
+check counts as a release. `gateway -version` prints it and where it came from
+(`v1.0.0 stamp`) and exits, before it reads any setting: `docker run --rm
+ghcr.io/smarthealthnetwork/shn-gateway:v1.0.0 -version`.
 
 **`GET /internal/checks`** returns the most recent completed run: `503`
 (`{"error":"checks have not completed yet"}`) if the gateway hasn't completed
@@ -432,14 +700,43 @@ run's results:
 Each result's `target` is redacted to `scheme://host` — never a path, query
 string, or credential, even if the URL you configured carried one.
 
+A result that carries `"advisory": true` reports on the gateway's monitoring
+(`telemetry-config` and `telemetry-export`): a failing advisory result means
+some monitoring is off or not delivered, never that the gateway is not ready to
+carry exchanges. Every other result omits the field.
+
+A result that ran no probe carries `"noProbe": true` and has no latency (`latencyMs`
+is 0): the two monitoring checks and each `validator-lane-<line>` (read from the
+gateway's own state), an endpoint the network's discovery does not name
+(`endpoint-unknown`), and a check the run deadline left unprobed (`not-checked`). A
+result whose probe ran omits the field.
+
 A failing result also carries a machine-readable `failure` object: `code` is one of
 `unreachable` (the endpoint never answered), `http-status` (it answered with a failing
 status), `invalid-capability-statement` (a 2xx answer that is not a valid
 CapabilityStatement), `credential-rejected` (the credential check failed), `not-checked`
-(the run deadline left this probe unprobed), or `internal` (a gateway-side bug, not a
-network condition); `hint` carries the redaction-safe specifics (for example `HTTP 401`)
+(the run deadline left this probe unprobed, or no metrics export has run yet), `internal` (a gateway-side bug, not a
+network condition), `version-drift` (for a contract both you and the endpoint name, it
+publishes none of the versions you declared for it), `invalid-davinci-configuration` (the
+endpoint published a `.well-known/davinci-configuration` that could not be parsed;
+publishing none is not a failure), `endpoint-unknown` (the network's discovery names no
+endpoint for the check, so nothing was probed), `lane-unqualified` (a default validator lane has not
+qualified yet, below), or `invalid-telemetry-configuration` (a monitoring setting is not
+valid: one that tunes export falls back to its default and export continues, while one
+that decides where metrics go or how they authenticate turns OTLP export off; either
+way the gateway serves as before, and `hint` names the settings, never their
+values); `hint` carries the redaction-safe specifics (for example `HTTP 401`)
 and is omitted when the code says it all. Passing results carry no `failure` key. The
 same redaction rule applies to `hint` as to `target` and `detail`.
+
+From v1.0.0 the results also include one `validator-lane-<line>` per Compose default
+validator lane (a line with no `FHIR_VALIDATE_URL_<line>`). It reads the lane's
+qualification from the gateway's own state, dials nothing and starts no attempt, and a
+`GET` reads it afresh rather than from the last run. It
+passes once the lane has qualified; until then it fails with `lane-unqualified`, whose
+`hint` says whether the lane is on its first attempt (`qualifying (attempt 1)`) or
+retrying after failures (`failed, retrying (<n> attempts): <reason>`, the reason in
+the words of the `validator_qualification` line, never a validator's answer).
 
 **`POST /internal/checks`** runs the probes immediately and returns the same
 shape, with two safety limits:
@@ -465,6 +762,12 @@ overrides](#advanced-overrides-rarely-needed) included — is checked with a pla
 reachability request. `PAYER_DIRECTORY` is a local file path, not a network
 endpoint, and is never probed.
 
+One check is not a setting: `AUDIT_ENDPOINT` is the audit endpoint the network's
+discovery names (`endpoints.audit`), where the gateway sends its audit records (see
+[The audit outbox](#the-audit-outbox)). It is checked with a plain reachability request
+and, when discovery names none, fails `endpoint-unknown` without probing anything: the
+gateway's audit records then wait in its outbox.
+
 When a base the gateway calls with a credential is configured with one
 (`PAYER_DAVINCI_BASE_URL` with `PAYER_DAVINCI_TOKEN_URL`, `FHIR_DATA_URL` with
 `FHIR_TOKEN_URL`), its `$metadata` check authenticates the same way the
@@ -484,13 +787,117 @@ read, and runs are held to the 30-second cooldown above. A base configured witho
 credential is read anonymously, as the gateway calls it, and carries no
 `anonymous` object.
 
+## Exchange stats (`/internal/stats`)
+
+From v1.0.0 every gateway answers `GET /internal/stats` with a summary of the
+exchanges it answered: per direction and exchange kind, how many there were, by outcome,
+and their latency at P50, P95 and P99. It is always on, with no setting, and does not
+depend on the CloudWatch or OpenTelemetry metrics above. It carries no payload, no peer's
+identity and no identifier. Each replica keeps its own counts, in memory, from when it
+started.
+
+Access is `/internal/checks`' rule: with `CHECKS_TOKEN` set, a request must present
+`Authorization: Bearer <token>` (else `401`); without it, only a request from the
+gateway's own host is answered (else `403`). Any method but `GET` gets `405`.
+
+The answer is JSON (fields may be added in a minor release; decode tolerantly):
+
+- `replica`: this replica's `service.instance.id`, the value on its OpenTelemetry
+  resource. `since`: when it started counting. `generatedAt`: when the answer was read.
+- `sketch`: the latency sketch's parameters, `relativeError` (0.02), `minSeconds`
+  (0.0001) and `maxSeconds` (300).
+- `windows`: `1m`, `5m` and `1h`, each the last 1, 5 or 60 complete minutes plus the
+  current one, from `start` (never before `since`) to `generatedAt`. Each window
+  lists, for every series with any traffic in it:
+  - `exchanges`: `direction`, `exchange`, `count`, `rate` (exchanges per second over
+    the window), `outcomes` (counts by outcome, the values of the `Exchange` metric's
+    `outcome`) and `latency`, from arrival to answer;
+  - `backends`: the exchanges that called your own system, by `exchange` only (the
+    backend metrics carry no direction), as the `BackendCall` metric counts them:
+    `count` (one per such exchange, whatever the call's class) and `latency` (that
+    call's duration, where it is known).
+
+  A `latency` gives `p50`, `p95`, `p99` and `max` in seconds, absent when no duration
+  was recorded, and the `sketch` they were read from. Each quantile is within the
+  sketch's relative error for durations from `minSeconds` to `maxSeconds`; a shorter
+  one reads as 0, and a longer one as the top bucket's value (about 299 s), while
+  `max` states the longest exactly.
+
+**Merging replicas.** The quantiles of several replicas cannot be averaged, but their
+sketches merge exactly. A sketch is `zero` (values at or below `minSeconds`), `buckets`
+(each `[index, count]`, ascending; an index can be negative) and `max`. When two answers
+carry equal `sketch` parameters, add their `zero` counts and the counts of equal indexes,
+and take the larger `max`. Answers whose `sketch` parameters differ (another release's
+bucketing) must not be merged: their indexes name different buckets. To read a quantile `q`
+from `n` values, take the first bucket, zero bucket first and then in index order, at which
+the running count reaches `q·n` (the nearest rank, the bucket Prometheus'
+`histogram_quantile` reads from for a classic histogram; for a native one at `q` ≥ 0.5 it
+can read the next value up, which it does where `(1−q)·n` comes out a whole number, as it
+always does at the median). It reads 0 for the zero bucket, else `2·γ^i/(γ+1)` for bucket
+`i`, where `γ = (1+relativeError)/(1−relativeError)`, and never more than `max`.
+
+`shn gateway stats`, in the `shn` CLI from shn-sdk v1.0.0, does this for you: give it
+each replica's base URL (`--url`, repeatable) and the `CHECKS_TOKEN` in a file
+(`--token-file`), and it prints one table by exchange for the window you name
+(`--window`, `5m` by default; `--json` for JSON). Rates add across replicas. It
+refuses answers with different `sketch` parameters, a malformed answer, and one replica
+given twice, naming the URL.
+
+## The audit outbox
+
+The gateway writes audit records about its own work and sends them to the network's
+Audit Plane. As of v1.0.0 it writes none yet; the outbox that will carry them is in
+place. There is no setting for it.
+
+- **Signed by your gateway.** Each record names your gateway's holder as its sender
+  and is signed with the holder signing key in your `SHN_SECRETS` bundle. Before it is
+  queued, a record is checked against the shape the Audit Plane accepts from a gateway,
+  bounded more tightly where the Plane leaves a field open; one that fails is refused,
+  counted, and never stored.
+- **Signed when it is sent.** The outbox keeps each record unsigned, and the gateway
+  signs it with the key it is running with each time it sends it. To rotate your
+  holder's signing key (`shn rotate`), stop the gateway, rotate, and start it with the
+  new bundle: records still in a durable outbox go out under the new key.
+- **Sent to the endpoint discovery names.** The gateway reads `endpoints.audit` from the
+  network's discovery once, at start, as it reads the network's other endpoints; no
+  setting overrides it (`AUDIT_URL` is not read). When discovery names none, records are
+  queued and nothing is sent: the `AUDIT_ENDPOINT` check fails `endpoint-unknown` and the
+  gateway logs it at start.
+- **Where it waits.** With `SHN_STORE_DATABASE_URL` the outbox is the table
+  `gw_audit_outbox` in that database: audit records waiting to be signed and
+  sent, metadata only (no clinical content), each deleted once the Audit Plane
+  accepts or refuses it. It survives a restart, and replicas sharing the database
+  share it, never sending one record twice at once. Without the DSN it is in memory:
+  at a stop the gateway sends what it can for up to 10 seconds, and counts what is
+  left as lost. Before it starts, it reports how many records it holds as
+  `AuditQueueDepth` and, when discovery names an audit endpoint, logs the number, so a
+  gateway killed during the drain still leaves that count
+  ([DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway), "Stopping the gateway").
+- **Bounded.** It holds at most 10,000 records for your holder. One more drops the
+  oldest, counted, so it cannot grow without limit while the Audit Plane is out of reach.
+- **Retried.** A record the Audit Plane refuses (400, 403, 413, a 401 other than "unknown
+  sender", or a 409 for a record id it already holds) is dropped, counted, and not sent
+  again. Any other answer short of acceptance (none at all, a 5xx, a 408 or 429, or a 401
+  "unknown sender" while the Plane does not know your holder yet) is sent again, waiting
+  1 second after the first failure and doubling to at most 5 minutes.
+- **Never in the way.** Queuing a record never fails or holds up an exchange: it waits at
+  most 200 ms for the outbox, and a record that cannot be queued in time is counted and
+  dropped while the exchange goes on as before.
+
+With `METRICS_SERVICE` set the outbox reports `AuditAppendSent`, `AuditAppendRetried`
+(`reason`), `AuditAppendDroppedBy` (`reason`: `overflow`, `invalid`, `store`, `refused`,
+`conflict`, `stopped`), the gauge `AuditQueueDepth` each minute, and, while discovery
+names no audit endpoint, the gauge `AuditEndpointUnknown` with the queue's depth.
+`AuditAppendDropped` (`Service` only, for a single-metric alarm) counts every record that
+left the outbox without the Audit Plane's acceptance, whatever the reason.
+
 ## Connect your system of record
 
 See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 
 | Env var | Description |
 |---|---|
-| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). Unset means `demo`. From shn-gateway v0.57.0 any other value refuses to boot, on every role, with an error naming the accepted values; that includes `demo` or `provider-data` in another case or with surrounding whitespace, since the value is matched exactly. Earlier releases accepted an unknown value and built the requests the gateway originates on no known lane. |
+| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). Setting either is your declaration that your system cannot speak Da Vinci itself, so the gateway runs module 1, the `/scenario/*` origination API, for it. Unset, module 1 is off: the gateway serves its Da Vinci ingress and relays, mounts no `/scenario` route (each answers `404`), and needs no module 1 setting; `SCENARIO_CALLERS_FILE` then refuses to boot, and a set `NPI`, `PROVIDER_DTR_NATIVE`, `PROVIDER_DTR_POPULATE_URL` or `PROVIDER_DTR_POPULATE_TOKEN_URL` is unused and named in a boot warning, though still checked at boot (an invalid `NPI`, or an incomplete `PROVIDER_DTR_*` group, refuses boot). Before shn-gateway v1.0.0, unset meant `demo`. From shn-gateway v0.57.0 any other value refuses to boot, on every role, with an error naming the accepted values; that includes `demo` or `provider-data` in another case or with surrounding whitespace, since the value is matched exactly. Earlier releases accepted an unknown value and built the requests the gateway originates on no known lane. |
 | `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Required on every role but a native-forward payer.** The gateway reads its members, coverage and clinical facts from your own FHIR server; there is no built-in persona stub any more, so an unset value is a boot error naming this variable. From shn-gateway v0.58.0 (earlier releases refuse to boot without it on every role), a payer whose own system answers every exchange (`PAYER_DAVINCI_BASE_URL`, below) may leave it unset: its gateway then keeps no system of record. It binds each member from the request that names it, exactly as it binds a member a system of record does not hold (see [Members your system of record does not hold](#members-your-system-of-record-does-not-hold-every-role)), and answers coverage eligibility only through `PAYER_ELIGIBILITY_URL`: without that endpoint, an eligibility request is answered `501` "coverage eligibility is not offered by this payer". It logs `gateway: no system of record (FHIR_DATA_URL unset)` at boot. `REQUIRE_KNOWN_MEMBERS=true` needs a system of record, and refuses to boot without one. |
 | `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client credential block below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
@@ -516,7 +923,7 @@ sent to your system and your answer is relayed, whatever the ledger holds for th
 authorization — no pend recorded here, a decision already recorded, or another
 amendment still with your system. The ledger then records your answer by the rules
 below. When an amendment does not match a pend this gateway recorded, the gateway
-notes `pend.amendment-unbound:<reason>`, the reason being `not-pended` (no pend here),
+notes `pend.amendment-unbound` with the reason as its `detail`: `not-pended` (no pend here),
 `already-decided`, `update-in-progress` (another amendment is still with your system),
 `ledger-unavailable`, `no-prior-claim` (the update names no prior claim) or
 `other-requester`. Such an
@@ -1391,6 +1798,23 @@ carry your member's **active** order as your system holds it. CRD 2.1 and 2.2 ac
 order on those hooks; the CRD 2.0 profiles for them require `draft`, so a CRD 2.0 payer that
 enforces that profile refuses such a request (a known limitation).
 
+When your order's `requester` names the clinician who placed it, every prior-authorization
+request the gateway builds about that order (the submission and each amendment) carries that
+clinician's record from your system of record, so the payer resolves the order's requester
+inside the request. It carries the record the `requester` names (a `Practitioner`,
+`PractitionerRole` or `Organization`) and the records those reference, up to two references
+away from the requester, when they are a `Practitioner`, `PractitionerRole`, `Organization` or
+`Location`: for example a Practitioner's `qualification.issuer`, or a PractitionerRole's
+`practitioner`, `organization` and `location`. Each record is carried once, with the content
+your system holds (as JSON, its values unchanged); on the reference payers' lane, the references the gateway resolves this way
+are written as the entries' absolute `fullUrl`s, as every other reference to an entry is. The
+records are read once, before the gateway sends anything for the order. When your system cannot
+supply them, the gateway refuses the request before sending anything (`422`, naming the
+reference and the reason): a record the requester leads to is not in your system of record, is
+of another type, is more than two references away, is not a `Type/id` reference into your
+system, or there are more than 16. A contained requester (`#id`) travels inside the order, and
+an order that names no requester is sent exactly as before.
+
 A CDS Hooks request the gateway
 builds for your own workflow names the patient by the member id too. When your server names
 the patient differently, the gateway — as the author of that request — names the patient by
@@ -1507,7 +1931,10 @@ never read `fhirServer`.
   certificate authorities. An EHR server whose certificate a private CA signs is trusted by
   adding that CA to them: on Linux (the gateway's image), its certificate in a directory named
   in `SSL_CERT_DIR` beside the system's own, for example
-  `SSL_CERT_DIR=/etc/ssl/certs:/etc/ehr-ca`; on macOS or Windows, the system's trust store.
+  `SSL_CERT_DIR=/etc/ssl/certs:/etc/ehr-ca`, or a PEM bundle file in `SSL_CERT_FILE`, which
+  the Go runtime reads in place of the system's default bundle file (the system's certificate
+  directories are still read unless `SSL_CERT_DIR` names others); on macOS or Windows, the
+  system's trust store.
   Every TLS connection the gateway makes then trusts it, and verification cannot be turned
   off. Each connection has 2 s to
   connect and 2 s for TLS, both reads share one 4 s budget, and each answer may be at most
@@ -1572,14 +1999,32 @@ inside the SHN-operated network itself): `AUTHZ_URL`, `HUB_URL`, `CONSENT_URL`,
 `REGISTRAR_URL`, `FHIR_VALIDATE_URL`, `AUTHZ_PUBKEY_URL`, `HUB_TRANSPORT_KEY_URL`. Explicit env always wins over discovery.
 Before v0.63.0 the list also had `AUDIT_URL` and `PHG_URL`; later releases read neither, and a gateway with either still set logs one boot warning for it.
 
-`NPI` is the ordering clinician's NPI for requests a provider gateway originates
-(`ORIGINATION_PROFILE`); it defaults to a synthetic placeholder. A CDS Hooks request's `userId`
-is your order's `requester` when it names a `Practitioner` or `PractitionerRole`, and
-`Practitioner/<NPI>` otherwise. `NPI` also signs attestations that name no clinician and names
-the provider of eligibility requests. (A gateway built on the engine with no NPI refuses a
-CDS Hooks request whose order names no requester — `422 order names no requester; configure
-NPI` — and an attestation with no clinician NPI, unless the order's requester `Practitioner`
-carries one, and its eligibility requests name no provider.)
+`NPI` is your clinician's NPI for the requests a provider gateway originates
+(`ORIGINATION_PROFILE`), used where your own records name none. It has no default: unset, the
+gateway states no clinician of its own. Set, it must be a ten-digit NPI with a valid check digit,
+or the gateway refuses to boot. The ordering clinician (a CDS Hooks request's `userId`) and the
+attesting clinician (an attestation's NPI) come from the first of these that names one:
+
+1. an `npi` the request sends, when scenario caller authentication (`SCENARIO_CALLERS_FILE`)
+   verified its caller;
+2. your order's `requester` in your system of record: `userId` names it, and an attestation
+   uses its NPI (a `Practitioner`'s `us-npi` identifier, or a `PractitionerRole`'s
+   practitioner's);
+3. `NPI`;
+4. an `npi` the request sends without a verified caller.
+
+A sent `npi` that is not a valid NPI is refused (`400 npi must be a ten-digit NPI with a valid check
+digit`). With no source, the gateway does not build the request, and answers `422`:
+- a CDS Hooks request: `build order-sign request failed: order <ref> names no ordering
+  clinician: …` (or `order-select`), before any leg;
+- an attestation: `attestation names no clinician NPI: …`. That comes before any leg where the
+  request holds every source (`/scenario/uc06`, and UC-03's oxygen attestation); at
+  `/scenario/uc06/complete` it comes before the amendment is sent, and the pend stays parked
+  for a corrected request.
+
+An eligibility request names `NPI` as its provider when it is set, and no provider otherwise.
+The answer a UC-06 or UC-07 attestation states is the request's own: a request that states none
+is refused (`422 answer is required: …`) rather than built with an answer the gateway chose.
 
 ## Native-forward payer mode (`PAYER_DAVINCI_*`)
 
@@ -1622,14 +2067,14 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` and `/Claim/$inquire` as well as the read-only legs, since every leg forwards. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
-| `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it to any value changes nothing. From shn-gateway v0.60.0, a gateway that sets it, to any value, logs `gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch` at boot, and one that leaves it unset logs nothing about it; remove it. Releases v0.39.0 through v0.59.x log a similar notice whenever it is not `true`, unset included. |
+| `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it to any value changes nothing. From shn-gateway v1.0.0, a gateway that sets it, to any value, logs `gateway: WARNING: PAYER_DAVINCI_PAS_NATIVE is set but no longer read` at boot, and one that leaves it unset logs nothing about it; remove it. Releases v0.60.0 through v0.63.x log `gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch` when it is set, and releases v0.39.0 through v0.59.x a similar notice whenever it is not `true`, unset included. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
 | `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48); from shn-gateway v0.62.0 only with `REQUIRE_SHARED_LINE=true`, and by default such a leg is forwarded as sent and the carry recorded. Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
 | `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_TIMEOUT` | How long this gateway waits for your system on each operation it forwards, counted from the leg's arrival at this gateway, as a Go duration from `1s` to `28s` (from v0.59.0). Unset: `25s`, under the requester's 30 s leg budget by enough that a system slower than it is answered as its own timeout, this gateway's framed `504`, while the requester is still waiting, and recorded as your system's `timeout`. Any other value refuses the boot, as does setting it without `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | Whether each operation forwarded to your system carries `X-Correlation-Id` with the leg's id. Unset (or `on`, the default): it does. `off`: no `X-Correlation-Id` is sent, for a system that validates that header its own way; nothing else changes. Any other value refuses the boot, as does `off` without `PAYER_DAVINCI_BASE_URL`. `PAYER_DAVINCI_BACKEND_HEADERS` can never name `X-Correlation-Id`, whatever this is set to. |
-| `PAYER_DAVINCI_STRICT_EXTENSIONS` | `true` to reserve the per-peer gated overlay (FR-G52) for this partner — a peer flagged this way would refuse a cross-version transform chain carrying or dropping its extensions instead of forwarding stripped or lossy content. **Currently DORMANT: setting it has no routing effect on this deployment.** The strict *consult* itself is already live where transforms are actually selected (route-layer chain selection, exercised by test-only seams), but the one peer this flag targets — the foreign Da Vinci partner reached through native-forward mode — is filtered through arm-1-only forwarding this slice (never through the chain-selection path), so the flag has nothing to gate yet. It goes live together with transform-at-the-native-forward-edge (not yet shipped; re-labeling another gateway's build product as a translated payload needs its own stamp/Provenance semantics worked out first). Default `false`. |
+| `PAYER_DAVINCI_STRICT_EXTENSIONS` | **No longer read** (from shn-gateway v1.0.0). It reserved a per-peer strict-extensions overlay (FR-G52) that never had a routing effect. A gateway that sets it, to any value, logs `gateway: WARNING: PAYER_DAVINCI_STRICT_EXTENSIONS is set but no longer read` at boot and starts; remove it. A gateway SHN hosts for you no longer renders it. |
 
 **Removed settings.** `PAYER_DAVINCI_CRD_HOOK`, `PAYER_DAVINCI_DISPATCH_HOOK` and
 `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` no longer exist. The request's hook is never changed, and
@@ -1676,7 +2121,7 @@ media type your system sent (`application/json` when it sent none); the provider
 returns it to the EHR as `application/json`, the CDS Hooks media type. Coverage information belongs in a system
 action that updates the order; each FHIR resource your answer embeds is also validated at the
 routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation,
-at `observe` and `strict`; from v0.61.0 it carries `ms`, the time the `$validate` call took): it
+at every level but `none`; from v0.61.0 it carries `ms`, the time the `$validate` call took): it
 never changes or refuses your answer. A non-2xx answer is relayed as your system's error,
 and a 2xx answer with the status your system gave (from v0.63.0).
 
@@ -1731,7 +2176,7 @@ identity takes effect without a restart. Nothing is invented — the feed carrie
 attested claims, and an identity another holder publishes is never yours.
 
 `PAYER_DAVINCI_PAYOR_OWN` decides **alone** whenever this gateway cannot see its own entry
-among the holders it has converged: you run no registrar (`SHN_REGISTRAR_URL` unset), your
+among the holders it has converged: you run no registrar (your network's discovery names none and `REGISTRAR_URL` is unset), your
 registration has not propagated to the feed yet, or your entry was skipped because its
 published encryption key would not decode. (An unreachable registrar at startup is a boot
 failure, not this case, and a feed outage after startup leaves the last converged snapshot
@@ -1821,7 +2266,7 @@ tradeoff.
 | Env var | Description |
 |---|---|
 | `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed populator. Default `false`. |
-| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`, and for `ORIGINATION_PROFILE=demo` / `provider-data` (the operated engine those lanes require). |
+| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`, and on a provider for `ORIGINATION_PROFILE=demo` / `provider-data` (the operated engine those lanes require). A profile on any other role does not require it. |
 | `PROVIDER_DTR_POPULATE_TOKEN_URL` | SMART Backend Services token endpoint the gateway authenticates to the `$populate` engine with. Sets the connector's **own** credential block — the engine may be your SoR under the same registration, or a separate server with its own; either way the connector mints its own bearer and never reuses the `FHIR_*` client's. Requires `PROVIDER_DTR_POPULATE_URL`. |
 | `PROVIDER_DTR_POPULATE_CLIENT_ID` | Client id the token endpoint knows the connector by. Required with `PROVIDER_DTR_POPULATE_TOKEN_URL`. |
 | `PROVIDER_DTR_POPULATE_CLIENT_KEY` | Path to the PEM private key for `private_key_jwt`. |
@@ -2065,28 +2510,39 @@ directions (an inbound frame at that line is honoured, origination may target it
 address for that line and changes nothing about routing, so a gateway can record 2.2
 verdicts while it stays a 2.0 gateway. The evidence uses, in order, `FHIR_CERTIFY_URL_<line>`,
 then `FHIR_VALIDATE_URL_<line>`, then the Compose default once it has qualified — by
-routing's attempt at boot, or by the evidence's own: the evidence tries the default in a
+routing's qualification, which retries for the gateway's life, when it ran the same
+qualification (below), or by the evidence's own: the evidence tries the default in a
 background loop of its own, started only where certification evidence is collected (never
-at `CONFORMANCE_ENFORCEMENT=none`; first attempt 15 s after boot, stopping at the first
-success from either side), so a validator that comes up after boot is certified against
-within one interval of coming up, and routing's lanes never change because of it. What that
-loop sends a validator that is not up: each attempt lasts up to 60 s and, until the
-validator's `GET /metadata` answers `200`, repeats that request about once a second (each
-request waits up to 4 s, then 1 s passes before the next), so an address that refuses the
-connection, does not resolve or answers another status gets about one request per second,
-and one that accepts the connection but never answers about one every 5 s. Between attempts
-the loop pauses 15 s during the first hour after it starts, then 5 min. So for the first hour
-the validator gets requests during about 60 s of every 75 s, and afterwards during 60 s of
-about every 6 min. A metadata `200` ends the probing: when it is a readable R4
+at `CONFORMANCE_ENFORCEMENT=none`; first attempt 15 s after boot plus a random part of 15 s,
+stopping at the first success from either side), so a validator that comes up after boot is
+certified against soon after, and routing's lanes never change because of it. While routing is
+still retrying the default lane's qualification, the loop posts no corpus of its own; once
+routing's attempt passes on the same endpoint, for the same line, with the same qualification
+and within the same 120 s, that pass is the evidence's first qualification. Any difference and
+the loop runs its own. What that loop sends a validator that is not up: each attempt lasts up to
+120 s and, until the validator's `GET /metadata` answers `200`, repeats that request about once
+a second (each request waits up to 4 s, then 1 s passes before the next), so an address that
+refuses the connection, does not resolve or answers another status gets about one request per
+second, and one that accepts the connection but never answers about one every 5 s. After a
+failed attempt the loop waits on the gateway's shared retry backoff: 15 s after the first
+failure, doubling to 5 min, each wait drawn from the upper half of its step, so the gateways a
+deploy restarts together spread apart. An attempt its budget cuts off is discarded, never
+resumed. The budget bounds an attempt's cost, not what qualifying means: from v1.0.0 it is 120 s,
+routing's budget, where it was 60 s. A metadata `200` ends the probing: when it is a readable R4
 CapabilityStatement of at most 4 MiB the attempt then posts the readiness corpus once, and
 passes or fails; any other `200` fails the attempt. No exchange waits on that: a line whose default has not
 qualified records its verdict as `certification validator unavailable: FHIR_CERTIFY_URL_<line>
 and FHIR_VALIDATE_URL_<line> are not configured; default lane qualification pending` (or
-`… failed, retrying` after a failed attempt) and dials nothing for that exchange; routing's boot
-probe logs `validator_qualification` lines, and the evidence's loop logs a
+`… failed, retrying` after a failed attempt of its own) and dials nothing for that exchange.
+While it defers to routing, the state names routing's qualification instead: `default lane
+qualification pending (routing qualifying)` until routing's first attempt fails, then
+`default lane qualification failed, retrying (routing attempt <n>: <reason>)`, with routing's
+attempts so far and its last failure's reason in the words of the list below (from v1.0.0;
+before it the evidence ran attempts of its own and named only those); routing's qualification logs `validator_qualification` lines, and the evidence's loop logs a
 `certification_lane_qualification` line when an attempt's outcome changes (the first
-failure, then success). Each line carries the lane's line, `base` address, the `host` it
-dials and its `state`. A `failed` line also carries a `reason` naming why, in the gateway's
+failure, a change of its reason, then success). Each line carries the lane's line, `base`
+address, the `host` it dials, its `state` and `attempts`, the attempts its loop has made; a
+`failed` line also carries `next_retry_s`, the wait before the next. A `failed` line also carries a `reason` naming why, in the gateway's
 own words: `name does not resolve`, `name lookup failed`, `connection refused`,
 `metadata answered HTTP <status>`, `metadata is not an R4 CapabilityStatement`,
 `qualification corpus did not pass`, `no answer within the qualification budget`,
@@ -2095,8 +2551,8 @@ From shn-gateway v0.57.0 an address set by either key for 2.1 or 2.2 is gated th
 on its own qualification by the same corpus: a validator still warming answers errors about
 itself (on the 2.2 line, `SLICING_CANNOT_BE_EVALUATED` the first time it meets a PAS answer),
 not about the message. Its loop starts at boot where certification evidence is collected
-(never at `none`, where the address is never dialed), with no 15 s wait, and sends the same
-traffic on the same schedule afterwards (as described above); until an attempt passes, the line records `certification validator unavailable:
+(never at `none`, where the address is never dialed), with no 15 s wait, never defers to
+routing, and sends the same traffic on the same schedule afterwards (as described above); until an attempt passes, the line records `certification validator unavailable:
 lane not qualified; qualification pending` (or `…; qualification failed, retrying`) and dials
 nothing for that exchange, and the loop logs `certification_lane_qualification` lines as
 above. The gate re-qualifies after a lane stops answering: once a 2.1 or 2.2 lane (a default or an
@@ -2116,10 +2572,11 @@ evidence; until the re-qualification passes, the line records the same and dials
 re-qualification starts at once, or 30 s after the
 previous one started if that was more recent. Only its start is limited: while the lane stays
 broken, its attempts follow the qualification's own schedule above, and that schedule starts
-over with each re-qualification: attempts of up to 60 s, probing metadata as described above, 15 s apart for the first hour after the
-re-qualification starts, then 5 min apart. An attempt whose metadata answers `200` with a readable R4
-CapabilityStatement runs the readiness corpus instead, so a lane that answers its metadata but fails the corpus is sent
-the corpus every 15 s or so for that hour. An answer, whatever it is, does not clear the qualification: a verdict,
+over with each re-qualification: the re-qualification starts after a random part of 15 s more,
+and its attempts of up to 120 s, probing metadata as described above, back off from 15 s to 5
+min. A re-qualification is always the evidence's own run, never routing's. An attempt whose
+metadata answers `200` with a readable R4 CapabilityStatement runs the readiness corpus instead,
+so a lane that answers its metadata but fails the corpus is sent the corpus on that backoff. An answer, whatever it is, does not clear the qualification: a verdict,
 valid or invalid, is recorded as such, and a 5xx or an answer that is not an OperationOutcome
 marks only that certification `unavailable`. Nor does a certification abandoned because the
 collection's own time ran out (its 6 s, or its 30 s in the queue) or the gateway is shutting
@@ -2191,10 +2648,11 @@ the routing lane (the certification evidence qualifies a 2.1 or 2.2 address on i
 A newly defaulted declared CRD, DTR or PAS line must pass the complete finite
 synthetic qualification before the gateway serves traffic, even when it is the
 only declared line. Metadata availability only permits that corpus to begin;
-a metadata 200 alone is insufficient. Failure returns a boot error naming the
-line, endpoint and qualification reason. The total startup bound is 600 seconds. From
-v0.63.0, at `none` a declared default lane qualifies in the background instead, and its
-failure does not stop the gateway.
+a metadata 200 alone is insufficient. From v1.0.0 a failed attempt is retried
+inside the startup bound of 600 seconds, on the schedule below; when the bound
+runs out first, boot fails with an error naming the line, endpoint and the last
+attempt's reason. From v0.63.0, at `none` a declared default lane qualifies in the
+background instead, and its failure does not stop the gateway.
 The image's `/healthcheck` is an executable observing a qualification marker,
 not an HTTP readiness endpoint.
 The supplied validator image withholds public metadata and validation until its own
@@ -2205,9 +2663,17 @@ and is reported by the image's `/healthcheck`.
 
 Undeclared defaults qualify in the background without delaying configured `2.0`
 startup. Until qualification succeeds they cannot satisfy routing or inbound
-frame admission. Each default receives one finite attempt per gateway lifecycle;
-a complete failed attempt is terminal until restart. Shutdown cancels and joins
-workers. Embedders using `Handler` or `HandlerWithClock` must close the returned
+frame admission. From v1.0.0 a failed attempt is never terminal: the lane retries
+until an attempt passes, 15 s after the first failure, doubling to every 5 minutes,
+each wait drawn at random from its upper half so gateways restarted together do not
+retry together, and each attempt bounded at 120 s (before v1.0.0 a default lane got
+one attempt per gateway lifecycle, and a failed one lasted until restart). The
+`validator_qualification` lines carry the lane's state changes only: `started`, the
+first `failed` of a run of failures and any change of its `reason`, and `ready`, with
+`attempts` and, on `failed`, `next_retry_s`. `/internal/checks` reports each default
+lane as `validator-lane-<line>`, failing with `lane-unqualified` until it qualifies,
+and the `ValidatorLane` gauge reads 0 for it meanwhile (see "Exchange metrics").
+Shutdown cancels and joins workers. Embedders using `Handler` or `HandlerWithClock` must close the returned
 `io.Closer` after stopping HTTP service; tests can use `HandlerForTest` or
 `HandlerForTestWithClock` and invoke their cleanup before releasing dependencies.
 Ordinary validation verdicts do not change synthetic readiness.
@@ -2375,7 +2841,7 @@ deployment declaring only `2.0` is unaffected (byte-identical output, regression
 Auto-fill through a **native** SDC `$populate` engine (`PROVIDER_DTR_NATIVE=true`) was
 never affected — the engine, not the gateway, shapes that response.
 
-Verified by `TestManagedPopulatorBuildsAtLine` (`gateway/engine/populator_test.go`) at the
+Verified by `TestManagedPopulatorBuildsAtLine` (`gateway/engine/workstream_pa_populator_test.go`) at the
 populator seam, and `TestAuthoredQRBuiltAtSelectedLine`
 (`gateway/engine/authoredqr_line_test.go`) end-to-end against the actual submitted PAS
 bundle's embedded `QuestionnaireResponse` for both attestation sites — both assert the DTR
@@ -2491,7 +2957,7 @@ Request handlers enqueue to a bounded queue (4,096 observations, 64 MiB retained
 can arrive without holding a request open. HTTP capture separately limits concurrent
 buffering and marks unread, aborted, limited or failed bodies partial. A body the
 capture limits left out or cut says so in the observation's `detail` (`body not
-kept: capture budget`, `body capture partial: capture budget`; see STABILITY.md). Publishing
+kept: capture budget`, `body capture partial: capture budget`; see CHANGELOG.md). Publishing
 runs in the background with bounded retries; overload and collector failures can
 leave gaps, and each heartbeat counts how every observation left the queue
 (acknowledged, discarded, or dropped by reason).
@@ -2509,12 +2975,14 @@ leave gaps, and each heartbeat counts how every observation left the queue
   discarded and `suppressed`, not sent. Then they are sent again and the answer
   decides afresh.
 - **At a stop.** The gateway's listener shuts down (5 s), requests still running are
-  cut and their handlers get up to 2 s to return, and the gateway closes. The
-  publisher then delivers what is queued for up to 10 s and sends a last heartbeat,
-  counting anything left as `stopped`. With collection configured, stopping can take
-  up to about 11 s longer: up to about 28 s in all, since the gateway's close can
-  take up to 10 s to flush its conformance checks. Give the container a stop timeout
-  above that (Docker's default is 10 s).
+  cut and their handlers get up to 2 s to return, and the gateway closes: its
+  in-memory audit outbox drains (up to 10 s) and its conformance checks flush (up to
+  10 s), and, with `OTEL_METRICS_EXPORTER=otlp`, the final metrics export runs (up to
+  5 s). The publisher then delivers what is queued for up to 10 s and sends a last
+  heartbeat (1 s), counting anything left as `stopped`. With collection configured, a
+  stop takes up to 43 s in all. Give the container the 45 s stop timeout of
+  [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway), "Stopping the gateway"
+  (Docker's default is 10 s).
 
 The collector's retention and staff access policy governs persisted traffic. This is
 application-visible evidence, not a packet capture or a complete record of all

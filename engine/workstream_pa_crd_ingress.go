@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 // workstream_pa_crd_ingress.go — CRD (CDS Hooks order-select) ingress: parse the conformant inbound request,
 // prove every patient reference resolves to ONE pci before any leg, and prepare the EHR's own
 // bytes for the network (the callback removed; absent prefetch obtained from the participant's
@@ -876,7 +878,7 @@ func (g *Gateway) fhirServerBudget() time.Duration {
 
 func (g *Gateway) fhirServerReader() fhirServerReader {
 	return fhirServerReader{mode: g.cfg.FHIRServerRead, resolve: g.cfg.fhirServerResolve, roots: g.cfg.fhirServerRoots,
-		dial: g.cfg.fhirServerDial, dialed: g.cfg.fhirServerDialed}
+		dial: g.cfg.fhirServerDial, dialed: g.cfg.fhirServerDialed, certs: g.cfg.CertRecorder}
 }
 
 // coverageFromFHIRServer searches the bound patient's Coverage through

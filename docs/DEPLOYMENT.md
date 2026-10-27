@@ -127,10 +127,16 @@ the same way.
 - Treat the DSN like key material in your secret store, your logs and your backups; a
   database dump contains the signing key.
 
-To retire a key you believe is exposed, delete its `gw_ingress_key` row and restart the
-replicas — the row alone is not enough, because a replica that has already cached the key
-keeps verifying with it until the key's own `not_after` (see the cache note at the end of
-this section).
+To retire a key you believe is exposed, delete its `gw_ingress_key` row. Every replica
+drops the key from its cache at its next refresh, within about 30 seconds: the refresh
+interval, plus that reload's own round trip. From then on it refuses bearers signed with
+that key and signs new tokens with another. A replica that cannot reach the database keeps
+the key until a reload succeeds (see the note on such a replica at the end of "Running
+more than one replica").
+
+Point `SHN_STORE_DATABASE_URL` at the database's primary, not a read replica: the cache
+treats a key missing from what it reads as deleted, so a copy that lags behind a new key's
+commit would drop a live key.
 
 ### Behaviour during a database outage
 
@@ -269,9 +275,49 @@ If the shared exchange records cannot be cleared — the database is unreachable
 
 The payer role exposes no `/scenario/reset` route; requests return `404`.
 
-A key row deleted from the database keeps verifying at any replica that has already
-cached it, until the key's own `not_after` (its 24-hour rotation life plus a bearer
-lifetime). To retire a key immediately, restart the replicas.
+A key row deleted from the database leaves each replica's cache at that replica's next
+refresh, within about 30 seconds, and bearers signed with it are refused from then on. A replica
+that cannot reach the database cannot see the deletion: it keeps verifying with the cached
+key until a reload succeeds, and at most until the key's own `not_after` (24 hours, plus a
+bearer lifetime and a minute). To retire the key there at once, restart that replica.
+
+## Stopping the gateway
+
+On `SIGTERM` or an interrupt, the gateway stops in this order, each step bounded:
+
+| Step | Up to | When it takes time |
+| --- | --- | --- |
+| The listener stops taking calls and waits for the calls in flight | 5 s | calls in flight |
+| The calls still running are cut, and their handlers return | 2 s | calls that outlast the listener's wait |
+| The in-memory audit outbox sends what it holds | 10 s | records queued, without `SHN_STORE_DATABASE_URL` |
+| Queued conformance checks finish | 10 s | checks queued, at `observe` |
+| The final metrics export | 5 s | OpenTelemetry export on (`OTEL_METRICS_EXPORTER=otlp`) |
+| The diagnostic publisher delivers what it holds | 10 s | `DIAGNOSTIC_SINK_URL` set |
+| The diagnostic publisher's last heartbeat | 1 s | `DIAGNOSTIC_SINK_URL` set |
+
+In all, a stop takes up to 43 s, or 32 s without `DIAGNOSTIC_SINK_URL`. Give the
+gateway's container a stop timeout of 45 s:
+
+- `docker run --stop-timeout 45`;
+- Docker Compose: `stop_grace_period: 45s` on the gateway's service (the bundle and the
+  evaluation files under `gateway/deploy/` set it);
+- Kubernetes: `terminationGracePeriodSeconds: 45` on the pod;
+- Amazon ECS: `"stopTimeout": 45` on the gateway's container.
+
+The defaults are shorter: 10 s for Docker and Compose, 30 s for Kubernetes and ECS. A
+gateway SHN hosts for you gets 45 s.
+
+A gateway killed before its stop ends loses what the remaining steps would have done:
+the findings of conformance checks still queued, the metrics the final export would
+have sent, the diagnostic observations not yet delivered, and the audit records still
+in an in-memory outbox. An outbox that drains
+logs how many records it holds before it starts
+(`gateway: audit: stopping with <n> records in the in-memory outbox`) and reports the
+same count as `AuditQueueDepth`. When the drain ends, it counts what it could not
+send as `AuditAppendDroppedBy{reason=stopped}`. A gateway killed first leaves the
+count it started with and no result, so what it lost is unknown rather than none.
+With `SHN_STORE_DATABASE_URL` the outbox is durable: its records wait for the next
+start, and the step takes no time.
 
 ## Checklist
 
@@ -282,3 +328,4 @@ lifetime). To retire a key immediately, restart the replicas.
 - [ ] Registered `--base-url` is the public https address, and does not redirect
 - [ ] `SHN_STORE_DATABASE_URL` set if the Da Vinci ingress routes run at more than one replica (a single reachable instance otherwise)
 - [ ] That DSN and its database protected as key material — TLS, encryption at rest, least-privilege role (see "The signing key's trust boundary")
+- [ ] The container's stop timeout is 45 s (see "Stopping the gateway")

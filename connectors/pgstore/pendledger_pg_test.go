@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package pgstore
 
 // pendledger_pg_test.go holds the ledger rows that only the DURABLE backend can

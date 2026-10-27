@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package engine
 
 import (
@@ -183,7 +185,7 @@ func (s *twoPayerSubstrate) handleAuthorize(body []byte) (*http.Response, error)
 // plaintext envelope metadata (only the payload is encrypted), so no per-call pci field is needed
 // on the stub itself.
 func (s *twoPayerSubstrate) handleRoute(body []byte) (*http.Response, error) {
-	env, err := shnsdk.DecodeEnvelope(body)
+	env, err := hubDecodeEnvelope(body)
 	if err != nil {
 		return errResp("stub: decode envelope: " + err.Error()), nil
 	}
@@ -261,7 +263,7 @@ func twoPayerTestSystem(t *testing.T) (*Gateway, *twoPayerSubstrate) {
 		SoR:             newCensusSoR(),
 		Store:           newCensusSoR(),
 		Clock:           clock,
-		NPI:             "1234567890",
+		NPI:             "1234567893",
 		Client:          &http.Client{Transport: stub},
 	})
 	return gw, stub

@@ -4839,6 +4839,9 @@
             ]
           }
         ],
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "resourceType": "DeviceRequest",
         "status": "active",
         "subject": {
@@ -4877,6 +4880,9 @@
             ]
           }
         ],
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "resourceType": "DeviceRequest",
         "status": "active",
         "subject": {
@@ -4915,6 +4921,9 @@
             ]
           }
         ],
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "resourceType": "DeviceRequest",
         "status": "active",
         "subject": {
@@ -4953,6 +4962,9 @@
             ]
           }
         ],
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "resourceType": "DeviceRequest",
         "status": "active",
         "subject": {
@@ -9773,6 +9785,33 @@
       }
     },
     {
+      "fullUrl": "Practitioner/prac-ordering-clinician",
+      "resource": {
+        "id": "prac-ordering-clinician",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"
+          ]
+        },
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1000000046"
+          }
+        ],
+        "name": [
+          {
+            "family": "Ordering-Clinician"
+          }
+        ],
+        "resourceType": "Practitioner"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Practitioner/prac-ordering-clinician"
+      }
+    },
+    {
       "fullUrl": "Procedure/proc-mbrcanaryuc04-provider",
       "resource": {
         "id": "proc-mbrcanaryuc04-provider",
@@ -9975,6 +10014,9 @@
         "subject": {
           "reference": "Patient/pat-mbrbridgedemo-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10019,6 +10061,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrbridgerefuse-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10065,6 +10110,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc02-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10109,6 +10157,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc04-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10155,6 +10206,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc05-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10199,6 +10253,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc05nc-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10245,6 +10302,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc06-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10289,6 +10349,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc07-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10335,6 +10398,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryduc08-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10379,6 +10445,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc04-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10425,6 +10494,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc05-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10469,6 +10541,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc05noconsent-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10515,6 +10590,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc06-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10559,6 +10637,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc07-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10605,6 +10686,9 @@
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc07hcpcs-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10649,6 +10733,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrcanaryuc08-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10695,6 +10782,9 @@
         "subject": {
           "reference": "Patient/pat-mbrduc02-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10739,6 +10829,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrduc04-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10785,6 +10878,9 @@
         "subject": {
           "reference": "Patient/pat-mbrduc05-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10829,6 +10925,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrduc05nc-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10875,6 +10974,9 @@
         "subject": {
           "reference": "Patient/pat-mbrduc06-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -10919,6 +11021,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbrduc07-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -10965,6 +11070,9 @@
         "subject": {
           "reference": "Patient/pat-mbrduc08-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -11009,6 +11117,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbruc04-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -11055,6 +11166,9 @@
         "subject": {
           "reference": "Patient/pat-mbruc05-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -11099,6 +11213,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbruc05noconsent-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -11145,6 +11262,9 @@
         "subject": {
           "reference": "Patient/pat-mbruc06-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -11189,6 +11309,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbruc07-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {
@@ -11235,6 +11358,9 @@
         "subject": {
           "reference": "Patient/pat-mbruc07hcpcs-provider"
         },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
+        },
         "performer": [
           {
             "reference": "Organization/org-ordering-provider"
@@ -11279,6 +11405,9 @@
         },
         "subject": {
           "reference": "Patient/pat-mbruc08-provider"
+        },
+        "requester": {
+          "reference": "Practitioner/prac-ordering-clinician"
         },
         "performer": [
           {

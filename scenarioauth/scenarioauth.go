@@ -18,6 +18,7 @@ package scenarioauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -319,6 +320,23 @@ type Caller struct {
 	Label  string
 	JTI    string
 	Expiry time.Time
+}
+
+// callerKey is the request context key of the caller Verify admitted.
+type callerKey struct{}
+
+// WithCaller returns ctx carrying c, the caller a gateway verified for the
+// request ctx belongs to.
+func WithCaller(ctx context.Context, c Caller) context.Context {
+	return context.WithValue(ctx, callerKey{}, c)
+}
+
+// CallerFrom returns the caller the gateway verified for the request ctx
+// belongs to; ok is false when no caller was verified (a gateway with no
+// callers admits its operator routes unauthenticated).
+func CallerFrom(ctx context.Context) (c Caller, ok bool) {
+	c, ok = ctx.Value(callerKey{}).(Caller)
+	return c, ok
 }
 
 // Verify checks a /scenario request's assertion (the HeaderName value)

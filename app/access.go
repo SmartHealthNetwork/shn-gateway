@@ -1,3 +1,5 @@
+//go:build !shn_coreonly
+
 package app
 
 import (
@@ -35,6 +37,9 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 			ValidateMs: st.Validate.Milliseconds(), SealMs: st.Seal.Milliseconds(), LedgerMs: st.Ledger.Milliseconds(),
 			WriteMs: st.Write.Milliseconds(),
 		}
+	}
+	if n := r.Network; n != nil {
+		line.Network = &diagnostics.AccessNetwork{LatencyMs: n.Latency.Milliseconds(), Calls: n.Calls}
 	}
 	line.AnswerError = r.AnswerError
 	return line

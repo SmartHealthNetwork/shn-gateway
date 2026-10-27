@@ -298,11 +298,13 @@ exchanges respectively.)
    gateway forwards CRD/DTR/PAS to a Da Vinci-conformant service you already
    run, authenticating to it as a SMART Backend Services client (see
    [Authenticating to your backend](docs/INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)).
-3. **A custom `shnsdk.Adjudicator` behind the standalone SDK responder** — the
-   stable path for your own coverage and medical-necessity policy when your
+3. **A custom `shnsdk.Adjudicator` behind the standalone SDK responder** — a
+   path for your own coverage and medical-necessity policy when your
    decisioning doesn't speak Da Vinci natively; the responder runs in place
    of the gateway on the payer side (`crd-order-dispatch` not yet served —
-   see [`STABILITY.md`](STABILITY.md)).
+   see [`CHANGELOG.md`](CHANGELOG.md), "Go API notes before v1.0.0"). It is
+   built on the SDK's Go API, which carries no compatibility promise
+   ([`STABILITY.md`](STABILITY.md)).
 
 **Proving it works is deploy-and-test, not a laptop loopback.** A payer is
 dialed, not dialing: the Hub `POST`s to your registered
@@ -377,6 +379,7 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | `refusing to run without per-message validation (FR-36)` at startup | No validator configured and discovery advertises none. Run the IG-loaded `$validate` beside the gateway and set `FHIR_VALIDATE_URL` to it: [`deploy/bundle/`](deploy/bundle/README.md) ships that pairing, and [`deploy/eval/`](deploy/eval/README.md) runs a first end-to-end test with a real validator. A validator is needed at every `CONFORMANCE_ENFORCEMENT` level that checks a payload; from v0.63.0 a gateway at `none` starts without one ([CONFIGURATION.md](docs/CONFIGURATION.md#running-at-none-without-a-validator)). |
 | `SHN_FAKE_VALIDATOR is set, but a released gateway has no validator test double` at startup | From v0.63.0 a released gateway refuses `SHN_FAKE_VALIDATOR` set to any value: the stand-in it selected accepted almost everything, and it remains only in SHN's own test builds. Unset it, and configure a validator or run at `CONFORMANCE_ENFORCEMENT=none` as in the row above. |
 | `fetch discovery: …` / `fetch authz pubkey: …` / `fetch hub transport key: …` at startup | `SHN_DISCOVERY_URL` unreachable, or the gateway can't reach the hosts discovery resolves (Hub, Authorization Framework, registrar, …). Each of these fetches is tried again when the connection is refused, reset or closed before an answer, or the answer is `502`, `503` or `504`: after 1, 2 and 4 seconds and then every 8 seconds, with no new try more than 60 seconds into the fetch (each try has its own 30-second bound), so a plane that is restarting does not fail the boot; the error is the last try's. A name that does not resolve, a try that times out, a TLS certificate or protocol failure and every other answer fail the boot at once. Confirm `curl $SHN_DISCOVERY_URL` works from the gateway's network. |
+| `gateway: the network at … does not accept wire protocol 2.0.0 (it accepts […])` at startup | From v1.0.0 the gateway sends wire protocol `2.0.0`'s leg names, and starts only on a network whose discovery accepts `2.0.0` (`wireProtocolVersionsAccepted`; with it absent, `wireProtocolVersion`). The network named does not yet. Point `SHN_DISCOVERY_URL` at a network that accepts `2.0.0`, or run a gateway before v1.0.0 until it does ([CONFIGURATION.md](docs/CONFIGURATION.md), "The start check"). A descriptor the gateway cannot read refuses as `fetch discovery: … cannot confirm the network accepts wire protocol 2.0.0`. |
 | Provider originate returns `recipient "…" not in registry` | The payer holder resolved from the member's Coverage (feed `payerIds`, or your `PAYER_DIRECTORY` override) isn't a registered holder, or the registrar feed hasn't propagated yet. Confirm the counterpart appears in `shn clients` / the `/holders` feed. |
 | Provider originate returns `422 no payer identifier on member coverage` / `no registered payer for identifier …` | Coverage-derived routing found no route (FR-G41; no default): the member's Coverage carries no parseable payor identity, or no `role=payer` holder in the feed claims that identity (and no `PAYER_DIRECTORY` override maps it). Ensure the target payer holder published that `{system,value}` in its feed `payerIds` (payer-onboarding path), or set a `PAYER_DIRECTORY` override row. A payer that acquired the identity after onboarding — an EHR-assigned payer id, a merger, a new line of business — publishes it without re-onboarding: a hosted payer updates its tenant's `payerIds` and the control plane converges the feed entry; any payer can re-declare through the accounts front door once an operator has vouched for the identity. Payer identities are operator-attested, so a holder cannot add one with its own key. An identity claimed by **two** holders also fails closed (ambiguous — `AI-G12`). On the Da Vinci ingress (`Claim/$submit`, `Claim/$inquire`), from v0.60.0 the `no payer identifier` refusal adds which part of the Bundle failed, after a colon: `Coverage.payor` is a relative reference that matches no entry, an absolute reference that is no entry's `fullUrl`, or a reference several entries answer without naming one payer; or the payor Organization carries no identifier with both a system and a value (a NAIC code or payer id). The payor Organization must be an entry of the Bundle: the gateway resolves the reference among the Bundle's entries only, an absolute reference (a URL, or `urn:uuid`) to the entry whose `fullUrl` equals it, and a relative `Organization/<id>` to the one entry with that type and id; a reference several entries answer routes only when they all name the same payer identifier. |
 | Provider originate returns `502 {"error":"$populate upstream failed"}` | Inspect the holder-local `gateway: populate_failure` record below to distinguish the failing population boundary. |
@@ -432,9 +435,14 @@ existing logs.
 - [`docs/INTEGRATION.md`](docs/INTEGRATION.md) — connecting your systems end
   to end: FHIR system of record, provider-data origination, native Da Vinci
   ingress, payer decisioning, custom connectors.
-- [`STABILITY.md`](STABILITY.md) — versioning policy and which seams
-  (`engine.Config.SoR`, `engine.Config.Store`, `shnsdk.Adjudicator` behind the
-  standalone responder, …) are safe to depend on across versions.
+- [`docs/MONITORING.md`](docs/MONITORING.md) — watching a gateway: health,
+  checks and stats, access lines, CloudWatch EMF, OpenTelemetry push and
+  Prometheus pull, the metric catalogue, and example dashboards, alerts and
+  Collector recipes.
+- [`STABILITY.md`](STABILITY.md) — versioning policy and what the stability
+  promise covers: the binary contract (settings, endpoints, the protocol and
+  the image); the Go APIs are SHN-internal.
+- [`CHANGELOG.md`](CHANGELOG.md) — what each release changed.
 - [`SUPPORT.md`](SUPPORT.md) — where to ask, and what to include.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how this snapshot relates to the

@@ -1,10 +1,15 @@
+//go:build !shn_coreonly
+
 // workstream_pa_enrich.go — the PA workstream's enrichment hook: the one
 // seam through which a participant's own (native) request on a PA leg is
 // enriched, held in the PA workstream's state on the gateway
 // (paGatewayState).
 package engine
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // nativeEnrichment is the one hook through which a participant's own
 // (native) request is enriched. The PA legs call it on each enriching native
@@ -26,8 +31,9 @@ type nativeEnrichment interface {
 	prefetchValue(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string)
 	// dtrCoverageFilters are the coverage template's search filters
 	// (status=active) for a questionnaire-package request that carries no
-	// Coverage. The core runs and records the search, routes by its matches,
-	// and inserts the Coverage it routes by, only when it answered SearchOK.
+	// Coverage. The PA DTR ingress runs and records the search, routes by its
+	// matches, and inserts the Coverage it routes by, only when it answered
+	// SearchOK.
 	dtrCoverageFilters() []SearchDateRange
 	// dtrPatient reads the Patient a questionnaire-package request carrying
 	// none is sent with, or nil when nothing is added. A non-zero status
@@ -36,20 +42,32 @@ type nativeEnrichment interface {
 }
 
 // paGatewayState is the PA workstream's own state on one gateway
-// (workstream.newGatewayState): the enrichment hook.
+// (workstream.newGatewayState): the enrichment hook and the DTR populator.
 type paGatewayState struct {
 	// enrich is the enrichment hook, installed at boot only under the
 	// participant's opt-in (installEnrichment); nil otherwise.
 	enrich nativeEnrichment
+	// populator is the DTR populator (workstream_pa_populator.go): the
+	// managed populator over the gateway's system of record unless
+	// WithPopulator sets another.
+	populator Populator
 }
 
 // newGatewayState: the PA workstream's state on a new gateway, its hook
-// installed (or not) as the participant's opt-in says.
-func (paWorkstream) newGatewayState(g *Gateway) gatewayState {
-	st := &paGatewayState{}
-	g.installEnrichment(st)
-	return st
+// installed (or not) as the participant's opt-in says, and its populator the
+// managed one over the system of record New has decorated.
+func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
+	st := &paGatewayState{populator: newManagedPopulator(g.cfg.SoR)}
+	if err := g.installEnrichment(st); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
+
+// nativeEnrichmentFor builds the enrichment hook for g. On-behalf building
+// sets it when it is compiled in (module1_enrich_native.go); nil means no
+// enrichment is, and an opt-in is refused (installEnrichment).
+var nativeEnrichmentFor func(g *Gateway) nativeEnrichment
 
 // paState is the PA workstream's state on g, or nil on a gateway assembled
 // without New.
@@ -62,12 +80,18 @@ func (g *Gateway) paState() *paGatewayState {
 // has opted in (Config.EnrichNativeRequests, ENRICH_NATIVE_REQUESTS), and none
 // otherwise: no enrichment code then runs. New calls it at boot,
 // through the PA workstream's state; it is the one place the engine reads the
-// opt-in.
-func (g *Gateway) installEnrichment(st *paGatewayState) {
+// opt-in. An opt-in this build cannot honour (no enrichment compiled in) is
+// refused, never quietly carried as if the participant had not opted in.
+func (g *Gateway) installEnrichment(st *paGatewayState) error {
 	st.enrich = nil
-	if g.cfg.EnrichNativeRequests {
-		st.enrich = onBehalfEnrichment{g: g}
+	if !g.cfg.EnrichNativeRequests {
+		return nil
 	}
+	if nativeEnrichmentFor == nil {
+		return errors.New("gateway: Config.EnrichNativeRequests (ENRICH_NATIVE_REQUESTS) is set, but this build has no enrichment compiled in")
+	}
+	st.enrich = nativeEnrichmentFor(g)
+	return nil
 }
 
 // enrichment is the enrichment hook, or nil when the participant has not

@@ -114,9 +114,42 @@ The previous recording (2026-06-19, upstream image) differed in exactly those fo
 in the Questionnaire's version-algorithm extension url, which an earlier correction in the
 series changed.
 
+## crd-response-doc1.json — the reference payer's order-sign answer, from the -doc1 image
+
+Recorded 2026-10-21 from the reference payer image tagged
+`a8bece4-pasgraph8-l8000p2-dtr2-cve1-ctx1-igs1-prior1-doc1` (image id
+`sha256:20b308d5916bb1c9582c0f89fc70eb3798676f37b2b37779456bf9937e1e0ff1`, built locally from
+the reviewed series whose SHA-256 is
+`c0eb4c6b48b4677045082fd98e291644ea47824f647081b2965ecca887e77b4d`), run as one fresh container,
+answering `crd-order-sign-request.json` POSTed to `/cds-services/order-sign-crd`. The payer
+answered HTTP 200.
+
+`crd-response.json` stays the 2026-06-19 recording: the answer of an image from before the L8000
+doc-needed correction. The two differ in L8000's `doc-needed`, `no-doc` there and `admin` here,
+and in the date the payer stamps into its coverage-information `date` and assertion id. The
+same request answered by the previous image (`-prior1`) in the same run was the 2026-06-19
+answer with its dates moved, so the correction is the only change between the images.
+
+## The prior-authorization submit and update captures predate the reviewed series
+
+`pas-submit-response.json` (recorded 2026-06-19), `pas-submit-response-pended.json`
+(2026-06-22), and `pas-update-response-amend-after-resolution.json`,
+`pas-update-response-amend-before-resolution.json`, `pas-claimresponse-amend-repend-window.json`
+and `pas-claimresponse-amend-resolved.json` (2026-08-30) were recorded from the upstream
+reference payer at a8bece458cb31f151845db9ea5a892e398deef56, before this repository's reviewed
+correction series (`tools/brpayer/patches`) existed. They are the shapes that payer sent then,
+and a gateway must still accept them from a payer that answers the same way. They are not the
+shapes the pinned image sends now.
+
+One difference is measured. In every pended answer here, the administration reference number
+is on the ClaimResponse item. The series puts it on the ClaimResponse itself, because PAS 2.0.1
+allows that extension only on Claim.item and the ClaimResponse ("PAS 2.0.1 pending documentation
+fields" in `tools/brpayer/patches/README.md`). The series' replay proofs
+(`tools/brpayer/proof/prior1/replay/*.new.json`) carry it on the root only. The
+reference-payer mirror follows the current image, not these files.
+
 ## The other files
 
-The coverage-requirements, documentation-templates and prior-authorization submit and
-update messages here were captured earlier, from the same pinned image, by the
-two-reference-implementation gate and the demonstration lanes that drive it; each is
+The coverage-requirements and documentation-templates messages here were captured earlier
+by the two-reference-implementation gate and the demonstration lanes that drive it; each is
 referenced from the test that reads it.
