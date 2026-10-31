@@ -465,3 +465,93 @@ func TestSoRObserverEveryReadFailure(t *testing.T) {
 		}
 	}
 }
+
+// On the requester's side, a read of the participant's own system that the
+// connector reports repeats a member name (SoRRepeatedMember: the bundled FHIR
+// connector reports every such answer) is answered exactly as the same read
+// failing otherwise: the system's invalid response, 502, at every level, on
+// every route that reads the system for a request this participant sends. The
+// prefetch fill refuses only where its rule refuses (refusesAt); below that the
+// request is carried unfilled, either way.
+// The answering side's record of it is TestExchangeRecord_*RepeatingAMember.
+func TestSoRRequesterReadsRepeatingAMember(t *testing.T) {
+	pas := loadPASGolden(t, "MBR-COVERED")
+	crd := conformantCRD("MBR-COVERED", "72148")
+	type answer struct {
+		status int
+		msg    string
+	}
+	// fill marks the prefetch fill, refused only where its rule refuses.
+	type route struct {
+		run  func(*Gateway, SystemOfRecord) answer
+		fill bool
+	}
+	routes := map[string]route{
+		"crd-ingress member binding": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			_, status, msg := g.ingressCRDSubjectPCIContext(context.Background(), crd)
+			return answer{status, msg}
+		}},
+		"pas-ingress member binding": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			_, status, msg := g.ingressPASNativeSubjectPCIContext(context.Background(), pas)
+			return answer{status, msg}
+		}},
+		"crd prefetch fill": {fill: true, run: func(g *Gateway, _ SystemOfRecord) answer {
+			_, status, msg := g.ingressEnsureSelfContainedContext(context.Background(), "crd-order-select", crd, "MBR-COVERED")
+			return answer{status, msg}
+		}},
+		"prefetch patient read": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			fence := newPatientFence(shnsdk.MemberSystem, "MBR-COVERED", nil, "MBR-COVERED")
+			_, _, status, msg := g.obtainPrefetch(context.Background(), "crd-order-select", "patient", "MBR-COVERED", fence)
+			return answer{status, msg}
+		}},
+		"DTR fill": {fill: false, run: func(_ *Gateway, sor SystemOfRecord) answer {
+			_, _, err := newManagedPopulator(sor).Populate(context.Background(), wrapDemoLumbarPackage(t), PopulateContext{Member: "MBR-COVERED"})
+			status, msg := SoRFailureResponse(err)
+			if statusForPopulateErr(err) != status {
+				t.Errorf("DTR fill: populate status %d, the read's %d", statusForPopulateErr(err), status)
+			}
+			return answer{status, msg}
+		}},
+		"home oxygen evidence": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			evidence, err := g.homeOxygenAutoFillEvidenceContext(context.Background(), "MBR-COVERED", nil)
+			if evidence != nil {
+				t.Error("home oxygen evidence: a failed read gave evidence")
+			}
+			status, msg := SoRFailureResponse(err)
+			return answer{status, msg}
+		}},
+		"supplemental report": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			_, status, msg := g.supplementalReport(context.Background(), "MBR-COVERED", "MBR-COVERED")
+			return answer{status, msg}
+		}},
+		"scenario origination": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
+			w := httptest.NewRecorder()
+			g.handleScenario(w, httptest.NewRequest("POST", "/scenario", strings.NewReader(`{"branch":"covered","member":"MBR-COVERED"}`)))
+			return answer{w.Code, w.Body.String()}
+		}},
+	}
+	invalidStatus, invalidMsg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
+	for name, r := range routes {
+		for _, level := range allLevels {
+			read := func(err error) answer {
+				s := scriptedReadSoR{t: t, base: ReadSystemOfRecord(newCensusSoR()), before: func(context.Context, string, string) error { return err }}
+				g := &Gateway{cfg: Config{SoR: s, RequireKnownMembers: true, EnrichNativeRequests: true, ConformanceEnforcement: level}}
+				g.states = gatewayStates(g)
+				return r.run(g, s)
+			}
+			repeating, otherwise := read(SoRRepeatedMember()), read(&SoRReadError{Kind: SoRInvalidResponse})
+			if repeating != otherwise {
+				t.Errorf("%s/%s: a read repeating a member answered %+v, the same read failing otherwise %+v", name, level, repeating, otherwise)
+			}
+			if r.fill && !refusesAt(level, RulePrefetchFill) {
+				if repeating.status != 0 {
+					t.Errorf("%s/%s: answered %+v, want the request carried unfilled", name, level, repeating)
+				}
+				continue
+			}
+			if repeating.status != invalidStatus || !strings.Contains(repeating.msg, invalidMsg) {
+				t.Errorf("%s/%s: answered %+v, want the system's invalid response %d %q", name, level, repeating, invalidStatus, invalidMsg)
+			}
+		}
+	}
+}

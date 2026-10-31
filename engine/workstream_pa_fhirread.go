@@ -25,7 +25,7 @@ import (
 // is absent. Used by the (C) outbound fence (coverage-eligibility leg): the
 // engine compares the returned ref to the inbound member-namespace ref so a
 // connector cannot swap the patient between the request it was handed and the
-// response it returned. Exported because test/adversarial uses it directly.
+// response it returned. Exported because the platform's adversarial suite uses it directly.
 func ParseCoverageEligibilityResponsePatient(data []byte) (string, error) {
 	var probe struct {
 		ResourceType string                     `json:"resourceType"`
@@ -91,8 +91,8 @@ var ErrNoPASResponsePatient = errors.New("engine: PAS response carries no ClaimR
 // the right one here.
 //
 // Errors with ErrNoPASResponsePatient if none found. json-level, no FHIR lib.
-// Used by the (C) outbound fence (the PAS legs) and by test/adversarial.
-// Exported because test/adversarial uses it directly.
+// Used by the (C) outbound fence (the PAS legs) and by the platform's adversarial suite.
+// Exported because that suite uses it directly.
 func ParsePASResponsePatients(b []byte) ([]string, error) {
 	refs, sawResponse, err := parsePASResponsePatients(b)
 	switch {

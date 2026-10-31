@@ -4,7 +4,6 @@ package engine
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -35,9 +34,8 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	// Read as the payer's gateway reads it (handleEligibilityInbound): a

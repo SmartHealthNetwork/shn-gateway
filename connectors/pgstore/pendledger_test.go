@@ -9,9 +9,9 @@ package pgstore_test
 // other is the "stand-in more permissive than the real thing" bug, so every row here
 // runs twice.
 //
-// The third implementation (internal/holdersim's delegating Client) runs the same
-// rules over its HTTP routes in internal/holdersim/pendledger_test.go; it cannot run
-// from here because holdersim lives in the platform module, which imports this one.
+// The third implementation (the platform holder simulator's delegating Client) runs the
+// same rules over its HTTP routes in that simulator's own tests; it cannot run from
+// here because the simulator lives in the platform module, which imports this one.
 //
 // Retention (the bounded lazy purge) and the ledger-less fallback are backend-local
 // rows: they need the store's injected clock and an in-package type, so they live in

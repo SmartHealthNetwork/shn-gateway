@@ -452,6 +452,65 @@ func TestOriginateToleratesAbsentStamp(t *testing.T) {
 	}
 }
 
+// TestHubLegNotTakenIsTheCallersRoutingRefusal: the Hub's one 422 reaches the
+// caller as the routing 422 with the Hub's reason as it stands, decided by the
+// status and the delivered header. Any other answer with those parts stays what
+// it was.
+func TestHubLegNotTakenIsTheCallersRoutingRefusal(t *testing.T) {
+	const reason = "the recipient does not take cdex-attachment-submit: it declares no legs, and cdex-attachment-submit is since 1.1.0"
+	refusal := func(status int, delivered string) []byte {
+		w := httptest.NewRecorder()
+		if !(&Gateway{}).relayOriginationError(w, fmt.Errorf("originate leg: %w", hubRefusal(status, []byte(`{"error":"`+reason+`"}`), delivered))) {
+			t.Fatal("the refusal was not handled")
+		}
+		if want := http.StatusBadGateway; status != 422 || delivered != "no" {
+			if w.Code != want {
+				t.Errorf("%d delivered %q answered %d, want %d", status, delivered, w.Code, want)
+			}
+			return w.Body.Bytes()
+		}
+		if w.Code != http.StatusUnprocessableEntity {
+			t.Errorf("the Hub's 422 answered %d", w.Code)
+		}
+		return w.Body.Bytes()
+	}
+	if got, want := string(refusal(422, "no")), `{"error":"`+reason+`"}`+"\n"; got != want {
+		t.Fatalf("answer %q, want the Hub's reason as it stands, %q", got, want)
+	}
+	// Not the Hub's route handler: a load balancer in front of it.
+	refusal(422, "")
+	// The recipient was reached: never a refusal the caller may resend.
+	refusal(422, "yes")
+	refusal(422, "unknown")
+	// Any other status with this reason is not this refusal.
+	refusal(400, "no")
+}
+
+// What a v1.1.0 gateway's caller gets from a Hub older than the refusal of a leg
+// the recipient does not take. A Hub that carries the leg forwards it, and a
+// recipient that does not know it refuses (its status, nothing of its body). A
+// Hub that does not know the leg refuses it, on a network whose Authorization
+// Framework does know it. A Framework that does not know the leg denies it first,
+// and the caller gets the 403 of any denied leg.
+func TestHubThatPredatesTheRefusal(t *testing.T) {
+	for reason, want := range map[string]string{
+		recipientRefusedPrefix + "(400)": `{"error":"the recipient's gateway refused the exchange (400)"}`,
+		"unknown transaction type":       `{"error":"hub refused the exchange: unknown transaction type"}`,
+	} {
+		status := http.StatusBadGateway
+		if reason == "unknown transaction type" {
+			status = http.StatusBadRequest
+		}
+		w := httptest.NewRecorder()
+		if !(&Gateway{}).relayOriginationError(w, hubRefusal(status, []byte(`{"error":"`+reason+`"}`), "no")) {
+			t.Fatal("the refusal was not handled")
+		}
+		if got := strings.TrimSpace(w.Body.String()); w.Code != http.StatusBadGateway || got != want {
+			t.Errorf("%q answered %d %s, want 502 %s", reason, w.Code, got, want)
+		}
+	}
+}
+
 // TestRelayErrorSurvivesHelperWrapping is the %w audit guard: a *RelayError wrapped through the
 // deepest helper chain still relays (a %v wrap or error re-synthesis anywhere on the path would drop
 // the sentinel and fail this).

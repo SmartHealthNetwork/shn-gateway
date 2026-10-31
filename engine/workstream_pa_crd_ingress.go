@@ -769,8 +769,8 @@ const patientNamedDifferently = "system of record names the patient differently 
 // participant turned the fhirServer read off. Both are CDS Hooks' 412: the
 // service could not obtain the data the request left out.
 const (
-	crdNoCoverageToRouteBy = "no coverage to route by: send prefetch.coverage or fhirServer (this gateway's system of record names no patient for this member)"
-	crdNoCoverageReadOff   = "no coverage to route by: send prefetch.coverage (this gateway's system of record names no patient for this member, and it does not read fhirServer)"
+	crdNoCoverageToRouteBy = "no coverage to route by: send prefetch.coverage or fhirServer (this gateway's records name no patient for this member)"
+	crdNoCoverageReadOff   = "no coverage to route by: send prefetch.coverage (this gateway's records name no patient for this member, and it does not read fhirServer)"
 )
 
 // historyNamedDifferently is the recorded reason a history key is left out

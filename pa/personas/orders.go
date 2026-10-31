@@ -4,7 +4,7 @@ package personas
 // engine pins it equal to the system its order builder codes them in.
 const hcpcsSystem = "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
 
-// Demo-profile display/dx constants (§4.3's family map), so internal/fhirseed's
+// Demo-profile display/dx constants (§4.3's family map), so the platform seeder's
 // MBR-D-UC0N persona roster seeds the SAME clinical text these tuples
 // originate — one family fact, not two.
 const (
@@ -22,14 +22,14 @@ const (
 
 	// DemoDisplayE1390UC03/DemoDxE1390UC03 — R3's re-key: UC-03's demo arm off the oxygen
 	// family (E1390 oxygen concentrator), matching the provider-data UC-03 persona's own
-	// diagnosis (J44.9, COPD — internal/fhirseed.go's MBR-PD-UC03 comment) so the two lanes'
+	// diagnosis (J44.9, COPD — the platform seeder's MBR-PD-UC03 comment) so the two lanes'
 	// UC-03 tell the same clinical story off their own distinct personas/observations.
 	DemoDisplayE1390UC03 = "Oxygen concentrator, single delivery port, capable of delivering 85 percent or greater oxygen concentration"
 	DemoDxE1390UC03      = "J44.9"
 )
 
 // DemoOrderTuple is one demo-lane scenario's originated order — system + code (HCPCS) +
-// display + diagnosis (ICD-10-CM). A caller (accountsvc's discovery descriptor, the
+// display + diagnosis (ICD-10-CM). A caller (the platform account service's discovery descriptor, the
 // seed) derives a persona's advertised order from the SAME source the gateway's demo
 // lane originates from, instead of hand-copying the tuple a second time — verdict,
 // order and family table move together or not at all.

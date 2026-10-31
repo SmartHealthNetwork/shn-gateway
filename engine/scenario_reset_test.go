@@ -103,7 +103,7 @@ func TestGatewayReset_StoreFailureIs503AndCounted(t *testing.T) {
 	if len(stores) != 2 {
 		t.Fatalf("StoreErrorMetric calls after the route = %d, want 2 (one per Reset)", len(stores))
 	}
-	// A healthy store answers 200 {"ok":true} — the shape the reset caller (tools/cloudsmoke) reads.
+	// A healthy store answers 200 {"ok":true} — the shape the reset caller (the platform's cloud smoke) reads.
 	fake.failReset = nil
 	rec = httptest.NewRecorder()
 	g.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/reset", nil))

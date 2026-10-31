@@ -22,7 +22,7 @@ import (
 // holds — rather than by a stand-in's idea of a Coverage. That distinction is the
 // whole point of the test: every hermetic system-of-record stand-in in this
 // package names its payer organization by an external REFERENCE, while every
-// Coverage internal/fhirseed seeds CONTAINS it (fhirmap.BuildCoverageForMemberWithContainedPayer
+// Coverage the platform seeder seeds CONTAINS it (the platform FHIR mapping's BuildCoverageForMemberWithContainedPayer
 // — the shape to use when the reader returns only the Coverage's own bytes). A
 // submission built from the contained shape stranded that organization the moment
 // the builder re-pointed payor at the payer Organization entry, and no hermetic

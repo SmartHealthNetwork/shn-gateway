@@ -545,3 +545,52 @@ func TestValidateGovernedWrapsParameters(t *testing.T) {
 		t.Fatalf("the finding hashes the sender's bytes, got %+v", findings)
 	}
 }
+
+// At each level, through the choke point: the timeout alone is a check that
+// could not run (recorded and carried at observe and structural, the
+// gateway's own 500 at strict, not run at none), never a payload verdict;
+// beside a structural error the payload is refused for that error wherever
+// the level refuses one.
+func TestValidateGovernedRegexCheckCouldNotRun(t *testing.T) {
+	coverage := []byte(`{"resourceType":"Coverage"}`)
+	alone := invalid(regexTimeoutIssue("Coverage.extension[0].url"))
+	mixed := invalid(regexTimeoutIssue("Coverage.extension[0].url"), errIssue("Validation_VAL_Profile_Minimum", []string{"Coverage"}, "Coverage.status: minimum required = 1"))
+	for _, tc := range []struct {
+		name     string
+		level    ConformanceEnforcement
+		res      shnsdk.Result
+		status   int
+		decision string
+		verdict  string
+	}{
+		{"alone at none", EnforcementNone, alone, 0, "", ""},
+		{"alone at observe", EnforcementObserve, alone, 0, "relayed", "unavailable"},
+		{"alone at structural", EnforcementStructural, alone, 0, "relayed", "unavailable"},
+		{"alone at strict", EnforcementStrict, alone, 500, "", ""},
+		{"beside a structural error at none", EnforcementNone, mixed, 0, "", ""},
+		{"beside a structural error at observe", EnforcementObserve, mixed, 0, "relayed", ""},
+		{"beside a structural error at structural", EnforcementStructural, mixed, 422, "refused", ""},
+		{"beside a structural error at strict", EnforcementStrict, mixed, 422, "refused", ""},
+	} {
+		g, captured := findingsGateway(tc.level)
+		v := &capturingValidator{res: tc.res}
+		gr := g.validateGoverned(context.Background(), findingContext{LegType: "test"}, v, coverage, "ingress", "2.0", "", false)
+		g.drainObserveChecks()
+		findings := *captured
+		if gr.Status != tc.status {
+			t.Errorf("%s: status %d, want %d (%s)", tc.name, gr.Status, tc.status, gr.Msg)
+		}
+		if tc.decision == "" {
+			if len(findings) != 0 {
+				t.Errorf("%s: want no finding, got %+v", tc.name, findings)
+			}
+			continue
+		}
+		if len(findings) != 1 {
+			t.Fatalf("%s: %d findings, want 1", tc.name, len(findings))
+		}
+		if f := findings[0]; f.Decision != tc.decision || f.Verdict != tc.verdict || f.Level != tc.level.String() {
+			t.Errorf("%s: finding decision %q verdict %q level %q, want %q %q %q", tc.name, f.Decision, f.Verdict, f.Level, tc.decision, tc.verdict, tc.level)
+		}
+	}
+}

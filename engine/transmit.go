@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -84,9 +85,10 @@ func (g *Gateway) ownershipRefused(k relay.Key, err error) {
 const errOwnershipFault = "gateway fault: payload not permitted on this leg"
 
 // writeOwnershipFault answers a payload the ownership table refused: this
-// gateway's fidelity refusal of its own transmit.
+// gateway's fidelity refusal of its own transmit, a message it built failing
+// its own verification.
 func writeOwnershipFault(w http.ResponseWriter) {
-	exchangeOfWriter(w).refused(RefusalFidelity)
+	exchangeOfWriter(w).refusedFidelity(vocab.RefusalStageVerify)
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": errOwnershipFault})
 }
 
@@ -126,6 +128,9 @@ func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType st
 	}
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
+	}
+	if k.Role == relay.RoleRequester && k.Direction == relay.DirectionResponse {
+		setEditedHeader(w.Header(), p)
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
@@ -195,6 +200,13 @@ func sealRequest(id relay.BuilderID, b []byte, contentType string) relay.Payload
 // the responder could not send to its own system because the ownership table
 // refused it is also reported on the observer seam.
 func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) {
+	// The system's answer was over the limit: refused, never relayed cut
+	// short, as delivered (the system answered and may have acted).
+	if errors.Is(err, errAnswerTooLarge) {
+		exchangeOf(r.Context()).refused(RefusalRouting)
+		attestAnswerRefused(w, RefusalRouting, errResponseTooLarge)
+		return
+	}
 	status, msg := g.responderFailure(r.Context(), leg.tx, err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
 	// The answer is this gateway's, but the record says whose failure it was:
@@ -202,7 +214,7 @@ func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg in
 	var uf *upstreamFailure
 	switch x := exchangeOf(r.Context()); {
 	case isOwnershipFault(err):
-		x.refused(RefusalFidelity)
+		x.refusedFidelity(vocab.RefusalStageVerify)
 	case errors.As(err, &uf):
 		x.decided(ExchangeUpstreamError, "", "")
 	default:
@@ -264,7 +276,8 @@ const (
 
 // upstreamFailure is a native forward that got no usable answer from the
 // payer's own system. sent says the request was written to it: a connection
-// that failed after that, a read that failed, or a body too large to relay.
+// that failed after that, a read that failed, or an answer too large to read
+// (errAnswerTooLarge).
 // Before that (a dial, TLS or token failure) the payer's system never saw it.
 type upstreamFailure struct {
 	err  error

@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -112,6 +113,7 @@ func (g *Gateway) sealTransformed(ctx context.Context, route legRoute, x Exchang
 		Counterpart: x.Counterpart, Detail: err.Error(),
 		Route: routeInfoFor(route),
 	})
-	exchangeOf(ctx).refused(RefusalFidelity)
+	// The translation SHN built failed its own verification.
+	exchangeOf(ctx).refusedFidelity(vocab.RefusalStageVerify)
 	return built, http.StatusInternalServerError, "the gateway could not verify its own translation of the request to the payer's IG line, so nothing was sent: " + err.Error()
 }

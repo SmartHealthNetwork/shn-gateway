@@ -352,11 +352,12 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 				v.State = "unavailable"
 				v.Error = "certification validator did not judge the payload"
 			default:
-				if systems, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
-					// The lane could not check the payload's terminology: no verdict
-					// on the payload, so unavailable, never invalid and never valid.
+				if systems, regex, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
+					// The lane could not check the payload's terminology, or could
+					// not run a primitive's regex check: no verdict on the payload,
+					// so unavailable, never invalid and never valid.
 					v.State = "unavailable"
-					v.Error = terminologyUnavailableReason(systems)
+					v.Error = uncheckedReason(systems, regex)
 				} else {
 					v.State = "invalid"
 				}
@@ -432,30 +433,42 @@ func missedCodingSystems(diagnostics string) (systems []string, ok bool) {
 }
 
 // certificationUnchecked reads an invalid certification result: true when
-// the lane could not check the payload's terminology and found nothing else.
-// Every error and fatal issue must be one of:
+// the lane could not check the payload's terminology, or could not run a
+// primitive's regex check, and found nothing else. Every error and fatal issue
+// must be one of:
 //   - a passed-through verdict that the validator could not check a code
 //     system (uncheckedCodeSystem);
 //   - the required-binding miss that follows from it on the same element
 //     (Terminology_TX_NoValid_1_CC), when for every code it names the
 //     validator said on that element that it could not expand the bound value
 //     set for want of that code's system (missedCodingSystems);
+//   - an error the validator gives because it could not run a primitive's
+//     regex check (regexCheckCouldNotRun);
 //   - a no-match summary or PAS slice-match consequence that follows from
 //     those alone, read exactly as the structural level reads them
-//     (allExcused), on an entry that carries such terminology itself.
+//     (allExcused), on an entry that carries such an issue itself.
 //
 // Anything else — a structural error, an invariant, a code the validator
 // checked and did not find, a binding miss on a code system it holds, a fatal
 // issue, an unidentified issue — keeps the answer a verdict: invalid. systems
-// is every code system the lane could not check, sorted.
-func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string) (systems []string, ok bool) {
+// is every code system the lane could not check, sorted; regex reports a regex
+// check that could not run.
+func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string) (systems []string, regex, ok bool) {
 	errs := fhirErrors(res)
 	if len(errs) == 0 {
-		return nil, false
+		return nil, false, false
+	}
+	for i, e := range errs {
+		if e.Severity == "error" && e.MessageID == regexCheckCouldNotRun {
+			errs[i].excused, regex = true, true
+		}
 	}
 	unexpandableAt := map[string]map[string]bool{} // element → code systems a value set there could not be expanded for
 	named := map[string]bool{}
 	for i, e := range errs {
+		if e.excused {
+			continue
+		}
 		system, unexpandable, ok := uncheckedCodeSystem(e.Issue)
 		if !ok {
 			continue
@@ -485,7 +498,8 @@ func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string
 		errs[i].excused = all
 	}
 	// A summary or slice-match consequence is excused only by the unchecked
-	// terminology on its own entry: an entry with none has no such cause.
+	// terminology or regex check on its own entry: an entry with neither has no
+	// such cause.
 	unchecked := map[int]bool{}
 	for _, e := range errs {
 		if e.excused {
@@ -493,25 +507,45 @@ func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string
 		}
 	}
 	if !allExcused(errs, body, line, profile) {
-		return nil, false
+		return nil, false, false
 	}
 	for _, e := range errs {
 		if !unchecked[e.entry] {
-			return nil, false
+			return nil, false, false
 		}
 	}
 	for system := range named {
 		systems = append(systems, system)
 	}
 	sort.Strings(systems)
-	return systems, true
+	return systems, regex, true
+}
+
+// uncheckedReason is the unavailable verdict's authored reason for a lane that
+// could not check terminology (terminologyUnavailableReason) or could not run
+// a primitive's regex check. With both it names one code system, so the
+// reason stays under 256 bytes.
+func uncheckedReason(systems []string, regex bool) string {
+	const regexReason = "a primitive regex check could not run"
+	switch {
+	case len(systems) == 0:
+		return regexReason
+	case regex:
+		return terminologyReasonNaming(systems, 1) + "; " + regexReason
+	}
+	return terminologyUnavailableReason(systems)
 }
 
 // terminologyUnavailableReason is the unavailable verdict's authored reason,
 // naming the code systems the lane could not check (namedCodeSystem). At
 // most two are named, so the reason stays under 256 bytes.
 func terminologyUnavailableReason(systems []string) string {
-	const maxNamed = 2
+	return terminologyReasonNaming(systems, 2)
+}
+
+// terminologyReasonNaming is terminologyUnavailableReason naming at most
+// maxNamed code systems.
+func terminologyReasonNaming(systems []string, maxNamed int) string {
 	names := make([]string, 0, maxNamed)
 	for _, system := range systems {
 		if len(names) == maxNamed {

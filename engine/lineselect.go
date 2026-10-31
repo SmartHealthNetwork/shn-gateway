@@ -235,6 +235,10 @@ const recipientRefusedPrefix = "forward to recipient failed: the recipient refus
 // sends several legs, the earlier ones may have been answered.
 const errRecipientNotYetKnowing = "the recipient's gateway has not read this gateway's registration yet and took no action on this leg"
 
+// errRecipientAtCapacity is what the caller is told when the recipient's
+// gateway had no room for a large envelope, before acting on it.
+const errRecipientAtCapacity = "the recipient's gateway has no room for this envelope now and took no action on this leg"
+
 // relayOriginationError surfaces a recipient's framed non-2xx application answer
 // (a *RelayError from OriginateLeg, unwrapped through any %w chain) to the origination
 // caller byte-identically — the same verbatim relay the Da Vinci ingress handlers do,
@@ -256,6 +260,20 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	if errors.As(err, &rre) {
 		exchangeOfWriter(w).refused(RefusalRouting)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": rre.Error()})
+		return true
+	}
+	// A request whose sealed envelope is over the network's limit was not
+	// sent: refused 413 as routing, as an over-limit body is at the ingress.
+	if errors.Is(err, errEnvelopeTooLarge) {
+		exchangeOfWriter(w).refused(RefusalRouting)
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+		return true
+	}
+	// The member's Coverage records do not name one payer: no one recipient
+	// to ask (memberRoutingCoverage).
+	if errors.Is(err, errAmbiguousCoverage) {
+		exchangeOfWriter(w).refused(RefusalRouting)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgAmbiguousCoverage})
 		return true
 	}
 	// A Hub leg that produced no answer within the client's budget is a 504
@@ -281,6 +299,19 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	// so the caller does not resend a request the payer may have acted on.
 	var refused *hubRefusalError
 	if errors.As(err, &refused) {
+		// The recipient answered, and its answer was refused on the way back:
+		// delivered, so the caller does not resend it blindly. The one
+		// routing refusal of an answer is its size.
+		answerRefused := refused.reason == hubReasonAnswerTooLarge || refused.reason == hubReasonRecipientRefusedAnswer
+		if answerRefused && refused.delivered == "yes" {
+			if refused.reason == hubReasonAnswerTooLarge || refused.rule == RefusalRouting {
+				writeAnswerTooLarge(w)
+				return true
+			}
+			w.Header().Set(HubDeliveredHeader, "yes")
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": errAnswerRefusedDelivered})
+			return true
+		}
 		switch refused.delivered {
 		case "yes":
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer was lost on the way back (" +
@@ -289,19 +320,35 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient may have received this request (" +
 				refused.reason + "): check its outcome before resending"})
 		default:
-			// The recipient's gateway refused the leg before acting on it,
-			// because it has not read this gateway's registration yet (its own
-			// attestation, relayed by the Hub): nothing was done, so the caller
-			// is told to resend, and when.
+			// The recipient's gateway refused the leg before acting on it (its
+			// own attestation, relayed by the Hub): nothing was done, so the
+			// caller is told to resend, and when.
 			if refused.notActed {
+				why := errRecipientNotYetKnowing
+				if refused.atCapacity {
+					why = errRecipientAtCapacity
+				}
 				w.Header().Set("Retry-After", strconv.Itoa(refused.retryAfter))
-				writeUnavailable(w, fmt.Sprintf("%s; resend after %ds", errRecipientNotYetKnowing, refused.retryAfter))
+				writeUnavailable(w, fmt.Sprintf("%s; resend after %ds", why, refused.retryAfter))
+				return true
+			}
+			// The recipient does not take this leg: the network refused it on
+			// routing, and nothing reached the recipient. The caller gets the
+			// routing 422 with the Hub's reason as it stands.
+			if refused.legNotTaken() {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": refused.reason})
 				return true
 			}
 			// The recipient's gateway refused the forward at its edge: say whose
 			// refusal it was, with its status and nothing of its body.
 			if code, ok := strings.CutPrefix(refused.reason, recipientRefusedPrefix); ok {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient's gateway refused the exchange " + code})
+				return true
+			}
+			// The Hub refusing a body over its limit is the network's 413,
+			// recorded as the Hub's routing refusal (hubRules).
+			if refused.reason == errRequestTooLarge {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "hub refused the exchange: " + refused.reason})
 				return true
 			}
 			// A Hub 409 (a replayed envelope) is reported as it is. Any other
@@ -312,12 +359,21 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 			if status < 400 || status > 599 || (status/100 == 4 && status != http.StatusConflict) {
 				status = http.StatusBadGateway
 			}
+			// The Hub's budget for large envelopes had no room: its wait reaches
+			// the caller.
+			if refused.retryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(refused.retryAfter))
+			}
 			writeJSON(w, status, map[string]string{"error": "hub refused the exchange: " + refused.reason})
 		}
 		return true
 	}
 	// The recipient answered, but its answer failed this gateway's checks.
 	var lost *answerLostError
+	if errors.As(err, &lost) && lost.tooLarge {
+		writeAnswerTooLarge(w)
+		return true
+	}
 	if errors.As(err, &lost) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer could not be accepted (" +
 			lost.cause + "); it may have acted on the request: check its outcome before resending"})

@@ -214,7 +214,7 @@ func TestOriginatedCRD_RoutesAndCarriesTheRoutingChoice(t *testing.T) {
 			}
 			// The PAS leg is built under the coverage the request was routed by.
 			g := &Gateway{cfg: Config{SoR: sor}}
-			cov, found, status, msg := g.memberRoutingCoverage(context.Background(), prefetchMember)
+			cov, found, status, msg, _ := g.memberRoutingCoverage(context.Background(), prefetchMember)
 			if !found || status != 0 || !bytes.Equal(cov, row.want) {
 				t.Fatalf("routing coverage %s (found %v, %d %s), want %s", cov, found, status, msg, row.want)
 			}
@@ -286,7 +286,7 @@ func TestMemberCoverage_NoRoutingChoice(t *testing.T) {
 	if _, _, status, msg := g.memberCoverage(context.Background(), prefetchMember); status != http.StatusUnprocessableEntity || !strings.Contains(msg, "ambiguous coverage for routing") {
 		t.Fatalf("memberCoverage: %d %s, want 422 ambiguous", status, msg)
 	}
-	if cov, found, status, msg := g.memberRoutingCoverage(context.Background(), prefetchMember); !found || status != 0 || !bytes.Contains(cov, []byte(`"cov-1"`)) {
+	if cov, found, status, msg, _ := g.memberRoutingCoverage(context.Background(), prefetchMember); !found || status != 0 || !bytes.Contains(cov, []byte(`"cov-1"`)) {
 		t.Fatalf("memberRoutingCoverage: %s %v %d %s, want the active Coverage", cov, found, status, msg)
 	}
 }

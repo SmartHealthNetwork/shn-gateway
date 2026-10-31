@@ -16,22 +16,34 @@ RUN --network=none case "$TARGETPLATFORM" in \
       *) exit 2 ;; \
     esac && /src/build.sh /input/main.war /out "$TARGETPLATFORM" "$source_child" "$compiler_child"
 
+# The IG packages a build may pass as the igpackages build context
+# (`--build-context igpackages=<dir>`, compose `additional_contexts`): a
+# directory of <name>-<version>.tgz archives. Empty by default, so every
+# package below is downloaded from the registry. Each package, from either
+# source, is checked against its pinned sha256 before the image uses it, and
+# IG_PACKAGES_OFFLINE=1 refuses the registry: a package the context does not
+# hold then fails the build.
+FROM scratch AS igpackages
+
 FROM alpine:3 AS igs
-RUN apk add --no-cache curl
+ARG IG_PACKAGES_OFFLINE=
+RUN [ "$IG_PACKAGES_OFFLINE" = 1 ] || apk add --no-cache curl
+COPY --from=igpackages / /igcache/
 WORKDIR /packages
-RUN curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.core-6.1.0.tgz         https://packages.simplifier.net/hl7.fhir.us.core/6.1.0 \
+RUN igfetch() { if [ -f "/igcache/$1" ]; then cp "/igcache/$1" "$1"; elif [ "$IG_PACKAGES_OFFLINE" = 1 ]; then echo "igfetch: $1 is not in the igpackages build context, and IG_PACKAGES_OFFLINE=1 refuses the registry" >&2; return 1; else curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso "$1" "$2"; fi; } \
+ && igfetch hl7.fhir.us.core-6.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.core/6.1.0 \
  && echo "ec096f29bc4ce8f04117dfc4ef82e7289c67a7e2188892e86288c45389d158d9  hl7.fhir.us.core-6.1.0.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
+ && igfetch hl7.fhir.us.davinci-cdex-2.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-cdex/2.1.0 \
  && echo "7c950274d8128934868254e1a620dd44d63d9f62bed36edaa70018b70cd1102d  hl7.fhir.us.davinci-cdex-2.1.0.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-hrex-1.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.1.0 \
+ && igfetch hl7.fhir.us.davinci-hrex-1.1.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.1.0 \
  && echo "a122c031bc7d285a7aff18e18462728e499043e47f3675f43d4b359884287359  hl7.fhir.us.davinci-hrex-1.1.0.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-pas-2.0.1.tgz  https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.0.1 \
+ && igfetch hl7.fhir.us.davinci-pas-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-pas/2.0.1 \
  && echo "1ba4159f2a1ea000dfb1685601bfc902c603a1c59ce2127118ee0a7aec694218  hl7.fhir.us.davinci-pas-2.0.1.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-crd-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-crd/2.0.1 \
+ && igfetch hl7.fhir.us.davinci-crd-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-crd/2.0.1 \
  && echo "977ac1841346de0d9b50896dddd4834175ab41c6e25a58ca12e266f95a1c17fe  hl7.fhir.us.davinci-crd-2.0.1.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.us.davinci-dtr-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-dtr/2.0.1 \
+ && igfetch hl7.fhir.us.davinci-dtr-2.0.1.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-dtr/2.0.1 \
  && echo "a2840c31da3277d7b78c74baf65bcbeee97ddfe4f956810bffd79d9cfe5c64f0  hl7.fhir.us.davinci-dtr-2.0.1.tgz" | sha256sum -c \
- && curl --retry 5 --retry-delay 5 --retry-all-errors -fLSso hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
+ && igfetch hl7.fhir.uv.sdc-3.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.sdc/3.0.0 \
  && echo "be5c3f0a7f82e072b40739e05fb68f3e58e44c9bd040cd901b1b55c62f23dca2  hl7.fhir.uv.sdc-3.0.0.tgz" | sha256sum -c
 
 # The runtime base's JVM trust store without the four eMudhra emSign roots

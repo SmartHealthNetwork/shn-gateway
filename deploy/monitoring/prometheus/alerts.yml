@@ -125,8 +125,12 @@ groups:
           description: "Its last successful read was {{ $value | humanizeDuration }} ago. The feed carries registrations and revocations: until it is read again, a revocation since then does not reach this gateway, and a newly registered peer is not known to it."
 
       # Exchanges refused under a rule whose refusals mean the network's own machinery is failing,
-      # not a partner. Fidelity (the gateway's own edit of a message was refused) and audit (the
-      # exchange's audit could not be recorded) fire on a single refusal in the last 5 minutes.
+      # not a partner. Fidelity (an edit the gateway built failed its own verification) and audit
+      # (the exchange's audit could not be recorded) fire on a single refusal in the last 5 minutes.
+      # A fidelity refusal at stage build (shn_refusal_stage="build": the gateway refused to build
+      # a message because of what the caller declared or did not state) is not counted, as
+      # ExchangeRefusedByRule{rule=fidelity} does not count it; a series from a gateway that
+      # reports no stage still counts.
       # Integrity (one can be a partner's bad signature, a run points at keys or envelopes) and
       # routing (the Hub, the registry or discovery could not route or address it) fire when each of
       # two of the last three 5-minute periods holds three. Both sum over the gateway's replicas,
@@ -148,16 +152,16 @@ groups:
         expr: |
           sum by (job, shn_refusal_rule) (
             (
-              (last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m]) - last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[1d] offset 5m))
-              unless min_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m]) < last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[1d] offset 5m)
+              (last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit",shn_refusal_stage!="build"}[5m]) - last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit",shn_refusal_stage!="build"}[1d] offset 5m))
+              unless min_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit",shn_refusal_stage!="build"}[5m]) < last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit",shn_refusal_stage!="build"}[1d] offset 5m)
             )
-            or last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit"}[5m])
+            or last_over_time(shn_gateway_refusals_total{shn_refusal_rule=~"fidelity|audit",shn_refusal_stage!="build"}[5m])
           ) >= 1
         labels:
           severity: warning
         annotations:
           summary: "{{ $labels.job }} refused an exchange under the {{ $labels.shn_refusal_rule }} rule in the last 5 minutes"
-          description: "At least one {{ $labels.shn_refusal_rule }} refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+          description: "At least one {{ $labels.shn_refusal_rule }} refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - alert: ShnGatewayRefusedIntegrityOrRouting
         expr: |
           count_over_time(

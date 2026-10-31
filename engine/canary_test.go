@@ -46,7 +46,7 @@ var canaryTwinlessMembers = map[string]string{
 	"MBR-BRIDGE-DEMO": "the bridging-demo SUCCESS persona (task2 brief A3a) — same exemption " +
 		"as MBR-BRIDGE-REFUSE: a canary twin for a demo-only visualization persona would be " +
 		"an abuse of a mechanism that exists to keep continuous checks off the shared " +
-		"scenario personas; scenariodrive.BridgeChecks() drives it directly with " +
+		"scenario personas; the platform scenario driver's BridgeChecks() drives it directly with " +
 		"PinnedPersonas instead",
 	"MBR-UNKNOWN-PAYER": "the deliberately unroutable member behind the no-registered-payer " +
 		"fail-closed proof; a canary run of it would assert nothing",

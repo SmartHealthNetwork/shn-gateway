@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -101,7 +102,9 @@ func (g *Gateway) refuseInboundRequest(w http.ResponseWriter, r *http.Request, e
 // {"error": msg}.
 func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, status int, msg string, detail map[string]any) {
 	if msg == errOwnershipFault {
-		defer exchangeOf(r.Context()).refused(RefusalFidelity)
+		// The transmit check refused this gateway's own answer: a message it
+		// built failed its own verification.
+		defer exchangeOf(r.Context()).refusedFidelity(vocab.RefusalStageVerify)
 	}
 	result := LegResult{Status: status, Message: msg}
 	if detail != nil {

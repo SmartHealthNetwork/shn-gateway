@@ -52,6 +52,12 @@ type levelPayer struct {
 	// preWrite, when set, runs on each leg's response writer before the
 	// route does: a header something ahead of the handler set.
 	preWrite func(http.ResponseWriter)
+	// envelope, when set, rewrites each leg's encoded envelope before it is
+	// posted: bytes the Hub would deliver around the same envelope.
+	envelope func([]byte) []byte
+	// coding, when set, is the Content-Encoding each leg is posted under,
+	// through the route as mounted with its content coding (codedRoute).
+	coding   string
 	findings []ConformanceFinding
 	skipped  []ObserverEvent
 	// sideRecord are the events naming a decision this gateway's own record
@@ -77,6 +83,10 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 	hubPub, hubPriv := genED25519(t)
 	authzPub, authzPriv := genED25519(t)
 	g.cfg.HubTransportPub, g.cfg.AuthzPub = hubPub, authzPub
+	// One Framework: the key the requester's leg tokens are signed with also
+	// signs the tokens this payer's authorize calls mint for its answers,
+	// which it verifies before sealing them in.
+	g.cfg.Client.Transport.(*inboundAuthzStub).authzPriv = authzPriv
 	store := g.cfg.Store.(*censusSoR)
 	p := newStubPartner(t)
 	p.respByPath[crdSelectPath] = realCRDAnswer(t)
@@ -187,6 +197,9 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	if err != nil {
 		t.Fatal(err)
 	}
+	if p.envelope != nil {
+		raw = p.envelope(raw)
+	}
 	as, err := json.Marshal(shnsdk.IssueAssertion("hub", p.g.cfg.HolderID, p.hubPriv, clock, time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +215,12 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	}
 	// The route as mounted: the exchange record and the diagnostic observer
 	// around handleInbound (each a pass-through when unset).
-	p.g.inboundRoute()(rec, r)
+	if p.coding != "" {
+		r.Header.Set("Content-Encoding", p.coding)
+		codedRoute(p.g.coreRoutes("payer")[0].bodyLimit, noCredential, p.g.inboundRoute()).ServeHTTP(rec, r)
+	} else {
+		p.g.inboundRoute()(rec, r)
+	}
 	// At observe a payload check runs off the request path: wait for the
 	// leg's queued checks, so a test reads every finding the leg produced.
 	p.g.drainObserveChecks()

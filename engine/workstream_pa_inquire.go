@@ -48,7 +48,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -649,7 +648,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), result.ResponseContentType(), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeResponseLegFailure(w, status, msg)
 		return
 	}
 	if !read.read() {
@@ -880,9 +879,8 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	const leg = "pas-claim-inquire"
@@ -1004,9 +1002,16 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		outcome = "answered"
 		g.localWriteSkipped(leg, child, unread)
 	}
+	// The payer's answer as it arrived, apart from a pend's documentation
+	// return address, re-keyed to the network (E-10).
+	carried, err := g.pendReturnRekey(r.Context(), answer, "application/fhir+json", recipient)
+	if err != nil {
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
+		refusePendRekey(w, r, err)
+		return
+	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json",
-		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), "application/fhir+json"),
+	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json", carried,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

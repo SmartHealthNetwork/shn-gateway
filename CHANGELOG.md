@@ -4,6 +4,704 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A responder verifies its answer token, and attests its system answered when it cannot send the answer (Unreleased)
+
+- **Changed (responder):** the gateway verifies the token `POST /authorize`
+  mints for each answer before sealing it in, as it does for a request leg:
+  signed by the Authorization Framework's key and bound to exactly that answer
+  (its frame, operation, correlation, this gateway as holder, the leg's
+  patient and the answer's payload hash). A token that does not verify is a
+  refusal on per-leg authority, a network rule, at every conformance level.
+- **Changed (responder):** once the participant's system has answered (it may
+  have acted), an answer the gateway cannot authorize is never sent, and the
+  gateway says its system answered. It answers the Hub's forward with a raw
+  `502 {"error": <reason>, "rule": <rule>}` marked `X-SHN-Delivered: yes`:
+  - rule `authority`, refused by the gateway: the token does not verify
+    (`answer token does not verify`), the Framework answered with no usable
+    token (`answer authorization carries no token`), or the Framework could not
+    be reached, timed out or failed (`answer authorization unavailable`; the
+    record's answer error class says which, so it is not read as a denial);
+  - rule `authority`, refused by the Authorization Framework: it denied the
+    answer (`answer not authorized`);
+  - rule `audit`, refused by the Authorization Framework: it could not record
+    its decision (`answer authorization not recorded`).
+
+  The Hub relays the rule to the requester's gateway, marked
+  `X-SHN-Delivered: yes`: `502 forward to recipient failed: the recipient's
+  gateway refused its system's answer`. The requester's gateway records the
+  payer gateway's refusal on that rule, delivered yes, and answers its caller
+  `502 the recipient received this request and answered, but its gateway
+  refused to send the answer; it may have acted on the request: check its
+  outcome before resending`. The token outcome says what happened (`failed`,
+  `denied` or `unavailable`).
+  - Before, an answer token that did not verify was sent, and the Hub refused
+    it (`response leg authorization failed`, delivered yes); the requester
+    recorded the Hub's refusal on `authority`. An answer the Framework
+    answered with no token, or could not authorize, was answered with the
+    payer gateway's plain `502 authorization failed`, which the Hub reported
+    as delivery unknown and the requester recorded as `upstream-error`.
+  - Only the system answering the forwarded operation counts, whatever its
+    status. The gateway's own refusal, made before its system was asked to act
+    (a read of its CDS service listing is not asking), an answer built from
+    its records and a forward that got no answer still answer the plain
+    `502 authorization failed`, which leaves delivery unknown, when they
+    cannot be authorized.
+  - A requester that left while the answer was being authorized is no refusal
+    of the answer: the plain `502`, recorded `other`, on no rule. A refusal the
+    gateway had already made keeps its rule, and a failure of its system stays
+    an upstream error.
+  - An answer the Framework authorized is sent as before.
+
+## A regex check the validator could not run is not a payload verdict (Unreleased)
+
+- **Fixed:** an error the validator reports because it could not run a
+  primitive's regex check (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`)
+  is read as a check that could not run, by its message id. The validator
+  reports it on values that match: when it is short of CPU it gives up on a
+  primitive's type regex after a fixed wall-clock limit, so the same message
+  could be refused on one attempt and pass on the next; and a very long valid
+  `code` or `oid` value can overflow its regex engine. A malformed `code`, `oid`
+  or base64 value is refused by the validator's own checks before its regex
+  runs, and stays refused.
+  - Alone, or beside deeper rules' errors only, the check is `unavailable`:
+    refused with `500` at `strict`, recorded as an `unavailable` finding and
+    relayed at `observe` and `structural`, not run at `none`. Before, it read
+    as a structural defect: refused `422` at `structural` and `strict`, and
+    recorded and carried at both in an answer from a payer it tolerates.
+  - Beside a structural error the message is invalid for that error, at every
+    level that refuses one, as before.
+  - A certification lane whose only errors are such checks (with any unchecked
+    terminology and the no-match summaries on those entries) records
+    `unavailable` with `error` `a primitive regex check could not run` (after
+    the terminology reason when terminology was unchecked too), never `invalid`
+    and never certified.
+  - So `structural` relays a message whose primitive check could not run,
+    recorded `unavailable`, as it relays any check that could not run: under
+    CPU starvation, and for a very long valid `code` or `oid` value, which it
+    refused before. A gateway at `strict` refuses either with `500`, including
+    an answer from a payer it tolerates, which it carried before: a check that
+    could not run is never tolerated.
+
+## The IG-loaded images can build from a local package directory (Unreleased)
+
+- **Additive:** `deploy/validator/Dockerfile` and `deploy/eval/hapi/Dockerfile`
+  read each IG package from an optional `igpackages` build context
+  (`--build-context igpackages=<dir>`, or compose `additional_contexts`), a
+  directory of `<name>-<version>.tgz` archives, before downloading it from the
+  package registry. With the build argument `IG_PACKAGES_OFFLINE=1` the build
+  refuses the registry, so a package the directory does not hold fails it.
+  Every package, from either source, is checked against the sha256 the
+  Dockerfile pins, as before. A build that passes neither downloads and checks
+  every package exactly as before. `deploy/validator/verify.sh` passes
+  `IG_PACKAGES_DIR`, when set, as that context.
+
+## A requester records the Hub's large envelope refusal as routing (Unreleased)
+
+- **Changed (requester):** the Hub's `503 large envelope budget exhausted`, with
+  `Retry-After`, is recorded as the Hub's `routing` refusal: transient, the
+  network cannot carry this body right now. The caller's answer is that `503`
+  with the Hub's `Retry-After`, a whole number of seconds from 1 to 60, or 5
+  when the Hub's cannot be read.
+
+## Module 1's coverage and unstated-claim-fact refusals record their rule (Unreleased)
+
+- **Changed (monitoring):** three refusals on module 1's origination routes
+  now record their rule instead of `other`. Their answers are unchanged.
+  - `422 no coverage on file for member` (the participant's own system holds
+    no Coverage for the member, so no payer can be addressed) is `routing`, as
+    a coverage naming no payer the network registers already was.
+  - `422 ambiguous coverage for routing: the member's Coverage records do not
+    name one payer` (Coverages naming different payers, or one whose payer
+    cannot be read) is `routing` on the module 1 routes it ends (those that
+    originate a submission, and `/scenario/pa/inquire`): no one recipient can
+    be addressed. A waiting call's later inquiry that meets it keeps the pend,
+    as before, and records no refusal.
+  - A prior-authorization request that does not state a claim fact the PAS
+    line requires, or states one its element cannot carry (`422` naming the
+    element), is `fidelity` at stage `build`, as claim facts stated for an
+    order the member does not hold already were.
+- **Changed (monitoring):** a PAS build that fails for any other reason is
+  still the gateway's own `500`, now recorded `other` in every case: an
+  internal error, never a refusal. Before, when a leg of the same call had
+  already been answered, it was recorded as this gateway's refusal on rule
+  `other`.
+
+## A Hub transport key that is not an Ed25519 public key refuses to start (Unreleased)
+
+- **Changed (Go API):** `engine.New` for a role that mounts the Hub-facing
+  inbound (payer, facility, PHG) refuses to start when `HubTransportPub` is
+  not an Ed25519 public key (32 bytes), where it refused only an empty one. A
+  key of another length is a configuration error said at boot. Before, a
+  request carrying a Hub assertion made the verifier panic, and the request
+  was dropped. A gateway that fetches the key from the network's discovery
+  is unaffected: that fetch already checks its length.
+
+## Module 1's build refusals record what failed (Unreleased)
+
+- **Changed (monitoring):** the `422 build ... request failed` refusals on
+  module 1's origination routes (the order-select, order-sign and
+  order-dispatch requests, and the questionnaire-package request) now record
+  what failed, instead of `other`. Their answers are unchanged.
+  - The participant's own records cannot be built from faithfully: an order
+    record the gateway cannot read, or a device history that does not hold
+    the order being dispatched. That is `fidelity` at stage `build`, as an
+    ordering clinician named nowhere already was.
+  - The gateway's own assembly failing (reading the Coverage searchset it
+    assembled from the participant's records, or sealing the
+    questionnaire-package request) is `fidelity` at stage `verify`.
+  - Each of these also reports a `leg.failed` observer event naming the leg,
+    as an ordering clinician named nowhere already did.
+  - A refusal by the shn-sdk request builder itself is still recorded on rule
+    `other`: the SDK does not yet say whether the inputs or the call were at
+    fault.
+
+## An involved patient's token is verified, and a patient left out is on the record (Unreleased)
+
+- **Changed (requester and responder):** this gateway now verifies each involved
+  patient's token before putting it in the leg's involved list, with shn-sdk's
+  `VerifyInvolved`: signature, expiry, leg, operation, frame, holder, patient and
+  payload hash. One that does not verify leaves its patient out, counted as
+  `authorization-failed`, as a Framework failure does, and **the leg is sent,
+  with no record of the exchange under that patient.** A token without the
+  involvement asked for stays `involvement-not-carried`. Before, the
+  gateway listed the token. On a request the Hub then refused the whole leg, and
+  on an answer it dropped the entry. A token for another patient passed the Hub,
+  which binds no subject, and recorded the exchange under that patient; it no
+  longer reaches the list.
+- **Additive:** a patient left out is now on the exchange record for every omit
+  reason, on any gateway, with or without metrics: the record's
+  `InvolvedOmitted`, and the access line's `involvedOmitted`, count them by
+  reason, and are absent when no one was. Before, only the observer event and
+  the metric said so.
+
+## An amendment carries the submitted Claim as sent, and one that cannot is refused (Unreleased)
+
+- **Changed (requester):** from PAS 2.1, the amendment this gateway builds on
+  module 1's routes carries the submitted Claim as sent as its prior-Claim entry,
+  with its items, from shn-sdk v1.1.0. Before, that entry restated the Claim: its
+  own id, status, use and references, and no items. A PAS 2.0 amendment still
+  carries no prior-Claim entry.
+- **Changed (requester):** an amendment whose recorded submission cannot be
+  carried as the requester submitted it is refused `422`, in shn-sdk's own words,
+  as `fidelity` at stage `build`, at every conformance level. From PAS 2.1 that is
+  a claim fact stating a reference the amendment cannot carry as sent. No
+  amendment is sent, and this gateway never rebuilds the Claim. Before, it answered
+  `500 build update bundle failed`, recorded `other`. The submission itself was
+  already sent, so the payer's pended authorization stands.
+
+## A request leg with no authority is recorded as refused on authority (Unreleased)
+
+- **Changed (requester):** when no authority could be obtained for a leg this
+  gateway was sending, the exchange record, the access line and the refusal
+  metrics now say so: refused by this gateway on rule `authority`. That covers
+  an authorize answer with no usable token, a token that does not verify for
+  the leg, and the Authorization Framework failing or unreachable. A denial,
+  and the Framework's audit refusal, are recorded as before. A request that
+  ended first is no refusal. The answers are unchanged: `503` when the
+  Framework could not be reached, else `502 authorization failed`, and the leg
+  is not sent. A leg's `LegOutcome`, and so `LegError`, is unchanged: it is the
+  signal an outage of the Framework alarms on.
+- **Additive:** the record's `AuthorizeError`, and the access line's
+  `authorizeError`, say why, with the classes `answerError` uses.
+
+## A gateway bounds the large bodies it holds at once (Unreleased)
+
+- **Added (requester and recipient):** a gateway holds a bounded number of
+  bytes of documentation attachments and large envelopes at once. A submission
+  that does not fit is refused at the provider's gateway `503`
+  `attachment budget exhausted` with `Retry-After`, recorded as its `routing`
+  refusal, at every level, before any of it is read. One it holds must arrive
+  within 30 seconds, or it is refused `400`, so a sender that stalls cannot keep
+  the budget. An envelope over 8 MiB that
+  does not fit is refused at the recipient's gateway `503` with `Retry-After`
+  and `X-SHN-Not-Acted: at-capacity`, recorded as its `routing` refusal, before
+  its system is called. An envelope at or under 8 MiB is never counted.
+- **Added (requester):** the caller of a leg the recipient's gateway refused
+  that way gets `503` with the wait: the Hub relays the attestation, and nothing
+  was done, so the leg can be sent again.
+- **Added (configuration):** `ATTACHMENT_INFLIGHT_BYTES` sets the budget. Unset,
+  it is a tenth of the task's memory, read from the container's cgroup or, on
+  Amazon ECS, from the task metadata endpoint, or 64 MiB when neither states it,
+  and never below the attachment ceiling. The boot log states the value and
+  where it came from.
+
+## A documentation attachment has its own size bounds, and a payer may declare the largest file it accepts (Unreleased)
+
+- **Changed (requester and recipient):** a CDex documentation attachment
+  submission (`cdex-attachment-submit`) is no longer held to the 8 MiB the
+  network carries on every other leg (just under 6 MiB of body). Its body may
+  be up to the network's attachment ceiling, 16 MiB, and its sealed envelope
+  up to 22 MiB, the SDK's per-leg caps (`MaxAttachmentBytes`,
+  `MaxRequestBytesFor`). The provider's gateway reads a submission up to its
+  ceiling and refuses one over it `413` `request body too large` (`routing`)
+  before reading anything in it; the payer's gateway refuses one over its own
+  ceiling the same way before its system is called. An envelope over its
+  leg's limit is refused `413` naming that limit. A gateway reads an envelope
+  up to the largest limit of any leg, then holds it to its own leg's. A
+  gzip-coded submission or envelope has the same bounds as an uncoded one.
+- **Added (configuration):** `ATTACHMENT_CEILING_BYTES` sets a lower ceiling
+  than the network's 16 MiB; a higher one refuses to boot.
+  `PAYER_ATTACHMENT_MAX_BYTES` is a payer's optional declaration of the
+  largest single inline attachment (file) its system accepts, in bytes after
+  base64 decoding, the value its capability declaration states as
+  `attachmentMaxBytes`; a provider
+  gateway refuses to boot with it.
+- **Added (requester):** a provider's gateway reads the payer's declared
+  `attachmentMaxBytes` from the registry feed and refuses a submission
+  carrying an inline file over the smaller of it and its own ceiling `413`
+  `attachment too large: an inline attachment is N bytes, over the M the
+  payer's system accepts` (`routing`), before anything is sent, at every
+  level. Only inline files are measured, each on its own and from its base64
+  length, never decoded and never from `Attachment.size`: a file by `url`,
+  content with no inline file and `data` that is not well-formed base64 are
+  carried.
+  A payer that declares no limit has only the ceiling applied.
+
+## An answer over the network's limit is refused, never relayed cut short (Unreleased)
+
+- **Fixed (responder):** an answer from the payer's system over what the
+  network carries (the sealed answer is bounded by 8 MiB, so just under 6 MiB
+  of answer fits) is refused for size and never relayed cut short. The
+  payer's gateway answers the Hub `502 {"error":"response body too large",
+  "rule":"routing"}` with `X-SHN-Delivered: yes`, its statement that its
+  system answered and which refusal it made, and records its own `routing`
+  refusal. That holds for a `2xx` answer and for an
+  application error alike.
+  - Before, a `2xx` answer was read up to 8 MiB and sealed as read, so an
+    answer over it was relayed cut short (a DTR questionnaire package
+    included), and one between about 6 and 8 MiB sealed over the Hub's limit
+    and failed there. A non-`2xx` answer over 6 MiB was a `502` saying the
+    payer's system gave no answer the gateway could carry.
+- **Changed (Hub):** the Hub relays that statement as `502 forward to
+  recipient failed: the recipient's gateway refused its system's answer`,
+  delivered `yes`, with the statement's `rule` when it is one of the closed
+  refusal rules (never the recipient's own reason), and refuses a `2xx`
+  answer over the limit it reads itself as `502 response body too large`, delivered
+  `yes`. It honours `X-SHN-Delivered: yes` from a recipient's gateway only on
+  a `502`, which a gateway sets only when it refuses to send its system's
+  answer.
+- **Fixed (requester):** the requester's gateway answers its caller `502
+  {"error":"response body too large"}` with `X-SHN-Delivered: yes`, and records
+  a `routing` refusal by the payer's gateway, the Hub or itself, whichever
+  refused the answer, with the Hub's delivery `yes` when the Hub refused it
+  (none when this gateway refused the Hub's answer). A payer gateway's
+  refusal on another rule is answered `502` saying the recipient answered and
+  its gateway refused to send the answer, delivered `yes`, and recorded on
+  the rule the Hub relayed (`other` when it relayed none). A missing
+  `X-SHN-Delivered` on a gateway's own answer means delivery is not stated.
+
+## Request bodies may be gzip-coded, and answers are gzip-coded on request (Unreleased)
+
+- **Added:** the provider's ingress (its PA routes, coverage eligibility, the
+  CDex `$submit-attachment` routes at the plain endpoint and at each payer's
+  return path, and `GET /cdex/payers`), the token endpoint, the route the
+  network delivers a leg to, and the operator's `/scenario` routes read a
+  request body sent with `Content-Encoding: gzip` decoded. What the
+  gateway reads, carries, verifies, hashes and records is the decoded body,
+  so a gzip-coded exchange is the exchange it would be uncoded; a `/scenario`
+  caller's assertion is verified over the decoded body. The network's limit
+  applies to the decoded body: one that decodes past it is refused `413
+  request body too large`, as an uncoded one is, and is never inflated past
+  the limit. The coded body is read no further than the most any gzip of a
+  body at the limit takes: a coded body that decodes to little or nothing
+  for longer is refused `413` the same way.
+- **Changed (network rule, every level):** a request body in any other
+  content coding, or in a stack of codings (`gzip, gzip` included), is refused
+  `415 unsupported content coding` with `Accept-Encoding: gzip`, the coding
+  the gateway decodes, and recorded as this gateway's refusal on message
+  integrity. The Hub refuses one the same way, and a requester's gateway
+  records the Hub's `415` as the Hub's refusal on message integrity. The body
+  is not read to guess what it is. The coding is refused where the body is
+  read, so a caller is refused first on any authentication that does not
+  need the body: the ingress's bearer, the network's delivery assertion, the
+  Hub's holder assertion, a `/scenario` caller with no assertion. Where the
+  caller's credential is verified over the body (the token endpoint's form, a
+  stated `/scenario` assertion), the coding is refused first. A FHIR operation
+  route answers it as an `OperationOutcome`, as it answers each of its
+  refusals; the token endpoint answers it as an OAuth error, `invalid_request`.
+  - Before, the coding was not looked at: a body labelled with a coding but
+    sent uncoded was read as sent, and a gzip-coded body was refused as
+    whatever its coded bytes failed to parse as (`400`). A body that is not a
+    whole gzip stream is still `400 read body failed`.
+- **Added (answers):** on the provider's ingress, the CDex routes and
+  `GET /cdex/payers` included, and the route the network delivers a leg to,
+  an answer of at least 1 KiB is gzip-coded when the
+  caller sends `Accept-Encoding: gzip`, and every answer states `Vary:
+  Accept-Encoding`. An answer with no body, an event stream, or one already
+  coded is sent as written. The token endpoint's answer, which carries a
+  bearer, and the operator's `/scenario` answers, which carry a scenario's
+  resume token, are never compressed and have no `Vary` header: a compressed
+  answer's length can reveal a secret repeated across answers. The tokens an
+  envelope carries are each bound to one leg and refused if replayed, so
+  envelope answers are compressed.
+
+## A gateway declares what it takes, and a leg its recipient does not take is a 422 (Unreleased)
+
+- **Added (declaration):** at each start a gateway declares to the registrar the
+  legs it compiles for its role (`PUT /register/{id}/capabilities`). A gateway that
+  answers none declares an empty list. It sends the declaration again, backing off
+  to every 10 minutes, until the registrar has it. A `409` is logged once and not
+  resent: the registrar holds a declaration issued no earlier, or the holder's list
+  was set when the network was founded and no declaration applies to it. A `404` or
+  `405`, as a registrar older than the declaration answers, is logged once after
+  four tries and then tried hourly in silence, so a registrar updated later has the
+  declaration with no restart. A failure is logged and never stops the gateway.
+  `GET /health` gains the check `capability-declaration`, with a registrar, and with
+  status always `ok`: `lastSuccess` when it was stored, `lastError` when it was not,
+  and neither before the first answer.
+- **Added (registry):** the registry a gateway converges from the feed carries each
+  holder's `legs` and `attachmentMaxBytes`.
+- **Changed (caller):** the network now refuses, before forwarding, a leg its
+  recipient does not declare it takes: the Hub answers `422` with
+  `X-SHN-Delivered: no`. A provider's gateway answers its caller `422` with the Hub's
+  reason as it stands, where such an answer would be `502 hub refused the exchange: …`.
+- **Changed (exchange record):** that refusal is the Hub's, on `routing`; before,
+  such a reason read `other`. Both changes read the status and the header, never the
+  reason.
+
+## A pended PAS answer's payer-url is re-keyed to the network (Unreleased)
+
+- **Changed (provider, default):** a provider's gateway relaying a payer's
+  answer to a PAS submit, update or inquiry to its own system re-keys the
+  `payer-url` of each Task in it (registered edit `E-10`,
+  `pas-pend-return-rekey`) to its documentation return path for the payer the
+  exchange was routed to, `cdexroute.ReturnBase(PROVIDER_DAVINCI_INGRESS_BASE_URL,
+  <payer participant id>)`, so documentation the provider sends there reaches
+  that payer through the network. Only a `payer-url` input written as a
+  `valueUrl` is re-keyed; nothing else in the answer changes, and the payer's
+  answer crosses the network as its system sent it. The re-key is made only for
+  a payer whose registry entry lists `cdex-attachment-submit`: the Hub refuses that
+  leg to a payer that does not take it, so a payer on an earlier release keeps its
+  own address, carried as sent.
+  - Before, the answer was relayed exactly, and the `payer-url` named the
+    payer's own address, off the network.
+  - A gateway with no return path to write refuses such an answer `502` as a
+    fidelity refusal of its own edit, stage `build`. A released gateway does
+    not reach it: see the boot change below.
+- **Changed (boot; can stop an upgraded gateway from starting):** with
+  `PROVIDER_DAVINCI_INGRESS` on, the gateway refuses to start unless
+  `PROVIDER_DAVINCI_INGRESS_BASE_URL` is an absolute `http` or `https` URL
+  with a host, no `?` or `#` and no user information, so every return path can
+  be built under it. These shapes now refuse to boot, where before they started:
+  - a base with no host (`http://`, `https://`);
+  - a base with a query, an empty one included (`https://gw.example/fhir?tenant=1`,
+    `https://gw.example/fhir?`);
+  - a base with a fragment, an empty one included (`https://gw.example/fhir#x`,
+    `https://gw.example/fhir#`);
+  - a base with user information (`https://user:pass@gw.example`), which every
+    re-keyed `payer-url` would carry.
+
+  A missing base and one that is not `http` or `https` refused to boot before
+  and still do. A gateway with the provider ingress off is unaffected: it
+  starts with any of these values set, as before. `engine.New` applies the same
+  rule to `Config.IngressBaseURL` when the ingress is on, and returns an error
+  for those shapes, where before it checked only that the base was set.
+- **Changed (signed content):** the re-key is made even where an in-payload
+  signature covers the `payer-url`; that signature then no longer verifies in
+  the provider's copy. It is the only edit the gateway makes to signed content:
+  every other edit is still refused `422 signed content cannot be edited`.
+  This is a recorded exception to [`STABILITY.md`](STABILITY.md)'s terms for
+  the full PAS pass-through, scoped to this edit (STABILITY.md, "One recorded
+  exception, v1.1.0").
+- **Additive (wire):** the answer the gateway writes to its own system names
+  each disclosed edit in `X-SHN-Edited`, one value per edit: the edit's name,
+  then `; signed="<signatures>"` when a signature covered what it changed,
+  each signature named once by its carrier
+  (`pas-pend-return-rekey; signed="Bundle.signature"`).
+- **Additive (record, access line):** `engine.ExchangeRecord.EditsNotMade`,
+  and the access line's `editsNotMade` (`diagnostics.AccessLine.EditsNotMade`), name a default
+  edit the gateway could not make, and why (`engine.EditNotMadeValues`):
+  `E-10:no-structural-payer-url` for a `payer-url` that is not a string
+  `valueUrl`, carried as sent, `E-10:unreadable-answer` for an answer that
+  cannot be read as JSON, and `E-10:payer-does-not-take` for a payer whose list
+  lacks the leg, that declares no list, or that the gateway cannot read.
+  `ExchangeRecord.AnswerEdits` names `E-10` when the
+  re-key was made.
+- **Additive (Go API):** `relay.EditPASPendReturnRekey` (`E-10`) and
+  `relay.Payload.SignedEdited`; `engine.EditedHeader`,
+  `engine.ExchangeRecord.EditsNotMade`, `engine.EditNotMadeNoStructuralPayerURL`,
+  `engine.EditNotMadeUnreadableAnswer`, `engine.EditNotMadePayerDoesNotTake`
+  and `engine.EditNotMadeValues`. The
+  ownership rules of the `pas-claim`, `pas-claim-update` and
+  `pas-claim-inquire` answers to the requester's system permit `edited` with
+  `E-10`.
+
+## A provider's system sends CDex documentation to a payer through the network (Unreleased)
+
+- **Added (requester, evolving):** the CDex 2.1.0 `$submit-attachment`, a new
+  exchange leg, `cdex-attachment-submit` (staged `pa.cdex-attachment-submit`).
+  A provider gateway with its Da Vinci ingress takes it at
+  `POST /$submit-attachment`, routed by the submission's `PayerId` to the
+  registered payer it names, and at each registered payer's return path,
+  `POST /cdex/payer/{payer}` and `POST /cdex/payer/{payer}/$submit-attachment`,
+  routed to that payer. `GET /cdex/payers` lists the payers that take the leg with
+  their return paths. The submission and the payer's answer are carried as sent. It is
+  refused only with no registered payer to route to (422, `routing`), with no
+  readable `MemberId` to bind the patient by (400, `authority`), when it
+  repeats a member name (400, `integrity`) or above the request limit (413). A
+  `PayerId` that names another payer than the return path's is carried and
+  noted (`cdex.payer-id-differs`). The leg rides no declared contract line.
+- **Added (recipient, evolving):** a payer gateway carries the submission to
+  the payer's own `$submit-attachment`, under the CDex base the payer
+  publishes in its `.well-known/davinci-configuration`
+  (`davinci_cdex_attachsubmit_endpoint`), when same-origin with
+  `PAYER_DAVINCI_BASE_URL`, else under `PAYER_DAVINCI_BASE_URL`. It binds the
+  member from `MemberId` as on the other legs, and relays the payer's answer
+  exactly, its media type included.
+- **Additive:** a provider gateway's `.well-known/davinci-configuration` names
+  its ingress base as `davinci_cdex_attachsubmit_endpoint#2.1`; the exchange
+  kind `cdex-attachment-submit`, the exchange routes `cdex-submit` and
+  `cdex-return-submit` and the observer tag `cdex-ingress` are added. The
+  exchange metrics' series bound rises with the new kind (`MONITORING.md`).
+- **Additive (Go API):** package `pa/cdexroute`
+  (`github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute`) builds a return
+  path's address (`cdexroute.ReturnBase(ingressBase, payer)`, at
+  `cdexroute.Prefix` plus the payer's path-escaped participant id), from the
+  ingress base and the payer's participant id alone; and
+  `scenariodriver.Driver.SubmitAttachment` (Evolving) posts a submission
+  through the ingress.
+
+## A request body over the network's limit is refused 413 (Unreleased)
+
+- **Fixed:** a request body over the network's limit (8 MiB, as the
+  participant protocol states) is refused `413` with the published reason,
+  `request body too large`, and recorded as a `routing` refusal: no route on
+  the network carries it. That covers every provider ingress route (CRD, DTR,
+  PAS, PAS inquire, eligibility, the federated query), the module 1 route
+  `POST /scenario/pa/inquire`, the route the network delivers a leg to on the
+  recipient's gateway, and the Hub's `/route`. A FHIR
+  operation route answers it as an `OperationOutcome` with the reason as its
+  diagnostics, as it answers each of its refusals; CDS Hooks, the delivery
+  route and the Hub answer `{"error":"request body too large"}`.
+  - Before, the body was cut at the limit and then refused as whatever the
+    cut-off bytes failed to parse as: `400 parse … failed` at the ingress,
+    `400 decode envelope failed` at the Hub, and `400 decode envelope failed`
+    recorded as `integrity` at the delivery route.
+- **Fixed (requester):** a request whose sealed envelope would be over the
+  limit (the ciphertext is base64 in the envelope, so a body somewhat under 8
+  MiB can seal over it) is refused `413 request body too large: sealed for the
+  network it is over the 8 MiB an envelope may carry` before anything is
+  sent, and before a token is minted unless only its token and involved list
+  take its envelope over the limit, recorded as this gateway's `routing`
+  refusal.
+  The Hub's own `413` reaches the caller as a `413` and is recorded as the
+  Hub's `routing` refusal.
+  - Before, such a request was sent and cut at the Hub, and the caller got
+    `502 hub refused the exchange: decode envelope failed`.
+
+## The FHIR connector refuses an answer that repeats a member name (Unreleased)
+
+- **Changed (network rule, every level):** the bundled FHIR system-of-record
+  connector read the participant's own FHIR server leniently: an answer that
+  repeats a member name, exactly or under case folding, was read one way (the
+  last of the repeated members) wherever no stricter reader looked at it
+  afterwards, and acted on. FHIR JSON allows no such answer (property names
+  SHALL be unique). Every read and search the connector makes now refuses it as
+  the system's invalid response, wherever in the answer the repeat is, and the
+  gateway records the refusal on message integrity, the call `malformed`, on a
+  leg it answers. What each answer becomes; a repeat inside a resource that a
+  stricter reader already refused keeps its refusal, except where noted:
+  - **Federated query (a facility's gateway):** the member's Patient search
+    repeating a member at the Bundle level was answered as if clean; it is now
+    the patient-match `403`. The member's own Patient read repeating a member
+    was refused `502 system of record returned another patient's resource`
+    (the patient fence's strict reading); it is now `502 system of record
+    returned an invalid response`. Records read from a server that cannot
+    search, repeating a member at the Bundle level, were read one way; they are
+    now refused `502`.
+  - **Legs a payer's gateway answers (CRD order-select and order-dispatch, PAS
+    claim and update, inquiry, the DTR questionnaire fetch):** the member's
+    Patient search repeating a member at the Bundle level bound one reading
+    and the leg was answered; it is now `502 system of record returned an
+    invalid response`.
+  - **Coverage eligibility (a payer's gateway):** the member's Patient, the
+    Coverage and the insurer Organization repeating a member were read one
+    way; each is now `502 system of record returned an invalid response`.
+  - **Patient-authored DTR:** the member's Patient search repeating a member at
+    the Bundle level was read one way; it is now the patient-match `403`.
+  - **Requests a provider's participant sends (CRD, DTR and PAS ingress and
+    origination):** the member's Patient, the payor Organization a request is
+    routed by, the order, its supplier, the supplemental report, and the
+    clinical facts a DTR fill or home-oxygen evidence reads were read one way
+    where they repeated a member, and a filled value could come from either
+    reading; each is now `502 system of record returned an invalid response`
+    to the participant's own caller (a prefetch fill below `strict` carries the
+    request unfilled, as for any read that fails).
+  An answer with no repeated member is read exactly as before, including one
+  the gateway's strict reader cannot finish (a string that is not well-formed
+  UTF-8, or nesting past its bound): such an answer is walked as the
+  connector's decoder reads it, and refused only for a repeat.
+- **Changed (a bound on the repeat check, every level):** where the gateway's
+  strict reader cannot finish a body, the check for a repeated member name
+  walks it as encoding/json reads it. That walk now goes no deeper than 10,000
+  levels of nested objects and arrays, encoding/json's own bound, so the
+  memory the check takes is bounded on every body it reads,
+  a peer's request included. A body nested deeper is read by no decoder, and
+  the check stops where it goes deeper: a repeat before that point is still
+  refused as a repeat; otherwise the path refuses the body as it refuses any
+  body it cannot read. So on a request nested more than 10,000 levels deep
+  whose only repeat is past that depth, or after it in the body, the answer's
+  text is that path's unreadable-body refusal (for coverage eligibility, `400
+  parse eligibility request failed: …`, not recorded as message integrity)
+  where it was the repeated-member refusal; the status is unchanged.
+- **Go API:** `engine.SoRRepeatedMember()` is the read error a connector
+  returns for an answer that repeats a member name.
+
+## A request leg's token is verified before the leg is sent (Unreleased)
+
+- **Changed (requester):** the gateway verifies the token `POST /authorize`
+  mints for each request leg before sealing it in: signed by the
+  Authorization Framework's key and bound to exactly that leg (its frame,
+  operation, correlation, holder, patient and payload hash). A 2xx answer with
+  no token, a `null` token or an unsigned one is an authorization failure too.
+  Either way the leg is not sent, the caller gets `502 authorization failed`,
+  the leg is recorded as this gateway's refusal on `authority`, and the token
+  outcome is `failed`.
+  - Before, such a leg was sent, and the Hub refused it: the caller got
+    `502 hub refused the exchange: authz token verification failed`, and the
+    leg was recorded as the Hub's refusal on `authority`.
+- **Changed (responder):** an answer whose authorize answer carries no token,
+  a `null` one or one with no signature is not sent. What the payer's gateway
+  answers is in "A responder verifies its answer token, and attests its system
+  answered when it cannot send the answer" above.
+  - Before, the answer was sent with the zero token, and the Hub refused it
+    (`response leg authorization failed`, delivered). The requester recorded
+    that as the Hub's refusal on `authority`.
+- **Changed (involved patients):** an involved patient whose authorize answer
+  carries no token, or one with no signature, is left out of the involved list
+  as `failed`. Before,
+  an answer with no token was left out as `unlabelled`. An unsigned token that
+  carried its label was put in the list, and the Hub then refused the whole leg
+  (`involved patients refused`).
+
+## The coverage refusals for a member the gateway names no patient for drop "system of record" (Unreleased)
+
+- **Changed (refusal text):** the Da Vinci ingress's no-coverage refusals for a
+  member the participant's system of record names no patient for (one it does
+  not hold, or holds but cannot name) end in `(this gateway's records name no
+  patient for this member)`, where they ended in `(this gateway's system of
+  record names no patient for this member)`:
+  - CDS Hooks: `412 no coverage to route by: send prefetch.coverage or
+    fhirServer (this gateway's records name no patient for this member)`, and,
+    with `CDS_FHIR_SERVER_READ=off`, `412 no coverage to route by: send
+    prefetch.coverage (this gateway's records name no patient for this member,
+    and it does not read fhirServer)`;
+  - DTR `$questionnaire-package`: `422 no coverage to route by: send the
+    coverage parameter (this gateway's records name no patient for this
+    member)`.
+
+  Statuses and conditions are unchanged, and so is each reason's beginning,
+  `no coverage to route by:`, the beginning the participant protocol documents
+  for these CDS Hooks refusals. `no coverage in request or system of record`
+  is unchanged byte for byte. A caller that matches a whole reason text must
+  match the new explanation; one that matches the documented beginning is
+  unaffected.
+
+## A requester records the Authorization Framework's audit refusal by its rule (Unreleased)
+
+- **Changed (records and metrics):** when the Authorization Framework cannot
+  record its decision, it answers `POST /authorize` with 502
+  `{"error":"decision audit failed","rule":"audit"}`. A requester's gateway now
+  reads `rule` and records the leg as refused by the Authorization Framework
+  on the `audit` rule, where it recorded `other`. That covers the access line's
+  `outcome` and `refusal`, `Exchange` (its `outcome`), `ExchangeRefused`,
+  `ExchangeRefusedByRule`, `shn.gateway.exchanges` and
+  `shn.gateway.refusals`. So a whole Audit Plane outage, which the Framework
+  meets before the Hub does, reaches the per-rule `audit` refusal alarm.
+  - The rule is read only from the field of a 502, never from the error
+    text. A 502 that states no rule, or a rule this gateway does not read,
+    and a 500 that states one, are this gateway's refusal on `authority`, as
+    is a Framework that cannot be reached: no authority could be obtained. A
+    403 stays the authority denial.
+  - Your caller's answer is unchanged: the opaque 502 `authorization
+    failed`.
+  - `LegOutcome` (`failed`), the token outcome (`unavailable`), an answer's
+    own authorization error class (`other`) and the involved-patient token
+    omissions (`failed`) are unchanged.
+
+## A system of record's answer that repeats a member name is recorded as message integrity on every leg (Unreleased)
+
+- **Changed (exchange record):** a read or search of the participant's own
+  system of record whose answer the gateway knows repeats a member name (a
+  search page, or a read the connector reports with `engine.SoRInvalidAnswer`:
+  the bundled FHIR connector does, for a member's Patient) was recorded
+  `upstream-error`, with no rule: on the federated query a facility answers,
+  coverage eligibility, patient-authored DTR and the member binding of a leg
+  the gateway answers. A requester's gateway records its own system's failed
+  read as before.
+  The participant's answer to a forwarded operation that repeats a member name
+  was already recorded `refused` by the gateway on `integrity`, with the call
+  `malformed`. These reads are now recorded the same way: a body that can be
+  read two ways is refused on message integrity, and it was the participant's
+  system's answer that was malformed. The refusal and the requester's answer
+  are unchanged at every level, for example `502 system of record returned an
+  invalid response` for a records search and the patient-match `403` for the
+  federated query's patient lookup. An alarm that counts `upstream-error` no
+  longer counts it; one that counts refusals on rule `integrity` does.
+- **Go API:** `engine.SearchError` and `engine.SoRReadError` gain `Unwrap`,
+  which reports an answer that repeats a member name as
+  `relay.ErrDuplicateKey`, and an unexported field each, so a struct literal of
+  either from another package must name its fields. `engine.SoRInvalidAnswer(body)`
+  is the read error for an answer a connector could not read; it reports a
+  repeated member name that way too.
+
+## Module 1's origination routes are recorded, and a fidelity refusal names its stage (Unreleased)
+
+- **Additive (monitoring):** each call a provider's gateway answers on one of
+  module 1's `/scenario` routes that originates (builds and sends a request of
+  its own) now writes an access line and an exchange record, and reports the
+  exchange metrics (EMF and OpenTelemetry), as an ingress call does: direction
+  `ingress`, route `scenario-*` (the route's path joined by `-`, such as
+  `scenario-uc07-complete`), `sender` this gateway, `exchange` and
+  `correlationId` the first leg's the call sent (a refusal may belong to a
+  later leg). Its latency is the whole call, a flow of legs: it is on the
+  access line (`latencyMs`) but feeds neither `ExchangeLatency` nor the
+  exchange duration and stage instruments nor `/internal/stats` latency; the
+  exchange count, its outcome and its refusals count as for any exchange.
+  A refusal carries its real rule: the Hub's or a peer's,
+  `routing` for a coverage naming no payer the network registers,
+  `authentication` for a refused `/scenario` caller, `fidelity` for claim facts
+  stated for an order the member does not hold. Before, these calls wrote no
+  access line and reported no refusal metric. The local routes (`uc06/cancel`,
+  `uc07/cancel`, `uc07/pending`, `reset`) are not recorded. `ActiveRequests`
+  counts the recorded calls as `ingress`. At `observe`, one diagnostic
+  `conformance.result` closes an origination call, counting its legs'
+  findings together.
+- **Go API (additive):** `engine.ExchangeOriginationRoutes` names the routes
+  of `engine.ExchangeRoutes` that module 1's origination calls are recorded
+  under.
+- **Additive (monitoring):** a fidelity refusal names its stage: the access
+  line's `refusal.stage` and the record's `RefusalStage`
+  (`recording.RefusalStages`; the engine adds no alias): `build`, SHN refused
+  to build the message the refusal is about, because of what the caller
+  declared or did not state; `verify`, an edit or message it built failed its
+  own verification. The OpenTelemetry `shn.gateway.refusals` instrument gains
+  the attribute `shn.refusal.stage` (`none` for every other rule, `build`,
+  `verify`, `other`), so every one of its series gains the label
+  (`shn_refusal_stage` in Prometheus, `none` off fidelity): a query that
+  matches the series' labels exactly adds it, or aggregates it away
+  (`sum without (shn_refusal_stage)`). ExchangeRefusedByRule{rule=fidelity} counts fidelity
+  refusals at stage verify; build-stage refusals count in ExchangeRefused and
+  the OTel refusals instrument with shn.refusal.stage=build. No EMF line's
+  dimensions change.
+- `deploy/monitoring/prometheus/alerts.yml`'s fidelity and audit rule leaves out
+  `shn_refusal_stage="build"`.
+- `docs/MONITORING.md`, "Access lines"; `docs/CONFIGURATION.md`, "Access
+  lines (always on)"; `STABILITY.md`, "Access lines".
+
+## The evaluation bundle's reference provider checks TLS certificate chains (Unreleased)
+
+- **Security (evaluation bundle):** the reference provider in `deploy/eval`
+  (upstream `br-provider` at its pinned commit) skipped the TLS certificate
+  chain check on its outbound HTTPS by default: upstream sets
+  `security.ssl-verify` to false, which installs a trust manager that accepts
+  any chain. Its connections to the gateway are plain HTTP, but a FHIR server
+  a user adds in the provider's settings, and the discovery, UDAP
+  registration, token and userinfo calls to it, went through that manager.
+  `compose.eval.yml` now sets `SECURITY_SSL_VERIFY: "true"`, so a server's
+  chain must reach a root in the image's JVM trust store. A server on a
+  private CA needs that CA added to the trust store.
+
 ## The evaluation bundle's reference payer builds again (v1.0.0)
 
 - **Fix (evaluation bundle):** `deploy/eval/brpayer/build.sh` failed in

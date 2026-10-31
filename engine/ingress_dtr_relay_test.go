@@ -253,7 +253,7 @@ func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
 	// without enrichment.
 	t.Run("no coverage for a member the system of record does not hold", func(t *testing.T) {
 		stranger := ehrParams(ehrOrderParam("sr1", strangerMember), dtrQuestionnaire, `{"name":"context","valueString":"ctx-1"}`)
-		const want = "no coverage to route by: send the coverage parameter (this gateway's system of record names no patient for this member)"
+		const want = "no coverage to route by: send the coverage parameter (this gateway's records name no patient for this member)"
 		s := newPrefetchSoR()
 		refused(t, s, stranger, http.StatusUnprocessableEntity, want)
 		if searched, read := s.calls(); len(searched) != 0 || len(read) != 0 {

@@ -1389,7 +1389,7 @@ func TestIngressKeyPg_WarmMissTakesALastLookUnderTheLockBeforeRefusing(t *testin
 // warm path allows (attempt) and verifies the sibling's first key on the FIRST call —
 // never a wait, never a park, one query. Deferring to the out-of-band kick here is a 401
 // against the first bearer a brand-new deployment ever presents, at every replica but the
-// minting one, which is exactly what make smoke's two-replica ingress probe presents.
+// minting one, which is exactly what the platform smoke gate's two-replica ingress probe presents.
 //
 // Deterministic: reloadSignalDB + settleReload prove the empty warm-up has completed; the
 // clock (mutex-guarded, since the loop reads it) is stepped past the throttle the warm-up

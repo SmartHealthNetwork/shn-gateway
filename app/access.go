@@ -24,9 +24,10 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		Findings:   diagnostics.AccessFindings{Count: r.Findings.Count, Refused: r.Findings.Refused, Kinds: r.Findings.Kinds, Deferred: r.Findings.Deferred},
 		RelayEdits: r.Edits, Ownership: r.Ownership, Builder: r.Builder, HubDelivered: r.HubDelivered,
 		RequestEdits: r.RequestEdits, AnswerOwnership: r.AnswerOwnership, AnswerBuilder: r.AnswerBuilder, AnswerEdits: r.AnswerEdits,
+		EditsNotMade: r.EditsNotMade,
 	}
 	if r.Outcome == engine.ExchangeRefused {
-		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule}
+		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule, Stage: r.RefusalStage}
 	}
 	if b := r.Backend; b != nil {
 		line.Backend = &diagnostics.AccessBackend{Status: b.Status, LatencyMs: b.Latency.Milliseconds(), ErrorClass: b.ErrorClass, Calls: r.BackendCalls}
@@ -42,6 +43,8 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		line.Network = &diagnostics.AccessNetwork{LatencyMs: n.Latency.Milliseconds(), Calls: n.Calls}
 	}
 	line.AnswerError = r.AnswerError
+	line.AuthorizeError = r.AuthorizeError
+	line.InvolvedOmitted = r.InvolvedOmitted
 	return line
 }
 

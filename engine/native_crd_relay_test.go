@@ -348,6 +348,9 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 				// so its event carries exactly that call's time.
 				clock := &testClock{now: time.Date(2026, 10, 7, 14, 0, 0, 0, time.UTC)}
 				g.cfg.Clock = clock.Now
+				// The Framework mints on the same clock, so the answer's token
+				// is live when the gateway verifies it.
+				g.cfg.Client.Transport.(*inboundAuthzStub).clock = clock.Now
 				var mu sync.Mutex
 				var validated [][]byte
 				g.cfg.Validator = validatorFunc(func(b []byte) (shnsdk.Result, error) {

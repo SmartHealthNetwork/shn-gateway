@@ -85,6 +85,17 @@ func TestAccessLineFor(t *testing.T) {
 	if wantBodies := strings.TrimSuffix(want, "}") + `,"relayEdits":["E-01","E-08"],"ownership":"edited","requestEdits":["E-01"],"answerOwnership":"edited","answerEdits":["E-08"]}`; string(b) != wantBodies {
 		t.Fatalf("access line with each body's ownership\n got %s\nwant %s", b, wantBodies)
 	}
+	// A default edit the gateway could not make is named after the bodies'
+	// edits, with why.
+	notMade := refusedRecord()
+	notMade.AnswerEdits, notMade.EditsNotMade = []string{"E-10"}, []string{engine.EditNotMadeNoStructuralPayerURL}
+	b, err = json.Marshal(accessLineFor(notMade))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantNotMade := strings.TrimSuffix(want, "}") + `,"answerEdits":["E-10"],"editsNotMade":["E-10:no-structural-payer-url"]}`; string(b) != wantNotMade {
+		t.Fatalf("access line with an edit not made\n got %s\nwant %s", b, wantNotMade)
+	}
 	refusal := refusedRecord()
 	refusal.AnswerOwnership, refusal.AnswerBuilder = "authored", "gateway-refusal"
 	b, err = json.Marshal(accessLineFor(refusal))
@@ -150,6 +161,26 @@ func TestAccessLineFor(t *testing.T) {
 	const stages = `"stages":{"unwrapMs":1,"readsMs":2,"forwardMs":3,"validateMs":4,"sealMs":5,"ledgerMs":6,"writeMs":7},"answerError":"timeout",`
 	if wantStaged := strings.Replace(want, `"findings":`, stages+`"findings":`, 1); string(b) != wantStaged {
 		t.Fatalf("access line with stages\n got %s\nwant %s", b, wantStaged)
+	}
+	// Why no authority could be obtained for a request leg: on the line, and
+	// off it when there is nothing to say.
+	unauthorized := refusedRecord()
+	unauthorized.AuthorizeError = "unreachable"
+	if b, err = json.Marshal(accessLineFor(unauthorized)); err != nil || !bytes.Contains(b, []byte(`"authorizeError":"unreachable"`)) {
+		t.Fatalf("a request leg with no authority: %s %v", b, err)
+	}
+	// A patient left out of an involved list has no record of the exchange
+	// under it: on the line, on any gateway, and off it when no one was.
+	gap := refusedRecord()
+	gap.InvolvedOmitted = map[string]int{"authorization-failed": 2}
+	if b, err = json.Marshal(accessLineFor(gap)); err != nil || !bytes.Contains(b, []byte(`"involvedOmitted":{"authorization-failed":2}`)) {
+		t.Fatalf("an exchange that left a patient out: %s %v", b, err)
+	}
+	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"involvedOmitted"`)) {
+		t.Fatalf("a call that left no one out rendered involvedOmitted: %s %v", b, err)
+	}
+	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"authorizeError"`)) {
+		t.Fatalf("a call with authority rendered an authorize error: %s %v", b, err)
 	}
 	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"stages"`)) || bytes.Contains(b, []byte(`"answerError"`)) {
 		t.Fatalf("an ingress call rendered stages or an answer error: %s %v", b, err)

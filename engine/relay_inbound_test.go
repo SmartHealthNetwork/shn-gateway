@@ -33,7 +33,7 @@ type inboundTestRequester struct {
 }
 
 // inboundAuthzStub is a minimal fake Authorization Framework for the respondLegError
-// harness. respondLegError (via buildResponseLeg -> g.authorize) calls ONLY
+// harness. respondLegError (via buildResponseLeg -> g.authorizeLeg) calls ONLY
 // .../authorize to mint the response-leg token; it never calls the Hub /route (that
 // round trip belongs to the ORIGINATOR's roundTripInner, not the payer's inbound
 // response path) — so, unlike twoPayerSubstrate (payerrouting_test.go), this stub
@@ -121,7 +121,7 @@ func newInboundTestGateway(t *testing.T, frameCapable bool) (*Gateway, inboundTe
 }
 
 // newSignedInboundRequest returns a bare inbound request carrying a background
-// context. g.authorize (respondLegError's only outbound call, via buildResponseLeg)
+// context. g.authorizeLeg (respondLegError's only outbound call, via buildResponseLeg)
 // reads ONLY r.Context() off the request — it mints a FRESH holder assertion itself
 // and never reads any inbound token/header off r — so no signing is needed here; the
 // name matches the shape of the real inbound-handler call sites (an *http.Request

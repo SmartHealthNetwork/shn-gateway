@@ -11,8 +11,8 @@ import (
 
 // paExtensionLinesJSON is every extension the Da Vinci PAS and DTR packages
 // of each line define, with the contexts it may be used in, generated from
-// the packages the validator lanes load (tools/pamarkergen in the platform
-// repository; its header says how it is regenerated and checked).
+// the packages the validator lanes load (by the platform repository's PA
+// marker generator; its header says how it is regenerated and checked).
 //
 //go:embed workstream_pa_extension_lines.json
 var paExtensionLinesJSON []byte

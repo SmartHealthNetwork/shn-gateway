@@ -18,8 +18,9 @@ import (
 // every other patient it involves, and the Hub
 // records the exchange under each of them as well as the leg token's patient.
 // It is recording only. Nothing here refuses a leg, judges its content or
-// changes its bytes: a patient that cannot be named is left out, with an
-// observer event and a count, and the leg is sent as usual.
+// changes its bytes: a patient that cannot be named is left out, on the call's
+// exchange record, with an observer event and a count, and the leg is sent as
+// usual.
 //
 // It runs only when the network's Hub reads the list (Config.HubAcceptsInvolved),
 // at every conformance level: it is the network's audit, not an optional
@@ -70,8 +71,9 @@ const (
 	// involvedOmitRefused: the Authorization Framework refused the patient's
 	// token (the refusal is recorded there).
 	involvedOmitRefused = "authorization-refused"
-	// involvedOmitFailed: the token could not be obtained (the Authorization
-	// Framework was unreachable or failed).
+	// involvedOmitFailed: no token that verifies could be obtained (the
+	// Authorization Framework was unreachable or failed, or its token does not
+	// verify for this leg and patient).
 	involvedOmitFailed = "authorization-failed"
 	// involvedOmitUnlabelled: the minted token does not carry the involvement
 	// requested (an Authorization Framework that predates it).
@@ -81,7 +83,8 @@ const (
 	involvedOmitBudget = "budget"
 )
 
-// InvolvedOmitReasons is the closed list of reasons InvolvedMetric reports.
+// InvolvedOmitReasons is the closed list of reasons InvolvedMetric and
+// ExchangeRecord.InvolvedOmitted report.
 var InvolvedOmitReasons = []string{involvedOmitOverflow, involvedOmitUnreadable, involvedOmitUnknown, involvedOmitRefused, involvedOmitFailed, involvedOmitUnlabelled, involvedOmitBudget}
 
 func (g *Gateway) involvedBudget() time.Duration {
@@ -128,7 +131,8 @@ type involvedPatient struct {
 }
 
 // omitInvolved reports one patient left out of a leg's involved list.
-func (g *Gateway) omitInvolved(direction, leg, corrID, reason string) {
+func (g *Gateway) omitInvolved(ctx context.Context, direction, leg, corrID, reason string) {
+	exchangeOf(ctx).involvedOmitted(reason)
 	g.observe(ObserverEvent{Kind: InvolvedOmittedEvent, Direction: direction, LegType: leg, CorrelationID: corrID, Detail: reason})
 	if g.cfg.InvolvedMetric != nil {
 		g.cfg.InvolvedMetric(reason)
@@ -142,8 +146,9 @@ func (g *Gateway) omitInvolved(direction, leg, corrID, reason string) {
 // the rest ordered by identifier then involvement, and any past maxInvolved
 // left out. The tokens are requested involvedConcurrency at a time, within
 // r's context (the leg's budget). A patient whose token is refused, cannot be
-// obtained, does not carry the involvement requested, or is not minted before
-// the budget runs out is left out. None left encodes as "".
+// obtained, does not verify for this leg and patient, does not carry the
+// involvement requested, or is not minted before the budget runs out is left
+// out. None left encodes as "".
 func (g *Gateway) involvedList(r *http.Request, direction, leg, frame, op, corrID, payloadHash, legSubject string, entries []involvedPatient) string {
 	seen := map[string]bool{legSubject: true}
 	var list []involvedPatient
@@ -162,7 +167,7 @@ func (g *Gateway) involvedList(r *http.Request, direction, leg, frame, op, corrI
 	})
 	if len(list) > maxInvolved {
 		for range list[maxInvolved:] {
-			g.omitInvolved(direction, leg, corrID, involvedOmitOverflow)
+			g.omitInvolved(r.Context(), direction, leg, corrID, involvedOmitOverflow)
 		}
 		list = list[:maxInvolved]
 	}
@@ -193,7 +198,7 @@ func (g *Gateway) involvedList(r *http.Request, direction, leg, frame, op, corrI
 	var out []shnsdk.InvolvedToken
 	for _, m := range results {
 		if m.reason != "" {
-			g.omitInvolved(direction, leg, corrID, m.reason)
+			g.omitInvolved(r.Context(), direction, leg, corrID, m.reason)
 			continue
 		}
 		out = append(out, m.entry)
@@ -201,7 +206,7 @@ func (g *Gateway) involvedList(r *http.Request, direction, leg, frame, op, corrI
 	encoded, err := shnsdk.EncodeInvolved(out)
 	if err != nil {
 		for range out {
-			g.omitInvolved(direction, leg, corrID, involvedOmitFailed)
+			g.omitInvolved(r.Context(), direction, leg, corrID, involvedOmitFailed)
 		}
 		return ""
 	}
@@ -215,6 +220,8 @@ func (g *Gateway) mintInvolved(r *http.Request, frame, op, corrID, payloadHash s
 	switch {
 	case errors.Is(err, errAuthorizationDenied):
 		return shnsdk.InvolvedToken{}, involvedOmitRefused
+	case errors.Is(err, errTokenUnverified):
+		return shnsdk.InvolvedToken{}, involvedOmitFailed
 	case err != nil && r.Context().Err() != nil:
 		return shnsdk.InvolvedToken{}, involvedOmitBudget
 	case err != nil:
@@ -245,31 +252,31 @@ func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, 
 	members := namedMembers(payload, leg)
 	if len(members) > maxInvolvedMembers {
 		for range members[maxInvolvedMembers:] {
-			g.omitInvolved("originate", leg, corrID, involvedOmitOverflow)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitOverflow)
 		}
 		members = members[:maxInvolvedMembers]
 	}
 	var out []involvedPatient
 	for _, m := range members {
 		if ctx.Err() != nil {
-			g.omitInvolved("originate", leg, corrID, involvedOmitBudget)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitBudget)
 			continue
 		}
 		pci, found, err := g.resolveInvolvedPCI(ctx, m.member, m.scope)
 		switch {
 		case err != nil && ctx.Err() != nil:
-			g.omitInvolved("originate", leg, corrID, involvedOmitBudget)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitBudget)
 			continue
 		case errors.Is(err, errPatientUnidentifiable):
 			// A member the request cannot identify is named under no
 			// identifier, never another person's.
-			g.omitInvolved("originate", leg, corrID, involvedOmitUnknown)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitUnknown)
 			continue
 		case err != nil:
-			g.omitInvolved("originate", leg, corrID, involvedOmitUnreadable)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitUnreadable)
 			continue
 		case !found || pci == "":
-			g.omitInvolved("originate", leg, corrID, involvedOmitUnknown)
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitUnknown)
 			continue
 		case pci == legSubject, slices.ContainsFunc(out, func(p involvedPatient) bool { return p.pci == pci }):
 			continue

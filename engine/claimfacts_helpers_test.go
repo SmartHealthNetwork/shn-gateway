@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -37,18 +38,34 @@ func testClaimFacts() shnsdk.PASClaimFacts {
 	}
 }
 
-// testPriorClaim is a recorded submission as the update builder takes it: a
-// submission whose one item (sequence 1) is recorded as its order line with
-// no more detail, so an amendment's item 1 differs from it and is marked
-// infoChanged "changed". A row about the derivation itself records a real
-// submission (recordPASSubmission).
-func testPriorClaim() shnsdk.PASPriorClaim {
-	return shnsdk.PASPriorClaim{
-		ClaimType: json.RawMessage(`{"coding":[` + testClaimTypeCoding + `]}`),
-		Priority:  json.RawMessage(`{"coding":[` + testPriorityCoding + `]}`),
-		Created:   "2026-06-01T12:00:00Z",
-		Items:     []json.RawMessage{json.RawMessage(`{"sequence":1}`)},
+// testSubmittedCategoryCoding is the service category the submissions
+// testSubmissionFor records stated: testCategoryCoding's code without its
+// display, so an amendment built from testClaimFacts carries information
+// changed since, and its item is marked infoChanged "changed".
+const testSubmittedCategoryCoding = `{"system":"https://codesystem.x12.org/005010/1365","code":"1"}`
+
+// testSubmissionFor is the recorded submission an amendment built from in
+// continues, at line: the submission the same parties, records and lane sent
+// under in.OriginalCorr, stating testSubmittedCategoryCoding, read off its bytes
+// (shnsdk.PASPriorClaimOf). A row about the recording itself records what the
+// gateway's own submit leg sent (recordPASSubmission).
+func testSubmissionFor(line string, in shnsdk.ConformantClaimUpdateInputs) shnsdk.PASPriorClaim {
+	facts := in.PASClaimFacts
+	facts.ServiceCategory = json.RawMessage(testSubmittedCategoryCoding)
+	out, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, shnsdk.ConformantClaimInputs{PASClaimFacts: facts,
+		Provider: in.Provider, Coverage: in.Coverage, Insurer: in.Insurer, MemberIDSystem: in.MemberIDSystem,
+		QR: in.QR, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef, MemberID: in.MemberID,
+		Corr: in.OriginalCorr, Created: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
+		ContainedInsurer: in.ContainedInsurer, AbsoluteRefs: in.AbsoluteRefs, PayerOrgEntry: in.PayerOrgEntry, Payer: in.Payer,
+	})
+	if err != nil {
+		panic("build the submission: " + err.Error())
 	}
+	p, err := shnsdk.PASPriorClaimOf(out)
+	if err != nil {
+		panic(err)
+	}
+	return p
 }
 
 func testCertificationType() json.RawMessage { return json.RawMessage(testCertificationCoding) }

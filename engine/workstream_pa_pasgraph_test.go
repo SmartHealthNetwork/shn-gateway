@@ -7,7 +7,7 @@
 // ambiguous.
 //
 // The rule is held to bytes a real reference payer emitted by
-// test/adversarial/payer_graph_capture_test.go; these rows are the other half —
+// the platform's adversarial payer-graph capture test; these rows are the other half —
 // hand-built graphs that prove each clause is implemented, mutation by mutation.
 package engine
 

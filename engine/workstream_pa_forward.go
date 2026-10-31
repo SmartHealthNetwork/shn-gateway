@@ -40,6 +40,12 @@ func (paWorkstream) forward(leg string) forwardHandler {
 		return func(n *nativeResponder, ctx context.Context, contract, _, _, _ string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 			return n.handlePASInquireNative(ctx, contract, in, requestFHIR)
 		}
+	case "cdex-attachment-submit":
+		// A CDex submission, carried to the payer's own $submit-attachment
+		// (workstream_pa_cdex.go).
+		return func(n *nativeResponder, ctx context.Context, _, _, _, _ string, in relay.Body, _ []byte) (LegResult, error) {
+			return n.forwardCDexSubmit(ctx, in)
+		}
 	}
 	return nil
 }

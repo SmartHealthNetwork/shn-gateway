@@ -12,6 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 )
 
 const maxBodyBytes = 8 << 20
@@ -28,9 +31,28 @@ func (*TransportError) Error() string   { return "FHIR endpoint unavailable" }
 func (e *TransportError) Unwrap() error { return e.Cause }
 
 // InvalidResponseError indicates malformed or oversized FHIR content.
-type InvalidResponseError struct{}
+type InvalidResponseError struct {
+	// repeatsAMember: the body repeats a member name, exactly or under case
+	// folding, so it can be read two ways (repeatsAMember).
+	repeatsAMember bool
+}
 
 func (*InvalidResponseError) Error() string { return "invalid FHIR response" }
+
+// Unwrap reports a body that repeats a member name as relay.ErrDuplicateKey.
+func (e *InvalidResponseError) Unwrap() error {
+	if e != nil && e.repeatsAMember {
+		return relay.ErrDuplicateKey
+	}
+	return nil
+}
+
+// repeatsAMember reports a body that repeats a member name in some object,
+// exactly or under case folding, wherever the decoders that read it would read
+// it (jsonmember.RepeatsAName). Such a body can be read two ways (FHIR JSON:
+// property names SHALL be unique), so no reading of it is acted on. A body
+// that is not JSON at all is left to the reader that decodes it.
+func repeatsAMember(body []byte) bool { return jsonmember.RepeatsAName(body) }
 
 type Client struct {
 	base string
@@ -70,6 +92,9 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, int, error) {
 	}
 	if len(body) > maxBodyBytes {
 		return nil, 0, &InvalidResponseError{}
+	}
+	if repeatsAMember(body) {
+		return nil, 0, &InvalidResponseError{repeatsAMember: true}
 	}
 	return body, resp.StatusCode, nil
 }

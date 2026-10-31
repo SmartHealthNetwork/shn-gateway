@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -378,5 +379,35 @@ func TestObservationQuantityJSONTypeFailure(t *testing.T) {
 				t.Fatalf("valid/absent quantity changed: found=%v err=%v quantity=%q", found, err, cc.OxygenSaturationPct)
 			}
 		})
+	}
+}
+
+// A member's Patient that repeats a member name can be read two ways: the
+// patient-context read refuses it as the invalid response any unreadable
+// Patient is, and says so by structure (errors.Is relay.ErrDuplicateKey), so
+// the exchange record names message integrity. A Patient unreadable otherwise
+// does not.
+func TestPatientRepeatingAMemberFailure(t *testing.T) {
+	for name, row := range map[string]struct {
+		patient  string
+		repeated bool
+	}{
+		"a repeated member": {`{"resourceType":"Patient","id":"p1","birthDate":"1970-01-01","name":[{"family":"Doe"}],"birthDate":"1980-01-01"}`, true},
+		"no birth date":     {`{"resourceType":"Patient","id":"p1","name":[{"family":"Doe"}]}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(searchResource(row.patient))) }))
+		_, _, found, err := NewFromURL(srv.URL, srv.Client()).ResolvePatientContext(context.Background(), "m")
+		srv.Close()
+		if found {
+			t.Fatalf("%s: an unreadable Patient was read", name)
+		}
+		assertFailure(t, err, 502)
+		var readErr *engine.SoRReadError
+		if !errors.As(err, &readErr) || readErr.Kind != engine.SoRInvalidResponse {
+			t.Fatalf("%s: %v, want an invalid response", name, err)
+		}
+		if errors.Is(err, relay.ErrDuplicateKey) != row.repeated {
+			t.Errorf("%s: repeats a member = %v, want %v", name, errors.Is(err, relay.ErrDuplicateKey), row.repeated)
+		}
 	}
 }

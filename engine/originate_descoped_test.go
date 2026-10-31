@@ -13,7 +13,7 @@ import (
 // noOrderSoR resolves the provider-data UC-02 member as a Patient (the member exists in the
 // provider tenant) but has NO open order in the SoR — the embedded censusSoR's OpenOrder
 // returns (nil,false). It mirrors the real provider-data lane: MBR-PD-UC02 lives in the FHIR-store
-// seed (internal/fhirseed), not the engine's in-memory censusPersonas map, so ResolvePatient is
+// seed (the platform seeder), not the engine's in-memory censusPersonas map, so ResolvePatient is
 // overridden here exactly as the HomeOxygen fake does for MBR-OX.
 type noOrderSoR struct{ *censusSoR }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"time"
 
@@ -42,20 +43,32 @@ func legMetricHook(reg *telemetry.Registry) func(string) {
 // exchangeSeriesBound EMF series; the leg's operation, parties and ids never
 // become attributes.
 //
-// It also reports the exchange additions: a refusal by its rule and the party
-// that refused (shn.gateway.refusals, MON-R21); the time in each stage the
+// It also reports the exchange additions: a refusal by its rule, the party
+// that refused and, for a fidelity refusal, its stage (shn.gateway.refusals,
+// MON-R21; refusalStage); the time in each stage the
 // exchange entered (shn.gateway.exchange.stage.duration, exchangeStages,
 // MON-R22); and its request and answer body sizes when they are known
 // (MON-R23).
 func exchangeMetricHook(reg *telemetry.Registry) func(engine.ExchangeRecord) {
 	return func(r engine.ExchangeRecord) {
 		reg.Add(telemetry.Exchanges, 1, r.Direction, r.Exchange, r.Outcome)
-		reg.RecordDuration(telemetry.ExchangeDuration, r.Latency, r.Direction, r.Exchange)
-		if r.Outcome == engine.ExchangeRefused {
-			reg.Add(telemetry.Refusals, 1, r.Direction, r.Exchange, r.Rule, r.RefusedBy)
+		// An origination call (a route of engine.ExchangeOriginationRoutes,
+		// module 1's table) runs a whole flow of legs, some waiting on a
+		// person: its latency is not one exchange's answer time, so it feeds
+		// neither the exchange duration (nor /internal/stats' quantiles, which
+		// read it) nor the stage durations. Its legs' own outcomes are counted
+		// per leg (LegOutcome); the access line keeps its latencyMs.
+		origination := slices.Contains(engine.ExchangeOriginationRoutes, r.Route)
+		if !origination {
+			reg.RecordDuration(telemetry.ExchangeDuration, r.Latency, r.Direction, r.Exchange)
 		}
-		for _, st := range exchangeStages(r) {
-			reg.RecordDuration(telemetry.ExchangeStageDuration, st.d, r.Direction, r.Exchange, st.stage)
+		if r.Outcome == engine.ExchangeRefused {
+			reg.Add(telemetry.Refusals, 1, r.Direction, r.Exchange, r.Rule, r.RefusedBy, refusalStage(r))
+		}
+		if !origination {
+			for _, st := range exchangeStages(r) {
+				reg.RecordDuration(telemetry.ExchangeStageDuration, st.d, r.Direction, r.Exchange, st.stage)
+			}
 		}
 		if r.RequestBytes != nil {
 			reg.Record(telemetry.ExchangeRequestSize, float64(*r.RequestBytes), r.Direction, r.Exchange)
@@ -185,6 +198,18 @@ func validatorMetricHook(reg *telemetry.Registry) func(line, lane string, took t
 // callback: shn.gateway.conformance.checks.dropped (MON-R24).
 func observeCheckDroppedHook(reg *telemetry.Registry) func() {
 	return func() { reg.Add(telemetry.ConformanceChecksDropped, 1) }
+}
+
+// refusalStage is a refusal's shn.refusal.stage: its stage when it is a
+// fidelity refusal (the record names one, or other), none for any other rule.
+func refusalStage(r engine.ExchangeRecord) string {
+	if r.Rule != engine.RefusalFidelity {
+		return telemetry.RefusalStageNone
+	}
+	if r.RefusalStage == "" {
+		return engine.ExchangeOther
+	}
+	return r.RefusalStage
 }
 
 // exchangeSeriesBound is the most EMF series exchangeMetricHook can report for

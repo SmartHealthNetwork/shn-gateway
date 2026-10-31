@@ -183,7 +183,7 @@ func TestSeriesBounds_MON_R18(t *testing.T) {
 	// The exchange additions: each list's own values, and other where a list
 	// does not name it.
 	plusOther := func(list []string) int { return len(list) + 1 }
-	want["shn.gateway.refusals"] = dirs * kinds * len(engine.RefusalRules) * len(engine.RefusalParties)
+	want["shn.gateway.refusals"] = dirs * kinds * len(engine.RefusalRules) * len(engine.RefusalParties) * len(telemetry.RefusalStages)
 	want["shn.gateway.exchange.stage.duration"] = dirs * kinds * plusOther(telemetry.Stages)
 	want["shn.gateway.active_requests"] = dirs
 	want["shn.gateway.exchange.request.size"] = dirs * kinds
@@ -198,7 +198,7 @@ func TestSeriesBounds_MON_R18(t *testing.T) {
 			t.Errorf("%s: bound %d, pinned %d", inst.Name, got, want[inst.Name])
 		}
 	}
-	if !toyProfileBuild && kinds != 10 {
+	if !toyProfileBuild && kinds != 11 {
 		t.Errorf("%d exchange kinds in a release build; the exchange instruments' bounds follow it", kinds)
 	}
 }
@@ -616,6 +616,12 @@ func TestRun_FinalExportOrder_MON_R14(t *testing.T) {
 	text := otlptest.Render(got[0].Request, otlptest.Options{})
 	if !strings.Contains(text, "{shn.direction=inbound,shn.exchange=crd-order-select,shn.outcome=answered} 1") {
 		t.Fatalf("the final export lacks the exchange answered during the stop:\n%s", text)
+	}
+	// The leg's observe check, held at the validator through the gateway's
+	// close, is counted by the flush that finished it: its finding is in the
+	// same final export.
+	if !strings.Contains(text, "{shn.conformance.level=observe,shn.exchange=crd-order-select,shn.finding.action=relayed,shn.finding.kind=fhir-ingress,shn.finding.tolerated=false} 1") {
+		t.Fatalf("the final export lacks the finding of the observe check the stop flushed:\n%s", text)
 	}
 	mu.Lock()
 	defer mu.Unlock()

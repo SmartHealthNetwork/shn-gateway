@@ -28,18 +28,18 @@ import (
 // payer-org-entry / DTR-coverage handling every br-payer-shaped request/response requires.
 // provider-data is the sole origination lane that dials br-payer's own HTTP surface — it must
 // not regress the contained-payor → uniform-A3 bug. The demo lane relays the SAME
-// reference-payer bytes (via the in-process mirror, internal/brpayermirror) without ever
+// reference-payer bytes (via the platform's in-process reference-payer mirror) without ever
 // dialing br-payer itself.
 func targetsBrPayer(profile string) bool { return profile == "provider-data" }
 
 // isDemoProfile reports whether the origination profile is the family-keyed demo lane
-// (§4.3): br-payer-mirrored code families (E0250/L8000/G0151/J3490 — originationCodes)
-// driven off the MBR-D-UC0N persona roster, in-process against internal/brpayermirror
-// rather than the live br-payer HTTP surface provider-data targets. Distinct from
-// targetsBrPayer in HOW it reaches the reference payer (in-process mirror vs. a live HTTP
+// (§4.3): br-payer-mirrored code families (originationCodes: E0250/E1390/G0151/J3490
+// off the MBR-D-UC0N persona roster, and L8000 for UC-07's HCPCS variant), in-process
+// against the platform's reference-payer mirror rather than the live br-payer HTTP surface provider-data
+// targets. Distinct from targetsBrPayer in HOW it reaches the reference payer (in-process mirror vs. a live HTTP
 // dial) — but NOT distinct on WHOSE bytes come back: since the in-process payer stub retired the
 // mirror relays the reference payer's OWN pinned bytes verbatim
-// (internal/brpayermirror/loopback.go), so this lane shapes its PAS requests as
+// (through the mirror's loopback), so this lane shapes its PAS requests as
 // provider-data does (relaysReferencePayerBytes).
 func isDemoProfile(profile string) bool { return profile == "demo" }
 
@@ -101,7 +101,7 @@ const referencePayerSystem = "urn:oid:2.16.840.1.113883.6.300"
 // Their DTR and PAS answers are the reference implementation's own bytes, which do not
 // yet conform at every request (the 2.0 reference payer's orderless DTR package fails
 // DTR 2.0.1). No gateway exempts them (D122): SHN's own provider gateways list exactly
-// these identities in CONFORMANCE_TOLERATE_PEERS, which test/invariants pins to this
+// these identities in CONFORMANCE_TOLERATE_PEERS, which the platform's invariant suite pins to this
 // set, until their answers conform.
 // personas.BridgeDemoPayerID and BridgeRefusePayerID, the two SHN-operated bridging-demo payers,
 // are in the set only because they relay the reference payer's content: each fronts
@@ -185,9 +185,9 @@ func bridgeRefusalText(err error) (string, bool) {
 // writeBridgeRefusal writes the demo lane's structured 200 refusal body (task2 brief A3a):
 // {"refused":true,"refusedAt":legType,"refusal":"<the designed refusal's own error text>"}
 // instead of the ordinary non-2xx relayOriginationError/502 path. This is deliberately NOT
-// how any other surface answers: internal/scenariodrive's Client.Post/RunCheck treats ANY
+// how any other surface answers: the platform scenario driver's Client.Post/RunCheck treats ANY
 // non-2xx status as a transport failure and never hands the response body to a Check's
-// Want matcher, so the only way a canary/cloudsmoke row can pin WHERE
+// Want matcher, so the only way a canary or cloud-smoke row can pin WHERE
 // and WHY the refusal happened is a 200 body carrying the refusal text verbatim. This is
 // the demo lane's own surface, not an external contract — the published Kit pins its own
 // gateway child via kit/runner's independent bridge-demo driver (rows_conformant.go), so
@@ -285,13 +285,8 @@ func (g *Gateway) handleScenario(w http.ResponseWriter, r *http.Request) {
 	// (the eligibility leg's recipient is resolved from realCov), and the request's insurer names
 	// the payer that Coverage names. It fails closed when the member has no coverage / no
 	// parseable payer on file (AI-G11 / OWD-G10).
-	realCov, hasCov, status, msg := g.memberCoverage(ctx, memberID)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	if !hasCov {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+	realCov, ok := g.originCoverage(ctx, w, memberID, false)
+	if !ok {
 		return
 	}
 	// Route the eligibility leg to the payer HOLDER resolved from the member's own Coverage
@@ -677,13 +672,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// payer identity feeds the egress builders so the payload's payer derives from the patient's
 	// real Coverage, not a synthetic CMS literal. realCov stays a LOCAL (never an egress payload,
 	// never stored on crdDtrResult); the recipient is resolved from it inline at this site.
-	realCov, found, status, msg := g.memberRoutingCoverage(ctx, member)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return crdDtrResult{}, false
-	}
-	if !found {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+	realCov, ok := g.originCoverage(ctx, w, member, true)
+	if !ok {
 		return crdDtrResult{}, false
 	}
 	// Resolve the payer HOLDER every leg of this exchange routes to AND the parsed payer identity in
@@ -769,12 +759,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	}
 	// The order is signed and headed for prior authorization: order-sign.
 	crdReq, err := g.originatedOrderingRequest(ctx, hookOrderSign, crdCorr, recs, srJSON)
-	if errors.Is(err, errNoOrderingClinician) {
-		g.refuseOwnBuild(w, recipient, "crd-order-select", "build order-sign request failed: "+err.Error())
-		return crdDtrResult{}, false
-	}
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-sign request failed: " + err.Error()})
+		g.refuseBuildFailure(ctx, w, recipient, "crd-order-select", "build order-sign request failed: "+err.Error(), err)
 		return crdDtrResult{}, false
 	}
 	// Validation posture is UNCHANGED by the promotion (D-7 is routing-only):
@@ -878,7 +864,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		}
 		dtrReq, dtrPayload, err := originatedPackageRequest(res.dtrLine, recs, res.dtrOrder(), cov.Questionnaires[0], res.crdAssertionID)
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
+			g.refuseBuildFailure(ctx, w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 			return crdDtrResult{}, false
 		}
 		sendRoute, carryStatus, carryMsg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient)
@@ -1131,7 +1117,7 @@ func (g *Gateway) handleUC02(w http.ResponseWriter, r *http.Request) {
 // Coverage names a DISTINCT payer identity (urn:oid:…300|00078) rather than the reference payer's
 // 00001, so the provider gateway's FeedPayerRouter must resolve it off the /holders feed with no
 // static per-provider directory — the many-to-many drop-in property. MBR-PD-UC02-PB is seeded into
-// the provider tenant by cmd/fhirseed (shnsdk provider-data persona "uc02-payerb").
+// the provider tenant by the platform seeder (shnsdk provider-data persona "uc02-payerb").
 //
 // WHAT IT PROVES DEPENDS ON THE DEPLOYMENT, and right now that is less than the name suggests: the
 // second payer holder that claimed 00078 retired alongside the payer it was the counterpart to, so
@@ -1155,7 +1141,7 @@ func (g *Gateway) handleUC02PayerB(w http.ResponseWriter, r *http.Request) {
 // MBR-UNKNOWN-PAYER persona's Coverage names a payer identity (urn:oid:…300|00099) that NO holder
 // claims in the feed, so the coverage-derived resolution fails closed with a legible 422 ("no
 // registered payer for identifier …|00099") — never a default payer. Seeded into the provider tenant
-// by cmd/fhirseed (a smoke-only negative persona, not an SDK partner-onboarding fixture).
+// by the platform seeder (a smoke-only negative persona, not an SDK partner-onboarding fixture).
 func (g *Gateway) handleUC02UnknownPayer(w http.ResponseWriter, r *http.Request) {
 	member, ok := g.scenarioMember(w, r, "uc02-unknownpayer")
 	if !ok {
@@ -1200,13 +1186,8 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	}
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40).
 	// realCov stays a LOCAL (the recipient is resolved from it).
-	realCov, hasCov, status, msg := g.memberRoutingCoverage(ctx, member)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return
-	}
-	if !hasCov {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+	realCov, ok := g.originCoverage(ctx, w, member, true)
+	if !ok {
 		return
 	}
 	// Resolve the CRD leg's payer HOLDER AND the parsed payer identity in ONE parse of the member's
@@ -1256,12 +1237,8 @@ func (g *Gateway) originateNoPACRD(w http.ResponseWriter, r *http.Request, membe
 	// A coverage check while the order is chosen, with no authorization to follow:
 	// order-select.
 	reqJSON, err := g.originatedOrderingRequest(ctx, hookOrderSelect, correlationID, recs, srJSON)
-	if errors.Is(err, errNoOrderingClinician) {
-		g.refuseOwnBuild(w, recipient, "crd-order-select", "build order-select request failed: "+err.Error())
-		return
-	}
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-select request failed: " + err.Error()})
+		g.refuseBuildFailure(ctx, w, recipient, "crd-order-select", "build order-select request failed: "+err.Error(), err)
 		return
 	}
 	// Validation posture UNCHANGED (routing-only promotion): reqJSON is a CDS
@@ -1606,7 +1583,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return
 	}
 	// An APPLY-time refusal (a *SemanticChangeError) is reshaped like the selection-time
@@ -1755,7 +1732,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -1968,19 +1945,21 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
-		return
-	}
-	// The submission an amendment of this request restates, recorded off the
-	// bytes it built.
-	submitted, err := recordPASSubmission(bundleJSON)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return
+	}
+	// The submission an amendment of this request carries as its prior Claim,
+	// recorded off the bytes the leg sends: built and completed. The amendment
+	// is built at the same line, completed the same way and sent on the same
+	// route, so its prior-Claim entry reaches the payer as this Claim did.
+	submitted, err := recordPASSubmission(bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	sent, failed := g.sendLeg(ctx, r, legSend{
@@ -2071,10 +2050,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			Payer:            res.payer,
 			// The amendment states the facts and the certificationType the
 			// request to this route states (the builder refuses a required one
-			// it does not state); the prior Claim it restates is the recorded
-			// submission's, read off the bytes the submission built — never a
-			// constant; the infoChanged marker is derived from it by the
-			// builder (an item sent before exactly as now carries none).
+			// it does not state); the prior Claim it carries is the submitted
+			// Claim, read off the bytes the submission's leg sent and carried as
+			// sent — never rebuilt; the infoChanged marker is derived from it by
+			// the builder (an item sent before exactly as now carries none).
 			PASClaimFacts:     claimFacts,
 			CertificationType: claimIn.CertificationType,
 			PriorClaim:        submitted.prior,
@@ -2083,7 +2062,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			Pend: submitted.pendFor(targetLine),
 		}, res.requester)
 		if err != nil {
-			pasBuildFailure(w, err, "build update bundle failed")
+			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -2340,19 +2319,21 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
-		return
-	}
-	// The submission an amendment of this request restates, recorded off the
-	// bytes it built.
-	submitted, err := recordPASSubmission(bundleJSON)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return
+	}
+	// The submission an amendment of this request carries as its prior Claim,
+	// recorded off the bytes the leg sends: built and completed. The amendment
+	// is built at the same line, completed the same way and sent on the same
+	// route, so its prior-Claim entry reaches the payer as this Claim did.
+	submitted, err := recordPASSubmission(bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	sent, failed := g.sendLeg(ctx, r, legSend{
@@ -2498,10 +2479,10 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			Payer:            res.payer,
 			// The amendment states the facts and the certificationType the
 			// request to this route states (the builder refuses a required one
-			// it does not state); the prior Claim it restates is the recorded
-			// submission's, read off the bytes the submission built — never a
-			// constant; the infoChanged marker is derived from it by the
-			// builder (an item sent before exactly as now carries none).
+			// it does not state); the prior Claim it carries is the submitted
+			// Claim, read off the bytes the submission's leg sent and carried as
+			// sent — never rebuilt; the infoChanged marker is derived from it by
+			// the builder (an item sent before exactly as now carries none).
 			PASClaimFacts:     claimFacts,
 			CertificationType: claimIn.CertificationType,
 			PriorClaim:        submitted.prior,
@@ -2510,7 +2491,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			Pend: submitted.pendFor(targetLine),
 		}, res.requester)
 		if err != nil {
-			pasBuildFailure(w, err, "build update bundle failed")
+			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -2665,7 +2646,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))

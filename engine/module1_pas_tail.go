@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -129,15 +130,19 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 		return out, http.StatusBadRequest, err.Error(), nil
 	}
 	// The facts are stated for the order this claim is about, or refused.
-	if status, msg := statedOrderCheck(claimIn, orderJSON); status != 0 {
+	if status, msg := statedOrderCheck(ctx, claimIn, orderJSON); status != 0 {
 		return out, status, msg, nil
 	}
 	facts := claimIn.facts()
 	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts, requester)
 	if err != nil {
 		if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
+			// The fidelity refusal pasBuildFailure answers, at the build stage.
+			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
 			return out, http.StatusUnprocessableEntity, err.Error(), nil
 		}
+		// This gateway's own failure, never a refusal (pasBuildFailure).
+		exchangeOf(ctx).ownFailure()
 		return out, http.StatusInternalServerError, "build bundle failed: " + err.Error(), nil
 	}
 	bundleJSON, err = retainPASSubmitSupplier(bundleJSON, supplierJSON)

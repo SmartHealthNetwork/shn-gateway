@@ -14,7 +14,7 @@ name a loopback address or the gateway does not start.
 | `GET /health` | The gateway is up and serving, and its version. It never reflects monitoring export. | Always on |
 | `GET`/`POST /internal/checks` | Probes of every outbound dependency, and the two monitoring checks | Always on; `CHECKS_TOKEN` for callers off the gateway's host |
 | `GET /internal/stats` | Exchange counts, outcomes and latency quantiles over the last 1, 5 and 60 minutes, per replica | Always on; access as for `/internal/checks` |
-| Access lines | One JSON line per exchange: each call from your own system on a Da Vinci ingress route, and each leg from the network | Always on (standard error) |
+| Access lines | One JSON line per exchange: each call from your own system on a Da Vinci ingress route or a module 1 origination route, and each leg from the network | Always on (standard error) |
 | CloudWatch EMF | Exchange, backend, operational and validator-lane metrics, as EMF lines on standard output | `METRICS_SERVICE` |
 | OTLP push | The same metrics as OpenTelemetry instruments, with the Go runtime's and the process's, pushed to a Collector or a vendor | `OTEL_METRICS_EXPORTER=otlp` |
 | Prometheus pull | The same instruments, for a Prometheus server to scrape, on a listener of their own | `OTEL_METRICS_EXPORTER=prometheus` (or `otlp,prometheus`) |
@@ -31,6 +31,14 @@ Build dashboards and alerts from the metrics and access lines below.
 `GET /health` answers while the gateway is serving, with the version it runs. It reads
 nothing from monitoring: an export that fails, or a monitoring setting that is not
 valid, never changes it.
+
+Its `capability-declaration` check (from v1.1.0, with a registrar) says what your gateway's
+declaration of the legs it takes came to. Its `status` is always `ok`, because a gateway that
+has not declared serves as before. `lastSuccess` is when the registrar stored it. `lastError`
+says why it has not been: `failing` (being retried), `not-applied` (a `409`, not resent), or
+`registrar-takes-no-declaration` (a `404` or `405`, tried hourly). Neither is set before the
+first answer. The network's Hub refuses a marked leg when the list the registrar holds lacks it,
+so read this check if a provider reports that `422` for a leg your gateway should take.
 
 `GET /internal/checks` returns the newest run of the gateway's probes of its outbound
 dependencies, and `POST` runs them again
@@ -56,6 +64,14 @@ calls to your own system. It needs
 no setting and no metrics backend, and it carries no payload, no peer's identity and no
 identifier. Each replica counts for itself, in memory, from its start.
 
+A call on one of module 1's origination routes (`route` `scenario-*`) counts here, with its
+outcome, but adds no latency: it runs a flow of legs, some of which wait on a person, so its
+time is not one exchange's answer time. For the same reason it records no
+`shn.gateway.exchange.duration` (`ExchangeLatency`) and no
+`shn.gateway.exchange.stage.duration` (`ExchangeStageLatency`); its access line keeps the
+whole call's `latencyMs`, and each of its legs still counts in `shn.gateway.legs`
+(`LegOutcome`).
+
 `shn gateway stats`, in the `shn` CLI, reads several replicas and merges them exactly: give
 it each replica's base URL (`--url`, repeatable) and the `CHECKS_TOKEN` in a file
 (`--token-file`). The answer's fields, and how to merge replicas yourself, are in
@@ -64,15 +80,25 @@ it each replica's base URL (`--url`, repeatable) and the `CHECKS_TOKEN` in a fil
 ## Access lines
 
 Every exchange writes one line to standard error, at every conformance level: each call
-from your own system on a Da Vinci ingress route, and each leg the gateway receives from
-the network. `/health`, `/internal/*` and the gateway's other routes write none.
+from your own system on a Da Vinci ingress route, each call on one of module 1's
+origination routes (a `/scenario` route that builds and sends a request; `route` is
+`scenario-*`, the route's path joined by `-`, such as `scenario-uc07-complete`), and each
+leg the gateway receives from the network. The local `/scenario` routes (`uc06/cancel`,
+`uc07/cancel`, `uc07/pending`, `reset`), `/health`, `/internal/*` and the gateway's other
+routes write none.
 
 ```
 2026/10/25 12:00:00 gateway: access: {"time":…,"correlationId":…,"direction":"ingress","exchange":…,"outcome":…,"status":…,"latencyMs":…,…}
 ```
 
 `direction` is `ingress` for a call from your own system, which the gateway carries to the
-network, and `inbound` for a leg the gateway receives from the network. The line starts
+network (an origination route's call included: the gateway sends its leg), and `inbound`
+for a leg the gateway receives from the network. An origination call can send several
+legs: its line's `exchange` and `correlationId` are the first leg's, while a refusal it
+records may belong to a later leg of the same call. A fidelity refusal's `refusal` names its
+`stage`: `build`, the gateway refused to build the message the refusal is about because of
+what the caller declared or did not state, or
+`verify`, an edit the gateway built failed its own verification. The line starts
 with the date and time Go's log package writes, so a query first strips everything up to
 `gateway: access: ` and reads the rest as JSON. Every field is described in
 [CONFIGURATION.md](CONFIGURATION.md#access-lines-always-on).
@@ -102,6 +128,14 @@ filter @message like "gateway: access: "
   by peer, direction, exchange
 | sort calls desc
 ```
+
+From v1.1.0 an outage of the Authorization Framework is `refused` on `authority`
+here, with `authorizeError` set, not `unreachable`: no authority could be
+obtained. Alert on `LegError` for it, whose leg outcome is still `unreachable`.
+
+A patient an exchange's involved list left out has no record of it under that
+patient. From v1.1.0 the access line's `involvedOmitted` counts them by reason, on
+any gateway. With metrics on, `InvolvedOmitted` is the same count. Alert on either.
 
 Refusals, by who refused and the network rule:
 
@@ -190,6 +224,9 @@ index=<your gateway index> "gateway: access: "
   BY peer, direction, exchange
 | sort - calls
 ```
+
+The note on an outage of the Authorization Framework under the first CloudWatch
+query holds here too: from v1.1.0 it is `refused`, not `failed`.
 
 Refusals, by who refused and the network rule:
 
@@ -334,7 +371,7 @@ memory (Linux).
 | `shn.gateway.authorization.token.duration` | `shn_gateway_authorization_token_duration_seconds` | `TokenLatency` | histogram | `s` | none | Time to acquire an Authorization Framework token, its retry included. |
 | `shn.gateway.authorization.tokens` | `shn_gateway_authorization_tokens_total` | `TokenAcquisition` | counter | `{token}` | `shn.outcome` | Authorization Framework token acquisitions, by outcome. |
 | `shn.gateway.telemetry.exports` | `shn_gateway_telemetry_exports_total` | none | counter | `{export}` | `shn.outcome` | OTLP metric exports, by outcome. |
-| `shn.gateway.refusals` | `shn_gateway_refusals_total` | `ExchangeRefused`, `ExchangeRefusedByRule` | counter | `{refusal}` | `shn.direction`, `shn.exchange`, `shn.refusal.rule`, `shn.refusal.by` | Exchanges refused, by the network rule and the party that refused. |
+| `shn.gateway.refusals` | `shn_gateway_refusals_total` | `ExchangeRefused`, `ExchangeRefusedByRule` | counter | `{refusal}` | `shn.direction`, `shn.exchange`, `shn.refusal.rule`, `shn.refusal.by`, `shn.refusal.stage` | Exchanges refused, by the network rule, the party that refused and, for a fidelity refusal, its stage. |
 | `shn.gateway.exchange.stage.duration` | `shn_gateway_exchange_stage_duration_seconds` | `ExchangeStageLatency` | histogram | `s` | `shn.direction`, `shn.exchange`, `shn.stage` | Time an exchange spent in each stage; an exchange's stages sum to its duration. |
 | `shn.gateway.active_requests` | `shn_gateway_active_requests` | `ActiveRequests` (peak each minute) | updowncounter | `{request}` | `shn.direction` | Exchanges in flight. In EMF, the peak each minute. |
 | `shn.gateway.exchange.request.size` | `shn_gateway_exchange_request_size_bytes` | `RequestBytes` | histogram | `By` | `shn.direction`, `shn.exchange` | Size of an exchange's request body, when it was read to its end. |
@@ -437,12 +474,12 @@ name. A GB is 10^9 bytes here.
 
 ### Custom metrics per gateway
 
-A gateway's exchange, conformance and in-flight metrics can reach at most 872
-metric-and-dimension combinations: 311 from the exchange record's metrics
-before the additions and 561 from the additions (165 `ExchangeRefused`, 11 `ExchangeRefusedByRule`, 100
-`ExchangeStageLatency`, 30 each of `RequestBytes` and `ResponseBytes`, 210
+A gateway's exchange, conformance and in-flight metrics can reach at most 919
+metric-and-dimension combinations: 342 from the exchange record's metrics
+before the additions and 577 from the additions (165 `ExchangeRefused`, 11 `ExchangeRefusedByRule`, 110
+`ExchangeStageLatency`, 33 each of `RequestBytes` and `ResponseBytes`, 210
 `ConformanceFinding`, 12 `ValidatorLatency`, 2 `ActiveRequests` and 1
-`ObserveCheckDropped`). At $0.30 each, that cap is $261.60 a month. A
+`ObserveCheckDropped`). At $0.30 each, that cap is $275.70 a month. A
 gateway reaches only the combinations its own traffic produces, usually a
 small fraction: a payer's gateway answers legs from the network, a
 provider's gateway calls for its own system, and most refusal combinations
@@ -455,6 +492,9 @@ closed list, so the combinations a gateway can reach are bounded. `ExchangeRefus
 `ConformanceFinding` leave out the exchange to keep that bound small, and
 `ExchangeRefusedByRule` and `BackendError` are one stream per rule and per gateway, for an
 alarm; the OpenTelemetry instruments carry the exchange.
+ExchangeRefusedByRule{rule=fidelity} counts fidelity refusals at stage verify; build-stage refusals count in ExchangeRefused and the OTel refusals instrument with shn.refusal.stage=build.
+`shn.refusal.stage` is `none` for a refusal on any other rule; no EMF line carries it, so
+it adds no combination here.
 
 The gateway's own tests pin the line counts, measured over exchanges driven through its
 engine, and the series bounds, so these figures change only with a release that says so.

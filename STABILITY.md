@@ -39,8 +39,9 @@ At v1.0 the full tier holds the network's own surface and guarantees
 (authentication, authority on each leg, consent, routing and addressing,
 replay, audit, message integrity, and the fidelity of the gateway's own edits),
 discovery, and the Prior Authorization workstream's CRD, DTR and PAS
-pass-through and routing. Eligibility, patient-authored DTR, the Federated
-Query Services workstream and modules 1, 2 and 3 are evolving.
+pass-through and routing. Eligibility, patient-authored DTR, CDex documentation
+exchange, the Federated Query Services workstream and modules 1, 2 and 3 are
+evolving.
 
 - A **MAJOR** version is the only release that may break the contract: remove
   or rename a full item, change what a full item means, or narrow a full
@@ -49,6 +50,19 @@ Query Services workstream and modules 1, 2 and 3 are evolving.
   an evolving item on the evolving terms above. Decode what the gateway sends
   tolerantly: ignore a field, an event kind or a value you do not know.
 - A **PATCH** version contains backwards-compatible fixes only.
+- **One recorded exception, v1.1.0:** PAS pass-through is full, and v1.1.0, a
+  minor release, adds a registered edit to it by default: the provider's gateway
+  re-keys the `payer-url` of each Task in a PAS answer it relays to its own
+  system to its documentation return path for the payer that answered (E-10,
+  `pas-pend-return-rekey`; participant protocol §7b.1a), when that payer's
+  registry entry lists `cdex-attachment-submit`; any other payer's `payer-url` is
+  carried as sent. It is made even where
+  a signature covers the `payer-url`, the one edit the gateway makes to signed
+  content, and the answer names it in `X-SHN-Edited`. It re-keys addressing at
+  a participant boundary so that documentation the provider sends stays on the
+  network, and nothing used it in production when it shipped. The exception is
+  this edit only: it lets no minor release add another edit to a full item, or
+  make another edit to signed content.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -111,9 +125,11 @@ The classes are:
 - `core`: the network's own surface.
 - `PA workstream` (Prior Authorization), `FQS workstream` (Federated Query
   Services): a workstream's own surface, documented under that workstream.
-- `PA workstream, evolving`: the Prior Authorization workstream's eligibility
-  and patient-authored DTR items, owned by `PA workstream`, which are evolving
-  at v1.0 while its CRD, DTR and PAS items are full.
+- `PA workstream, evolving`: the Prior Authorization workstream's eligibility,
+  patient-authored DTR and CDex documentation exchange items (the CDex legs,
+  from v1.1.0 `cdex-attachment-submit`, and their ingress, return paths and
+  size limits), owned by `PA workstream`, which are evolving while its CRD, DTR
+  and PAS items are full.
 - `module 1` (building messages on a participant's behalf), `module 2`
   (bridging and translating between IG lines), `module 3` (opt-in conformance
   checks): an opt-in module's surface, in effect only where the participant
@@ -149,7 +165,7 @@ own section states; one carries it for an item of an evolving class.
 |---|---|---|
 | `core` | full | Full from v1.0.0. The observer event feed and the access line are evolving surfaces, each graduating when its own section says. |
 | `PA workstream` | full | Full from v1.0.0: CRD, DTR and PAS pass-through and routing. |
-| `PA workstream, evolving` | evolving | Eligibility graduates when the responder default ships (a request is carried to the payer's own endpoint unless the payer declares that its system cannot answer it) and a partner payer's own endpoint answers it. Patient-authored DTR graduates when a participant other than SHN's PHG answers it. |
+| `PA workstream, evolving` | evolving | Eligibility graduates when the responder default ships (a request is carried to the payer's own endpoint unless the payer declares that its system cannot answer it) and a partner payer's own endpoint answers it. Patient-authored DTR graduates when a participant other than SHN's PHG answers it. CDex documentation exchange graduates once it has shipped and partners use it. |
 | `FQS workstream` | evolving | Graduates when the CDex carry path ships and a partner facility answers through it. |
 | `module 1` | evolving | Graduates when module 1 sends what it builds through the gateway's own ingress and a partner declares it (`ORIGINATION_PROFILE`) in production. |
 | `module 2` | evolving | Graduates when a certified translation for a pair of IG lines is in partner use. |
@@ -323,6 +339,10 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PAYER_DAVINCI_PAYOR_OWN` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_PAYOR_BACKEND` | PA workstream | PA workstream |
 | `PAYER_ELIGIBILITY_URL` | PA workstream, evolving | PA workstream |
+| `ATTACHMENT_CEILING_BYTES` | PA workstream, evolving | PA workstream |
+| `ATTACHMENT_INFLIGHT_BYTES` | PA workstream, evolving | PA workstream |
+| `ECS_CONTAINER_METADATA_URI_V4` | PA workstream, evolving | PA workstream |
+| `PAYER_ATTACHMENT_MAX_BYTES` | PA workstream, evolving | PA workstream |
 | `PAYER_DAVINCI_PAS_NATIVE` | unsupported | PA workstream |
 | `SCENARIO_CALLERS_FILE` | test tooling | test tooling |
 | `SHN_DEMO_EGRESS_NATIVE_LINES` | test tooling | test tooling |
@@ -777,6 +797,10 @@ The main listener, on `HOST` and `PORT`:
 | `POST /Claim/$submit` | PA workstream | PA workstream |
 | `POST /Claim/$inquire` | PA workstream | PA workstream |
 | `POST /CoverageEligibilityRequest/$submit` | PA workstream, evolving | PA workstream |
+| `POST /$submit-attachment` | PA workstream, evolving | PA workstream |
+| `POST /cdex/payer/{payer}` | PA workstream, evolving | PA workstream |
+| `POST /cdex/payer/{payer}/$submit-attachment` | PA workstream, evolving | PA workstream |
+| `GET /cdex/payers` | PA workstream, evolving | PA workstream |
 | `GET /metadata` | core | core |
 | `POST /oauth/token` | core | core |
 | `GET /.well-known/smart-configuration` | core | core |
@@ -1143,10 +1167,12 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
 - A patient it cannot name is left out and the leg is sent as usual: past 16
   patients, a system-of-record read that fails, a member not held under
   `REQUIRE_KNOWN_MEMBERS=true`, a token that is refused, cannot be obtained,
-  or does not carry the involvement asked for, or one not named before the
-  2 seconds run out. Each raises the observer event
-  `involved.omitted` (Detail: the reason) and, with `METRICS_SERVICE` set,
-  counts in the EMF metric `InvolvedOmitted{reason}`.
+  does not verify for this leg and patient (from v1.1.0), or does not carry the
+  involvement asked for, or one not named before the 2 seconds run out. Each
+  counts on the call's exchange record and access line (`involvedOmitted`, from
+  v1.1.0), raises the observer event `involved.omitted` (Detail: the reason)
+  and, with `METRICS_SERVICE` set, counts in the EMF metric
+  `InvolvedOmitted{reason}`.
 - The descriptor is read once, at start, and the boot line says which way it
   went. A gateway started before the network lists `involved` sends nothing
   until it restarts.
@@ -1211,6 +1237,34 @@ between 2.1 and 2.2, in either direction:
   refusals apply to the transform chain itself (`engine.RunTransformChain`, and
   the observer listener's `POST /demo/transform`, which answers a refusal with
   `422` and its own body).
+
+### The Da Vinci ingress's no-coverage refusals
+
+**Behavior change in v1.1.0.**
+
+- A CDS Hooks request with no coverage the gateway can route by is refused
+  `412` with one of these reasons:
+  - `no coverage in request or system of record`: a `null` coverage prefetch,
+    or none the participant's system of record holds for a member it holds;
+  - `no coverage to route by: send prefetch.coverage or fhirServer (…)`: a
+    member the system of record names no patient for (one it does not hold, or
+    holds but cannot name), when the request names no `fhirServer`;
+  - `no coverage to route by: send prefetch.coverage (…, and it does not read
+    fhirServer)`: the same member, with `CDS_FHIR_SERVER_READ=off`.
+
+  The first reason, and each other one up to its parentheses, is inside the
+  promise, as the participant protocol documents it. The explanation in parentheses is outside
+  the promise; a release that rewords it says so in
+  [`CHANGELOG.md`](CHANGELOG.md). The refusals of the read through `fhirServer`
+  also begin `no coverage to route by:`, with their own statuses and reasons
+  (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)); this section does not
+  cover them.
+- From v1.1.0 the explanation reads `(this gateway's records name no patient
+  for this member)`, and `(this gateway's records name no patient for this
+  member, and it does not read fhirServer)` with the read off. v1.0.0 said
+  `(this gateway's system of record names no patient for this member)` and
+  `(this gateway's system of record names no patient for this member, and it
+  does not read fhirServer)`. Statuses and conditions are unchanged.
 
 ### When the requester stops waiting
 
@@ -1288,6 +1342,7 @@ table.
 | `decision.conflict` | PA workstream | PA workstream |
 | `decision.superseded` | PA workstream | PA workstream |
 | `decision.stale-answer` | PA workstream | PA workstream |
+| `cdex.payer-id-differs` | PA workstream, evolving | PA workstream |
 
 | Item | Class | Owner |
 |---|---|---|
@@ -1296,6 +1351,7 @@ table.
 | `pas-ingress` | PA workstream | PA workstream |
 | `pas-inquire-ingress` | PA workstream | PA workstream |
 | `eligibility-ingress` | PA workstream, evolving | PA workstream |
+| `cdex-ingress` | PA workstream, evolving | PA workstream |
 | `federated-query-ingress` | FQS workstream | FQS workstream |
 
 | Item | Class | Owner |
@@ -1488,7 +1544,8 @@ the SSE incarnation header. No observer listener is created by default.
 ## Access line
 
 Every gateway writes one `gateway: access: <json>` line for each call it
-answers on an ingress route and for each leg it receives from the network, at
+answers on an ingress route or on one of module 1's origination routes, and for
+each leg it receives from the network, at
 every conformance level, with nothing to configure ("Access lines", below, and
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)). Fields and closed-set values
 may be added in minor releases, so decode tolerantly. The line is an evolving
@@ -1522,6 +1579,7 @@ classify is written as `other`.
 | `outcome` | core | core |
 | `refusal.by` | core | core |
 | `refusal.rule` | core | core |
+| `refusal.stage` | core | core |
 | `status` | core | core |
 | `latencyMs` | core | core |
 | `backend.status` | core | core |
@@ -1538,6 +1596,8 @@ classify is written as `other`.
 | `network.latencyMs` | monitoring | core |
 | `network.calls` | monitoring | core |
 | `answerError` | core | core |
+| `authorizeError` | core | core |
+| `involvedOmitted` | core | core |
 | `findings.count` | module 3 | module 3 |
 | `findings.refused` | module 3 | module 3 |
 | `findings.kinds` | module 3 | module 3 |
@@ -1549,6 +1609,7 @@ classify is written as `other`.
 | `answerOwnership` | core | core |
 | `answerBuilder` | core | core |
 | `answerEdits` | core | core |
+| `editsNotMade` | core | core |
 | `hubDelivered` | core | core |
 
 | Item | Class | Owner |
@@ -1560,8 +1621,11 @@ classify is written as `other`.
 | `outcome` | core | core |
 | `refusal.by` | core | core |
 | `refusal.rule` | core | core |
+| `refusal.stage` | core | core |
 | `backend.errorClass` | core | core |
 | `answerError` | core | core |
+| `authorizeError` | core | core |
+| `involvedOmitted` | core | core |
 
 ### Access lines
 
@@ -1593,6 +1657,31 @@ classify is written as `other`.
   `engine.WithoutBackendCorrelation`) stops the header being sent, for a
   payer system that validates `X-Correlation-Id` its own way. Unset or `on`
   sends it; any other value refuses the boot.
+- **Additive (unreleased):** access lines, and the exchange record and its
+  metrics (EMF and OpenTelemetry), also cover module 1's origination routes.
+  Each call a provider's gateway answers on a `/scenario` route that
+  originates (builds and sends a request of its own) is recorded with
+  direction `ingress` and route `scenario-*`, the route's path joined by `-`
+  (`scenario-uc07-complete` for `POST /scenario/uc07/complete`): the request
+  enters from the participant's own side and this gateway sends the leg, so
+  `sender` is this gateway. Its `exchange` and `correlationId` are the first
+  leg's the call sent (`other` and absent when it sent none), while a refusal
+  it records may belong to a later leg of the same call; a refusal carries
+  its rule as on an ingress call: the Hub's or a peer's, `routing` for a
+  coverage that names no payer the network registers, `authentication` for a
+  refused `/scenario` caller, `fidelity` for claim facts stated for an order
+  the member does not hold. Its `latencyMs` is the whole call, a flow of legs,
+  so it feeds the exchange count and refusals but not `ExchangeLatency`, the
+  exchange duration and stage instruments or `/internal/stats` latency. The
+  local `/scenario` routes (`uc06/cancel`, `uc07/cancel`, `uc07/pending`,
+  `reset`) send nothing and are not recorded. In the Go API,
+  `engine.ExchangeOriginationRoutes` (additive) names the recorded routes.
+- **Additive (unreleased):** a fidelity refusal's access line carries
+  `refusal.stage`, and its record `RefusalStage` (`recording.RefusalStages`):
+  `build`, SHN refused to build the message the refusal is about, because of
+  what the caller declared or did not state (earlier legs of the same call
+  may already have been sent), or `verify`, an edit or message the gateway
+  built failed its own verification. Absent for every other rule.
 
 ### One record per exchange
 
@@ -1617,10 +1706,11 @@ classify is written as `other`.
   applied to the bytes it transmitted on the leg, in transmit order: ids only,
   each once, only for bytes sent (the receiver answered, or the connection
   failed after the request was written). Not a metric dimension.
-- Direction, route, exchange, operation, outcome, refusing party, rule and
-  backend error class are closed sets (`engine.ExchangeDirections`,
-  `ExchangeRoutes`, `ExchangeKinds`, `ExchangeOperations`, `ExchangeOutcomes`,
-  `RefusalParties`, `RefusalRules`, `BackendErrorClasses`), each ending in
+- Direction, route, exchange, operation, outcome, refusing party, rule,
+  refusal stage and backend error class are closed sets
+  (`engine.ExchangeDirections`, `ExchangeRoutes`, `ExchangeKinds`,
+  `ExchangeOperations`, `ExchangeOutcomes`, `RefusalParties`, `RefusalRules`,
+  `BackendErrorClasses`, and `recording.RefusalStages`), each ending in
   `other`: a value the gateway cannot classify is recorded as `other`, never as
   a caller's string.
 - **Fixed in v0.59.0:** a payer that requires known members
@@ -1636,7 +1726,17 @@ classify is written as `other`.
   given because its participant's system did not answer usably (a service
   listing it could not read, or an error answer a requester without a message
   frame cannot be sent), is recorded as `upstream-error`, with the failed call;
-  so is a read or search of its system of record that failed. Every read and
+  so is a read or search of its system of record that failed, except, from
+  v1.1.0, one the gateway knows repeats a member name: a search page, or a
+  read the connector reports with `engine.SoRRepeatedMember` or
+  `engine.SoRInvalidAnswer` (the bundled FHIR connector reports every answer it
+  reads that repeats a member name, exactly or under case folding, and acts on
+  no reading of it). That answer can be read two ways, so
+  it is `refused` by this gateway on `integrity`, the call `malformed`, as the
+  participant's answer to a forwarded operation is when it repeats a member
+  name; v1.0.0 recorded it `upstream-error` (on the federated query, coverage
+  eligibility, patient-authored DTR and the member binding of a leg it
+  answers). Every read and
   search of the participant's system of record on a leg it answers is a
   backend call (status 0, with its latency), and so is a read of its CDS
   service listing. `Backend` is the call the answer came from: the operation
@@ -1822,6 +1922,7 @@ the EMF `exchange` dimension.
 | `shn.dependency` | monitoring | core |
 | `shn.refusal.rule` | monitoring | core |
 | `shn.refusal.by` | monitoring | core |
+| `shn.refusal.stage` | monitoring | core |
 | `shn.stage` | monitoring | core |
 | `shn.finding.kind` | monitoring | core |
 | `shn.finding.action` | monitoring | core |
@@ -1906,8 +2007,9 @@ SHN health payload — `service` (the gateway's holder id), `version` (`SHN_VERS
 when set, else the build's own version: a release's tag, a preview build's pseudo-version, the
 module version Go recorded for an unstamped build, or `v0.0.0-unstamped` for one that states
 none), `uptimeSeconds`, a worst-check-wins `status`, and a `checks`
-array (`registrar-poller` when a registrar feed is configured; `store` when the
-durable Postgres store is configured). The payload shape is the published
+array (`registrar-poller` and, from v1.1.0, `capability-declaration` when a
+registrar feed is configured; `store` when the durable Postgres store is
+configured). The payload shape is the published
 `shn-sdk/health` contract (v0.29.0) and is non-sensitive by construction —
 statuses, timestamps, counts, and coarse error classes only. The JSON field
 shape is part of the binary contract. Which checks a gateway reports, and so
@@ -1953,9 +2055,10 @@ and CDS service ids its discovery documents name), and the headers and
 endpoints of optional diagnostic collection.
 
 Of the leg types, `coverage-eligibility` and `patient-dtr` (`PA workstream,
-evolving`) and `federated-query` (`FQS workstream`) are evolving at v1.0: a
-minor gateway release may change how the gateway carries them. The wire
-protocol's own versioning still governs their names.
+evolving`) and `federated-query` (`FQS workstream`) are evolving at v1.0, and
+the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`)
+are evolving when they ship: a minor gateway release may change how the gateway
+carries them. The wire protocol's own versioning still governs their names.
 
 | Item | Class | Owner |
 |---|---|---|
@@ -1981,12 +2084,14 @@ protocol's own versioning still governs their names.
 | `transactionType=pas-claim-update` | PA workstream | PA workstream |
 | `transactionType=pas-claim-inquire` | PA workstream | PA workstream |
 | `transactionType=patient-dtr` | PA workstream, evolving | PA workstream |
+| `transactionType=cdex-attachment-submit` | PA workstream, evolving | PA workstream |
 | `transactionType=federated-query` | FQS workstream | FQS workstream |
 | `POST <authz>/authorize` | core | core |
 | `X-Hub-Assertion` | core | core |
 | `X-SHN-Delivered` | core | core |
 | `X-SHN-Not-Acted` | core | core |
 | `X-SHN-Leg-Id` | core | core |
+| `X-SHN-Edited` | core | core |
 | `X-Correlation-Id` | core | core |
 | `SHN-Builder` | module 1 | module 1 |
 | `X-SHN-Observer-Incarnation` | core | core |

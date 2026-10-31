@@ -57,7 +57,9 @@ func searchsetMatches(bundle []byte, resourceType string) ([][]byte, error) {
 func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, canonical, assertionID string) (body []byte, sealed relay.Payload, err error) {
 	coverages, err := searchsetMatches(recs.coverage, "Coverage")
 	if err != nil {
-		return nil, sealed, fmt.Errorf("read the coverage search result: %w", err)
+		// The searchset is this gateway's own assembly of the participant's
+		// records, each already read: failing to read it is its own fault.
+		return nil, sealed, assemblyFault(fmt.Errorf("read the coverage search result: %w", err))
 	}
 	in := shnsdk.QuestionnairePackageInputs{
 		Coverages:      coverages,
@@ -69,6 +71,17 @@ func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, 
 	if err != nil {
 		return nil, sealed, err
 	}
+	sealed, err = sealPackageRequest(pkg, in)
+	if err != nil {
+		return nil, sealed, err
+	}
+	return pkg.Body, sealed, nil
+}
+
+// sealPackageRequest seals the questionnaire-package request the SDK built
+// from in, naming each span it copied from the inputs: this gateway's own
+// assembly, so each failure is an assembly fault.
+func sealPackageRequest(pkg shnsdk.QuestionnairePackageParameters, in shnsdk.QuestionnairePackageInputs) (sealed relay.Payload, err error) {
 	embeds := make([]relay.Embed, 0, len(pkg.Copied))
 	for _, c := range pkg.Copied {
 		var src relay.Body
@@ -78,12 +91,15 @@ func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, 
 		case c.Parameter == "order" && c.Index < len(in.Orders):
 			src = relay.NewBody(in.Orders[c.Index], relay.OriginPeerFrame)
 		default:
-			return nil, sealed, fmt.Errorf("questionnaire-package request copies an unknown input %s[%d]", c.Parameter, c.Index)
+			return sealed, assemblyFault(fmt.Errorf("questionnaire-package request copies an unknown input %s[%d]", c.Parameter, c.Index))
 		}
 		embeds = append(embeds, relay.Embed{Source: src, Start: c.Start, End: c.End, At: c.At})
 	}
 	sealed, err = relay.Authored(relay.BuilderSDKDTRPackage, pkg.Body, dtrPackageContentType, embeds...)
-	return pkg.Body, sealed, err
+	if err != nil {
+		return sealed, assemblyFault(err)
+	}
+	return sealed, nil
 }
 
 // carryUnchanged walks a questionnaire request the gateway built to the

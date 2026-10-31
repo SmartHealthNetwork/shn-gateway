@@ -45,6 +45,10 @@ func buildDavinciConfiguration(baseURL, holderID string, declared []string) ([]b
 		}
 		endpoints[code+"#"+line] = baseURL
 	}
+	// The ingress takes a CDex $submit-attachment at its base for every
+	// payer (routed by its PayerId), whatever lines it declares: the leg is
+	// carried as sent.
+	endpoints[cdexEndpointCode+"#"+cdexLine] = baseURL
 	doc := map[string]any{
 		"identifier": map[string]string{"system": shnParticipantIDSystem, "value": holderID},
 		"endpoints":  endpoints,

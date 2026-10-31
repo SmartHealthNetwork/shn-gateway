@@ -108,7 +108,7 @@ func TestPASIngress_CarriedAnswerIsValidatedAtTheLevel(t *testing.T) {
 					if o := lastLegOutcome(t, env.originator); o != "error" {
 						t.Fatalf("a refused answer's leg is recorded error, got %q", o)
 					}
-				} else if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
+				} else if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
 					t.Fatalf("answer %d %s, want the payer's answer relayed exactly", rec.Code, rec.Body)
 				}
 				if row.level == EnforcementNone {
@@ -133,7 +133,7 @@ func TestPASIngress_CarriedConformantAnswerIsCarriedAtEveryLevel(t *testing.T) {
 		for _, level := range allLevels {
 			t.Run(leg.leg+"/"+level.String(), func(t *testing.T) {
 				_, rec, findings, _, answer := carriedAnswerRun(t, leg, level, "", shnsdk.NewFakeValidator())
-				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
 					t.Fatalf("answer %d %s, want the payer's answer relayed exactly", rec.Code, rec.Body)
 				}
 				for _, f := range findings {
@@ -178,7 +178,7 @@ func TestPASIngress_CarriedAnswerCheckUnavailable(t *testing.T) {
 					}
 					return
 				}
-				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
 					t.Fatalf("answer %d %s, want the payer's answer relayed exactly", rec.Code, rec.Body)
 				}
 			})

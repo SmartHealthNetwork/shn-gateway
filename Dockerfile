@@ -17,14 +17,14 @@ RUN go mod download
 COPY . .
 # GATEWAY_VERSION is declared here, after the module download, so a new version does not miss that
 # layer's cache. The -X target sits in a variable, so the go build line names no package
-# tools/deployscope would read as one the image builds.
+# the platform's deploy-scope check would read as one the image builds.
 ARG GATEWAY_VERSION=
 RUN stamp=; [ -z "$GATEWAY_VERSION" ] || stamp="-X github.com/SmartHealthNetwork/shn-gateway/internal/buildversion.stamp=$GATEWAY_VERSION"; \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w $stamp" -o /out/gateway ./cmd/gateway
 
 # Distroless static NONROOT (uid/gid 65532): no shell (keep healthchecks binary/none),
 # CA certs for outbound HTTPS. The runtime reads its key bundle from the mounted
-# /etc/shn volume — tools/materialize chowns the bundle dir+secrets to gid 65532 so the
+# /etc/shn volume — the platform's bundle materializer chowns the bundle dir+secrets to gid 65532 so the
 # nonroot runtime can traverse+read them (keys stay non-world-readable; AI-8 custody).
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/gateway /gateway

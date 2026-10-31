@@ -13,9 +13,9 @@ snapshot.
 
 ## Drift guard
 
-These copies are **not** independently maintained. Root-module
-`test/conformance/gateway_app_golden_drift_test.go` asserts byte-equality
-between each file here and its repo-root original on every `make check` run,
+These copies are **not** independently maintained. A drift test in the
+platform repository's root module asserts byte-equality between each file
+here and its repo-root original on every run of the platform's default gate,
 so a regeneration of the repo-root goldens can't silently strand a stale copy
 here. If that test fails, re-copy the named file(s) from `testdata/golden/` —
 do not hand-edit the copies.

@@ -18,12 +18,12 @@ import (
 
 // readConformantGolden reads a conformant request golden from this package's
 // own vendored copies (testdata/golden/conformant/, see that directory's
-// README.md). It used to reach into the surrounding monorepo and t.Skip when
-// the reach failed, which meant the byte-match ran only in the monorepo and
+// README.md). It used to reach into the surrounding platform repository and t.Skip
+// when the reach failed, which meant the byte-match ran only in that repository and
 // silently vanished from the published standalone module; vendoring makes it a
 // real gate in both. The copies are pinned byte-for-byte against their
-// originals by the root module's
-// test/conformance/gateway_vendored_golden_drift_test.go.
+// originals by the platform repository's
+// vendored-golden drift test.
 func readConformantGolden(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "golden", "conformant", name))
@@ -86,7 +86,7 @@ func rebindPASPatient(t *testing.T, bundleJSON []byte, newID string) []byte {
 // the payer-side already runs (conformantCRDBind / parseConformantPASSubjects). The PAS golden
 // is the byte-pinned target the SDK claim builder byte-matches against, and the CRD golden is
 // the inbound request an EHR sends from its own records; if they don't bind here, nothing
-// downstream can. (The SECOND oracle — make validate on the SHN-produced resources — is run
+// downstream can. (The SECOND oracle — the platform's validation gate on the SHN-produced resources — is run
 // out-of-band.)
 func TestTask0_ConformantGoldensBind(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
@@ -674,7 +674,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 	if err != nil {
 		t.Fatalf("BuildServiceRequest: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimUpdateBundleExact(shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Coverage: testMemberCoverage(member),
+	in := shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), Coverage: testMemberCoverage(member),
 		Provider:         testRequestingProvider(),
 		MemberIDSystem:   shnsdk.MemberSystem,
 		QR:               qrJSON,
@@ -695,7 +695,9 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		PayerOrgEntry: true,
 		Insurer:       testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Payer:         shnsdk.CMSPayerIdentity,
-	})
+	}
+	in.PriorClaim = testSubmissionFor("2.0", in)
+	got, err := shnsdk.BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
 	}

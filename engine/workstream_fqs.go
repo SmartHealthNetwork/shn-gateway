@@ -61,15 +61,15 @@ func (fqsWorkstream) routes(g *Gateway, role string) []mountedRoute {
 // the provider's ingress is (paRoutes).
 func (g *Gateway) fqsRoutes(role string) []mountedRoute {
 	var out []mountedRoute
-	route := func(pattern string, h http.HandlerFunc) {
-		out = append(out, mountedRoute{pattern: pattern, handler: h})
+	route := func(pattern string, credential routeCredential, h http.HandlerFunc) {
+		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: credential})
 	}
 	switch role {
 	case "provider":
 		if !g.cfg.IngressEnabled {
 			return nil
 		}
-		route("POST /Task", g.ingressRoute(RouteFederatedQuery))
+		route("POST /Task", noCredential, g.ingressRoute(RouteFederatedQuery))
 	}
 	return out
 }

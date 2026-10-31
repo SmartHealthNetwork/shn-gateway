@@ -71,8 +71,8 @@ func TestNativeReachBuildsUnlanedOnlyForACertifiedBuilderAtNone(t *testing.T) {
 	}
 }
 
-// Every certified pair names the make validate test that certifies it
-// (test/conformance checks that its line's run list selects it), a line its
+// Every certified pair names the platform validation-gate test that certifies it
+// (the platform conformance suite checks that its line's run list selects it), a line its
 // contract builds natively, and a builder the ownership table lets this
 // gateway originate on one of that contract's legs.
 func TestCertifiedBuildsNameTheirTest(t *testing.T) {

@@ -61,18 +61,6 @@ func sha256hexT(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// signTestToken returns a signed copy of tok using authzPriv. Replicates the
-// tokenSigningPayload logic (marshal with Signature=nil) since the public
-// SDK's tokenSigningPayload is unexported. json.Marshal of a well-formed
-// shnsdk.Token never errors, so the return value is always valid.
-func signTestToken(tok shnsdk.Token, authzPriv ed25519.PrivateKey) shnsdk.Token {
-	c := tok
-	c.Signature = nil
-	payload, _ := json.Marshal(c) // Token fields are all JSON-safe; never errors
-	tok.Signature = ed25519.Sign(authzPriv, payload)
-	return tok
-}
-
 // sealForProvider seals payload to providerEncPub (NaCl anonymous box, matching
 // shnsdk.Seal) and stamps a valid response-leg Token so the provider's
 // roundTrip VerifyBound check passes. Returns the encoded envelope bytes.
@@ -141,6 +129,9 @@ type stubSubstrate struct {
 	// opaque "authorization failed" path (outcome "failed").
 	denyAuthorize bool
 	failAuthorize bool
+	// auditRefuseAuthorize answers /authorize as the Framework does when it
+	// cannot record its decision: 502, the audit rule stated.
+	auditRefuseAuthorize bool
 	// pasDenialRationale, when set, makes leg 1 (the PAS-submit response, only
 	// reached by a caller that proceeds past a not-covered CRD verdict — D-S2-2)
 	// return a DENIED ClaimResponse carrying this rationale, built at pasLine.
@@ -200,6 +191,13 @@ func (s *stubSubstrate) handleAuthorize(_ *http.Request, body []byte) (*http.Res
 	}
 	if s.failAuthorize {
 		return errResp("stub: authorize forced failure"), nil
+	}
+	if s.auditRefuseAuthorize {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"decision audit failed","rule":"audit"}`)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
 	}
 	var req struct {
 		Frame         string `json:"frame"`
@@ -614,11 +612,11 @@ func TestRunCRDThenDTROrder_NotCovered_ProceedFlag(t *testing.T) {
 }
 
 // TestHandleUC08_DemoLane_ProceedsPastNotCoveredToDeny is the behavioral guard for the
-// EXACT bug live `make smoke` caught: with
+// EXACT bug the platform's live smoke gate caught: with
 // OriginationProfile == "demo", a not-covered CRD verdict for
 // UC-08's J3490 family must NOT terminally stop at the CRD leg (the generic FR-G25
 // STOP). It must proceed to PAS and come back DENIED with a rationale, matching what
-// internal/scenariodrive.DemoChecks()'s UC08 check asserts
+// the platform scenario driver's DemoChecks() UC08 check asserts
 // (All(Has(`"denied":true`), Has(`"rationale"`))). Before this fix, an empty profile
 // hit the CRD not-covered stop and UC-08 returned
 // {"covered":false,"outcome":"not-covered","paRequired":false} instead — precisely the
@@ -887,7 +885,7 @@ func TestClassifyResolution(t *testing.T) {
 func TestRunCRDThenDTROrder_NamesPayer(t *testing.T) {
 	covJSON, err := containedPayorCoverage("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	if !strings.Contains(string(covJSON), "#cms-payer") {
 		t.Fatalf("expected contained #cms-payer payer reference, got: %s", covJSON)

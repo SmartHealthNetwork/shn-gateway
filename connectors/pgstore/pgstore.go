@@ -3,12 +3,12 @@
 // Package pgstore is the durable (Postgres) implementation of the gateway's
 // Store seam — the holder's OWN business state: issued authorization numbers and
 // the pended-claim ledger (AI-1: metadata/decision only, never a cross-holder
-// clinical record). It mirrors internal/auditstore (NewPgStore +
+// clinical record). It mirrors the platform's audit store (NewPgStore +
 // EnsureSchema over pgxpool) and satisfies engine.Store (the public seam); the
 // compile-time conformance assertion lives in-package (var _ engine.Store below).
 //
-// Bound to one holder: the Store interface carries no holder id, so (like
-// holdersim.NewClient(url, holderID)) NewPgStore captures holderID and every query
+// Bound to one holder: the Store interface carries no holder id, so (like the platform
+// holder simulator's NewClient(url, holderID)) NewPgStore captures holderID and every query
 // is scoped WHERE holder_id = $holderID — partitioning the gateways that share one
 // DB, harmless-constant in the single-tenant partner case.
 //
@@ -83,7 +83,7 @@ func NewPgStore(ctx context.Context, pool *pgxpool.Pool, holderID string) (*PgSt
 
 // schemaLockKey serializes concurrent EnsureSchema calls (see below). Postgres
 // advisory locks are CLUSTER-GLOBAL (not per-database), so a DISTINCT key is what
-// keeps this from contending with another service's lock (e.g. auditstore's) — and
+// keeps this from contending with another service's lock (e.g. the platform audit store's) — and
 // even an accidental collision would only harmlessly serialize two unrelated
 // schema-inits, never corrupt anything.
 const schemaLockKey int64 = 0x676174657761795F // arbitrary distinct key ("gateway_" bytes)
@@ -312,7 +312,7 @@ CREATE INDEX IF NOT EXISTS gw_audit_outbox_due ON gw_audit_outbox (holder_id, ne
 // callers race in pg_type/pg_class and one fails with SQLSTATE 23505), and the four
 // gateways share one shn_gateway DB and all run EnsureSchema at startup — so the DDL
 // runs inside a transaction holding a transaction-scoped advisory lock (the
-// auditstore pattern). The first holder creates the tables; the rest then find them
+// platform audit store's pattern). The first holder creates the tables; the rest then find them
 // already present (no-op).
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)

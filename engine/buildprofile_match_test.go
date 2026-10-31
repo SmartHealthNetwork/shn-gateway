@@ -75,8 +75,8 @@ func TestInThisBuild_AgreesWithTheGoCommand(t *testing.T) {
 	// The probe is a package outside any module, which the go command lists
 	// in GOPATH mode. Temporary seam: it would be a temporary module, but a
 	// go.mod literal here would read as reaching the repository root to the
-	// CI router (tracked in the SHN platform repository: "gateroute: a
-	// temp-module literal in a test is not root reach"). When that is fixed,
+	// CI router (tracked in the SHN platform repository, so that the router does
+	// not read a temp-module literal in a test as root reach). When that is fixed,
 	// the probe writes its own go.mod and lists in module mode; either way
 	// the go command decides the same files.
 	if got, want := inThisBuildFiles(t, dir), goListFiles(t, dir, "GO111MODULE=off"); !slices.Equal(got, want) || len(want) < 2 {

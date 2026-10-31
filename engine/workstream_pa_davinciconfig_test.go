@@ -39,6 +39,8 @@ func TestBuildDavinciConfiguration(t *testing.T) {
 		"davinci_crd_hook_endpoint#2.0":       "https://gw.example/fhir",
 		"davinci_dtr_qpackage_endpoint#2.0":   "https://gw.example/fhir",
 		"davinci_pas_submission_endpoint#2.0": "https://gw.example/fhir",
+		// The CDex submission's endpoint, whatever lines are declared.
+		"davinci_cdex_attachsubmit_endpoint#2.1": "https://gw.example/fhir",
 	}
 	if len(doc.Endpoints) != len(want) {
 		t.Fatalf("endpoints = %v, want exactly %v", doc.Endpoints, want)

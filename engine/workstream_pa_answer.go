@@ -44,6 +44,8 @@ func (paWorkstream) answer(leg string) answerHandler {
 		return paAttested(legPASClaimInquire, (*Gateway).handlePASInquireInbound)
 	case "patient-dtr":
 		return (*Gateway).handlePatientDTRInbound
+	case "cdex-attachment-submit":
+		return (*Gateway).handleCDexSubmitInbound
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -66,6 +67,15 @@ func verdictCommand(args []string, getenv func(string) string) int {
 		started := time.Now()
 		if err := submitValidation(ctx, client, normalized, row, prepared[i]); err != nil {
 			fmt.Fprintf(os.Stderr, "verdict: line=%s row=%s elapsed=%s outcome=failed reason=%s\n", *line, row.identity, time.Since(started).Round(time.Millisecond), err)
+			var oe *outcomeError
+			if errors.As(err, &oe) {
+				for _, record := range outcomeRecord(row, oe.excerpt) {
+					fmt.Fprintf(os.Stderr, "verdict: line=%s row=%s %s\n", *line, row.identity, record)
+				}
+				if onlyRegexTimeout(row, oe.reason, oe.excerpt) {
+					fmt.Fprintf(os.Stderr, "verdict: line=%s row=%s named=regex-check-timeout: the validator could not evaluate a primitive's type regex in time (%s); every other issue matches the row's verdict\n", *line, row.identity, regexTimeoutMessageID)
+				}
+			}
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "verdict: line=%s row=%s elapsed=%s outcome=completed\n", *line, row.identity, time.Since(started).Round(time.Millisecond))

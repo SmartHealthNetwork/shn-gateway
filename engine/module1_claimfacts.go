@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -170,21 +171,26 @@ func claimInputOf(r *http.Request) (originationClaimInput, error) {
 // pasBuildFailure answers a PAS request build that failed. A build refused
 // because a request fact the request did not state is required at the line,
 // or is not a coding its element can carry, is the fidelity refusal above:
-// 422, with the SDK's text naming the element. Any other build failure stays
-// an internal error under fallback.
-func pasBuildFailure(w http.ResponseWriter, err error, fallback string) {
-	if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+// 422, with the SDK's text naming the element, recorded at the build stage.
+// So is an amendment whose recorded submission cannot be carried as the
+// requester submitted it, in the SDK's own words: this gateway never rebuilds
+// a submitted Claim. Any other build failure stays an internal error under
+// fallback: this gateway's own fault, not a refusal.
+func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback string) {
+	if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) ||
+		errors.Is(err, shnsdk.ErrPASPriorClaimNotCarried) {
+		refuseBuilder(w, err.Error())
 		return
 	}
+	// This gateway's own failure, never a refusal.
+	exchangeOf(r.Context()).ownFailure()
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fallback})
 }
 
 // pasSubmissionRecord is what an amendment needs of the submission it
-// continues, read off the bytes that submission actually built
-// (shnsdk.PASPriorClaimOf): the submitted Claim's type and priority as sent
-// (the prior-Claim entry restates them), its created, and its items as sent
-// (the amendment's infoChanged marker is derived from them).
+// continues, read off the bytes that submission's leg sent
+// (shnsdk.PASPriorClaimOf): the submitted Claim as sent, which the amendment
+// carries as its prior-Claim entry and derives its infoChanged marker from.
 type pasSubmissionRecord struct {
 	prior shnsdk.PASPriorClaim
 	// pend is the payer's pended answer to the submission, exactly as
@@ -243,8 +249,11 @@ func requestNamesMember(w http.ResponseWriter, r *http.Request, resolved string)
 //
 // A request stating facts for an order the member does not hold is refused
 // 422 before anything is built. That is the fidelity of SHN's own build: a
-// claim SHN builds would carry one order's facts on another order.
-func statedOrderCheck(in originationClaimInput, order []byte) (int, string) {
+// claim SHN builds would carry one order's facts on another order. It is
+// recorded on the call's exchange record as a fidelity refusal at
+// recording.RefusalStageBuild; the request's other faults (no order named, an order
+// with no product coding) are not fidelity refusals.
+func statedOrderCheck(ctx context.Context, in originationClaimInput, order []byte) (int, string) {
 	if in.Order == nil || strings.TrimSpace(in.Order.System) == "" || strings.TrimSpace(in.Order.Code) == "" {
 		return http.StatusBadRequest, `the request names no "order" ({"system","code"}): the claim facts it states are stated for an order`
 	}
@@ -253,6 +262,7 @@ func statedOrderCheck(in originationClaimInput, order []byte) (int, string) {
 		return http.StatusBadGateway, "open order has no recognized product coding"
 	}
 	if system != in.Order.System || code != in.Order.Code {
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
 		return http.StatusUnprocessableEntity, fmt.Sprintf(
 			"the request states its claim facts for order %s|%s and the member's open order is %s|%s: SHN does not build a claim carrying facts stated for an order the member does not hold (fidelity of SHN's own build)",
 			in.Order.System, in.Order.Code, system, code)
@@ -268,7 +278,7 @@ func claimInputForOrder(w http.ResponseWriter, r *http.Request, order []byte) (o
 	if !ok {
 		return originationClaimInput{}, false
 	}
-	if status, msg := statedOrderCheck(in, order); status != 0 {
+	if status, msg := statedOrderCheck(r.Context(), in, order); status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return originationClaimInput{}, false
 	}
@@ -321,12 +331,12 @@ func (g *Gateway) claimFactsBeforeAnyLeg(w http.ResponseWriter, r *http.Request,
 		return true
 	}
 	if err := shnsdk.CheckPASClaimFactsAtLine(route.BuildLine, in.facts()); err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return false
 	}
 	if sendsAmendment(r) {
 		if err := shnsdk.CheckPASUpdateFactsAtLine(route.BuildLine, in.facts(), in.CertificationType); err != nil {
-			pasBuildFailure(w, err, "build update bundle failed")
+			pasBuildFailure(w, r, err, "build update bundle failed")
 			return false
 		}
 	}
@@ -418,7 +428,7 @@ func (g *Gateway) resumeAmendmentOrFail(w http.ResponseWriter, r *http.Request, 
 		a.facts = *in.ClaimFacts
 	}
 	if err := shnsdk.CheckPASUpdateFactsAtLine(route.BuildLine, a.facts, a.certificationType); err != nil {
-		pasBuildFailure(w, err, "build update bundle failed")
+		pasBuildFailure(w, r, err, "build update bundle failed")
 		return resumeAmendment{}, false
 	}
 	return a, true

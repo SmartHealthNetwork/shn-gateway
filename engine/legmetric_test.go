@@ -6,6 +6,7 @@
 package engine
 
 import (
+	"slices"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -78,6 +79,22 @@ func TestLegMetric_FailedOutcome(t *testing.T) {
 		if got[i] != w {
 			t.Fatalf("outcome %d = %q, want %q (all: %v)", i, got[i], w, got)
 		}
+	}
+}
+
+// TestLegMetric_AuditRefusalStillFailed: the Framework's refusal on the audit
+// rule is recorded as that refusal, but the leg metric keeps counting it
+// "failed", so the leg-error alarm still sees it.
+func TestLegMetric_AuditRefusalStillFailed(t *testing.T) {
+	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
+	stub.auditRefuseAuthorize = true
+	var got []string
+	gw.cfg.LegMetric = func(outcome string) { got = append(got, outcome) }
+
+	callUC03(t, gw)
+
+	if want := []string{LegOutcomeRouted, LegOutcomeFailed}; !slices.Equal(got, want) {
+		t.Fatalf("outcomes = %v, want %v", got, want)
 	}
 }
 

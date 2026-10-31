@@ -122,8 +122,8 @@ scope github.com/SmartHealthNetwork/shn-gateway/telemetry v1.0.0-golden
   shn.gateway.peers.known unit="{peer}" gauge
     {} 3
   shn.gateway.refusals unit="{refusal}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
-    {shn.direction=inbound,shn.exchange=crd-order-select,shn.refusal.by=payer-gateway,shn.refusal.rule=consent} 1
-    {shn.direction=ingress,shn.exchange=pas-claim,shn.refusal.by=provider-gateway,shn.refusal.rule=authentication} 1
+    {shn.direction=inbound,shn.exchange=crd-order-select,shn.refusal.by=payer-gateway,shn.refusal.rule=consent,shn.refusal.stage=none} 1
+    {shn.direction=ingress,shn.exchange=pas-claim,shn.refusal.by=provider-gateway,shn.refusal.rule=authentication,shn.refusal.stage=none} 1
   shn.gateway.store.errors unit="{error}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
     {shn.store=exchange} 1
     {shn.store=ingresskey} 1

@@ -32,7 +32,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -40,7 +42,7 @@ import (
 // (AI-2), so validation lives at the gateways on egress and ingress. Every
 // Validate call passes an EMPTY profile = base-R4 validation via $validate
 // (structural + terminology). US Core profile pinning for Coverage/ServiceRequest
-// is carried in the resource's meta.profile (set by internal/fhirmap), so the
+// is carried in the resource's meta.profile (set by the platform's FHIR mapping), so the
 // IG-enabled compose HAPI validates them against US Core even with an empty
 // profile param; Da Vinci CRD/DTR/PAS profile pinning is a tracked fast-follow.
 // The Validator interface keeps the profile param so explicit per-call pinning
@@ -59,7 +61,8 @@ type Config struct {
 	// the inbound envelope's Sender.
 	PayerRouter PayerRouter
 	// OriginationProfile selects the per-UC behavior lane: "demo" = originate the
-	// family-keyed order tuples (E0250/L8000/G0151/J3490) off the MBR-D-UC0N roster;
+	// family-keyed order tuples (E0250/E1390/G0151/J3490) off the MBR-D-UC0N roster,
+	// and L8000 for UC-07's HCPCS variant;
 	// "provider-data" = originate every UC off the provider's seeded SoR and drive real
 	// br-payer verdicts (Mode A). targetsBrPayer keys the contained-insurer /
 	// absolute-refs handling on it. Spec 2B-bis/2C, §4.3.
@@ -179,6 +182,19 @@ type Config struct {
 	// the leg routed. It never changes which line is chosen when the pair
 	// shares one. Set from REQUIRE_SHARED_LINE (gateway/app).
 	RequireSharedLine bool
+	// AttachmentCeiling is the largest body of a documentation attachment
+	// submission (the cdex-attachment-submit leg) this gateway sends or
+	// accepts: its ingress reads no more, and its inbound refuses a larger
+	// one, 413 as routing, before anything parses the submission or the
+	// participant's system is called. Zero means the network's ceiling,
+	// shnsdk.MaxAttachmentBytes, which it is never above: gateway/app refuses
+	// to boot with a larger one. Set from
+	// ATTACHMENT_CEILING_BYTES.
+	AttachmentCeiling int64
+	// AttachmentInflightBytes bounds the bytes of documentation attachments and
+	// large envelopes this gateway holds at once (bodyBudget). Zero means the
+	// default; it is never below the attachment ceiling.
+	AttachmentInflightBytes int64
 	// TranslateIGLines is the participant's opt-in to module 2, the IG-line
 	// bridge: translating a message it builds to a peer's IG line through the
 	// registered compatibility steps where a certified translation exists
@@ -297,7 +313,7 @@ type Config struct {
 	// request. Defaults to newCorrelationID (crypto-random 128-bit hex string).
 	// Override in tests for deterministic IDs.
 	CorrelationGen func() string
-	// ConsentURL is the Trust-operated Global Person Consent service URL (facility
+	// ConsentURL is the Hub's Global Person Consent service URL (facility
 	// only). The facility's consent backstop re-confirms a TREAT permit here
 	// before releasing any records. When empty the backstop fails closed (no consent
 	// service ⇒ no disclosure).
@@ -431,7 +447,7 @@ type Config struct {
 	// CONFORMANCE_ENFORCEMENT to EnforcementNone (D116), which is the one and
 	// only place a non-strict level comes from an omission. Every gate, reference
 	// participant and hosted gate therefore pins its level explicitly
-	// (test/invariants' TestInvariant_EveryGateRunsStrict).
+	// (the platform invariant suite's TestInvariant_EveryGateRunsStrict).
 	ConformanceEnforcement ConformanceEnforcement
 	// ConformanceToleratePeers is the payers whose answers this participant
 	// tolerates (CONFORMANCE_TOLERATE_PEERS, D122): a defect the FHIR profile
@@ -468,6 +484,9 @@ type Gateway struct {
 	// requester guard; regRefreshBudget overrides registryRefreshBudget (tests).
 	regRefresh       registryRefresher
 	regRefreshBudget time.Duration
+
+	// bodies is the budget for the large bodies held at once.
+	bodies *bodyBudget
 
 	// exchanges is the Layer-2 Exchange-correlation seam (the DaVinciIngress origination
 	// driver groups each ingress call's legs under one Exchange.ID). In-memory default
@@ -608,8 +627,8 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	}
 	switch cfg.Role {
 	case "payer", "facility", "phg":
-		if len(cfg.HubTransportPub) == 0 {
-			panic("gateway: HubTransportPub required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
+		if len(cfg.HubTransportPub) != ed25519.PublicKeySize {
+			panic("gateway: HubTransportPub, an Ed25519 public key, required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 		}
 	}
 	// Observer seam: decorate the SoR BEFORE the workstreams' states are built
@@ -640,6 +659,7 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	g := &Gateway{
 		cfg:           cfg,
 		explicitLanes: explicit,
+		bodies:        &bodyBudget{limit: attachmentInflight(cfg)},
 	}
 	states, err := workstreamGatewayStates(g)
 	if err != nil {
@@ -674,7 +694,7 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	// never through cfg.Validator — so wrapping only cfg.Validator left the
 	// observer stream silently missing the validate.result for every
 	// version-bearing leg, which is exactly the class of honesty gap the
-	// observer exists to close. Found by regenerating ui/kit's captured
+	// observer exists to close. Found by regenerating the platform Kit UI's captured
 	// fixtures: the ehr uc03 capture had dropped from 6
 	// validate.result events to 2 — the 4 line-scoped ones.
 	if g.cfg.Observer != nil {
@@ -847,12 +867,55 @@ func (g *Gateway) Handler() http.Handler {
 
 // mountedRoute is one route a piece of the gateway declares for its role.
 // operator marks a route of the gateway's operator surface (/scenario): it is
-// mounted behind requireScenarioCaller, outermost, so an unauthenticated
-// caller is refused before anything else runs.
+// mounted behind requireScenarioCaller, so an unauthenticated caller is
+// refused before anything else runs. exchangeRoute, when set, is the closed
+// route name (ExchangeRoutes) of a route this gateway originates exchanges
+// from: it is mounted with the exchange record outermost (recordExchange,
+// direction ingress), around requireScenarioCaller too, so every answer the
+// route writes, the caller's refusal included, produces one record.
+//
+// credential states whether the route's answers may carry a reusable
+// credential or session, which a compressed answer's length can leak
+// (contentcoding's package doc). Only a route that states it carries none is
+// compressed; one that states nothing is not, and fails
+// TestRoutes_EveryRouteStatesItsCredential.
 type mountedRoute struct {
-	pattern  string
-	handler  http.HandlerFunc
-	operator bool
+	pattern       string
+	handler       http.HandlerFunc
+	operator      bool
+	exchangeRoute string
+	credential    routeCredential
+	// bodyLimit is the most the route reads of a body when a leg's own bounds
+	// take that past the network's request limit; zero is that limit.
+	bodyLimit int64
+}
+
+// routeCredential is what a route states about its answers' credentials.
+type routeCredential uint8
+
+const (
+	credentialUnstated routeCredential = iota
+	// noCredential: the route's answers carry no reusable credential or
+	// session. An envelope's leg-bound authorization tokens are not one.
+	noCredential
+	// carriesCredential: the route's answers may carry one, such as a bearer
+	// the route issues, or an operator route's resume token.
+	carriesCredential
+)
+
+// codedRoute is h with HTTP content coding (contentcoding): its request body
+// is read decoded, and its answer is gzip-coded for a caller that accepts
+// gzip when the route states it carries no credential. Both sit outside the
+// exchange record, so what the gateway reads, carries and records is the
+// identity body. The coded body is bounded by limit, the most the route reads.
+func codedRoute(limit int64, credential routeCredential, h http.HandlerFunc) http.Handler {
+	var out http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h(w, contentcoding.Decode(r, limit))
+	})
+	if credential == noCredential {
+		out = contentcoding.Compress(out)
+	}
+	return out
 }
 
 // routes mounts what each piece of this gateway declares for its role
@@ -860,8 +923,9 @@ type mountedRoute struct {
 // (workstreamRoutes), and every compiled-in module's (moduleRoutes): on-behalf
 // building declares none unless the participant declares its origination
 // profile, and declares them once, as New builds its state. It is the only
-// place a route is mounted, and the only place an operator route is put
-// behind requireScenarioCaller.
+// place a route is mounted, the only place an operator route is put behind
+// requireScenarioCaller, and the only place a declared exchange route is put
+// behind the exchange record.
 func (g *Gateway) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	var patterns []string
@@ -872,7 +936,14 @@ func (g *Gateway) routes() *http.ServeMux {
 			if rt.operator {
 				h = g.requireScenarioCaller(h)
 			}
-			mux.HandleFunc(rt.pattern, h)
+			if rt.exchangeRoute != "" {
+				h = g.recordExchange(rt.exchangeRoute, DirectionIngress, h)
+			}
+			limit := rt.bodyLimit
+			if limit == 0 {
+				limit = shnsdk.MaxRequestBytes
+			}
+			mux.Handle(rt.pattern, codedRoute(limit, rt.credential, h))
 			patterns = append(patterns, rt.pattern)
 		}
 	}
@@ -893,7 +964,7 @@ func (g *Gateway) RoutePatternsForTest() []string {
 func (g *Gateway) coreRoutes(role string) []mountedRoute {
 	switch role {
 	case "payer", "facility", "phg":
-		return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute()}}
+		return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
 	}
 	return nil
 }
@@ -1031,7 +1102,7 @@ type authorizeReq struct {
 }
 
 type authorizeResp struct {
-	Token shnsdk.Token `json:"token"`
+	Token *shnsdk.Token `json:"token"`
 }
 
 // errAuthorizationDenied marks an authority DENIAL — a 403 from the Authorization
@@ -1040,6 +1111,72 @@ type authorizeResp struct {
 // (UC-05's no-consent branch leaves the PA pended) check errors.Is against this so
 // they never report a facility outage or a tampered response as "consent denied".
 var errAuthorizationDenied = errors.New("authorization denied")
+
+// errTokenUnverified marks a token the Authorization Framework minted that
+// does not verify for what it was asked for (authorizeRequest): not signed by
+// the Framework's key, expired, or bound to another leg or patient. On a leg's
+// own token, a refusal on per-leg authority, which the caller names by structure
+// (errors.Is), never by text; an involved patient's leaves that patient out.
+var errTokenUnverified = errors.New("authorize answer's token does not verify")
+
+// requestNoAuthority is a request leg refused before it is sent because no
+// authority could be obtained for it: no usable token, one that does not verify
+// for the leg, or the Authorization Framework unavailable or failing. The
+// record names the refusal, on authority, and its AuthorizeError says why. The
+// wrapped error is what the caller is answered from, so the wire is what it was
+// without the wrapper: 503 for an unreachable Framework, else the opaque
+// "authorization failed".
+type requestNoAuthority struct{ err error }
+
+func (e *requestNoAuthority) Error() string { return e.err.Error() }
+func (e *requestNoAuthority) Unwrap() error { return e.err }
+
+// errAuthzNoToken marks a 2xx authorize answer that carries no usable
+// token: none, a null one, one with no signature, or a body that is not an
+// authorize answer at all. It grants no authority.
+var errAuthzNoToken = errors.New("authorize answer carries no token")
+
+// The reasons a responder refuses its system's answer for, once the system
+// has answered, when the answer cannot be authorized. Each is attested
+// delivered (answerRefusalRules), with the rule it names, if any.
+const (
+	// errAnswerTokenUnverified: the answer's token does not verify
+	// (errTokenUnverified). Rule authority.
+	errAnswerTokenUnverified = "answer token does not verify"
+	// errAnswerNoToken: the Framework's answer carries no usable token
+	// (errAuthzNoToken). Rule authority.
+	errAnswerNoToken = "answer authorization carries no token"
+	// errAnswerDenied: the Framework denied the answer. Rule authority.
+	errAnswerDenied = "answer not authorized"
+	// errAnswerAuditRefused: the Framework could not record its decision.
+	// Rule audit.
+	errAnswerAuditRefused = "answer authorization not recorded"
+	// errAnswerAuthorizationUnavailable: the Framework could not be reached,
+	// did not answer in time or failed. Rule authority: the answer has no
+	// authority, whatever the reason; the record's answer error class says
+	// the Framework was unavailable, so it is not read as a denial.
+	errAnswerAuthorizationUnavailable = "answer authorization unavailable"
+)
+
+// answerAuthorizationRefusal names a responder's refusal of its system's
+// answer when authorizing the answer failed with err: the reason it is
+// attested under, whose rule answerRefusalRules holds, and the party that
+// refused (empty: this gateway). An answer with no authority is refused on
+// authority whatever the Framework did.
+func answerAuthorizationRefusal(err error) (reason, by string) {
+	var refused *authzRefusal
+	switch {
+	case errors.Is(err, errTokenUnverified):
+		return errAnswerTokenUnverified, ""
+	case errors.Is(err, errAuthzNoToken):
+		return errAnswerNoToken, ""
+	case errors.Is(err, errAuthorizationDenied):
+		return errAnswerDenied, RefusedByAuthorizationFramework
+	case errors.As(err, &refused) && refused.rule == RefusalAudit:
+		return errAnswerAuditRefused, RefusedByAuthorizationFramework
+	}
+	return errAnswerAuthorizationUnavailable, ""
+}
 
 // errAuthzUnreachable marks an authorize call the Authorization Framework
 // never answered: the connection was refused, reset or closed, or failed some
@@ -1051,6 +1188,35 @@ var errAuthorizationDenied = errors.New("authorization denied")
 // denial (errAuthorizationDenied) and any other answer keep their own
 // answers.
 var errAuthzUnreachable = errors.New("the authorization service could not be reached, so this leg was not sent to the payer")
+
+// authzRefusal is the Authorization Framework's refusal on a network rule it
+// states in its 502 answer's "rule" (PARTICIPANT_PROTOCOL §4.1): the audit
+// rule, a decision it could not record, is the only one it states. The record
+// names the rule and the Framework; the caller's answer is the opaque
+// "authorization failed" every other failed authorize answer gets.
+type authzRefusal struct{ rule string }
+
+func (e *authzRefusal) Error() string { return "authorization failed" }
+
+// authzStatedRules are the rules a Framework 502 is read for. A rule outside
+// them, or none, leaves the answer what it was: a failure, in which no
+// authority could be obtained.
+var authzStatedRules = map[string]bool{RefusalAudit: true}
+
+// authzStatedRule reads the rule a Framework 502 states, by its "rule" field
+// alone, keyed exactly, never its error text; "" when it states none this
+// gateway reads.
+func authzStatedRule(status int, body []byte) string {
+	if status != http.StatusBadGateway {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	var rule string
+	if json.Unmarshal(body, &fields) != nil || json.Unmarshal(fields["rule"], &rule) != nil || !authzStatedRules[rule] {
+		return ""
+	}
+	return rule
+}
 
 // LegOutcome values passed to Config.LegMetric: "routed" when an
 // origination leg is attempted, then exactly one terminal outcome.
@@ -1077,7 +1243,8 @@ const (
 	// depends on: a transport error or timeout, an answer cut off before it
 	// was read, or a 429, 502, 503 or 504.
 	TokenUnavailable = "unavailable"
-	// TokenFailed is any other answer, an unreadable success among them.
+	// TokenFailed is any other answer, an unreadable success and a token that
+	// does not verify among them.
 	TokenFailed = "failed"
 )
 
@@ -1111,6 +1278,27 @@ var errHubUnreachable = errors.New("hub routing failed")
 // errors.Is; the value returned is a *hubTimeoutError carrying the budget.
 var errHubTimeout = errors.New("hub leg timed out")
 
+// errEnvelopeTooLarge is a request whose sealed envelope is over the limit the
+// Hub and every gateway read for its leg (shnsdk.MaxRequestBytesFor): the
+// ciphertext is base64 in the envelope, so a body somewhat under the limit
+// can still seal over it. Nothing was sent; a request whose envelope only its
+// token and involved list take over the limit was refused after its token was
+// minted. It is refused 413 as routing, as an over-limit body is at the
+// ingress (bodycap.go): no route carries it. The error returned is an
+// *envelopeTooLargeError, which names the leg's limit.
+var errEnvelopeTooLarge = errors.New(errRequestTooLarge + ": sealed for the network it is over the limit an envelope may carry")
+
+// envelopeTooLargeError is errEnvelopeTooLarge for a leg whose envelope may
+// carry limit bytes.
+type envelopeTooLargeError struct{ limit int }
+
+func (e *envelopeTooLargeError) Error() string {
+	return errRequestTooLarge + ": sealed for the network it is over the " + strconv.Itoa(e.limit>>20) + " MiB an envelope may carry"
+}
+
+// Is makes an envelopeTooLargeError an errEnvelopeTooLarge.
+func (e *envelopeTooLargeError) Is(target error) bool { return target == errEnvelopeTooLarge }
+
 // HubDeliveredHeader is the header the Hub sets on every POST /route error,
 // saying whether the recipient's gateway received the request: "no" when the Hub
 // refused before forwarding or the recipient's gateway was not reached or
@@ -1119,8 +1307,12 @@ var errHubTimeout = errors.New("hub leg timed out")
 // "unknown" when it may have received the request (it answered 5xx, the
 // connection failed after the request was sent, or it did not answer in time).
 // An error without it did not come from the Hub's route handler, and a 5xx of
-// that kind is read as "unknown". internal/hubsvc sets it; the root module's
-// tests pin the two names equal.
+// that kind is read as "unknown". The platform's Hub service sets it; the root module's
+// tests pin the two names equal. A gateway sets it itself, always "yes", only
+// where its system or its counterpart's answered: on its refusal to send its
+// system's answer (attestAnswerRefused), which the Hub relays, and on its
+// answer to its caller when an answer was refused after the recipient
+// answered (relayOriginationError).
 const HubDeliveredHeader = "X-SHN-Delivered"
 
 // hubRefusalError is the Hub's own non-2xx answer to POST /route: its status,
@@ -1135,15 +1327,32 @@ type hubRefusalError struct {
 	// (a load balancer), or was built here for a failed connection.
 	fromHub bool
 	// notActed is the recipient gateway's attestation, relayed by the Hub on
-	// its 503 (NotActedHeader), that it refused the leg before acting because
-	// it does not know this gateway yet; retryAfter is the Retry-After the Hub
-	// relayed with it, in seconds.
+	// its 503 (NotActedHeader), that it refused the leg before acting, because
+	// it does not know this gateway yet or has no room for the envelope;
+	// retryAfter is the Retry-After the Hub
+	// relayed with it, or stated with its own large envelope refusal
+	// (withEnvelopeBudgetWait), in seconds.
 	notActed   bool
 	retryAfter int
+	// atCapacity says why it did not act: it had no room for the envelope
+	// (NotActedAtCapacity), where otherwise it does not know this gateway yet.
+	atCapacity bool
+	// rule is the closed refusal rule the Hub relays with a recipient
+	// gateway's attested refusal of its system's answer
+	// (hubReasonRecipientRefusedAnswer); empty when the Hub named none or one
+	// outside the closed list.
+	rule string
 }
 
 func (e *hubRefusalError) Error() string {
 	return fmt.Sprintf("hub refused the exchange (%d): %s", e.status, e.reason)
+}
+
+// legNotTaken says the Hub refused the leg because its recipient does not take
+// it: the one 422 its route handler answers, before forwarding. The status and
+// the delivered header say so; the reason is for people.
+func (e *hubRefusalError) legNotTaken() bool {
+	return e.fromHub && e.status == http.StatusUnprocessableEntity && e.delivered == ""
 }
 
 // answerLostError is a leg the recipient answered whose answer this gateway
@@ -1154,7 +1363,14 @@ func (e *hubRefusalError) Error() string {
 // failure the caller might blindly resend.
 //
 // rule is the network rule the refusal is recorded under; empty is integrity.
-type answerLostError struct{ cause, rule string }
+//
+// tooLarge is the Hub's answer over the limit this gateway reads: the
+// recipient answered, and its answer is refused for size, never read cut
+// short (writeAnswerTooLarge).
+type answerLostError struct {
+	cause, rule string
+	tooLarge    bool
+}
 
 func (e *answerLostError) Error() string { return e.cause }
 
@@ -1208,16 +1424,24 @@ func (g *Gateway) legMetric(outcome string) {
 	}
 }
 
-// authorize fetches a scope-bound token from the Authorization Framework. The
-// correlationID binds the minted token to the envelope it will ride in (C2).
-// custodian is forwarded for federated-query operations so the Authorization
-// Framework can resolve consent for the specific source facility; it is empty
-// for all other operations (provider↔payer exchanges).
-func (g *Gateway) authorize(r *http.Request, frame, operation, subjectPCI, correlationID, custodian, payloadHash string) (shnsdk.Token, error) {
+// authorizeLeg fetches a scope-bound token from the Authorization Framework
+// for a leg this gateway sends, a request or an answer. The correlationID
+// binds the minted token to the envelope it will ride in (C2). custodian is
+// forwarded for federated-query operations so the Authorization Framework can
+// resolve consent for the specific source facility; it is empty for all other
+// operations (provider↔payer exchanges).
+//
+// The minted token must verify, against the Framework's key and bound to
+// exactly this leg (frame, operation, correlation, this gateway as holder,
+// patient and payload hash), before it is sealed in. A network rule on per-leg
+// authority and message integrity, at every conformance level: a token the
+// Framework did not sign for this leg is an authorization failure here, never
+// a leg the Hub or the requester refuses.
+func (g *Gateway) authorizeLeg(r *http.Request, frame, operation, subjectPCI, correlationID, custodian, payloadHash string) (shnsdk.Token, error) {
 	return g.authorizeRequest(r, authorizeReq{Frame: frame, Operation: operation, SubjectPCI: subjectPCI, Custodian: custodian, CorrelationID: correlationID, PayloadHash: payloadHash})
 }
 
-// authorizeRequest is authorize with the whole request, so a token for an
+// authorizeRequest is authorizeLeg with the whole request, so a token for an
 // involved patient can carry its involvement (involved.go).
 func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.Token, error) {
 	// H1: authenticate to the Authorization Framework with a holder assertion for
@@ -1237,10 +1461,31 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 	if retry && r.Context().Err() == nil {
 		tok, _, outcome, err = g.authorizeOnce(r.Context(), body)
 	}
+	if err == nil {
+		if verr := g.verifyAuthorized(tok, req); verr != nil {
+			tok, outcome, err = shnsdk.Token{}, TokenFailed, fmt.Errorf("%w: %w", errTokenUnverified, verr)
+		}
+	}
 	if outcome != "" && g.cfg.TokenMetric != nil {
 		g.cfg.TokenMetric(outcome, g.exchangeClock().Sub(start))
 	}
 	return tok, err
+}
+
+// verifyAuthorized verifies a token against the Framework's key and binds it to
+// the request it answers: shnsdk.VerifyBound for a leg's own token,
+// shnsdk.VerifyInvolved for an involved patient's. A token that does not carry
+// the involvement requested is mintInvolved's to leave out, under its own
+// reason.
+func (g *Gateway) verifyAuthorized(tok shnsdk.Token, req authorizeReq) error {
+	now := g.cfg.Clock()
+	if req.Involvement == "" {
+		return shnsdk.VerifyBound(tok, g.cfg.AuthzPub, now, req.Frame, req.Operation, req.CorrelationID, g.cfg.HolderID, req.SubjectPCI, req.PayloadHash)
+	}
+	if tok.Involvement != req.Involvement {
+		return nil
+	}
+	return shnsdk.VerifyInvolved(tok, g.cfg.AuthzPub, now, req.Frame, req.Operation, req.CorrelationID, g.cfg.HolderID, req.SubjectPCI, req.PayloadHash, req.Involvement)
 }
 
 // authorizeOnce makes one authorize call, with its own holder assertion: authz
@@ -1299,13 +1544,21 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if rule := authzStatedRule(resp.StatusCode, respBody); rule != "" {
+			return shnsdk.Token{}, false, tokenOutcomeOf(resp.StatusCode), &authzRefusal{rule: rule}
+		}
 		return shnsdk.Token{}, false, tokenOutcomeOf(resp.StatusCode), &shnsdk.StatusError{Code: resp.StatusCode, Body: string(respBody)}
 	}
 	var out authorizeResp
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return shnsdk.Token{}, false, TokenFailed, fmt.Errorf("decode authorize answer: %w", err)
+		return shnsdk.Token{}, false, TokenFailed, fmt.Errorf("%w: decode authorize answer: %w", errAuthzNoToken, err)
 	}
-	return out.Token, false, TokenOK, nil
+	// Unknown is not empty: an answer with no token, a null one or one the
+	// Framework did not sign carries no authority, whatever its status.
+	if out.Token == nil || len(out.Token.Signature) == 0 {
+		return shnsdk.Token{}, false, TokenFailed, errAuthzNoToken
+	}
+	return *out.Token, false, TokenOK, nil
 }
 
 // postEnvelope POSTs an encoded envelope and the holder assertion header to url,
@@ -1341,15 +1594,20 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
+	respBody, err := readCapped(resp.Body, shnsdk.MaxResponseBytes)
 	waited()
+	if isBodyTooLarge(err) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// The recipient answered and the Hub verified it; the answer is over
+		// what the network carries, so it is refused for size.
+		return shnsdk.Envelope{}, &answerLostError{cause: errResponseTooLarge, rule: RefusalRouting, tooLarge: true}
+	}
 	if err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// A Hub 200 comes only after the recipient answered and the Hub verified it.
 		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer could not be read"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		g.diagnosticHubRefusal(ctx, resp, respBody)
-		return shnsdk.Envelope{}, withNotActed(hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader)), resp.Header)
+		return shnsdk.Envelope{}, withEnvelopeBudgetWait(withNotActed(hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader)), resp.Header), resp.Header)
 	}
 	env, err := shnsdk.DecodeEnvelope(respBody)
 	if err != nil {
@@ -1357,6 +1615,14 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 	}
 	return env, nil
 }
+
+// hubReasonEnvelopeBudget is the Hub's reason for a large envelope it has no
+// room to hold now, and envelopeBudgetRetryAfter the wait, in seconds, when its
+// Retry-After cannot be read.
+const (
+	hubReasonEnvelopeBudget  = "large envelope budget exhausted"
+	envelopeBudgetRetryAfter = 5
+)
 
 // hubSentError is a POST to the Hub whose connection failed after the request
 // was written: the Hub may have forwarded it.
@@ -1366,19 +1632,58 @@ func (e *hubSentError) Error() string { return e.err.Error() }
 func (e *hubSentError) Unwrap() error { return e.err }
 
 // withNotActed marks e as the recipient's not-acted refusal when the Hub's
-// route handler answered 503, not delivered, relaying NotActedHeader with
-// NotActedRequesterUnknown. Retry-After is read as a whole number of seconds
-// from 1 to 60; anything else reads as requesterUnknownRetryAfter.
+// route handler answered 503, not delivered, relaying NotActedHeader with one
+// of its values, with its wait (hubRetryAfter).
 func withNotActed(e *hubRefusalError, h http.Header) *hubRefusalError {
-	if !e.fromHub || e.status != http.StatusServiceUnavailable || e.delivered != "" || h.Get(NotActedHeader) != NotActedRequesterUnknown {
+	if !e.fromHub || e.status != http.StatusServiceUnavailable || e.delivered != "" {
+		return e
+	}
+	switch h.Get(NotActedHeader) {
+	case NotActedRequesterUnknown:
+		e.retryAfter = hubRetryAfter(h, requesterUnknownRetryAfter)
+	case NotActedAtCapacity:
+		e.atCapacity = true
+		e.retryAfter = hubRetryAfter(h, bodyBudgetRetryAfter)
+	default:
 		return e
 	}
 	e.notActed = true
-	e.retryAfter = requesterUnknownRetryAfter
-	if n, err := strconv.Atoi(h.Get("Retry-After")); err == nil && n >= 1 && n <= 60 {
-		e.retryAfter = n
-	}
 	return e
+}
+
+// withEnvelopeBudgetWait carries the wait the Hub states when its budget for
+// large envelopes refused this one: nothing was recorded or forwarded, so the
+// caller is told when to send it again.
+func withEnvelopeBudgetWait(e *hubRefusalError, h http.Header) *hubRefusalError {
+	if !e.fromHub || e.status != http.StatusServiceUnavailable || e.delivered != "" || e.reason != hubReasonEnvelopeBudget {
+		return e
+	}
+	e.retryAfter = hubRetryAfter(h, envelopeBudgetRetryAfter)
+	return e
+}
+
+// hubRetryAfter reads the Hub's Retry-After as a whole number of seconds from
+// 1 to 60; anything else reads as fallback.
+func hubRetryAfter(h http.Header, fallback int) int {
+	if n, err := strconv.Atoi(h.Get("Retry-After")); err == nil && n >= 1 && n <= 60 {
+		return n
+	}
+	return fallback
+}
+
+// relayedRule is the refusal rule the Hub relays with a recipient gateway's
+// attested refusal of its system's answer, when it is one of the closed
+// refusal rules this gateway can record from the attestation alone (each named
+// here, so a record's rule is always one of them); empty for any other value:
+// unknown, never guessed. A fidelity refusal is recorded with its stage, which
+// the attestation does not carry, so a relayed fidelity rule is unknown too.
+func relayedRule(rule string) string {
+	switch rule {
+	case RefusalAuthentication, RefusalAuthority, RefusalConsent, RefusalRouting, RefusalReplay,
+		RefusalIntegrity, RefusalAudit, RefusalConformance, RefusalLimit:
+		return rule
+	}
+	return ""
 }
 
 // hubRefusal reads the Hub's {"error": ...} body (or names the status when
@@ -1386,10 +1691,12 @@ func withNotActed(e *hubRefusalError, h http.Header) *hubRefusalError {
 func hubRefusal(status int, body []byte, delivered string) *hubRefusalError {
 	var e struct {
 		Error string `json:"error"`
+		Rule  string `json:"rule"`
 	}
-	reason := ""
+	reason, rule := "", ""
 	if json.Unmarshal(body, &e) == nil {
 		reason = strings.TrimSpace(e.Error)
+		rule = relayedRule(e.Rule)
 	}
 	if reason == "" {
 		reason = http.StatusText(status)
@@ -1415,7 +1722,7 @@ func hubRefusal(status int, body []byte, delivered string) *hubRefusalError {
 			delivered = "unknown"
 		}
 	}
-	return &hubRefusalError{status: status, reason: reason, delivered: delivered, fromHub: fromHub}
+	return &hubRefusalError{status: status, reason: reason, delivered: delivered, fromHub: fromHub, rule: rule}
 }
 
 // roundTrip performs one authorized sealed exchange with the counterpart
@@ -1447,6 +1754,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	g.diagnosticStage(ctx, "leg.originated", txType, requestBytes, 0, "")
 	g.legMetric(LegOutcomeRouted)
 	x := exchangeOf(ctx)
+	x.sending(txType, correlationID)
 	x.peers(g.cfg.HolderID, recipient)
 	if content.Route != nil {
 		x.line(shnsdk.LineOf(content.Route.Token))
@@ -1596,6 +1904,15 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if err != nil {
 		return nil, fmt.Errorf("seal failed")
 	}
+	// An envelope over the limit the Hub and the recipient's gateway read for
+	// its leg is refused here, before a token is minted or anything is sent, when it is
+	// over the limit as sealed, before its token and involved list are added.
+	// One that only those take over the limit is refused once they are
+	// (below), still before anything is sent.
+	envelopeLimit := shnsdk.MaxRequestBytesFor(txType)
+	if pre, err := shnsdk.EncodeEnvelope(env); err == nil && len(pre) > envelopeLimit {
+		return nil, &envelopeTooLargeError{limit: envelopeLimit}
+	}
 
 	if leg, ok := ctx.Value(diagnosticLegKey{}).(*diagnosticLeg); ok {
 		leg.hash = sha256hex(env.Ciphertext)
@@ -1605,7 +1922,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// sealed with; the record names them once the leg is sent (below).
 	edits := content.Payload.Edits()
 	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload, edits)
-	tok, err := g.authorize(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
+	tok, err := g.authorizeLeg(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
 		// Preserve a genuine authority DENIAL as the typed sentinel (UC-05's
 		// no-consent branch depends on telling it apart from an authz outage); any
@@ -1613,12 +1930,27 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		if errors.Is(err, errAuthorizationDenied) {
 			return nil, errAuthorizationDenied
 		}
+		// The Framework's refusal on a rule it states: recorded as that
+		// refusal, answered as every other failure is.
+		var refusal *authzRefusal
+		if errors.As(err, &refusal) {
+			return nil, refusal
+		}
 		// Authz never answered: this leg was not sent. The cause rides along
 		// for the leg's own records; the caller's answer is the fixed text.
-		if errors.Is(err, errAuthzUnreachable) {
-			return nil, err
+		cause := err
+		if !errors.Is(err, errAuthzUnreachable) {
+			cause = fmt.Errorf("authorization failed")
 		}
-		return nil, fmt.Errorf("authorization failed")
+		// No authority could be obtained, so the leg is refused on authority
+		// here, before the network sees it. A requester that left refused
+		// nothing: its failure stays what it was.
+		class := answerErrorClass(ctx, err)
+		exchangeOf(ctx).authorizeError(class)
+		if class == BackendCancelled {
+			return nil, cause
+		}
+		return nil, &requestNoAuthority{err: cause}
 	}
 	tokStr, err := tokenJSON(tok)
 	if err != nil {
@@ -1635,6 +1967,9 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	body, err := shnsdk.EncodeEnvelope(env)
 	if err != nil {
 		return nil, fmt.Errorf("encode failed")
+	}
+	if len(body) > envelopeLimit {
+		return nil, &envelopeTooLargeError{limit: envelopeLimit}
 	}
 
 	assertion := shnsdk.IssueAssertion(g.cfg.HolderID, "hub", g.cfg.Identity.SignPriv, g.cfg.Clock(), time.Hour)
@@ -3338,7 +3673,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	payload, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
-		exchangeOf(r.Context()).refusing(RefusalFidelity)
+		exchangeOf(r.Context()).refusingFidelity(vocab.RefusalStageVerify)
 		return nil, http.StatusInternalServerError, errOwnershipFault
 	}
 	if frame != nil {
@@ -3370,16 +3705,36 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	if err != nil {
 		return nil, http.StatusInternalServerError, "seal failed"
 	}
+	// An answer already over the Hub's limit as sealed is refused before its
+	// token is minted, as delivered (writeResponseLegFailure).
+	if pre, err := shnsdk.EncodeEnvelope(respEnv); err == nil && len(pre) > shnsdk.MaxResponseBytes {
+		exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
+		return nil, http.StatusBadGateway, errResponseTooLarge
+	}
 	// C2: bind the response token to the SAME correlationID as the inbound leg so
 	// the requester can verify the response leg is authorized for this exchange.
-	respTok, err := g.authorize(r, respFrame, respOp, subjectPCI, inboundCorrID, "", sha256hex(respEnv.Ciphertext))
+	// The token is verified for this answer before it is sealed in (authorizeLeg).
+	respTok, err := g.authorizeLeg(r, respFrame, respOp, subjectPCI, inboundCorrID, "", sha256hex(respEnv.Ciphertext))
 	if err != nil {
 		// The answer was decided and cannot be sent: say why, under the leg's
 		// id, without the error's text (the Hub's answer is unchanged).
 		class := answerErrorClass(r.Context(), err)
-		exchangeOf(r.Context()).answerError(class)
+		x := exchangeOf(r.Context())
+		x.answerError(class)
 		log.Printf("gateway: %s answer not authorized: %s (correlation %s)", txType, class, boundedID(inboundCorrID))
-		return nil, http.StatusBadGateway, "authorization failed"
+		if !x.systemAnswered() || class == BackendCancelled {
+			// Until its system has answered there is nothing to attest, and a
+			// requester that left is listening for no attestation. Nothing
+			// settles here either: a refusal this gateway already made keeps
+			// its rule, and the rest is settled by its caller, or other.
+			return nil, http.StatusBadGateway, "authorization failed"
+		}
+		// The system answered (it may have acted): the refusal is attested
+		// delivered, on its rule (answerRefusalRules). The record takes the
+		// attestation's own rule and is final, so the two cannot differ.
+		reason, by := answerAuthorizationRefusal(err)
+		x.refusedAttested(by, answerRefusalRules[reason])
+		return nil, http.StatusBadGateway, reason
 	}
 	respTokStr, err := tokenJSON(respTok)
 	if err != nil {
@@ -3395,6 +3750,15 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	out, err = shnsdk.EncodeEnvelope(respEnv)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "encode failed"
+	}
+	// An answer whose sealed envelope is over the limit the Hub reads is
+	// refused, never sent to be cut short: the participant's system answered,
+	// so it is refused as delivered (writeResponseLegFailure). One that only
+	// its token and involved list take over is refused here; one already over
+	// as sealed was refused before its token was minted (above).
+	if len(out) > shnsdk.MaxResponseBytes {
+		exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
+		return nil, http.StatusBadGateway, errResponseTooLarge
 	}
 	x := exchangeOf(r.Context())
 	x.responseHash(sha256hex(respEnv.Ciphertext))
@@ -3510,7 +3874,7 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, p, answerKey(txType, relay.OutcomeAnswered),
 		g.successFrame(r.Context(), requester, answerStatus, ct, stamp), subjectPCI, requester, consentRef)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeResponseLegFailure(w, status, msg)
 		return
 	}
 	writeLeg(w, out)
@@ -3558,7 +3922,7 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		return
 	}
 	// A connector/responder can answer non-2xx with NO body and NO LegResult.Message at
-	// all — internal/brpayermirror's loopback mirror
+	// all — the platform's reference-payer loopback mirror
 	// does this on every one of its own rejection paths (a truly empty response body),
 	// and gateway/engine/native.go's upstream-relay path only ever sets LegResult.Status +
 	// Response (never Message) for a relayed non-2xx. Both of those are pre-existing,
@@ -3627,7 +3991,7 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 		return shnsdk.EncodeHTTPFrame(appStatus, ct, b)
 	}, subjectPCI, requester, consentRef)
 	if status != 0 { // refused payload, bad app status, or seal/authz BUILD failure → gateway fault
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeResponseLegFailure(w, status, msg)
 		return
 	}
 	writeLeg(w, out)

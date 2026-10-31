@@ -851,7 +851,7 @@ func TestOriginator_SeededPendingPersonaIsInquirable(t *testing.T) {
 
 	// The inquiry names the persona's own supplier, by reference, carrying the
 	// NPI a payer matches on — not a party invented here.
-	records, status, msg := gw.inquiryRecords(req.Context(), cont)
+	records, status, msg, _ := gw.inquiryRecords(req.Context(), cont)
 	if status != 0 {
 		t.Fatalf("records: %d %q", status, msg)
 	}
@@ -873,7 +873,7 @@ func TestOriginator_ProviderAnInquiryCannotCarryIsRefusedByName(t *testing.T) {
 	// a prior-authorization inquiry has nowhere to put.
 	sor.dropPerformer = true
 
-	_, status, msg := gw.inquiryRecords(context.Background(), pendingPersonaContinuation())
+	_, status, msg, _ := gw.inquiryRecords(context.Background(), pendingPersonaContinuation())
 	if status == 0 {
 		t.Fatal("an order naming no provider an inquiry can carry must be refused")
 	}
@@ -937,7 +937,7 @@ func TestOriginator_InquiryNamesTheCoverageTheSubmissionCarried(t *testing.T) {
 
 		// Every origination site builds its PAS submission under
 		// memberRoutingCoverage's Coverage (crdDtrResult.coverage).
-		submitted, found, status, msg := gw.memberRoutingCoverage(context.Background(), pasFollowMember)
+		submitted, found, status, msg, _ := gw.memberRoutingCoverage(context.Background(), pasFollowMember)
 		if !found || status != 0 {
 			t.Fatalf("routing coverage: %v %d %q", found, status, msg)
 		}
@@ -1517,5 +1517,60 @@ func TestPASDecision_AppliesOneVocabularyToEverySurface(t *testing.T) {
 	}
 	if strings.Contains(string(b), "continuationDurable") {
 		t.Fatalf("a decision with no continuation must not carry the disclosure: %s", b)
+	}
+}
+
+// A waiting inquiry whose re-read of the member's Coverage finds records that
+// do not name one payer keeps the pend, as any failed inquiry does, and
+// records no refusal: the routing refusal belongs only to an origination
+// call that the coverage read ends (originCoverage).
+func TestFollow_AmbiguousCoverageOnTheInquiryRecordsNoRefusal(t *testing.T) {
+	fastPASInquire(t)
+	follow := newPASFollowSoR()
+	active, _ := follow.OpenCoverage(pasFollowMember)
+	noPayer := []byte(`{"resourceType":"Coverage","id":"cov-nopayer","status":"active",` +
+		`"beneficiary":{"reference":"Patient/` + pasFollowMember + `"},"subscriberId":"` + pasFollowMember + `"}`)
+	gw, stub := pasFollowSystemWithSoR(t, "pended", withCoverages(follow, active, noPayer), follow)
+	stub.inquireAnswer = "approved"
+	in := pasFollowSubmit(PASWaitMax)
+	x := &exchangeRecorder{}
+	req := httptest.NewRequest("POST", "/scenario/uc03", strings.NewReader(testOrderBody(in.orderJSON, "")))
+	ctx := context.WithValue(req.Context(), exchangeRecorderKey{}, x)
+	out, status, msg, err := gw.submitClaimAndFollow(ctx, req.WithContext(ctx), in)
+	if err != nil || status != 0 || out.Decision != "pended" {
+		t.Fatalf("decision %q status %d %q %v, want the pend kept", out.Decision, status, msg, err)
+	}
+	if x.outcome == ExchangeRefused {
+		t.Fatalf("recorded refused %s/%s on an answer that keeps the pend", x.party, x.rule)
+	}
+}
+
+// Continuing an authorization for a member whose Coverage records no longer
+// name one payer is a routing refusal on the inquire route, whose call the
+// 422 ends: no one recipient to ask. Its answer is unchanged.
+func TestPAInquireRoute_AmbiguousCoverageIsRouting(t *testing.T) {
+	fastPASInquire(t)
+	follow := newPASFollowSoR()
+	gw, _ := pasFollowSystemWithSoR(t, "pended", follow, follow)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(testRouteBody(gw, "/scenario/uc03", "")))
+	pend, status, msg, err := gw.submitClaimAndFollow(req.Context(), req, pasFollowSubmit(0))
+	if status != 0 || err != nil {
+		t.Fatalf("submit: %d %q %v", status, msg, err)
+	}
+	active, _ := follow.OpenCoverage(pasFollowMember)
+	noPayer := []byte(`{"resourceType":"Coverage","id":"cov-nopayer","status":"active",` +
+		`"beneficiary":{"reference":"Patient/` + pasFollowMember + `"},"subscriberId":"` + pasFollowMember + `"}`)
+	gw.cfg.SoR = withCoverages(follow, active, noPayer)
+	x := &exchangeRecorder{}
+	inq := httptest.NewRequest(http.MethodPost, "/scenario/pa/inquire", strings.NewReader(`{"continuation":"`+pend.Continuation+`"}`))
+	rec := httptest.NewRecorder()
+	// The exchange wrapper hands the handler its writer and its request, both
+	// carrying the call's recorder, as the mounted route does.
+	gw.handlePAInquire(&exchangeWriter{ResponseWriter: rec, x: x}, inq.WithContext(context.WithValue(inq.Context(), exchangeRecorderKey{}, x)))
+	if rec.Code != http.StatusUnprocessableEntity || strings.TrimSpace(rec.Body.String()) != `{"error":"ambiguous coverage for routing: the member's Coverage records do not name one payer"}` {
+		t.Fatalf("inquire = %d %s, want the 422 ambiguous coverage", rec.Code, rec.Body.String())
+	}
+	if x.outcome != ExchangeRefused || x.rule != RefusalRouting {
+		t.Fatalf("recorded %q/%q, want refused routing", x.outcome, x.rule)
 	}
 }

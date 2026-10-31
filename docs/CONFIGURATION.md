@@ -58,7 +58,7 @@ with an invalid result, is your choice (`CONFORMANCE_ENFORCEMENT` below):
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | **Not supported.** From v0.63.0 a released gateway refuses to boot when it is set to any value, at every `CONFORMANCE_ENFORCEMENT` level: it selected a stand-in validator that accepted almost everything, and it remains only in SHN's own test builds. For a first wiring test, run [`deploy/eval`](../deploy/eval/README.md), which pairs the gateway with a real validator; to run your own, use the sidecar below; or, from v0.63.0, run at `CONFORMANCE_ENFORCEMENT=none`, which needs no validator ([below](#running-at-none-without-a-validator)). |
 | `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
-| `CONFORMANCE_ENFORCEMENT` | `none` (the default when unset, from v1.0.0), `observe` (the default when unset before v1.0.0), `structural` or `strict`. Payload conformance is your opt-in: left unset, a gateway from v1.0.0 runs no payload check, records no finding and needs no validator; its boot line says `conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is; a carried DTR questionnaire package request is not, and from v1.0.0 the payer's answer to one is, against the operation's output Parameters profile at the lines whose profile constrains the parameter names it uses): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, one step of its stop sequence, so give its container the 45-second stop timeout [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway) gives (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway CHANGELOG.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
+| `CONFORMANCE_ENFORCEMENT` | `none` (the default when unset, from v1.0.0), `observe` (the default when unset before v1.0.0), `structural` or `strict`. Payload conformance is your opt-in: left unset, a gateway from v1.0.0 runs no payload check, records no finding and needs no validator; its boot line says `conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is; a carried DTR questionnaire package request is not, and from v1.0.0 the payer's answer to one is, against the operation's output Parameters profile at the lines whose profile constrains the parameter names it uses): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded, and so is a primitive's regex check the validator could not run (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`: it gives this when it is short of CPU, or on a very long valid `code` or `oid` value), unless an issue that refuses at this level is beside it. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, one step of its stop sequence, so give its container the 45-second stop timeout [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway) gives (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway CHANGELOG.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
 | `CONFORMANCE_TOLERATE_PEERS` | Optional, unset by default. From shn-gateway v1.0.0. The payers whose answers your gateway tolerates: payer identities as `<system>\|<value>` (the identity a member's Coverage names, which the exchange is routed by), comma-separated, for example `urn:oid:2.16.840.1.113883.6.300\|00001`. At `structural` or `strict`, a defect the FHIR profile check of a listed payer's DTR or PAS answer would refuse (an answer to a request your gateway sends, or to one it carries for your system through its Da Vinci ingress) is recorded instead and the answer carried; the finding is marked `tolerated: true`. Only that check is tolerated: the content rules on an answer (its IG line's answer graph, `answer.shape`, and its patient linkage, `patient.answer`) and the CDS Hooks answer check refuse as ever, as do network rules and the gateway's own edits; a check that could not run is never tolerated (`500` at `strict`). An answer from an exchange routed by several payer identities is tolerated only when every one is listed. Unset, or empty, tolerates no one: no payer, the network's reference payers included, is exempt by default. The list is logged at boot (`gateway: conformance tolerated peers=…`, `none` when unset); an entry without both parts, or listed twice, refuses to boot. At `none` and `observe` nothing is refused, so the list changes nothing. A hosted gateway cannot set it yet. |
 
 If `FHIR_VALIDATE_URL` is not set (and discovery advertises none), the gateway exits
@@ -157,6 +157,18 @@ authorized grant); and client registration enforces `declared ⊆ authorized` be
 lands in the registrar (`UNIQUE(system,value)` globally). Only then does a provider's
 `FeedPayerRouter` route to it.
 
+**What a gateway declares at each start.** From shn-gateway v1.1.0, a gateway with a registrar
+declares the legs it compiles for its `ROLE` (`PUT /register/{id}/capabilities`, signed with its
+own key), so the network refuses a leg it does not take before anything reaches it. You set
+nothing for this. A failure is logged, `gateway: capability declaration not stored`, and the
+gateway keeps running and sends the declaration again until the registrar has it. A `409` is
+logged once and not resent: the registrar holds a declaration issued no earlier, which the next
+start declares over, or your holder was founded with the network and no declaration applies to it.
+A `404` or `405` is logged once after four tries and then tried hourly in silence: your holder
+is not registered, or the network's registrar is older than the declaration. Your gateway runs on
+as one that declared nothing, and declares once the registrar takes it, with no restart. The
+`capability-declaration` check on `GET /health` says where it stands.
+
 Responder roles (`payer`/`facility`/`phg`) need no `PAYER_DIRECTORY`: they receive
 at `POST /substrate/inbound` and reply to whoever the Hub delivers from. A payer has no
 built-in decision policy — it answers Da Vinci legs by native-forwarding to your own
@@ -172,8 +184,18 @@ gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR or PAS subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS or CDex submission subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
 | `SHN_ACCEPT_UNKNOWN_MEMBERS` | **No longer read** (from shn-gateway v1.0.0). Carrying members your system of record does not hold is the default, so a gateway that sets it, to any value, logs `gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read` at boot and starts; remove it. Beside `REQUIRE_KNOWN_MEMBERS=true` it no longer refuses to boot: `REQUIRE_KNOWN_MEMBERS` alone decides. Releases before v1.0.0 logged a deprecation warning, and refused to boot when it was set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`. |
+
+## Documentation attachment size (every role)
+
+From shn-gateway v1.1.0. A CDex documentation attachment submission (`$submit-attachment`) has its own size bounds, above the 8 MiB the network carries on every other leg. The network's ceiling is 16 MiB of body, the bound the gateway's strict JSON reading reads a body to; its sealed envelope may be up to 22 MiB. Both are published in the SDK (`MaxAttachmentBytes`, `MaxRequestBytesFor`). A payer may also declare the largest single file its system accepts, and a provider's gateway refuses a file over it before sending. The Hub gives an envelope over 8 MiB 30 seconds to arrive, so a full 22 MiB envelope needs about 6 Mbit/s from your gateway to the Hub; a slower link should set a lower ceiling. When the Hub has no room for a large envelope, your caller gets `503` with `Retry-After`: send it again after that wait.
+
+| Env var | Description |
+|---|---|
+| `ATTACHMENT_CEILING_BYTES` | The largest documentation attachment submission body, in bytes, your gateway sends or accepts. Unset (the default): the network's ceiling, 16777216 (16 MiB). Set a lower positive integer to bound it further. A provider's gateway reads a submission from its system up to it and refuses one over it `413` (`request body too large`, recorded as `routing`) before reading anything in it; a payer's gateway refuses a submission over it the same way before your system is called. The boot log states the value when it is below the network's ceiling. A value above the network's ceiling, zero, a negative number or anything but an integer refuses to boot. |
+| `ATTACHMENT_INFLIGHT_BYTES` | The bytes of documentation attachments and large envelopes your gateway holds at once. Unset (the default): a tenth of the task's memory, and never below `ATTACHMENT_CEILING_BYTES`. The figure comes from the container's cgroup (`memory.max`) when that states a limit, and otherwise, on Amazon ECS, from the task metadata endpoint (`Limits.Memory`): an ECS Fargate container whose task alone has a memory limit has no limit in its cgroup. When neither states it, the budget is 64 MiB (67108864). You set nothing for this. The boot log states the value and where it came from. A provider's gateway counts each submission's stated length, or the whole ceiling when it states none, such as a gzip-coded one. A payer's gateway counts envelopes over 8 MiB, up to the largest envelope any leg may carry; an envelope at or under 8 MiB is never counted. One that states no length is read to 8 MiB and, past that, counted at that largest envelope. A request that does not fit is refused `503` with `Retry-After`, recorded as `routing`, before your system is called: the refusal is transient, so send it again after that wait. A submission it holds must arrive within 30 seconds, which is about 5 Mbit/s for a full one, or it is refused `400`. A value below the ceiling, or anything but an integer, refuses to boot. |
+| `PAYER_ATTACHMENT_MAX_BYTES` | Payer gateways only. The largest single inline attachment (file), in bytes after base64 decoding, your system accepts in one documentation submission. Unset (the default): your gateway declares no limit, which the network reads as unknown, never as zero, and a provider's gateway applies only its own ceiling. Set, it is the value your gateway's capability declaration states (`attachmentMaxBytes`), exactly as you set it, and a provider's gateway sending to you refuses, before sending, a submission carrying any inline file over the smaller of your value and its own ceiling (`413`, recorded as `routing`). Only inline files are measured, each on its own, wherever the submission carries them (a `DocumentReference`'s content, a `QuestionnaireResponse`'s answer): an attachment given by `url`, and content that carries no inline file (a `QuestionnaireResponse` with no attachment answer), are carried; so is a file whose `data` is not well-formed base64, bounded by the ceiling on the whole body. Each start declares what is set, so a start with it unset clears a limit declared before, and a provider's gateway goes back to its own ceiling. A release before v1.1.0 declares nothing, so a limit stays through a rollback to one, until a later start on v1.1.0 or newer replaces it. A holder founded with the network has no declaration, so its limit is not declared. A positive integer up to 9007199254740991 (2^53-1); zero, a negative number or anything but an integer refuses to boot, and a provider gateway refuses to boot with it. |
 
 ## Networking
 
@@ -203,8 +225,9 @@ network-facing feature.
 ## Access lines (always on)
 
 A gateway writes one line to its log for every call it answers on a Da Vinci
-ingress route (a call from your own system) or for a leg it receives from the
-network, at every conformance level. There is nothing to configure:
+ingress route (a call from your own system) or on one of module 1's origination
+routes, and for a leg it receives from the network, at every conformance level.
+There is nothing to configure:
 
 `gateway: access: {"time":…,"correlationId":…,"direction":"ingress"|"inbound","route":…,"exchange":…,"outcome":…,"status":…,"latencyMs":…,…}`
 
@@ -212,13 +235,32 @@ network, at every conformance level. There is nothing to configure:
   with; `trace` is the caller's own `X-Correlation-Id` when it differs. A leg
   id a message chose (a PAS Claim's own `urn:shn:correlation`) that is not
   one bounded token is recorded as `sha256:<digest>`.
+- `route` is the route the call arrived on: an ingress route (`crd`, `pas`,
+  …), the network's own route for a leg from the network, or, for a call on one of
+  module 1's `/scenario` routes that originates (builds and sends a request of
+  the gateway's own), `scenario-*`, the route's path joined by `-`
+  (`scenario-uc07-complete` for `POST /scenario/uc07/complete`), with
+  `direction` `ingress`. The local `/scenario` routes (`uc06/cancel`,
+  `uc07/cancel`, `uc07/pending`, `reset`) send nothing and write no line.
 - `exchange` is the leg (`crd-order-select`, `pas-claim`, …); `contractLine`
-  the IG line it ran at; `sender` and `recipient` the two holders.
+  the IG line it ran at; `sender` and `recipient` the two holders. On an
+  origination route, which can send several legs, `exchange` and
+  `correlationId` are the first leg's, while a refusal the line records may
+  belong to a later leg of the same call.
 - `outcome` is `answered`, `refused`, `unreachable`, `upstream-error` or
   `other`. A refusal names who refused (`refusal.by`) and the network rule
   (`refusal.rule`: authentication, authority, consent, routing, replay,
   integrity, audit, fidelity, conformance for a check you opted into, limit,
-  or other when no rule is named).
+  or other when no rule is named). An exchange whose audit could not be
+  recorded is refused on `audit`: by the Hub, or, from v1.1.0, by the
+  Authorization Framework when it could not record its
+  decision, as its answer's `rule` states. Your caller's answer is unchanged
+  either way. A fidelity refusal also names its stage
+  (`refusal.stage`): `build`, the gateway refused to build the message the
+  refusal is about because of what the caller declared or did not state (an
+  earlier leg of the same call may already have been sent); `verify`, an edit
+  or message the gateway built failed its own verification. Absent for every
+  other rule.
 - On a leg from the network, `backend` is your own system's answer: its
   `status`, `latencyMs`, `errorClass` and how many `calls` were made, reads
   and searches of your system of record included (they have status 0). It
@@ -293,13 +335,28 @@ network, at every conformance level. There is nothing to configure:
   that handed nothing to the transport for the Hub. A duration and a count
   only.
 - From shn-gateway v0.61.0, when the answer to a leg (your system's, or this
-  gateway's own refusal) could not be authorized, the requester is still
-  answered `502 authorization failed`, and the access line's `answerError`
-  says why: `cancelled` (the request ended first: the requester had gone),
-  `timeout` (the authorize call ran out of time), `auth` (the Authorization
-  Framework denied it), `unreachable` (it never answered) or `other`. The
-  gateway also logs `gateway: <exchange> answer not authorized: <class>
-  (correlation <leg id>)`.
+  gateway's own refusal) could not be authorized, the access line's
+  `answerError` says why: `cancelled` (the request ended first: the requester
+  had gone), `timeout` (the authorize call ran out of time), `auth` (the
+  Authorization Framework denied it), `unreachable` (it never answered) or
+  `other`. The gateway also logs `gateway: <exchange> answer not authorized:
+  <class> (correlation <leg id>)`. From v1.1.0, once your system has answered
+  the forwarded operation, the gateway says so: the Hub is answered a raw `502`
+  naming the reason and its rule (`authority`, or `audit` for the Framework's
+  audit refusal), marked `X-SHN-Delivered: yes`, and the requester learns its
+  request was received and answered. Otherwise (the gateway's own refusal
+  before your system was asked to act, an answer from your records, a forward
+  that got no answer, or a requester that had gone) the answer is the plain
+  `502 authorization failed`.
+- From v1.1.0, when no authority could be obtained for a leg this gateway was
+  sending (the Authorization Framework answered no usable token, one that does
+  not verify for the leg, or an error, or it could not be reached), the leg is
+  not sent and is recorded as this gateway's refusal on rule `authority`, and
+  the access line's `authorizeError` says why, with the classes `answerError`
+  uses. A denial, and the Framework's audit refusal, stay the Framework's. The
+  caller's answer is unchanged: `503` when the Framework could not be reached,
+  else `502 authorization failed`. A request that ended first has
+  `authorizeError` `cancelled` and is no refusal.
 - `findings` counts the conformance findings the call's checks recorded; each
   finding keeps its own `gateway: conformance:` line. From v0.60.0, at `observe`
   the line carries `"deferred": true` instead of a count (`count` reads 0 and
@@ -368,6 +425,13 @@ network, at every conformance level. There is nothing to configure:
   the edits to the request `ownership` describes, and those to the answer
   (`["E-08"]`). Each is absent when that body was not edited. All four keys
   are Evolving.
+- `editsNotMade` (from v1.1.0) names each edit the gateway makes by default
+  that it could not make on the call, and why, so the bytes it would have
+  changed were carried as sent: `E-10:no-structural-payer-url` (a pend's
+  `payer-url` that is not a string `valueUrl`), `E-10:unreadable-answer` (an
+  answer that could not be read as JSON, so whether it named a `payer-url` is
+  unknown) and `E-10:payer-does-not-take` (a payer not known to take the
+  documentation submission). Absent when empty. Evolving.
 - With diagnostic collection configured, the captured request names the ids it
   was built with, as its `Detail`, before it is sent: `leg.sealed` once the
   request is sealed, before the network's authorization is asked, and
@@ -437,7 +501,10 @@ shared state and the patients a leg leaves out:
 - `InvolvedOmitted` (`reason`): one count per patient a leg's involved list left out,
   by reason: `overflow`, `system-of-record-unavailable`, `unknown-member`,
   `authorization-refused`, `authorization-failed`, `involvement-not-carried` or
-  `budget`.
+  `budget`. `authorization-failed` covers a token that does not verify for the leg
+  and patient, from v1.1.0. The exchange has no record under a patient left out.
+  The access line's `involvedOmitted` counts the same, by reason, on any gateway,
+  with or without metrics.
 
 With `METRICS_SERVICE` set, or an OpenTelemetry exporter on, the gateway also reports
 its operational state every minute. A value it does not know is left out, never
@@ -474,7 +541,8 @@ reported as 0.
 - `TokenAcquisition` counts each Authorization Framework token acquisition, its one retry
   included, by `outcome`:
   `ok`; `denied` (401 or 403); `unavailable` (no answer, a timeout, an answer cut off,
-  or 429, 502, 503 or 504); or `failed` (any other answer). `TokenLatency` is its
+  or 429, 502, 503 or 504); or `failed` (any other answer, a token that does not
+  verify among them). `TokenLatency` is its
   duration, its one retry included.
 
 From v1.0.0, with `METRICS_SERVICE` set, the gateway also writes these EMF
@@ -485,6 +553,7 @@ from a fixed list:
   `ExchangeRefusedByRule` (`rule`), the same count by rule alone, for an alarm
   per rule. It leaves out the exchange, since CloudWatch bills each
   combination of dimensions; the OpenTelemetry metric carries it.
+  ExchangeRefusedByRule{rule=fidelity} counts fidelity refusals at stage verify; build-stage refusals count in ExchangeRefused and the OTel refusals instrument with shn.refusal.stage=build.
 - `ExchangeStageLatency` (`direction`, `exchange`, `stage`): where a call's
   time went. A leg from the network reports its seven stages (the access
   line's `stages`) and `rest`, the time in none of them. A call from your
@@ -791,7 +860,9 @@ credential is read anonymously, as the gateway calls it, and carries no
 
 From v1.0.0 every gateway answers `GET /internal/stats` with a summary of the
 exchanges it answered: per direction and exchange kind, how many there were, by outcome,
-and their latency at P50, P95 and P99. It is always on, with no setting, and does not
+and their latency at P50, P95 and P99. A call on one of module 1's origination routes
+counts with its outcome but adds no latency, as it adds none to `ExchangeLatency` and
+`ExchangeStageLatency`: it is a flow of legs, not one exchange's answer. It is always on, with no setting, and does not
 depend on the CloudWatch or OpenTelemetry metrics above. It carries no payload, no peer's
 identity and no identifier. Each replica keeps its own counts, in memory, from when it
 started.
@@ -1355,8 +1426,8 @@ run) and routes the request to the payer it names. It routes on the active Cover
 any is active, otherwise on the others; when several name one payer, the first is used. A
 payor Organization the Coverage names by reference is found among the records the search
 included, then in your system of record. It refuses instead when that system does not hold the
-patient (`422 no coverage to route by: send the coverage parameter (this gateway's system of
-record names no patient for this member)`), holds no Coverage
+patient (`422 no coverage to route by: send the coverage parameter (this gateway's records
+name no patient for this member)`), holds no Coverage
 (422), when the Coverages it chooses (the active ones, else the others) name different payers
 (422), cannot search (422) or is unavailable (503). A Coverage that references its payor
 Organization is resolved among the request's own resources and the records the search
@@ -1424,8 +1495,8 @@ The inquiry is carried to the payer as your EHR sent it, bound to the one member
 patient reference in it names (at enforcement `strict` a Bundle naming two members is
 refused with 403; below `strict` it is bound to its Claim's patient) and
 routed by the Coverage it carries (a Coverage naming no payer the gateway can resolve
-is refused with 422, never defaulted). The payer's answer reaches your EHR exactly, in
-whichever shape the payer's prior-authorization line defines: the response Bundle
+is refused with 422, never defaulted). The payer's answer reaches your EHR exactly (apart
+from a pend's `payer-url`, below), in whichever shape the payer's prior-authorization line defines: the response Bundle
 itself, or a `Parameters` whose `return` parameters are those Bundles. The gateway
 holds no state for this: the inquiry names the authorization, so your EHR is the only
 thing that has to remember it.
@@ -1438,13 +1509,53 @@ own refusal rather than the gateway's. Note that the earliest line requires the
 inquiry to name at least one item and the later ones do not, so an inquiry by
 authorization number alone is accepted here and answered by the payer.
 
+`POST /$submit-attachment` sends documentation for a prior authorization to a payer: a
+CDex 2.1.0 `$submit-attachment` (a `Parameters` with its `TrackingId`, `AttachTo`,
+`MemberId`, `PayerId`, `OrganizationId` or `ProviderId`, and one or more `Attachment`). From
+the release that adds it, it is in the evolving tier (see `STABILITY.md`). The submission is
+carried to the payer as your EHR sent it, and the payer's answer (its `OperationOutcome`,
+informational or an error) reaches your EHR exactly. It is routed by its `PayerId` to the
+registered payer that identifier names; a submission naming none, or a payer the network
+does not register, is refused with 422 before it is sent. Each registered payer also has a
+**return path** on this gateway, `{PROVIDER_DAVINCI_INGRESS_BASE_URL}/cdex/payer/{payer}`:
+a submission posted there, or to that path with `/$submit-attachment` appended, goes to that
+payer whatever its `PayerId` says (one naming another payer is carried and noted as the
+observer event `cdex.payer-id-differs`). `GET /cdex/payers` lists the registered payers
+that take the submission, each with its participant id, the payer identifiers it registered and its return path:
+`{"payers":[{"participant":"…","payerIdentifiers":[{"system":"…","value":"…"}],"returnBase":"…"}]}`.
+The submission's patient is bound from its `MemberId`, as the other legs bind theirs: a
+member your system of record does not hold is carried (unless
+`REQUIRE_KNOWN_MEMBERS=true`), and a submission with no readable `MemberId`, or two that differ, is refused with 400,
+since the network cannot identify the patient. A body larger than the request limit is
+refused with 413 before it is read further. The submission rides no declared contract line,
+so `SHN_CONTRACT_VERSIONS` and `REQUIRE_SHARED_LINE` do not apply to it. This gateway's
+`.well-known/davinci-configuration` names the ingress base as its CDex endpoint
+(`davinci_cdex_attachsubmit_endpoint#2.1`).
+
+**A pend's documentation return address.** From v1.1.0, by default, the gateway re-keys the
+`payer-url` of each Task in a payer's answer to `$submit`, an amendment or `$inquire`
+before it reaches your EHR (registered edit E-10, `pas-pend-return-rekey`): the Task's
+`payer-url` `valueUrl` becomes your gateway's documentation return path for the payer that
+answered, `PROVIDER_DAVINCI_INGRESS_BASE_URL` + `/cdex/payer/` + that payer's participant
+id. Documentation your EHR sends there with `$submit-attachment` reaches that payer through
+the network. Nothing else in the answer changes. A `payer-url` in another form than a
+`valueUrl` is carried as the payer sent it, and the exchange record's `EditsNotMade` says
+so (`E-10:no-structural-payer-url`). So is the `payer-url` of a payer not known to take the
+documentation submission (`E-10:payer-does-not-take`): one whose registry entry lacks the
+leg, one that declares no list, as a payer on an earlier release does, or one your gateway
+cannot read. The Hub refuses that leg to a payer that does not take it. The re-key is made even where a signature covers the
+`payer-url`, so that signature no longer verifies in your copy. The answer then carries
+`X-SHN-Edited: pas-pend-return-rekey`, with `; signed="<signatures>"` added when a
+signature covered the address.
+
 What the gateway changes on these requests is only the callback removal and the prefetch and
 coverage additions above. A signature inside a message (`Bundle.signature`,
-`Provenance.signature`, a `Signature` element) travels untouched. HTTP-level signatures
+`Provenance.signature`, a `Signature` element) travels untouched, apart from the `payer-url`
+re-key above. HTTP-level signatures
 (signed header fields, a detached JWS) are not carried: each gateway terminates HTTP, and the
 network carries only the message's media type, contract line and operation name with it. A
 participant that needs an end-to-end signature signs inside the payload. The answer's body
-reaches your EHR exactly; its media type is the gateway's own (`application/json` for CDS
+reaches your EHR exactly, apart from a pend's `payer-url`; its media type is the gateway's own (`application/json` for CDS
 Hooks, `application/fhir+json` for DTR and PAS).
 
 Inbound requests authenticate via **SMART Backend Services**: the gateway hosts its
@@ -1476,7 +1587,7 @@ payer was asked): the payer gateway keys each authorization by its patient as we
 | Env var | Description |
 |---|---|
 | `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
-| `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises. **Required** when the ingress is enabled. |
+| `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises, and the base of its documentation return paths (`/cdex/payer/<payer>`). **Required** when the ingress is enabled. From v1.1.0 it must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
 | `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. From v0.63.0 an entry may add `"module": "on-behalf"` to register that client as a module ingress client ([below](#a-module-ingress-client)); an unknown module, or a `builders` key on any entry, refuses to boot. |
 | `CDS_FHIR_SERVER_READ` | `private`, `public` or `off`; unset means `private`. How the gateway reads, to choose the payer, through a CDS Hooks request's own `fhirServer`: the Coverage when the request carries none and your system of record does not hold the member (from v0.61.0 what that read routed by is carried as the request's `prefetch.coverage`; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and the payor Organization a coverage your EHR sent names by reference alone when the request does not resolve it, for any member, unless the request's `fhirServer` is your system of record's own FHIR base and your system resolves it (see [CDS Hooks prefetch](#cds-hooks-prefetch)). `private` (the default) reads an `https` server in your own network or on the internet, never a loopback, link-local, metadata or reserved address; `public` reads only an `https` server on port 443 at a public address; `off` never calls `fhirServer`, and carries nothing. Any other value refuses to boot, and so does a value other than `off` set without `PROVIDER_DAVINCI_INGRESS` (unset needs no ingress). A gateway SHN hosts runs `public`, or `off` if you set it (see the section). |
 | `ENRICH_NATIVE_REQUESTS` | `true` or `false`; unset means `false`. By default a Da Vinci request your EHR sends is carried as sent (apart from the CDS Hooks callback, which is always removed, and, from v0.61.0, the coverage read through that callback's `fhirServer` to route by, which is then carried): nothing else is added to it. Set `true` to have the gateway add what a request leaves out, read from your own system of record: each advertised CDS Hooks prefetch value (see [CDS Hooks prefetch](#cds-hooks-prefetch)), and the patient's Coverage and Patient on a `$questionnaire-package` request that carries none. Either way, a coverage a request leaves out is read from your system of record to choose the payer (or, unless `CDS_FHIR_SERVER_READ=off`, through the request's own `fhirServer` for a member that system does not hold). Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected. Any other value refuses to boot. |
@@ -1592,9 +1703,9 @@ For each key:
   v0.61.0 carried as `prefetch.coverage` once the request is routed (see
   [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and a
   request that names no `fhirServer` is refused with `412 no coverage to route by: send
-  prefetch.coverage or fhirServer (this gateway's system of record names no patient for this
-  member)`. A coverage read through `fhirServer` is carried to the payer from v0.61.0 (see
-  that section); a coverage read from your system of record is not. Otherwise the payer
+  prefetch.coverage or fhirServer (this gateway's records name no patient for this member)`. A coverage
+  read through `fhirServer` is carried to the payer from v0.61.0 (see that section); a
+  coverage read from your system of record is not. Otherwise the payer
   receives a request without the
   coverage, as it would from your EHR directly; a payer's gateway that runs `strict` refuses
   such a request (`400`), and its answer is relayed to your EHR. So send every prefetch value
@@ -1852,15 +1963,15 @@ nothing is read or carried:
 |---|---|
 | `private` (the default; unset is the same) | An `https` server in your own network or on the internet: on any port at a private address (RFC 1918, IPv6 unique-local, carrier-grade NAT and the like), on port 443 at a public one. Never an address no mode reads: loopback, link-local (the cloud metadata and credential endpoints `169.254.169.254` and `169.254.170.2` included), `fd00:ec2::254`, `fd00:ec2::23`, `fd20:ce::254`, `100.100.100.200`, unspecified, multicast, broadcast, `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, a zoned address, or a NAT64 or 6to4 address embedding any of these. |
 | `public` | Only an `https` server on port 443 at a public address: never a private, carrier-grade NAT, documentation or benchmarking address, nor any of the above. For a gateway whose own network is not its participant's: every gateway SHN hosts or runs uses it. |
-| `off` | Nothing: the gateway never calls `fhirServer`, carries nothing, and such a request is refused `412 no coverage to route by: send prefetch.coverage (this gateway's system of record names no patient for this member, and it does not read fhirServer)`. |
+| `off` | Nothing: the gateway never calls `fhirServer`, carries nothing, and such a request is refused `412 no coverage to route by: send prefetch.coverage (this gateway's records name no patient for this member, and it does not read fhirServer)`. |
 
 Any other value refuses to boot, and so does `private` or `public` set without
 `PROVIDER_DAVINCI_INGRESS` (left unset, the key needs no ingress). With the read on, a request
 that names no `fhirServer` (or a `null` or empty one) has nothing to read and is refused `412 no
-coverage to route by: send prefetch.coverage or fhirServer (this gateway's system of record
-names no patient for this member)`; with it `off`, every such request is refused `412 no
-coverage to route by: send prefetch.coverage (this gateway's system of record names no patient
-for this member, and it does not read fhirServer)`.
+coverage to route by: send prefetch.coverage or fhirServer (this gateway's records name no
+patient for this member)`; with it `off`, every such request is refused `412 no coverage to route by: send
+prefetch.coverage (this gateway's records name no patient for this member, and it does not read
+fhirServer)`.
 
 **A gateway SHN hosts.** A hosted gateway's own network is SHN's, not yours, so SHN sets
 `CDS_FHIR_SERVER_READ=public` on every hosted provider tenant with the ingress on. You may set
@@ -2056,7 +2167,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
 
-**Where each operation goes.** For every forward the gateway resolves the URL in this order: the endpoint your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then the per-operation base if you set one, then `PAYER_DAVINCI_BASE_URL`. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its endpoints win and the bases are only the fallback.
+**Where each operation goes.** For every forward the gateway resolves the URL in this order: the endpoint your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then the per-operation base if you set one, then `PAYER_DAVINCI_BASE_URL`. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its endpoints win and the bases are only the fallback. For the other operations a published endpoint is used as published, as the operation's URL. A CDex `$submit-attachment` is resolved differently, because HRex defines the published CDex value as a base, not the operation's URL: it goes under the CDex base your partner publishes (`davinci_cdex_attachsubmit_endpoint#2.1`), honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and otherwise to `PAYER_DAVINCI_BASE_URL`, with `/$submit-attachment` appended either way, as the CDex guide dictates; there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
 
 | Env var | Description |
 |---|---|
@@ -2316,8 +2427,8 @@ within the gateway's HTTP client timeout, or a `503` or `504` from a proxy or lo
 balancer in front of it; the Framework never answers those itself) is answered
 `503 {"error":"the authorization service could not be reached, so this leg was not sent to
 the payer"}` (an `OperationOutcome` with issue code `transient` on the FHIR operation
-routes), and the leg is recorded `unreachable`; before, it was
-`502 {"error":"authorization failed"}`. The leg is not sent to the Hub: a Da Vinci ingress
+routes), and the leg is recorded as this gateway's refusal on rule `authority`, with
+`authorizeError` saying why; before, it was `502 {"error":"authorization failed"}`. The leg is not sent to the Hub: a Da Vinci ingress
 call is one leg, so its caller can resend it. The gateway makes that call once more, with a fresh holder assertion, only when
 the first attempt failed with a refused, reset or closed connection before its request was
 written: after the write the Framework may already have decided and recorded its decision.
@@ -2624,7 +2735,12 @@ validator could not check), the verdict is `unavailable` with `error` `terminolo
 not `invalid`: the validator reached no verdict on the message. From shn-gateway v0.63.0 so is a
 lane that stops without a verdict (`HAPI-0389`: "failed to validate, but no errors", as it can on
 a PAS 2.1 or 2.2 request Bundle that declares its profile) or that read no payload (`HAPI-0992`):
-`unavailable`, with `error` `certification validator did not judge the payload`. Any other error
+`unavailable`, with `error` `certification validator did not judge the payload`. So is a lane
+whose errors are a primitive's regex check it could not run (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`,
+which the validator reports on a value that matches its type when it is short of CPU, or on a very
+long valid `code` or `oid` value), alone or with the
+unchecked terminology above and the no-match summaries on those entries: `unavailable`, with
+`error` `a primitive regex check could not run` (after the terminology reason when there is one). Any other error
 keeps it `invalid`: a structural error, a failed invariant, a code the validator checked and did not
 find (`Unknown code`), a required-binding miss on a code system it holds or under a value set
 it could expand (a code from a system it does not know, where the value set is drawn from
@@ -2745,14 +2861,14 @@ qualification. Both make the line available in these two directions:
    checks no payload, so a message it builds itself (an origination, never a request your
    participant sends) is built at a line it has no lane for when that message's builder is
    certified at that line at build time: the whole message, built by the gateway's own
-   builder at the line, validated against its profile in `make validate`. Today only the PAS
+   builder at the line, validated against its profile in the platform's validation gate. Today only the PAS
    inquiry is certified (2.0, 2.1 and 2.2), and an inquiry always follows its pend's pinned
    line, so in practice: at `none`, an inquiry whose pinned line has no lane is built at that
    line rather than carried at one you declare (see "Declared-set changes" below). Every
    other message still needs the lane, and at every other level the lane is required as
    above.
 2. **Inbound:** the SAME lane map backs what this gateway **honors** on an inbound request-frame
-   `contractVersion` claim (`docs/PARTICIPANT_PROTOCOL.md` §8.6's *native ∩ laned* rule, wider
+   `contractVersion` claim (the SDK's `docs/PARTICIPANT_PROTOCOL.md`, §8.6's *native ∩ laned* rule, wider
    than the declared set by design) — so configuring an undeclared lane widens what you'll
    silently accept from a stale-routed peer too, not only what you can build for one. This is
    the bidirectional lane-admission rule, read by both routing directions.
@@ -2803,21 +2919,21 @@ This is now closed **honestly**, on both sides of the wire:
 Verified live against the pinned DTR 2.2.0 package (`shn-hapi-validate-ig22`, 2026-08-12):
 a hand-built shell of this exact shape validates against `dtr-questionnaireresponse|2.2.0`
 with zero error-severity issues. `pa.dtr@2.2` is now included in the whole-line 2.2 mesh
-(`test/conformance/per_line_uc_test.go`'s `perLineMeshes`) alongside `pa.crd@2.2` and
+(the platform's per-line use-case conformance mesh) alongside `pa.crd@2.2` and
 `pa.pas@2.2`.
 
 A **separate, pre-existing, unrelated** gap surfaced during this verification and is
 recorded here rather than fixed (out of scope for that fix — it concerns the Questionnaire a
 worked-example payer responder *asks*, not the QuestionnaireResponse it *answers with*): the
 worked-example lumbar Questionnaire (content unchanged; the SDK's public `DemoLumbarQuestionnaire`
-export was retired — register open-items §8, 2026-08-25 — and this fixture now lives in
-`internal/dtr`/`gateway/fhirseed`) does not itself conform to DTR 2.2's
+export was retired on 2026-08-25, and this fixture now lives in the platform's DTR package
+and in this module's `fhirseed/`) does not itself conform to DTR 2.2's
 `dtr-base-questionnaire` profile (`Questionnaire.subjectType` min=1 unmet, an unmet
 `sdc-2` versionAlgorithm constraint, and item-extension slices this build's pinned package
 set cannot resolve). This was already true of the existing `testdata/golden/2.2/
-questionnaire-package-pa-lumbar-mri.json` golden before this task and is not newly
-introduced by it; `make validate`'s current gate does not catch it (that golden is not in
-`pinnedProfiles`, so it validates against base R4 only, never against
+questionnaire-package-pa-lumbar-mri.json` golden before that fix and is not newly
+introduced by it; the platform's validation gate does not currently catch it (that golden is not among
+the gate's pinned profiles, so it validates against base R4 only, never against
 `DTR-QPackageBundle`). Tracked as a follow-up, not a blocker for this closure.
 
 ### CLOSED — authored DTR answers now build at the selected line
@@ -2947,7 +3063,8 @@ From v0.60.0 each conformance finding is also captured as its own
 `conformance:` log line has it, never a body), bound to its call like the
 gateway's other observations. At `observe` each exchange is then closed by one
 `conformance.result` observation carrying its finding count, sent once its checks
-have run. At `observe` an exchange captures at most 32 findings on their own, and
+have run; a call on one of module 1's origination routes is one exchange here, so
+one result counts the findings of all the legs it sent. At `observe` an exchange captures at most 32 findings on their own, and
 its result still counts them all (`"truncated": true`); a check dropped from a
 full queue makes the result `"incomplete": true`.
 

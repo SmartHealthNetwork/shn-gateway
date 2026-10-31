@@ -19,6 +19,13 @@ import (
 // validation it stopped without a verdict (HAPI-0389), which are unavailable
 // at either severity (validatorDidNotJudge).
 //
+// An error the validator gives because it could not run a primitive's regex
+// check (regexCheckCouldNotRun) is no verdict on the payload. It never makes
+// the result invalid: beside a structural error the result is invalid for that
+// error; otherwise, alone or beside deeper rules' errors only, the result is
+// unavailable, never deeper, since the primitive it could not check may be
+// malformed.
+//
 // A HAPI validator reports issue.code "processing" for nearly every issue, so
 // the kind of issue is read from its message id (shnsdk.Issue.MessageID), never
 // from its code. The reading fails closed: an issue with no message id, or with
@@ -42,20 +49,39 @@ func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict 
 	if validatorDidNotJudge(errs) {
 		return VerdictUnavailable
 	}
+	couldNotRun := false
 	for i := range errs {
+		if errs[i].Severity == "error" && errs[i].MessageID == regexCheckCouldNotRun {
+			errs[i].excused, couldNotRun = true, true
+			continue
+		}
 		errs[i].excused = errs[i].Severity == "error" && deeperMessageID(errs[i].MessageID)
 	}
 	if !allExcused(errs, body, line, profile) {
 		return VerdictInvalid
 	}
+	if couldNotRun {
+		return VerdictUnavailable
+	}
 	return VerdictDeeper
 }
+
+// regexCheckCouldNotRun is the message id HAPI's validator gives an error
+// when evaluating a primitive's type regex failed, which says nothing about
+// the value. The pinned validator gives it in two known cases, both on values
+// that match: it evaluates each regex under a fixed wall-clock limit and gives
+// up when its JVM is short of CPU; and a very long valid code or oid can
+// overflow the regex engine's stack. A malformed code, oid or base64 value is refused by
+// the validator's own checks before its regex runs. The id is read, never the
+// issue's text.
+const regexCheckCouldNotRun = "TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION"
 
 // fhirIssue is one error or fatal issue as a reading of a $validate result
 // sees it. entry is the one Bundle.entry index its expressions name, or -1.
 // excused marks an issue the reading in progress does not count against the
-// payload: for classifyFHIR a deeper rule's, for certificationUnchecked
-// terminology the validator could not check; the summaries and slice-match
+// payload: for classifyFHIR a deeper rule's or a regex check that could not
+// run, for certificationUnchecked terminology the validator could not check or
+// a regex check that could not run; the summaries and slice-match
 // consequences that follow from such issues are then excused alike.
 type fhirIssue struct {
 	shnsdk.Issue
@@ -262,7 +288,7 @@ func wrapValidateResource(body []byte) []byte {
 }
 
 // ClassifyFHIRForTest is classifyFHIR for the real-validator lane tests
-// (test/conformance), which read what the validator actually reports and must
+// (the platform's conformance suite), which read what the validator actually reports and must
 // see the gateway's own reading of it: "valid" for a valid result, else
 // "structural", "deeper" or "unavailable". Test-only introspection, like
 // ConformanceLevelForTest.

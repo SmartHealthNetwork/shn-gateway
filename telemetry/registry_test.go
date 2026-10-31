@@ -106,8 +106,8 @@ func TestHTTPServerBound_MON_R18(t *testing.T) {
 	if got := HTTPServerRequestDuration.SeriesBound(); got != want || HTTPStatusErrorPairs() != pairs {
 		t.Errorf("bound %d with %d status and error pairs, want %d with %d", got, HTTPStatusErrorPairs(), want, pairs)
 	}
-	if routes != 71 || len(HTTPStatusCodes) != 900 || want != 682168 {
-		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 71, 900 and 682168", routes, len(HTTPStatusCodes), want)
+	if routes != 76 || len(HTTPStatusCodes) != 900 || want != 730208 {
+		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 76, 900 and 730208", routes, len(HTTPStatusCodes), want)
 	}
 }
 
@@ -166,7 +166,7 @@ var allowedKeys = map[string]bool{
 	KeyDirection: true, KeyExchange: true, KeyOutcome: true, KeyBackendClass: true, KeyStore: true,
 	KeyReason: true, KeyPoolState: true, KeyIGLine: true, KeyLane: true, KeyWireProtocol: true, KeyLevel: true,
 	KeyEndpointKind: true, KeyCertRole: true, KeyDependency: true,
-	KeyRefusalRule: true, KeyRefusalBy: true, KeyStage: true, KeyFindingKind: true,
+	KeyRefusalRule: true, KeyRefusalBy: true, KeyRefusalStage: true, KeyStage: true, KeyFindingKind: true,
 	KeyAction: true, KeyTolerated: true,
 }
 

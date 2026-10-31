@@ -561,7 +561,7 @@ func dtrPackageAnswer(pkgName string, entries []string, outcomes ...string) []by
 }
 
 // The $questionnaire-package output profile at each line (the package facts in
-// test/sdkparity/linefake_rules_test.go): the line's own names, the package's
+// the platform's SDK parity suite): the line's own names, the package's
 // and the outcome's cardinality, and the package Bundle's Questionnaire and
 // QuestionnaireResponse entries. Without the profile nothing is checked.
 func TestLineFakeDTRPackageAnswer(t *testing.T) {

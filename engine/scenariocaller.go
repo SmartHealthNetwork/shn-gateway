@@ -2,10 +2,12 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -33,6 +35,13 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		callers := g.cfg.ScenarioCallers
 		if callers == nil {
+			// No caller to verify first: a body in a coding the gateway does
+			// not decode is refused here, once, for every operator route.
+			if contentcoding.Unsupported(r) {
+				exchangeOf(r.Context()).refused(RefusalIntegrity)
+				writeUnsupportedCoding(w)
+				return
+			}
 			h(w, r)
 			return
 		}
@@ -43,6 +52,11 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes+1))
+		if errors.Is(err, contentcoding.ErrUnsupported) {
+			exchangeOf(r.Context()).refused(RefusalIntegrity)
+			writeUnsupportedCoding(w)
+			return
+		}
 		if err != nil || len(body) > shnsdk.MaxRequestBytes {
 			refuseScenarioCaller(w, r, "the body could not be read whole")
 			return
@@ -79,8 +93,10 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // refuseScenarioCaller answers 401, the same body for every reason, and logs
-// the route and the reason (never the assertion).
+// the route and the reason (never the assertion). On a route that records its
+// exchange, the refusal is recorded as authentication.
 func refuseScenarioCaller(w http.ResponseWriter, r *http.Request, why string) {
+	exchangeOf(r.Context()).refused(RefusalAuthentication)
 	log.Printf("gateway: refused a /scenario caller: %s %s: %s", r.Method, r.URL.Path, why)
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": errUnauthorizedCaller})
 }

@@ -143,6 +143,7 @@ var transmitBoundaries = map[string]boundaryRule{
 var writerUsersThatSendNothing = map[string]string{
 	"net/http.ServeMux.ServeHTTP":                          "the router dispatches to this package's own handlers, which are checked themselves",
 	"github.com/SmartHealthNetwork/shn-sdk.DecodeJSONBody": "reads the request body; the writer only caps its size",
+	"net/http.NewResponseController":                       "sets a read deadline; its Flush and Hijack are checked as sends",
 }
 
 // unestablishedLegScopes are the only functions that name the refusal row a
@@ -349,6 +350,8 @@ func checkTransmitBoundaries(fset *token.FileSet, files []*ast.File, info *types
 							sink(call, "round trip")
 						case (name == "Write" || name == "WriteString" || name == "ReadFrom") && isWriter(recv):
 							sink(call, "response "+name)
+						case (name == "Flush" || name == "Hijack") && recv.String() == "*net/http.ResponseController":
+							sink(call, "response controller "+name)
 						}
 					} else {
 						obj = info.Uses[fun.Sel]
@@ -570,6 +573,8 @@ func probeWrapped(w probeWrapper) { _, _ = w.Write([]byte("x")) }`, nil,
 			"probeHand sends bytes outside"},
 		{"a writer handed to another handler", `func probeServe(w http.ResponseWriter, r *http.Request) { http.NotFoundHandler().ServeHTTP(w, r) }`, nil,
 			"probeServe sends bytes outside"},
+		{"a flush through a response controller", `func probeFlush(w http.ResponseWriter) { _ = http.NewResponseController(w).Flush() }`, nil,
+			"probeFlush sends bytes outside"},
 		{"a package-level http.Post", `func probePost(u string) { _, _ = http.Post(u, "application/json", strings.NewReader("{}")) }`, nil,
 			"probePost sends bytes outside"},
 		{"a package-level http.Get", `func probeGet(u string) { _, _ = http.Get(u) }`, nil,

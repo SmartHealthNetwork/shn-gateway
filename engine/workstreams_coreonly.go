@@ -2,7 +2,7 @@
 
 package engine
 
-// The core-only build profile (make core-only) compiles the engine without
+// The core-only build profile (the shn_coreonly build tag) compiles the engine without
 // its zones' files, which carry //go:build !shn_coreonly: the PA and FQS
 // adapters and module 1 (workstream_pa*.go, workstream_fqs*.go,
 // module1_*.go). That it compiles proves no core file names a zone. A

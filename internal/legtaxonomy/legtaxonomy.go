@@ -55,6 +55,10 @@ type Leg struct {
 	Observe         bool     `json:"observe"`
 	FrameOperations []string `json:"frameOperations"`
 	Advertise       bool     `json:"advertise"`
+	// Since is the network release that brings the leg, on a leg added after
+	// recipients began declaring the legs they take; empty on every leg
+	// before (the root module's legtaxonomy.Leg.Since).
+	Since string `json:"since,omitempty"`
 }
 
 // Side is one side of a leg.

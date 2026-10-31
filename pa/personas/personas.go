@@ -72,7 +72,7 @@ var scenarioMembers = map[string]struct {
 	"uc01-notcovered": {"MBR-NOTCOVERED", "MBR-PD-UC01-NC", "MBR-D-UC01-NC", nil},
 	"uc02":            {"MBR-COVERED", "MBR-PD-UC02", "MBR-D-UC02", func() DemoOrderTuple { return DemoOrderCodes().UC02 }},
 	"uc02-payerb":     {"MBR-PD-UC02-PB", "MBR-PD-UC02-PB", "MBR-PD-UC02-PB", func() DemoOrderTuple { return DemoOrderCodes().UC02 }},
-	// The unknown-payer persona's system holds no order (cmd/fhirseed seeds its
+	// The unknown-payer persona's system holds no order (the platform seeder seeds its
 	// Patient and Coverage only): its route fails closed on routing, before any
 	// order is read, so its statement names none.
 	"uc02-unknownpayer": {"MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", "MBR-UNKNOWN-PAYER", nil},
@@ -151,7 +151,7 @@ func ScenarioRoster() []ScenarioPersona {
 // demo personas' state (ledger rows, auth-number overwrites) and canary
 // audit records are attributable by PCI. Twins share the original's birthDate
 // and take family "<orig>-Canary" — the member id alone makes the PCI distinct.
-// internal/fhirseed mirrors this table (census-pinned by its canary_test.go) and
+// The platform seeder mirrors this table (census-pinned by its canary test) and
 // seeds the twins into the deployed stack's FHIR tenants.
 //
 // The table must cover every member a scenario route can resolve ON A LANE A
@@ -206,7 +206,7 @@ const bridgeDemoPayerSystem = "urn:shn:demo-payer"
 // members' Coverage.payor names: coverage-derived routing (FeedPayerRouter) sends their
 // legs to the bridge-demo-payer / bridge-demo-refuse holders rather than the CMS
 // conformance payer. They are identities, not persona content, exported so
-// internal/fhirseed and the SHN Kit surfaces (runner branches, the live bridging
+// the platform seeder and the SHN Kit surfaces (runner branches, the live bridging
 // fixture) name the exact identity instead of duplicating the literal. Plain
 // shnsdk.PayerIdentifier values, following the sdk/payer.go CMSPayerIdentity idiom.
 var (

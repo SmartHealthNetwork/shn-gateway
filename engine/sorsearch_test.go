@@ -607,3 +607,37 @@ func TestSoRSearchQuery_TokenNarrowing(t *testing.T) {
 func searchSystemOfRecord(ctx context.Context, sor SystemOfRecord, resourceType, sorPatientID string) sorSearchset {
 	return runSoRSearch(ctx, sor, resourceType, sorPatientID, true, prefetchSearchFilters(resourceType)...)
 }
+
+// A search page that repeats a member name is malformed, and says so by
+// structure (errors.Is relay.ErrDuplicateKey), whether the engine parses the
+// page or a connector reports the parse: the system's answer can be read two
+// ways, which the exchange record names as message integrity. A page
+// malformed any other way does not.
+func TestSoRSearch_RepeatedMemberIsStructural(t *testing.T) {
+	for name, row := range map[string]struct {
+		page     string
+		repeated bool
+	}{
+		"a repeated member":      {`{"resourceType":"Bundle","type":"searchset","type":"searchset"}`, true},
+		"a repeated entry name":  {`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Condition","id":"c","id":"d"}}]}`, true},
+		"not JSON":               {`{"resourceType":"Bundle",`, false},
+		"not a searchset":        {`{"resourceType":"Bundle","type":"collection"}`, false},
+		"an entry not an object": {`{"resourceType":"Bundle","type":"searchset","entry":[7]}`, false},
+	} {
+		_, err := ParseSearchPage([]byte(row.page), "Condition")
+		var se *SearchError
+		if !errors.As(err, &se) || se.Outcome != SearchMalformed {
+			t.Fatalf("%s: %v, want a malformed page", name, err)
+		}
+		if errors.Is(err, relay.ErrDuplicateKey) != row.repeated {
+			t.Errorf("%s: parse error %v, repeats a member = %v, want %v", name, err, errors.Is(err, relay.ErrDuplicateKey), row.repeated)
+		}
+		parsed := search(t, searchingSoR{censusSoR: newCensusSoR(), res: SearchResult{Pages: [][]byte{[]byte(row.page)}}})
+		reported := search(t, searchingSoR{censusSoR: newCensusSoR(), err: err})
+		for how, s := range map[string]sorSearchset{"parsed by the engine": parsed, "reported by the connector": reported} {
+			if s.Outcome != SearchMalformed || s.repeated != row.repeated {
+				t.Errorf("%s, %s: %s repeated=%v, want malformed repeated=%v", name, how, s.Outcome, s.repeated, row.repeated)
+			}
+		}
+	}
+}

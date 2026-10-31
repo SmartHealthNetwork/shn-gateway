@@ -31,6 +31,7 @@ import (
 
 	checks "github.com/SmartHealthNetwork/shn-gateway/checks"
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/SmartHealthNetwork/shn-sdk/health"
 )
@@ -252,7 +253,7 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		// THE default: absent means none (D116). No payload check runs and
 		// nothing is recorded; a participant opts in to observe, structural or
 		// strict. Every SHN gateway pins its level explicitly instead
-		// (test/invariants' TestInvariant_EveryGateRunsStrict and
+		// (the platform invariant suite's TestInvariant_EveryGateRunsStrict and
 		// TestInvariant_EverySHNGatewayStatesItsLevel).
 		{"", engine.EnforcementNone},
 		{"none", engine.EnforcementNone},
@@ -330,7 +331,7 @@ func TestBuildWiresConformanceEnforcementToGateway(t *testing.T) {
 // members is the default. Deleting the
 // "gwCfg.RequireKnownMembers = cfg.RequireKnownMembers" line, or the env read in
 // loadConfig, leaves the "true" row red. That the engine honors the field is
-// proven in internal/fhirseed/public_door_integration_test.go and the engine's
+// proven in the platform seeder's public-door integration test and the engine's
 // subject-binding rows. A value outside true/false refuses to boot. The retired
 // alias SHN_ACCEPT_UNKNOWN_MEMBERS is not read: it only warns, beside
 // REQUIRE_KNOWN_MEMBERS=true too, which then governs alone.
@@ -3266,5 +3267,64 @@ func TestLoadConfig_NPI(t *testing.T) {
 		if err != nil || cfg.NPI != c.raw {
 			t.Errorf("NPI=%q: cfg.NPI %q err %v, want it as given", c.raw, cfg.NPI, err)
 		}
+	}
+}
+
+// TestLoadConfig_IngressBaseAlwaysBuildsAReturnPath: a provider gateway
+// serving the PAS ingress builds every pended answer's documentation return
+// path (E-10) under PROVIDER_DAVINCI_INGRESS_BASE_URL, and refuses that
+// answer when it cannot. A released gateway therefore refuses to start
+// without a base, or with one no return path can be built under, so a serving
+// gateway never reaches that refusal; only a test build's ingress bypass
+// (engine.EnableIngressForTest with the base cleared) can.
+func TestLoadConfig_IngressBaseAlwaysBuildsAReturnPath(t *testing.T) {
+	clients := writeClientsFile(t, testValidClientsJSON(t))
+	t.Run("no base", func(t *testing.T) {
+		e := baseProviderEnv()
+		e["INGRESS_CLIENTS_FILE"] = clients
+		_, err := loadConfig(func(k string) string { return e[k] })
+		if err == nil || !strings.Contains(err.Error(), "requires PROVIDER_DAVINCI_INGRESS_BASE_URL") {
+			t.Fatalf("ingress with clients but no base: want the base refused, got %v", err)
+		}
+	})
+	for _, base := range []string{"http://", "https://", "https://gw.test/fhir?tenant=1", "https://gw.test/fhir#x", "https://gw.test/fhir#", "https://gw.test/fhir?", "https://u:p@gw.test"} {
+		t.Run("refused "+base, func(t *testing.T) {
+			if _, err := cdexroute.ReturnBase(base, "payer"); err == nil {
+				t.Fatalf("fixture: %q builds a return path", base)
+			}
+			e := baseProviderEnv()
+			e["INGRESS_CLIENTS_FILE"] = clients
+			e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = base
+			_, err := loadConfig(func(k string) string { return e[k] })
+			if err == nil || !strings.Contains(err.Error(), "PROVIDER_DAVINCI_INGRESS_BASE_URL") {
+				t.Fatalf("base %q: want a boot refusal naming the setting, got %v", base, err)
+			}
+		})
+	}
+	// A gateway with the provider ingress off serves no return path and is
+	// not held to the rule: it boots with each refused shape set, as before.
+	for _, base := range []string{"https://", "https://gw.test/fhir?tenant=1", "https://gw.test/fhir#x", "https://gw.test/fhir?"} {
+		t.Run("ingress off "+base, func(t *testing.T) {
+			e := baseProviderEnv()
+			delete(e, "PROVIDER_DAVINCI_INGRESS")
+			e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = base
+			if _, err := loadConfig(func(k string) string { return e[k] }); err != nil {
+				t.Fatalf("ingress off with base %q: want boot, got %v", base, err)
+			}
+		})
+	}
+	for _, base := range []string{"https://gw.test", "http://provider-ingress:8080", "https://gw.test/davinci/"} {
+		t.Run("accepted "+base, func(t *testing.T) {
+			e := baseProviderEnv()
+			e["INGRESS_CLIENTS_FILE"] = clients
+			e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = base
+			cfg, err := loadConfig(func(k string) string { return e[k] })
+			if err != nil {
+				t.Fatalf("base %q refused: %v", base, err)
+			}
+			if _, err := cdexroute.ReturnBase(cfg.IngressBaseURL, "payer"); err != nil {
+				t.Fatalf("an accepted base %q builds no return path: %v", base, err)
+			}
+		})
 	}
 }

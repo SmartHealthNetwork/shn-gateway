@@ -364,7 +364,7 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 	// handleRoute seals; frame_originate_test.go re-asserts this per
 	// case via advertiseRecipientFrameV1 (idempotent) and its stale-feed row seals a
 	// bare payload against this same v1-advertising entry.
-	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames()})
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, Legs: AnsweredLegs("payer"), MessageFrames: shnsdk.SupportedMessageFrames()})
 
 	const fakeBase = "http://relay-stub.test"
 	cfg := Config{
@@ -405,7 +405,7 @@ func newInProcessExchange(t *testing.T) *inProcessExchange {
 // prefetch (the histories must be resolved from the SoR to be self-contained). The coverage
 // carries a payor identity (CMSPayerIdentity) so the CRD ingress can route it off the inbound
 // Coverage — payerRouterFor maps it to the harness's "payer" holder (FR-G40; no default).
-// Lifted verbatim from test/ingressconformance/crd_test.go (Gate-1 hermetic conformance fence)
+// Lifted verbatim from the platform's CRD ingress-conformance test (Gate-1 hermetic conformance fence)
 // so this in-package harness drives the SAME conformant fixture.
 func conformantCRDRequest(member string) []byte {
 	ref := "Patient/" + member

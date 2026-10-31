@@ -4,10 +4,13 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -226,5 +229,75 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	// strictly before the Hub round-trip, mirroring TestTransformRefusalZeroBytes's row.
 	if got := env.routeHitCount(); got != 0 {
 		t.Fatalf("fake Hub /route was called %d times — a bridged-egress refusal must never reach the Hub", got)
+	}
+}
+
+// The waiting tail's own build refuses a claim fact the line requires and
+// the request does not state as the single-shot routes do: 422 naming the
+// element, recorded as a fidelity refusal at the build stage. A route's
+// preflight (claimFactsBeforeAnyLeg) refuses it first, so this row calls the
+// tail directly.
+func TestSubmitPASClaim_UnstatedClaimFactIsBuildStage(t *testing.T) {
+	env := newInProcessExchange(t)
+	const (
+		member      = "MBR-COVERED"
+		patientRef  = "Patient/" + member
+		coverageRef = "Coverage/" + member
+	)
+	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	if status != 0 {
+		t.Fatalf("originCRDRecords: %d %s", status, msg)
+	}
+	realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
+	if status != 0 || !found {
+		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
+	}
+	realPayerOrg, status, msg := env.originator.memberPayerOrganization(env.ctx, realCov)
+	if status != 0 {
+		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
+	}
+	x := &exchangeRecorder{}
+	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
+	req := claimRequest(claimBodyWithout(t, "claimType")).WithContext(ctx)
+	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	if err != nil || status != http.StatusUnprocessableEntity || !strings.Contains(msg, "Claim.type") {
+		t.Fatalf("submitPASClaim = %d %q %v, want 422 naming Claim.type", status, msg, err)
+	}
+	if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+		t.Fatalf("recorded %s/%s stage %q, want refused fidelity at the build stage", x.outcome, x.rule, x.refusalStage)
+	}
+}
+
+// The waiting tail's own build failing for any other reason is this
+// gateway's internal error: 500, settled other, never a refusal, also after
+// a leg of the same call was answered.
+func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
+	env := newInProcessExchange(t)
+	const (
+		member      = "MBR-COVERED"
+		patientRef  = "Patient/" + member
+		coverageRef = "Coverage/" + member
+	)
+	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	if status != 0 {
+		t.Fatalf("originCRDRecords: %d %s", status, msg)
+	}
+	realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
+	if status != 0 || !found {
+		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
+	}
+	x := &exchangeRecorder{}
+	x.decided(ExchangeAnswered, "", "")
+	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
+	req := claimRequest(testOrderBody(pasFollowSubmit(0).orderJSON, "")).WithContext(ctx)
+	// No payer Organization: the builder refuses (shn-sdk requires the
+	// Insurer), a failure of this gateway's own assembly, not a fact the
+	// caller left out.
+	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, nil, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	if err != nil || status != http.StatusInternalServerError || !strings.HasPrefix(msg, "build bundle failed") {
+		t.Fatalf("submitPASClaim = %d %q %v, want the 500 build bundle failed", status, msg, err)
+	}
+	if x.outcome != ExchangeOther || x.rule != "" {
+		t.Fatalf("recorded %q/%q, want other: an internal error is not a refusal", x.outcome, x.rule)
 	}
 }

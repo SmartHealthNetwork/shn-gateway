@@ -67,8 +67,10 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 			return fail(http.StatusUnprocessableEntity, "records exceed the per-answer bound for "+bound.resourceType)
 		}
 		// The facility's own system failing to answer is an upstream
-		// failure on the exchange record, as on every other leg.
-		exchangeOf(ctx).sorFailure()
+		// failure on the exchange record, as on every other leg; one
+		// answering a body that repeats a member name is refused on message
+		// integrity (sorFailure).
+		exchangeOf(ctx).sorFailure(err)
 		status, msg := SoRFailureResponse(err)
 		return fail(status, msg)
 	}
@@ -271,12 +273,11 @@ func (r *facilityRecordReader) records(ctx context.Context, q shnsdk.CDexQuery) 
 			return nil, nil
 		}
 		return []heldRecord{{src: relay.NewBody(raw, relay.OriginUpstreamResponse), b: raw, start: 0, end: len(raw)}}, nil
-	case SearchUnavailable:
-		return nil, &SoRReadError{Kind: SoRUnavailable}
 	case SearchBound:
 		return nil, &recordsBoundError{resourceType: q.ResourceType}
 	}
-	return nil, &SoRReadError{Kind: SoRInvalidResponse}
+	// Unavailable, or an answer that could not be read.
+	return nil, s.readError()
 }
 
 // shiftDate moves a FHIR date (YYYY-MM-DD) by days; any other value is

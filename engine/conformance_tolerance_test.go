@@ -214,3 +214,41 @@ func TestCarriedDTRAnswerToleratesOnlyWhenEveryRoutedPayerIsListed(t *testing.T)
 		})
 	}
 }
+
+// regexAnswerValidator answers every ClaimResponse-bearing body with res and every
+// other body as valid.
+type regexAnswerValidator struct{ res shnsdk.Result }
+
+func (a regexAnswerValidator) Validate(_ context.Context, body []byte, _ string) (shnsdk.Result, error) {
+	if bytes.Contains(body, []byte(`"ClaimResponse"`)) {
+		return a.res, nil
+	}
+	return shnsdk.Result{Valid: true}, nil
+}
+
+// A payer the participant tolerates: at strict, a defect in its answer is
+// recorded and carried, but a check that could not run is never tolerated.
+// The timeout alone refuses the answer; beside a structural error the answer
+// is invalid for that error, which tolerance carries as before.
+func TestToleranceNeverCoversARegexCheckThatCouldNotRun(t *testing.T) {
+	tolerate := func(g *Gateway) { g.cfg.ConformanceToleratePeers = ReferencePayerIdentities() }
+	alone := regexAnswerValidator{invalid(regexTimeoutIssue("ClaimResponse.extension[0].url"))}
+	mixed := regexAnswerValidator{invalid(regexTimeoutIssue("ClaimResponse.extension[0].url"), errIssue("Validation_VAL_Profile_Minimum", []string{"ClaimResponse"}, "x"))}
+	for _, leg := range carriedAnswerLegs() {
+		t.Run(leg.leg, func(t *testing.T) {
+			_, rec, findings, _, _ := carriedAnswerRun(t, leg, EnforcementStrict, "demo", alone, tolerate)
+			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "validator unavailable") {
+				t.Fatalf("the timeout alone: %d %s, want the gateway's own 500", rec.Code, rec.Body)
+			}
+			for _, f := range findings {
+				if f.Tolerated {
+					t.Fatalf("a check that could not run was tolerated: %+v", f)
+				}
+			}
+			_, rec, findings, _, _ = carriedAnswerRun(t, leg, EnforcementStrict, "demo", mixed, tolerate)
+			if rec.Code != http.StatusOK || len(findings) != 1 || !findings[0].Tolerated || findings[0].Decision != Record.String() || findings[0].Verdict != "" {
+				t.Fatalf("beside a structural error: %d %s %+v, want carried with a tolerated invalid finding", rec.Code, rec.Body, findings)
+			}
+		})
+	}
+}

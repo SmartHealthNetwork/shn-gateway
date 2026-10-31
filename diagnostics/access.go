@@ -3,7 +3,8 @@ package diagnostics
 import "time"
 
 // AccessLine is the one line a gateway writes for each call it answers on a Da
-// Vinci ingress route or for a leg it receives from the network
+// Vinci ingress route or on one of module 1's origination routes, or for a leg
+// it receives from the network
 // (engine.ExchangeRecord, as JSON). It is written to the gateway's log as `gateway: access: <json>` at
 // every conformance level, and, with capture configured, published as the
 // Detail of a metadata-only Event of kind KindAccess. Metadata only: never a
@@ -23,8 +24,9 @@ type AccessLine struct {
 	CorrelationID string `json:"correlationId,omitempty"`
 	Trace         string `json:"trace,omitempty"`
 	CallID        string `json:"callId,omitempty"`
-	// Direction is "ingress" (a call from the gateway's own participant) or
-	// "inbound" (a leg from the network).
+	// Direction is "ingress" (a call from the gateway's own participant, on
+	// a Da Vinci ingress route or a module 1 origination route) or "inbound"
+	// (a leg from the network).
 	Direction string `json:"direction"`
 	Route     string `json:"route"`
 	// Exchange is the leg's transaction type, or "other".
@@ -70,8 +72,15 @@ type AccessLine struct {
 	// AnswerError is why an inbound leg's answer (the participant's, or the
 	// gateway's own refusal) could not be authorized (engine.AnswerErrorClasses):
 	// cancelled, timeout, auth, unreachable or other; absent otherwise.
-	AnswerError string         `json:"answerError,omitempty"`
-	Findings    AccessFindings `json:"findings"`
+	AnswerError string `json:"answerError,omitempty"`
+	// AuthorizeError is why no authority could be obtained for a request leg
+	// this gateway was sending.
+	AuthorizeError string `json:"authorizeError,omitempty"`
+	// InvolvedOmitted counts, by reason, the patients this call's involved
+	// lists left out: the exchange has no record under them
+	// (engine.InvolvedOmitReasons). Absent when none was.
+	InvolvedOmitted map[string]int `json:"involvedOmitted,omitempty"`
+	Findings        AccessFindings `json:"findings"`
 	// RelayEdits are the ids of the registered edits (E-01 …) the gateway
 	// applied to the bytes it sent on the leg, in transmit order, each once,
 	// named only once the bytes were sent (engine.ExchangeRecord.Edits). Ids only: never a value an edit
@@ -97,6 +106,12 @@ type AccessLine struct {
 	AnswerOwnership string   `json:"answerOwnership,omitempty"`
 	AnswerBuilder   string   `json:"answerBuilder,omitempty"`
 	AnswerEdits     []string `json:"answerEdits,omitempty"`
+	// EditsNotMade names each registered edit the gateway makes by default
+	// that it could not make on the call, with why
+	// (engine.ExchangeRecord.EditsNotMade, engine.EditNotMadeValues): the
+	// bytes it would have changed were carried as sent. Absent when empty.
+	// Evolving.
+	EditsNotMade []string `json:"editsNotMade,omitempty"`
 	// HubDelivered is the Hub's own word, on its error answer to an ingress
 	// call's leg, on whether the recipient's gateway received the request
 	// (engine.ExchangeRecord.HubDelivered): "no", "yes" or "unknown". Absent
@@ -138,10 +153,13 @@ type RelayEditsDetail struct {
 	RelayEdits []string `json:"relayEdits,omitempty"`
 }
 
-// AccessRefusal says who refused a call and on which network rule.
+// AccessRefusal says who refused a call and on which network rule, and, for
+// a fidelity refusal, its stage (engine.ExchangeRecord.RefusalStage: build or
+// verify); absent for every other rule.
 type AccessRefusal struct {
-	By   string `json:"by"`
-	Rule string `json:"rule"`
+	By    string `json:"by"`
+	Rule  string `json:"rule"`
+	Stage string `json:"stage,omitempty"`
 }
 
 // AccessBackend is the call to the participant's own system the answer came

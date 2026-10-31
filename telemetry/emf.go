@@ -195,7 +195,16 @@ var emfLines = map[*Instrument]func(*EMF, Measurement){
 			"rule":      rule,
 			"by":        closedDim(recording.RefusalParties, m.Attributes[3])})
 		// The alarm's own metric on {Env, Service, rule} (MON-R34): a single
-		// stream per rule, read without metric math.
+		// stream per rule, read without metric math. A fidelity refusal at
+		// stage build (SHN refusing to build what it could not build
+		// faithfully, from what the request stated) is not written:
+		// ExchangeRefusedByRule{rule=fidelity} counts fidelity refusals at
+		// stage verify, an edit SHN built failing its own verification. A
+		// build-stage refusal counts in ExchangeRefused above and in the
+		// OpenTelemetry refusals instrument with shn.refusal.stage=build.
+		if closedDim(RefusalStages, m.Attributes[4]) == recording.RefusalStageBuild {
+			return
+		}
 		e.em.EmitCount("ExchangeRefusedByRule", m.Value, map[string]string{"Service": e.service, "rule": rule})
 	},
 	ExchangeStageDuration: func(e *EMF, m Measurement) {

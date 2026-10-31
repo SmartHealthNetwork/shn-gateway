@@ -306,8 +306,8 @@ type pendFixtureOpts struct {
 // newPendResumeFixture wires a real provider Gateway (default lane —
 // OriginationProfile unset, the member resolved off this package's own census
 // fixture, same as every other hermetic engine test) against pendResumeSubstrate.
-// Every registry entry advertises requestFrames v1, exactly as internal/provision
-// stamps it in production, so REQUEST legs carry the contract-version claim the
+// Every registry entry advertises requestFrames v1, exactly as platform
+// provisioning stamps it in production, so REQUEST legs carry the contract-version claim the
 // pin tests read.
 func newPendResumeFixture(t *testing.T, opts pendFixtureOpts) (*Gateway, *pendResumeSubstrate) {
 	t.Helper()
@@ -503,7 +503,7 @@ func TestScenarioToPendSelectsAndCompleteClinicianHonorsPin(t *testing.T) {
 //
 // The RESPONDER half of request framing (honoring a claimed token rather than recomputing its
 // own, and stamping the honored line on the answer) is proven against the REAL
-// payer gateway in test/conformance's per-line pin test — a fake Hub can only
+// payer gateway in the platform conformance suite's per-line pin test — a fake Hub can only
 // honor by construction.
 func TestCompletePatient_HonorsPinAcrossDifferentLineDrift(t *testing.T) {
 	const (
@@ -770,7 +770,7 @@ func TestHandleUC05_FederatedQueryIngressValidatesOnDemoLane(t *testing.T) {
 func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 	// Deliberately observe and none: the fake validator's rejection carries no
 	// issue kind, which structural refuses as strict does. The structural row
-	// is test/adversarial TestAdversarial_FederatedQueryAnswerMutation_PerLevel,
+	// is the platform adversarial suite's TestAdversarial_FederatedQueryAnswerMutation_PerLevel,
 	// fhir-ingress/structural: this federated-query leg on the default lane.
 	// The demo-lane skip this test guards does not depend on the level.
 	for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementNone} {

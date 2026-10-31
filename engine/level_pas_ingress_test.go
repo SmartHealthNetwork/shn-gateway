@@ -106,7 +106,7 @@ func wantAnswerLevelOutcome(t *testing.T, leg string, level ConformanceEnforceme
 		}
 		return
 	}
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
 		t.Fatalf("at %s the payer's answer must be relayed exactly: %d %s", level, rec.Code, rec.Body.String())
 	}
 	switch level {
@@ -339,7 +339,7 @@ func TestLevelPASIngress_ReadableAnswerRecordsItsDecision(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, pasIngressBundle("00001", ""), levelPASPayerAnswer)
-			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), levelPASPayerAnswer) {
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, levelPASPayerAnswer)) {
 				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 			}
 			if o := lastLegOutcome(t, env.originator); o != "pended" {

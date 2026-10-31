@@ -1,7 +1,7 @@
 // transform.go — the cross-version transform framework:
 // pure, deterministic per-adjacent-line step functions and the chain
 // executor that composes them. This is engine-internal machinery, not
-// published-SDK surface — no sdk twin, no sdkparity row.
+// published-SDK surface — no sdk twin, no SDK parity row.
 //
 // A "step" bridges ONE adjacent pair of lines for ONE contract, in both
 // directions (Up = low->high, Down = high->low). Steps compose into chains

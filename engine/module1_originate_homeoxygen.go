@@ -116,13 +116,8 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// Read the member's OWN open Coverage as the routing/identity SOURCE (FR-G40): the dispatch leg's
 	// payer identity derives from the patient's real Coverage, not a synthetic CMS literal. realCov
 	// stays a LOCAL (the recipient is resolved from it); the per-leg emit shapes are unchanged.
-	realCov, hasCov, status, msg := g.memberRoutingCoverage(r.Context(), member)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return dispatchResult{}, false
-	}
-	if !hasCov {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+	realCov, ok := g.originCoverage(r.Context(), w, member, true)
+	if !ok {
 		return dispatchResult{}, false
 	}
 	// Resolve the payer HOLDER every dispatch/DTR/PAS leg routes to AND the parsed payer identity in
@@ -184,7 +179,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	// record does not hold it, and no supplier record is added.
 	crdReq, err := g.originatedDispatchRequest(crdCorr, recs, orderJSON, performerRef)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build order-dispatch request failed: " + err.Error()})
+		g.refuseBuildFailure(r.Context(), w, recipient, "crd-order-dispatch", "build order-dispatch request failed: "+err.Error(), err)
 		return dispatchResult{}, false
 	}
 	// Validation posture UNCHANGED (routing-only promotion): crdReq is a CDS
@@ -257,7 +252,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	}
 	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "build questionnaire-package request failed: " + err.Error()})
+		g.refuseBuildFailure(r.Context(), w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 		return dispatchResult{}, false
 	}
 	sendRoute, carryStatus, carryMsg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient)

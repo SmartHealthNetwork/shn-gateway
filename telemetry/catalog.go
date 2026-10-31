@@ -72,7 +72,21 @@ var (
 	Stages = []string{StageUnwrap, StageReads, StageForward, StageValidate, StageSeal, StageLedger, StageWrite, StageRest, StageNetwork, StageSelf}
 	// Booleans are a flag attribute's values.
 	Booleans = []string{"true", "false"}
+	// RefusalStages are a refusal's shn.refusal.stage values: none for a
+	// refusal on any rule but fidelity, else the stage the fidelity refusal
+	// was made at (recording.RefusalStages: build, verify, other).
+	RefusalStages = func() []string {
+		out := []string{RefusalStageNone}
+		for _, v := range recording.RefusalStages {
+			out = append(out, v)
+		}
+		return out
+	}()
 )
+
+// RefusalStageNone is the shn.refusal.stage of a refusal that is not a
+// fidelity refusal.
+const RefusalStageNone = "none"
 
 // The latency stages (Stages).
 const (
@@ -107,6 +121,7 @@ const (
 	KeyDependency   = "shn.dependency"
 	KeyRefusalRule  = "shn.refusal.rule"
 	KeyRefusalBy    = "shn.refusal.by"
+	KeyRefusalStage = "shn.refusal.stage"
 	KeyStage        = "shn.stage"
 	KeyFindingKind  = "shn.finding.kind"
 	KeyAction       = "shn.finding.action"
@@ -205,6 +220,12 @@ var (
 	}()
 	refusalByValues = func() (out []string) {
 		for _, v := range recording.RefusalParties {
+			out = append(out, v)
+		}
+		return out
+	}()
+	refusalStageValues = func() (out []string) {
+		for _, v := range RefusalStages {
 			out = append(out, v)
 		}
 		return out
@@ -371,10 +392,15 @@ var TelemetryExports = &Instrument{Name: "shn.gateway.telemetry.exports", Kind: 
 var (
 	// Refusals' EMF line, ExchangeRefused, leaves out the exchange
 	// dimension, since CloudWatch bills each combination: {Env, Service,
-	// direction, rule, by}. Its OpenTelemetry attributes keep it.
+	// direction, rule, by}. Its OpenTelemetry attributes keep it, and the
+	// refusal stage (shn.refusal.stage, RefusalStages), which no EMF line
+	// carries: ExchangeRefusedByRule{rule=fidelity} counts fidelity refusals
+	// at stage verify, and a build-stage refusal counts in ExchangeRefused and
+	// here with shn.refusal.stage=build.
 	Refusals = &Instrument{Name: "shn.gateway.refusals", Kind: Counter, Unit: "{refusal}",
-		Description: "Exchanges refused, by the network rule and the party that refused.",
-		Attributes:  []Attribute{attr(KeyDirection, directionValues), attr(KeyExchange, exchangeValues), attr(KeyRefusalRule, refusalRuleValues), attr(KeyRefusalBy, refusalByValues)}}
+		Description: "Exchanges refused, by the network rule, the party that refused and, for a fidelity refusal, its stage.",
+		Attributes: []Attribute{attr(KeyDirection, directionValues), attr(KeyExchange, exchangeValues), attr(KeyRefusalRule, refusalRuleValues), attr(KeyRefusalBy, refusalByValues),
+			attr(KeyRefusalStage, refusalStageValues)}}
 	ExchangeStageDuration = &Instrument{Name: "shn.gateway.exchange.stage.duration", Kind: Histogram, Unit: "s",
 		Description: "Time an exchange spent in each stage; an exchange's stages sum to its duration.",
 		Attributes:  []Attribute{attr(KeyDirection, directionValues), attr(KeyExchange, exchangeValues), attr(KeyStage, stageValues)}, Buckets: DurationBuckets}

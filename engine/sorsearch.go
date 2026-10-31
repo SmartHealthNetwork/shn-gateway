@@ -101,11 +101,18 @@ type SearchResult struct {
 type SearchError struct {
 	Outcome SearchOutcome
 	Reason  string
+	// cause is the structural reason a page is malformed, when it has one
+	// (relay.ErrDuplicateKey: the page repeats a member name).
+	cause error
 }
 
 func (e *SearchError) Error() string {
 	return "system of record search " + string(e.Outcome) + ": " + e.Reason
 }
+
+// Unwrap is the structural cause of a malformed page, if any: a page that
+// repeats a member name is relay.ErrDuplicateKey.
+func (e *SearchError) Unwrap() error { return e.cause }
 
 // SearchPage is what ParseSearchPage reads from one page.
 type SearchPage struct {
@@ -134,7 +141,7 @@ func ParseSearchPage(page []byte, resourceType string) (SearchPage, error) {
 	doc, err := relay.Doc(relay.NewBody(page, relay.OriginUpstreamResponse))
 	if err != nil {
 		if errors.Is(err, relay.ErrDuplicateKey) {
-			return bad("repeated member name")
+			return SearchPage{}, &SearchError{Outcome: SearchMalformed, Reason: "repeated member name", cause: relay.ErrDuplicateKey}
 		}
 		return bad("not a JSON document")
 	}
@@ -309,9 +316,12 @@ func SoRSearchQuery(resourceType, sorPatientID string, dates ...SearchDateRange)
 type sorSearchset struct {
 	Outcome SearchOutcome
 	Reason  string
-	Query   string
-	Pages   int
-	Count   int
+	// repeated: the search failed because the system's answer repeats a
+	// member name (relay.ErrDuplicateKey), so it can be read two ways.
+	repeated bool
+	Query    string
+	Pages    int
+	Count    int
 	// Value is the searchset to use, set only for SearchOK: the
 	// sor-searchset assembly of the search's pages (assembleSoRSearchset),
 	// however many pages the server returned.
@@ -403,10 +413,23 @@ func searchClass(err error, s sorSearchset) string {
 	return ""
 }
 
+// readError is the system-of-record read error a search that failed is: its
+// system unavailable, or an answer it could not read, which says so when that
+// answer repeats a member name (SoRRepeatedMember).
+func (s sorSearchset) readError() error {
+	switch {
+	case s.Outcome == SearchUnavailable:
+		return &SoRReadError{Kind: SoRUnavailable}
+	case s.repeated:
+		return SoRRepeatedMember()
+	}
+	return &SoRReadError{Kind: SoRInvalidResponse}
+}
+
 func failedSearch(query string, err error) sorSearchset {
 	var se *SearchError
 	if errors.As(err, &se) {
-		return sorSearchset{Query: query, Outcome: se.Outcome, Reason: se.Reason}
+		return sorSearchset{Query: query, Outcome: se.Outcome, Reason: se.Reason, repeated: errors.Is(err, relay.ErrDuplicateKey)}
 	}
 	return sorSearchset{Query: query, Outcome: SearchUnavailable, Reason: "search failed"}
 }

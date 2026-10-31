@@ -11,7 +11,9 @@ import (
 	"time"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/recording"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
+	"github.com/SmartHealthNetwork/shn-gateway/telemetry/stats"
 )
 
 // captureSink keeps every measurement the registry hands it.
@@ -103,11 +105,84 @@ func TestExchangeMetricHook_RefusalsAndSizes(t *testing.T) {
 		RefusedBy: engine.RefusedByPayerGateway, Rule: engine.RefusalConsent, ResponseBytes: &n})
 	hook(engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "pas-claim", Outcome: engine.ExchangeAnswered})
 	r := sink.of(telemetry.Refusals)
-	if len(r) != 1 || !slices.Equal(r[0].Attributes, []string{engine.DirectionInbound, "pas-claim", engine.RefusalConsent, engine.RefusedByPayerGateway}) {
+	if len(r) != 1 || !slices.Equal(r[0].Attributes, []string{engine.DirectionInbound, "pas-claim", engine.RefusalConsent, engine.RefusedByPayerGateway, telemetry.RefusalStageNone}) {
 		t.Fatalf("refusals %+v", r)
 	}
 	if req, resp := sink.of(telemetry.ExchangeRequestSize), sink.of(telemetry.ExchangeResponseSize); len(req) != 0 || len(resp) != 1 || resp[0].Value != 512 {
 		t.Fatalf("request sizes %+v, response sizes %+v; want only the one known answer size", req, resp)
+	}
+}
+
+// MON-R21: a requester's leg the Authorization Framework refused because it
+// could not record the decision is one exchange, outcome refused, and one
+// refusal on the audit rule by the Framework.
+func TestExchangeMetricHook_AuditRefusalByTheFramework(t *testing.T) {
+	sink := &captureSink{}
+	hook := exchangeMetricHook(telemetry.New(sink))
+	hook(engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "crd-order-select", Outcome: engine.ExchangeRefused,
+		RefusedBy: engine.RefusedByAuthorizationFramework, Rule: engine.RefusalAudit})
+	ex := sink.of(telemetry.Exchanges)
+	if len(ex) != 1 || !slices.Contains(ex[0].Attributes, engine.ExchangeRefused) {
+		t.Fatalf("exchanges %+v, want one refused", ex)
+	}
+	r := sink.of(telemetry.Refusals)
+	if len(r) != 1 || !slices.Equal(r[0].Attributes, []string{engine.DirectionIngress, "crd-order-select", engine.RefusalAudit, engine.RefusedByAuthorizationFramework, telemetry.RefusalStageNone}) {
+		t.Fatalf("refusals %+v", r)
+	}
+}
+
+// A fidelity refusal is counted with its stage: the OpenTelemetry refusals
+// instrument names it (shn.refusal.stage), and EMF writes
+// ExchangeRefusedByRule{rule=fidelity}, the refused-fidelity alarm's metric,
+// only for one at stage verify (an edit SHN built failing its own
+// verification). A build-stage refusal (SHN refusing to build from what the
+// request stated) counts in ExchangeRefused with its dimensions unchanged, and
+// in the OpenTelemetry instrument with stage build. Every other rule's
+// refusal is stage none and keeps its ExchangeRefusedByRule line.
+func TestExchangeMetricHook_FidelityStage(t *testing.T) {
+	for _, row := range []struct {
+		name, rule, stage string
+		otelStage         string
+		byRule            bool
+	}{
+		{"verify", engine.RefusalFidelity, recording.RefusalStageVerify, recording.RefusalStageVerify, true},
+		{"build", engine.RefusalFidelity, recording.RefusalStageBuild, recording.RefusalStageBuild, false},
+		{"fidelity naming no stage", engine.RefusalFidelity, "", engine.ExchangeOther, true},
+		{"another rule", engine.RefusalRouting, "", telemetry.RefusalStageNone, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			sink := &captureSink{}
+			hook := exchangeMetricHook(telemetry.New(telemetry.NewEMF(goldenEmitter(&buf), "svc", "provider"), sink))
+			hook(engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "pas-claim", Outcome: engine.ExchangeRefused,
+				RefusedBy: engine.RefusedByProviderGateway, Rule: row.rule, RefusalStage: row.stage, Status: 422})
+			r := sink.of(telemetry.Refusals)
+			if len(r) != 1 || !slices.Equal(r[0].Attributes, []string{engine.DirectionIngress, "pas-claim", row.rule, engine.RefusedByProviderGateway, row.otelStage}) {
+				t.Fatalf("refusals %+v, want stage %s", r, row.otelStage)
+			}
+			lines := map[string]map[string]any{}
+			for _, l := range decodeEMFLines(t, &buf) {
+				name := l["_aws"].(map[string]any)["CloudWatchMetrics"].([]any)[0].(map[string]any)["Metrics"].([]any)[0].(map[string]any)["Name"].(string)
+				lines[name] = l
+			}
+			refused, ok := lines["ExchangeRefused"]
+			if !ok || refused["rule"] != row.rule || refused["by"] != engine.RefusedByProviderGateway || refused["direction"] != engine.DirectionIngress {
+				t.Fatalf("ExchangeRefused %v, want it written for every refusal", refused)
+			}
+			if _, has := refused["stage"]; has {
+				t.Fatalf("ExchangeRefused carries a stage dimension: %v", refused)
+			}
+			byRule, ok := lines["ExchangeRefusedByRule"]
+			if ok != row.byRule {
+				t.Fatalf("ExchangeRefusedByRule written=%v, want %v (%v)", ok, row.byRule, byRule)
+			}
+			if ok {
+				dims := byRule["_aws"].(map[string]any)["CloudWatchMetrics"].([]any)[0].(map[string]any)["Dimensions"].([]any)[0].([]any)
+				if byRule["rule"] != row.rule || len(dims) != 3 {
+					t.Fatalf("ExchangeRefusedByRule %v, want {Env, Service, rule} on rule %s", byRule, row.rule)
+				}
+			}
+		})
 	}
 }
 
@@ -146,5 +221,59 @@ func TestActiveRequestsEMFPeak_MONR23(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "other") {
 		t.Fatal("a sample named the other direction")
+	}
+}
+
+// An origination call (a route of engine.ExchangeOriginationRoutes) whose
+// answer took 30 s counts as an exchange and keeps its outcome, but feeds no
+// exchange duration, no stage duration and no /internal/stats latency: its
+// time is a flow of legs, not one exchange's answer. A call on an ingress
+// route of the same kind still feeds all three.
+func TestExchangeMetricHook_OriginationLatencyIsNotADuration(t *testing.T) {
+	if len(engine.ExchangeOriginationRoutes) == 0 {
+		t.Fatal("this build declares no origination route")
+	}
+	now := time.Unix(1_761_350_400, 0)
+	agg := stats.New("replica-1", func() time.Time { return now })
+	sink := &captureSink{}
+	hook := exchangeMetricHook(telemetry.New(agg, sink))
+	ingress := engine.ExchangeRecord{Direction: engine.DirectionIngress, Route: engine.RouteCRD, Exchange: "crd-order-select", Outcome: engine.ExchangeAnswered,
+		Latency: time.Second, Network: &engine.NetworkWait{Latency: 600 * time.Millisecond, Calls: 1}}
+	hook(ingress)
+	series := func() stats.ExchangeSeries {
+		for _, s := range agg.Report().Windows[0].Exchanges {
+			if s.Direction == engine.DirectionIngress && s.Exchange == "crd-order-select" {
+				return s
+			}
+		}
+		t.Fatal("no ingress crd-order-select series in /internal/stats")
+		return stats.ExchangeSeries{}
+	}
+	before := series()
+	durations, stages := len(sink.of(telemetry.ExchangeDuration)), len(sink.of(telemetry.ExchangeStageDuration))
+	if durations != 1 || stages != 2 || before.Count != 1 || before.Latency.Sketch.Count() != 1 {
+		t.Fatalf("control: %d durations, %d stages, stats count %d sketch %d; want 1, 2 (network, self), 1, 1", durations, stages, before.Count, before.Latency.Sketch.Count())
+	}
+
+	origination := ingress
+	origination.Route = engine.ExchangeOriginationRoutes[0]
+	origination.Latency = 30 * time.Second
+	origination.Network = &engine.NetworkWait{Latency: 29 * time.Second, Calls: 3}
+	hook(origination)
+	after := series()
+	if got := len(sink.of(telemetry.Exchanges)); got != 2 {
+		t.Fatalf("%d exchanges counted, want the origination counted too", got)
+	}
+	if got := len(sink.of(telemetry.ExchangeDuration)); got != durations {
+		t.Fatalf("the origination recorded an exchange duration (%d, was %d)", got, durations)
+	}
+	if got := len(sink.of(telemetry.ExchangeStageDuration)); got != stages {
+		t.Fatalf("the origination recorded stage durations (%d, was %d)", got, stages)
+	}
+	if after.Count != 2 || after.Outcomes[engine.ExchangeAnswered] != 2 {
+		t.Fatalf("/internal/stats count %d outcomes %v, want the origination counted", after.Count, after.Outcomes)
+	}
+	if after.Latency.Sketch.Count() != 1 || *after.Latency.P95 != *before.Latency.P95 || *after.Latency.Max != *before.Latency.Max {
+		t.Fatalf("/internal/stats latency moved: sketch %d p95 %v max %v, was %v / %v", after.Latency.Sketch.Count(), *after.Latency.P95, *after.Latency.Max, *before.Latency.P95, *before.Latency.Max)
 	}
 }

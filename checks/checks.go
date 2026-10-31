@@ -747,6 +747,11 @@ var contractByHRexCode = map[string]string{
 	"davinci_dtr_qpackage_endpoint":   "pa.dtr",
 	"davinci_pas_submission_endpoint": "pa.pas",
 	"davinci_pdex_patient_endpoint":   "pa.pdex",
+	// A payer's CDex base, which HRex 1.2.0 defines as the base
+	// $submit-attachment is invoked on. No gateway declares a pa.cdex line
+	// (the leg is carried whatever the lines), so it never drifts; the token
+	// is the base the payer's gateway forwards a submission under.
+	"davinci_cdex_attachsubmit_endpoint": "pa.cdex",
 }
 
 // probeDavinciConfig GETs <base>/.well-known/davinci-configuration (HRex

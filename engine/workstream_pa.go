@@ -10,6 +10,7 @@
 package engine
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -62,10 +63,28 @@ const (
 	RouteEligibility = "eligibility"
 )
 
-// contractVersions: PA's contract lines are the SDK's, without pa.pdex@2.1
-// (sdkContractVersions).
+// contractVersions: PA's contract lines are the SDK's native set and default
+// (sdkContractVersions), which carry no pa.pdex token: a test holds the SDK the
+// gateway requires to that, and ParseDeclaredContractVersions refuses the token.
 func (paWorkstream) contractVersions() (native, defaults []string) {
 	return sdkContractVersions()
+}
+
+// retiredPDexToken is the PDex 2.1 contract-version token, which no gateway
+// declares: a gateway serves no Patient Access API and builds no PDex
+// resource. The gateway owns the literal: the SDK retires its own name for it,
+// and the refusal names it to the operator, so its bytes never change.
+const retiredPDexToken = "pa.pdex@2.1"
+
+// ErrPDexUndeclared refuses a declared set naming pa.pdex@2.1.
+var ErrPDexUndeclared = fmt.Errorf("contract-version token %q is no longer declared by any gateway: a gateway serves no Patient Access API and builds no PDex resource, so a declaration must not claim it: remove it from the declared set (SHN_CONTRACT_VERSIONS)", retiredPDexToken)
+
+// retiredContractVersion: PA retired pa.pdex@2.1 (contractRetirer).
+func (paWorkstream) retiredContractVersion(tok string) error {
+	if tok == retiredPDexToken {
+		return ErrPDexUndeclared
+	}
+	return nil
 }
 
 // paIngressRoutes are the PA workstream's Da Vinci ingress handlers, with the
@@ -76,6 +95,10 @@ var paIngressRoutes = map[string]ingressHandler{
 	RoutePAS:         {"pas-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASIngress }},
 	RoutePASInquire:  {"pas-inquire-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASInquireIngress }},
 	RouteEligibility: {"eligibility-ingress", func(g *Gateway) http.HandlerFunc { return g.handleEligibilityIngress }},
+	RouteCDexSubmit:  {"cdex-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexSubmitIngress }},
+	// A submission to a payer's return path: the same handler, routed by the
+	// path (cdexroute).
+	RouteCDexReturnSubmit: {"cdex-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexSubmitIngress }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -112,6 +135,11 @@ var paLegs = map[string]legDetail{
 	// itself decides nothing, though the answer may report a decision the payer
 	// already made.
 	"pas-claim-inquire": {Physics: paReadOnly, Contract: "pa.pas", Seam: paSeamPayer},
+	// A CDex $submit-attachment adds documentation to the payer's record of a
+	// prior authorization. It is carried as sent whatever the two sides' PA
+	// lines: no declared contract line governs it until a second CDex line
+	// gives the network lines to route between.
+	"cdex-attachment-submit": {Physics: paMutating, Contract: "", Seam: paSeamPayer},
 }
 
 // paSeamPayer is the seam a payer's inbound PA request is judged at.
@@ -134,8 +162,13 @@ func (paWorkstream) originatedAnswerCheck(leg string) legAnswerCheck {
 // The payer serves no participant-facing PA route of its own.
 func (g *Gateway) paRoutes(role string) []mountedRoute {
 	var out []mountedRoute
-	route := func(pattern string, h http.HandlerFunc) {
-		out = append(out, mountedRoute{pattern: pattern, handler: h})
+	route := func(pattern string, credential routeCredential, h http.HandlerFunc) {
+		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: credential})
+	}
+	// A documentation attachment submission is read to this gateway's ceiling,
+	// coded or not.
+	attachment := func(pattern string, h http.HandlerFunc) {
+		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: noCredential, bodyLimit: g.attachmentCeiling()})
 	}
 	switch role {
 	case "provider":
@@ -145,24 +178,31 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		// Every ingress answer carries X-Correlation-Id and X-SHN-Leg-Id
 		// (correlationheader.go): the caller's trace value and the leg's id,
 		// settled before the handler runs.
-		route("GET /cds-services", g.withIngressCorrelation(g.handleCDSDiscovery))
-		route("POST /cds-services/{id}", g.ingressRoute(RouteCRD))
-		route("POST /Questionnaire/$questionnaire-package", g.ingressRoute(RouteDTR))
-		route("POST /Claim/$submit", g.ingressRoute(RoutePAS))
-		route("POST /Claim/$inquire", g.ingressRoute(RoutePASInquire))
+		route("GET /cds-services", noCredential, g.withIngressCorrelation(g.handleCDSDiscovery))
+		route("POST /cds-services/{id}", noCredential, g.ingressRoute(RouteCRD))
+		route("POST /Questionnaire/$questionnaire-package", noCredential, g.ingressRoute(RouteDTR))
+		route("POST /Claim/$submit", noCredential, g.ingressRoute(RoutePAS))
+		route("POST /Claim/$inquire", noCredential, g.ingressRoute(RoutePASInquire))
 		// The base R4 operation a system submits a coverage eligibility
 		// request with (IHE FAIS ITI-124).
-		route("POST /CoverageEligibilityRequest/$submit", g.ingressRoute(RouteEligibility))
+		route("POST /CoverageEligibilityRequest/$submit", noCredential, g.ingressRoute(RouteEligibility))
+		// CDex $submit-attachment, at the plain endpoint and at each payer's
+		// return path (cdexroute.Prefix), with or without the operation's name;
+		// and the payers a submission can be addressed to (CDexPayersPath).
+		attachment("POST /$submit-attachment", g.ingressRoute(RouteCDexSubmit))
+		attachment("POST /cdex/payer/{payer}", g.ingressRoute(RouteCDexReturnSubmit))
+		attachment("POST /cdex/payer/{payer}/$submit-attachment", g.ingressRoute(RouteCDexReturnSubmit))
+		route("GET /cdex/payers", noCredential, g.withIngressCorrelation(g.handleCDexPayers))
 		// FR-37: the ingress edge's own CapabilityStatement.
-		route("GET /metadata", g.handleIngressMetadata)
+		route("GET /metadata", noCredential, g.handleIngressMetadata)
 		if g.ingressAuth != nil {
-			route("POST /oauth/token", g.ingressAuth.handleToken)
-			route("GET /.well-known/smart-configuration", g.ingressAuth.handleSmartConfig)
+			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
+			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)
 		}
 		if g.cfg.IngressBaseURL != "" {
 			// HRex 1.2.0 endpoint discovery:
 			// version-specific endpoint codes for the Da Vinci-facing edge.
-			route("GET /.well-known/davinci-configuration", g.handleDavinciConfiguration)
+			route("GET /.well-known/davinci-configuration", noCredential, g.handleDavinciConfiguration)
 		}
 	}
 	return out

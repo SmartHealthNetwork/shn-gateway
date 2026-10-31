@@ -5,8 +5,8 @@
 // §4.1 deletes the shipped in-process persona census: the published gateway module
 // no longer carries a hardcoded demo roster, and every DEPLOYMENT reads its members from a
 // real FHIR system of record (gateway/connectors/fhirsor). Hermetic tests still need a
-// deterministic SoR, and §4.4's answer — the seeded-fixture SoR — lives substrate-side in
-// the root module (test/harness, internal/fixturesor), which this module cannot import.
+// deterministic SoR, and §4.4's answer — the seeded-fixture SoR — lives in
+// the platform's root module (its test harness and fixture SoR), which this module cannot import.
 //
 // So the roster the engine's own unit tests drive lives HERE, in a _test.go file: it is
 // compiled only into `go test ./engine`, is unreachable from any shipped binary or partner
@@ -321,7 +321,7 @@ var censusPersonas = map[string]censusPersona{
 	// carry cannot have a twin, and a demo member without a twin fails every
 	// canary request for its scenario closed (scenarioMember's no-twin 400).
 	//
-	// Demographics are the deployed roster's own (internal/fhirseed's table, the
+	// Demographics are the deployed roster's own (the platform seeder's table, the
 	// source of truth a real deployment reads from FHIR), so a member resolves to
 	// the same PCI here as it does there — the gateway/connectors/scaffold
 	// precedent. Clinical facts are deliberately minimal: the demo lane's
@@ -437,7 +437,7 @@ var censusPersonas = map[string]censusPersona{
 	// payer holder, MBR-BRIDGE-REFUSE to bridge-demo-refuse, instead of the CMS
 	// conformance payer. Distinct demographics from MBR-COVERED so their PCI (and every
 	// audit/observer surface keyed on it) is attributable. Demo values are copied VERBATIM into
-	// internal/fhirseed/fhirseed.go's demographics table (cross-partition PCI — the MBR-OX
+	// the platform seeder's demographics table (cross-partition PCI — the MBR-OX
 	// precedent's rule, applied here too).
 	"MBR-BRIDGE-DEMO": {
 		demo:    Demo{BirthDate: "1983-03-11", FamilyName: "Solberg-BridgeDemo"},
@@ -472,7 +472,7 @@ var censusPersonas = map[string]censusPersona{
 		hasClinical: true,
 	},
 	// MBR-PAYERB / MBR-PAYERUNKNOWN are HERMETIC-TEST-ONLY personas (FR-G40): they exist
-	// solely so gateway/engine/payerrouting_test.go (and test/adversarial) can prove/disprove
+	// solely so this package's payerrouting_test.go (and the platform's adversarial suite) can prove/disprove
 	// coverage-derived payer routing without standing up a real multi-payer FHIR SoR. They carry
 	// no clinical context (routing tests never reach CRD/DTR content). Deliberately NOT in
 	// PersonaRefs (personas.go): never live-seeded, never driven by any UC scenario
@@ -494,13 +494,13 @@ var censusPersonas = map[string]censusPersona{
 	// g.cfg.SoR, never a literal) — but the PAYER-side inbound bind for the crd-order-dispatch
 	// leg (conformantCRDDispatchBind, workstream_pa_crd_dispatch_inbound.go) resolves the member against
 	// THIS stub when the payer gateway boots on the memstub default (no FHIR_DATA_URL), which
-	// is what every test/harness / in-process payer wiring does — the
+	// is what every platform test-harness and in-process payer wiring does — the
 	// in-process payer must cover the same demo personas the seeded fixtures define, or
 	// payer- and provider-side census drifts apart. Before
 	// this fix the stub had no entry for either member, so that bind 400'd "unknown member"
-	// even though the hosted payer (internal/fhirseed's payer-tenant Coverage, seeded via
+	// even though the hosted payer (the platform seeder's payer-tenant Coverage, seeded via
 	// seedCoverage) already covers both. Demo values are copied VERBATIM from
-	// internal/fhirseed/fhirseed.go's demographics table (the single seed source of truth) —
+	// the platform seeder's demographics table (the single seed source of truth) —
 	// they MUST match exactly, or the payer-computed PCI would diverge from the
 	// provider-computed one and the payer would bind the member to another patient.
 	// No clinical context: the order-dispatch leg never reads ClinicalContext (mirrors
@@ -522,7 +522,7 @@ var censusPersonas = map[string]censusPersona{
 	// inbound binds (the conformant PAS bind and the adaptive $next-question bind) resolve the
 	// member against THIS stub when the payer gateway boots on the memstub default — the
 	// hermetic provider-data harness. Demo values are copied VERBATIM from
-	// internal/fhirseed/fhirseed.go's demographics table (the single seed source of truth) —
+	// the platform seeder's demographics table (the single seed source of truth) —
 	// they MUST match exactly, or the payer-computed PCI diverges from the provider-computed
 	// one and the payer binds the member to another patient. No clinical context: the HHA lane
 	// attests from the seeded order, never from ClinicalContext.
@@ -633,7 +633,7 @@ func (d *censusSoR) SupplementalReport(memberID string) ([]byte, bool) {
 // censusOrders is the open order this stub holds per member — one per member, the
 // order that member's scenario is about.
 //
-// It mirrors internal/fhirseed's seedOriginationOrders: the seeded system of record
+// It mirrors the platform seeder's seedOriginationOrders: the seeded system of record
 // this stub stands in for holds exactly these members' orders, built from the SAME
 // gwengine.DemoOrderCodes() table, so a stand-in order and a seeded order carry the
 // same product coding and the tuple check agrees in both worlds. The PROVIDER-DATA
@@ -674,14 +674,14 @@ func censusOrders() map[string]struct {
 }
 
 // censusOrderID is the id the stub's order for a member carries — the seed's own
-// convention (internal/fhirseed's originationOrderID), so a reference that resolves
+// convention (the platform seeder's originationOrderID), so a reference that resolves
 // here has the shape one that resolves against a seeded stack does.
 func censusOrderID(prefix, member string) string {
 	return prefix + "-" + strings.ToLower(strings.ReplaceAll(member, "-", "")) + "-provider"
 }
 
 // censusSupplierRef is the DME supplier the stub's order-DISPATCH order names — the
-// same record internal/fhirseed seeds (DemoSupplierOrgID).
+// same record the platform seeder seeds (DemoSupplierOrgID).
 const censusSupplierRef = "Organization/org-uc03-demo-supplier"
 
 // censusSupplierNPI is that supplier's NPI, matching the seed's own.
@@ -776,8 +776,8 @@ func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
 	// insurer entry, and the inquiry reads it back from the same place.
 	//
 	// It is NOT the shape the deployed reference systems seed. Every Coverage
-	// internal/fhirseed writes CONTAINS its payer organization
-	// (fhirmap.BuildCoverageForMemberWithContainedPayer — the shape to use when the
+	// the platform seeder writes CONTAINS its payer organization
+	// (the platform FHIR mapping's BuildCoverageForMemberWithContainedPayer — the shape to use when the
 	// reader is handed only the Coverage's own bytes, which fhirsor.OpenCoverage is).
 	// Modelling only this shape is what let a submission build here that the seeded
 	// system's own egress $validate refused — hermetic green, live red, on the one
@@ -833,7 +833,7 @@ func censusPayers() []shnsdk.PayerIdentifier {
 
 // censusOrderingProviderNPI is the NPI the stub's requesting-provider
 // Organization carries. The seeded system of record this stub stands in for
-// holds the same record (internal/fhirseed's OrderingProviderOrgID); one row
+// holds the same record (the platform seeder's OrderingProviderOrgID); one row
 // binds the two references.
 const censusOrderingProviderNPI = "1295837462"
 

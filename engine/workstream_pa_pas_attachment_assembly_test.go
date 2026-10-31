@@ -54,13 +54,14 @@ func attachmentInputs(orderType, line string, absolute bool) shnsdk.ConformantCl
 
 func attachmentUpdateInputs(line string, absolute, diagnostic bool) shnsdk.ConformantClaimUpdateInputs {
 	in := attachmentInputs("ServiceRequest", line, absolute)
-	out := shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
+	out := shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), Insurer: testPayerOrganization(in.Payer), Coverage: testMemberCoverage(in.MemberID), QR: in.QR, SR: in.SR, Provider: in.Provider, MemberIDSystem: in.MemberIDSystem, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef,
 		MemberID: in.MemberID, Corr: "synthetic-update", OriginalCorr: in.Corr, Created: in.Created,
 		AbsoluteRefs: absolute, PayerOrgEntry: true, Payer: in.Payer,
 		Provenance: []byte(`{"resourceType":"Provenance","id":"source-prov","recorded":"2023-11-14T22:13:20Z","target":[{"reference":"QuestionnaireResponse/source-qr"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}],"opaque":{"preserve":"attribution"}}`)}
 	if diagnostic {
 		out.DiagnosticReport = []byte(`{"resourceType":"DiagnosticReport","id":"source-dr","status":"final","code":{"text":"Synthetic report"},"subject":{"reference":"Patient/MBR-OX"},"opaque":{"preserve":"report"}}`)
 	}
+	out.PriorClaim = testSubmissionFor(line, out)
 	return out
 }
 
@@ -211,16 +212,15 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 			t.Errorf("other ref[%d]=%s want %s", i, refs[i]["reference"], want)
 		}
 	}
-	// Independently resolve requestedService on the actual current Claim.
+	// Independently resolve requestedService on the actual current Claim: the
+	// first Claim entry. An update's prior Claim after it is the submitted
+	// Claim, carried as sent, whose references the SDK checks resolve.
 	requestedServices := 0
 	for _, e := range entries {
 		m := attachmentObject(t, e.Resource)
 		if attachmentString(t, m["resourceType"]) != "Claim" {
 			continue
 		}
-		if len(m["item"]) == 0 {
-			continue
-		} // Minimal prior Claim has no requested item.
 		var items []struct {
 			Extension []struct {
 				URL            string `json:"url"`
@@ -242,6 +242,7 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 				}
 			}
 		}
+		break
 	}
 	if requestedServices != 1 {
 		t.Errorf("requestedService targets=%d, want 1", requestedServices)

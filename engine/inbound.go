@@ -9,13 +9,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -26,8 +27,9 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// Every answer written below is this gateway's answer as the leg's
 	// recipient; refusals before the leg is known are checked as such.
 	w, scope := g.withScope(w, relay.RoleRecipient)
-	// Only the requester guard below may state that this gateway took no
-	// action on a leg (NotActedHeader); every other answer is stripped of it.
+	// Only the requester guard and the budget's refusal below may state that
+	// this gateway took no action on a leg (NotActedHeader); every other answer
+	// is stripped of it.
 	fence := &notActedFence{ResponseWriter: w}
 	w = fence
 	// Per-hop transport auth: verify the Hub's X-Hub-Assertion FIRST, header only,
@@ -54,9 +56,28 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
+	// An envelope over the network's limit is refused 413 as routing, never
+	// cut short and then refused as an envelope that does not decode. It is
+	// read up to the largest limit of any leg, then held to its own leg's
+	// once its metadata names the leg (below). One over the network's limit
+	// for other legs holds the budget for large bodies until it is answered.
+	body, release, held, err := g.readInboundEnvelope(r)
+	if !held {
+		refuseAtCapacity(r.Context(), w, fence)
+		return
+	}
+	defer release()
+	if isBodyTooLarge(err) {
+		exchangeOf(r.Context()).refused(RefusalRouting)
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": errRequestTooLarge})
+		return
+	}
 	if err != nil {
 		exchangeOf(r.Context()).refused(RefusalIntegrity)
+		if errors.Is(err, contentcoding.ErrUnsupported) {
+			writeUnsupportedCoding(w)
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
@@ -71,6 +92,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// prefixed one (buildResponseLeg). A name no leg has stays as stated and is
 	// refused at the leg lookup.
 	env.Metadata.TransactionType, _ = canonicalLeg(env.Metadata.TransactionType)
+	if len(body) > shnsdk.MaxRequestBytesFor(env.Metadata.TransactionType) {
+		exchangeOf(r.Context()).refused(RefusalRouting)
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": errRequestTooLarge})
+		return
+	}
 
 	// Require the binding-critical metadata fields even though the Hub already
 	// guards them — the payer must not assume an implicitly-trusted Hub channel
@@ -249,7 +275,7 @@ type answerHandler func(g *Gateway, w http.ResponseWriter, r *http.Request, env 
 const errNoAnswerHandler = "no answer handler for leg"
 
 // consentBackstop independently confirms a TREAT permit (custodian = this
-// facility, recipient = requester) via the Trust-operated consent service and
+// facility, recipient = requester) via the Hub's consent service and
 // returns the AUTHENTICATED consent reference the service reports — the ref that
 // anchors the disclosure's source Provenance (never the provider-supplied wire
 // field). When ConsentURL is unset it fails closed (no consent service ⇒ no

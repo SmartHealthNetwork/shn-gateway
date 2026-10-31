@@ -8,7 +8,7 @@
 // It is a PRODUCT GUARD: a receiver that accepts an answer naming records it
 // does not carry has accepted a message it cannot read. It is held to answers
 // a REAL reference payer emitted, unpatched and corrected, by
-// test/adversarial/payer_graph_capture_test.go. The names below keep the
+// the platform's adversarial payer-graph capture test. The names below keep the
 // engine's callers unchanged; the rule itself is internal/pasgraph's.
 package engine
 

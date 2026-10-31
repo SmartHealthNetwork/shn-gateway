@@ -76,7 +76,7 @@ func TestOriginationCodes_Demo(t *testing.T) {
 
 // TestDemoOrderCodes_MirrorsOriginationCodes pins that the EXPORTED DemoOrderCodes() is a
 // pure field-by-field copy of the unexported
-// originationCodes() this package already trusts — the seam accountsvc's discovery
+// originationCodes() this package already trusts — the seam the platform account service's discovery
 // descriptor derives a persona's advertised order through, so it can never independently
 // drift from the tuples the engine itself originates.
 func TestDemoOrderCodes_MirrorsOriginationCodes(t *testing.T) {

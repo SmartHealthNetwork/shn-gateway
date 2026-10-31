@@ -34,8 +34,8 @@ const (
 )
 
 // TransformPASForTest is a thin exported wrapper around the pa.pas compat
-// chain (chainFor + applyChain) for the test/conformance package — a
-// DIFFERENT Go module (the substrate repo, which imports this one) that
+// chain (chainFor + applyChain) for the platform's conformance package — a
+// DIFFERENT Go module (the platform repository, which imports this one) that
 // cannot see engine-internal symbols across the module boundary. It exists
 // so that package can validate transform OUTPUT against the live per-line
 // HAPI lanes. Named *ForTest to signal it is a test seam, not published

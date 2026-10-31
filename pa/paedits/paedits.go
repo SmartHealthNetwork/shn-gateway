@@ -1,5 +1,5 @@
 // Package paedits holds the Prior Authorization workstream's registered relay
-// edits (E-01 … E-09): the only changes a gateway may make to a participant's
+// edits (E-01 … E-10): the only changes a gateway may make to a participant's
 // message it relays on a PA leg, and the transform it makes to a PAS message
 // it built itself. The gateway gathers them into its registry through the PA
 // workstream; a reader of recorded exchanges names an edit by them
@@ -205,6 +205,27 @@ func Rows() []relay.Edit {
 				"and the payer declares another PAS line, the gateway may carry it to the payer's line through the network's " +
 				"registered PAS steps. The message stays the builder's, recorded as built by that builder and then edited by " +
 				"this transform; it must validate at the payer's line, or it is refused, never sent.",
+		},
+		{
+			ID:        relay.EditPASPendReturnRekey,
+			Name:      "pas-pend-return-rekey",
+			Legs:      []string{"pas-claim", "pas-claim-inquire", "pas-claim-update"},
+			Role:      relay.RoleRequester,
+			Direction: relay.DirectionResponse,
+			Paths:     []string{"Task.input[i].valueUrl (the input whose type is PASTempCodes#payer-url)"},
+			Kind:      relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a payer's answer the provider's gateway relays to its own system, for each " +
+				"Task in it with a payer-url input written as a valueUrl, decided by structure (the input's type coding, " +
+				"never text). Made even where an in-payload signature covers the payer-url; that signature then no longer " +
+				"verifies in the provider's copy, and the forward says so. A payer-url in any other form is carried as sent " +
+				"and the exchange records that it was not re-keyed.",
+			Authority: "The provider gateway's own network return path for the payer the answer was routed to and came from: " +
+				"a fixed address under its Da Vinci ingress base, rebuilt from that payer's network identity. Nothing is " +
+				"read from the answer and nothing is stored per request.",
+			Disclosure: "When a payer's prior-authorization answer carries a Task whose payer-url names where to send " +
+				"documentation, the provider's gateway replaces that address with its own return path for the same payer, " +
+				"so the documentation the provider sends there reaches that payer through the network. The forward to the " +
+				"provider's system names the edit in a header, and names any signature that covered the address.",
 		},
 	}
 }

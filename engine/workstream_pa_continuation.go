@@ -191,10 +191,8 @@ type Continuation struct {
 	// builder does not need them.
 	ClaimType     string
 	ClaimPriority string
-	// ClaimCreated is the submitted Claim's created, exactly as sent:
-	// the recorded submission an amendment restates. A continuation written
-	// before the gateway recorded it has none, and an amendment built from it is refused
-	// (shnsdk.PASPriorClaim) rather than given the amendment's own time.
+	// ClaimCreated is the submitted Claim's created, exactly as sent. A
+	// continuation written before the gateway recorded it has none.
 	ClaimCreated string
 	// ItemTraceNumbers are the submitted item trace numbers, in submission
 	// order. They are the same values Items carries; both are stored because the

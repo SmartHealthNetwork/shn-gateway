@@ -162,6 +162,10 @@ services:
       SECURITY_CERT_FILE: /secrets/provider-cert.pfx
       SECURITY_CERT_PASSWORD: udap-test
       SECURITY_FETCH_CERT: "false"
+      # Upstream's default skips the TLS certificate chain check on the provider's outbound HTTPS
+      # (a custom FHIR server added in its settings, its token and UDAP calls). On, a server's chain
+      # must reach a root in the image's JVM trust store.
+      SECURITY_SSL_VERIFY: "true"
     volumes:
       - certs:/secrets:ro
     ports: ["127.0.0.1:8082:8080"]

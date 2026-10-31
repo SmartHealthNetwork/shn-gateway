@@ -23,7 +23,7 @@
 // message); the rule stayed, because a receiver that accepts an answer naming
 // records it does not carry has accepted a message it cannot read. It is held to
 // answers a REAL reference payer emitted, unpatched and corrected, by
-// test/adversarial/payer_graph_capture_test.go — every raw capture refused, every
+// the platform's adversarial payer-graph capture test — every raw capture refused, every
 // corrected one accepted byte for byte.
 //
 // The bounded decoder below is part of the rule: a duplicate JSON member, a

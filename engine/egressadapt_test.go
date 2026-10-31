@@ -189,7 +189,7 @@ func TestEgressAdaptStampsTargetToken(t *testing.T) {
 // of egressAdapt (envelopeChainReports), not applyChain — the field-filling
 // promise is branch-independent (both branches feed transformedObserverEvent),
 // and the chain-invoking branch's leg.transformed fields are pinned live by
-// the kitlive bridged-run assertions (test/kitlive). The fields land on the
+// the platform's live Kit bridged-run assertions. The fields land on the
 // SAME event TestEgressAdaptStampsTargetToken already pins
 // CorrelationID/Detail/Payload on.
 func TestEgressAdaptFillsPromisedFields(t *testing.T) {

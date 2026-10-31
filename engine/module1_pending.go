@@ -94,11 +94,11 @@ type pendState struct {
 	carriedEntries []shnsdk.LossEntry
 	// claimFacts are the request facts the pended submission's request stated
 	// (originationClaimInput), and submitted is that submission as it was
-	// built (recordPASSubmission). The resume amendment states the facts its
+	// sent (recordPASSubmission). The resume amendment states the facts its
 	// own request states, or — when that request states none — these, the
-	// requester's own earlier statement; it restates the submission's own
-	// type, priority and created. Its certificationType is always the resume
-	// request's. In-memory like the rest of pendState.
+	// requester's own earlier statement; it carries the submitted Claim as
+	// sent. Its certificationType is always the resume request's. In-memory
+	// like the rest of pendState.
 	claimFacts shnsdk.PASClaimFacts
 	submitted  pasSubmissionRecord
 }
@@ -241,8 +241,8 @@ func (g *Gateway) handleUC07Pending(w http.ResponseWriter, r *http.Request) {
 
 // handleScenarioReset clears the provider's in-memory pended-scenario store and the
 // holder's exchange records so a fresh demo run starts with no stale in-flight PAs.
-// Idempotent. A store half that failed answers 503: the caller (tools/cloudsmoke's
-// reset) fails the run instead of reporting a clean reset while records are still
+// Idempotent. A store half that failed answers 503: the caller (the platform cloud
+// smoke's reset) fails the run instead of reporting a clean reset while records are still
 // there. The body names the store and nothing else — never the database's own error.
 func (g *Gateway) handleScenarioReset(w http.ResponseWriter, r *http.Request) {
 	if err := g.Reset(); err != nil {

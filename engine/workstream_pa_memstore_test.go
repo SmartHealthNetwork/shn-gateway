@@ -27,7 +27,7 @@ func testContinuations(s Store) ContinuationStore {
 }
 
 // TestMemStore_ServesThePAState: the in-memory Store, and a type embedding one
-// (the engine's census fixture, as internal/fixturesor's SoR does), answer
+// (the engine's census fixture, as the platform's fixture SoR does), answer
 // LedgerOf and ContinuationsOf with the PA workstream's own state, every time the
 // same: a pend the Store seam records is the ledger's row, and a continuation one
 // lookup writes the next reads. A store that answered false here would send the

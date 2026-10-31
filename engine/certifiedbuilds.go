@@ -9,17 +9,17 @@ type certifiedBuild struct {
 	Line     string
 }
 
-// certification is how a certified pair is proven: the make validate test
+// certification is how a certified pair is proven: the platform's validation-gate test
 // that certifies it, and the shn-sdk release whose builder builds the bytes
 // that test certified. The test runs against the tree's sdk, while this
 // gateway builds with the shn-sdk its go.mod pins, so a pair holds only while
-// that pin is SDK or later (test/conformance
+// that pin is SDK or later (the platform conformance suite's
 // TestCertifiedBuildsHoldForThePinnedSDK). SDK is
 // set by hand, from a byte comparison of that release's builder with the
 // tree's on the test's fixtures; the check reads only the pin against it, so
 // a builder change after that release, at a pin that has not moved, needs the
 // pair compared again, and a later release holds only when it is cut from a
-// tree whose make validate passed for the pair.
+// tree whose validation gate passed for the pair.
 type certification struct {
 	Test string
 	SDK  string
@@ -27,8 +27,8 @@ type certification struct {
 
 // certifiedBuilds (workstreams.go) are the builder and line pairs that
 // build-time certification proves, from every compiled-in workstream, each
-// with the make validate test that proves it and the shn-sdk release it holds
-// from. A pair is certified when a test in that line's make validate run list
+// with the validation-gate test that proves it and the shn-sdk release it holds
+// from. A pair is certified when a test in that line's validation-gate run list
 // builds the whole message with the gateway's own builder at that line and
 // validates it against the builder's own profile on that line's lane, with a
 // refusal control, and the shn-sdk this gateway pins builds those bytes.

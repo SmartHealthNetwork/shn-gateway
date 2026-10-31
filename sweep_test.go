@@ -68,9 +68,9 @@ import (
 // mean nothing to an outsider — but for a partner's name the LIST ENTRY IS THE
 // DISCLOSURE. An arm here put five occurrences into every release.
 //
-// So that class is enforced from the root module instead, where the list does not
-// ship: test/conformance/gateway_partner_name_test.go walks this whole module and
-// runs in `make check`. Do not re-add it here, and do NOT split or obfuscate a
+// So that class is enforced from the platform's root module instead, where the list
+// does not ship: a partner-name test there walks this whole module and runs in the
+// platform's default gate. Do not re-add it here, and do NOT split or obfuscate a
 // literal to satisfy a grep — that is the exact evasion these sweeps exist to
 // catch. The test decides where a future entry belongs: publishable if naming the
 // token discloses nothing, root-side if the name is itself the secret.
@@ -471,31 +471,31 @@ func sweepTree(root string, re *regexp.Regexp, report func(rel string, line int,
 
 // repoRootReachPattern catches the ONE failure class that has now twice made
 // the published module's own `go test ./...` red: a file inside this module
-// reaching UP past the module root, into the monorepo that surrounds it in
+// reaching UP past the module root, into the platform repository that surrounds it in
 // development but does not exist around the published snapshot.
 //
 // `../../testdata` from a first-level package (engine/, app/) and `../../..`
-// from a second-level directory (deploy/validator/) both land on the monorepo
-// root. In the monorepo they resolve to real files, so every in-repo gate —
-// `make check`, `make e2e`, `make smoke` — passes while the published artifact
+// from a second-level directory (deploy/validator/) both land on the platform
+// repository's root. There they resolve to real files, so every in-repo gate —
+// the platform's default, end-to-end and smoke gates — passes while the published artifact
 // is broken. Only a standalone clone sees it, which is exactly why this has to
 // be a BY-CONSTRUCTION check rather than a publish-time grep.
 //
 // The fix is never to widen the reach: vendor the file into the module (see
-// gateway/app/testdata/golden/README.md and gateway/engine/testdata/golden/
-// README.md, both pinned against their repo-root originals by the root
-// module's test/conformance/gateway_vendored_golden_drift_test.go), or drop
+// app/testdata/golden/README.md and engine/testdata/golden/README.md, both
+// pinned against their repo-root originals by the platform repository's
+// vendored-golden drift test), or drop
 // the dependency.
 //
 // BOTH spellings are covered: the literal path form (`"../../testdata/..."`,
 // `${DIR}/../../..`) and Go's split-argument form
 // (`filepath.Join("..", "..", "testdata", ...)`). The split form is the one
 // that actually shipped broken — a pattern that only saw literal paths read as
-// clean while `gateway/engine`'s transform suite reached the monorepo root.
+// clean while the engine package's transform suite reached the platform repository's root.
 const repoRootReachPattern = `(?:\.\./)+(?:\.\.)?|(?:"\.\."\s*,\s*)*"\.\."`
 
-// TestNoRepoRootReach walks the module tree and fails on any monorepo-root
-// reach. There is no allowlist: a reach that resolves only in the monorepo is
+// TestNoRepoRootReach walks the module tree and fails on any reach to the platform
+// repository's root. There is no allowlist: a reach that resolves only in that repository is
 // never correct in a module that ships on its own.
 func TestNoRepoRootReach(t *testing.T) {
 	re := regexp.MustCompile(repoRootReachPattern)
@@ -546,7 +546,7 @@ func TestNoRepoRootReach(t *testing.T) {
 			if escapeSegments(m) <= depth {
 				continue
 			}
-			t.Errorf("%s:%d: %q reaches above the gateway module root — it resolves only inside the monorepo, so the PUBLISHED module (and the shipped deploy/ bundle) breaks on it. Vendor the file into the module with a root-side drift pin, or drop the dependency.\n\t%s",
+			t.Errorf("%s:%d: %q reaches above the gateway module root — it resolves only inside the platform repository, so the PUBLISHED module (and the shipped deploy/ bundle) breaks on it. Vendor the file into the module with a root-side drift pin, or drop the dependency.\n\t%s",
 				rel, i+1, m, strings.TrimSpace(line))
 		}
 		return nil
@@ -700,9 +700,9 @@ func dedupe(matches []string) []string {
 	return out
 }
 
-// BEGIN coding-fragment rule. Kept byte-identical in gateway/sweep_test.go and
-// test/vocabsweep/kit_snapshot_sweep_test.go, and equivalent to assemble.sh's
-// STRIP_CODINGS program; test/vocabsweep pins all three.
+// BEGIN coding-fragment rule. Kept byte-identical in the gateway module's sweep test and
+// the platform's Kit snapshot sweep, and equivalent to the Kit snapshot assembler's
+// STRIP_CODINGS program; the platform's vocabulary sweep pins all three.
 //
 // A validator's answer cites a FHIR coding as <system URL>#<code>
 // ("http://www.ama-assn.org/go/cpt#72148", an X12 code system's "#98"): the

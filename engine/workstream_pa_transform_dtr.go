@@ -75,7 +75,7 @@ const (
 )
 
 // TransformDTRForTest is a thin exported wrapper around the pa.dtr compat
-// chain (chainFor + applyChain) for the test/conformance package — mirrors
+// chain (chainFor + applyChain) for the platform's conformance package — mirrors
 // workstream_pa_transform_pas.go's TransformPASForTest (same cross-module-boundary
 // rationale: a DIFFERENT Go module cannot see engine-internal symbols).
 func TransformDTRForTest(from, to string, payload []byte, x ExchangeIdentity) ([]byte, []LossReport, error) {
@@ -708,7 +708,7 @@ func dtrRemapOriginCode(qr map[string]any, from, to string) {
 // than relocating (see dtrRestoreItemWeight).
 //
 // NEVER CREATES a missing container — this is a read-side walker for both
-// directions. (tools/xmatrix/inject.go's valueOf, which models the same locus,
+// directions. (The platform expectations matrix's injector valueOf, which models the same locus,
 // does create one; it is an injector, not a walker.)
 //
 // The key set is SORTED before use: Go map iteration order is randomized, and a
@@ -751,13 +751,13 @@ func dtrAnswerValueContainers(answer map[string]any) []map[string]any {
 // dtrIsValueChoiceKey reports whether k is a FHIR value[x] choice key —
 // "value" followed by an uppercase-led type name. The uppercase requirement is
 // load-bearing: it keeps real field names that merely begin with "value" out.
-// (Mirrored, with the same rationale, by tools/xmatrix/locus.go's
+// (Mirrored, with the same rationale, by the platform expectations matrix's
 // valueChoiceKey regexp, which folds the same keys onto the grid's "value"
 // segment.)
 func dtrIsValueChoiceKey(k string) bool {
 	// Spelled as an explicit set rather than a byte-range comparison so the
 	// ASCII bound is visible: FHIR datatype names are ASCII by definition, and
-	// the xmatrix mirror's [A-Z] means exactly these 26 bytes.
+	// the expectations-matrix mirror's [A-Z] means exactly these 26 bytes.
 	const asciiUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	const prefix = "value"
 	if !strings.HasPrefix(k, prefix) || len(k) == len(prefix) {

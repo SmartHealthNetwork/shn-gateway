@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -221,6 +223,17 @@ func (d *Driver) SubmitPAS(bundle []byte) (PASOutcome, error) {
 // them.
 func (d *Driver) InquirePAS(bundle []byte) (HTTPResult, error) {
 	return d.postBearer("/Claim/$inquire", bundle)
+}
+
+// SubmitAttachment posts a CDex $submit-attachment to the provider ingress
+// under the same direct bearer SubmitPAS uses: to the plain endpoint when
+// payer is "", routed by the submission's PayerId, or to that payer's return
+// path. It returns the payer's answer as sent, or the gateway's refusal.
+func (d *Driver) SubmitAttachment(payer string, body []byte) (HTTPResult, error) {
+	if payer == "" {
+		return d.postBearer("/$submit-attachment", body)
+	}
+	return d.postBearer(cdexroute.Prefix+url.PathEscape(payer), body)
 }
 
 // SendFederatedQuery POSTs a CDex data-request Task to the provider ingress's

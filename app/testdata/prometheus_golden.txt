@@ -579,10 +579,10 @@ shn_gateway_legs_total{shn_outcome="unreachable"} 1
 # HELP shn_gateway_peers_known Holders the last successful registrar read converged.
 # TYPE shn_gateway_peers_known gauge
 shn_gateway_peers_known 3
-# HELP shn_gateway_refusals_total Exchanges refused, by the network rule and the party that refused.
+# HELP shn_gateway_refusals_total Exchanges refused, by the network rule, the party that refused and, for a fidelity refusal, its stage.
 # TYPE shn_gateway_refusals_total counter
-shn_gateway_refusals_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="consent"} 1
-shn_gateway_refusals_total{shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="authentication"} 1
+shn_gateway_refusals_total{shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="consent",shn_refusal_stage="none"} 1
+shn_gateway_refusals_total{shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="authentication",shn_refusal_stage="none"} 1
 # HELP shn_gateway_store_errors_total Shared-state store failures, by store.
 # TYPE shn_gateway_store_errors_total counter
 shn_gateway_store_errors_total{shn_store="exchange"} 1

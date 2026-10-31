@@ -8,7 +8,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -80,16 +79,15 @@ func mod(base func() shnsdk.AuditRecord, f func(*shnsdk.AuditRecord)) shnsdk.Aud
 	return r
 }
 
-// flatLeg is a leg's version 1 (flat) name from the SDK's table.
+// flatLeg is a leg's version 1 (flat) name from the SDK's table: one every
+// SDK the gateway module is built against names, so the corpus is the same
+// whether the module reads the workspace's SDK or its pinned release.
 func flatLeg() string {
-	names := []string{}
-	for flat, prefixed := range shnsdk.PrefixedTransactionTypes() {
-		if flat != prefixed {
-			names = append(names, flat)
-		}
+	const leg = "coverage-eligibility"
+	if p, ok := shnsdk.PrefixedTransactionTypes()[leg]; !ok || p == leg {
+		panic("auditappend: the SDK's name table has no flat " + leg)
 	}
-	sort.Strings(names)
-	return names[0]
+	return leg
 }
 
 // cases is the corpus. A Go AuditRecord holds no member outside its schema,

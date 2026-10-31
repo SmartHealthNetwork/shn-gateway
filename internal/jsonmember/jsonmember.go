@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
@@ -118,4 +120,95 @@ func memberObjectPath(body []byte, offset int) (string, bool) {
 			stack = append(stack, frame{path: path})
 		}
 	}
+}
+
+// MaxDepth is the deepest nesting of objects and arrays RepeatsAName walks:
+// encoding/json's own bound, past which that decoder reads no body. The walk
+// stops where a body goes deeper: a repeat it met before that point is
+// reported; anything at or after it is not, and the body, which no decoder
+// reads, is refused by each caller as any body it cannot read.
+const MaxDepth = 10000
+
+// RepeatsAName reports whether body repeats a member name in some object,
+// exactly or under case folding. The relay's strict reader decides for a body
+// it can read. A body it refuses for its own limits (not well-formed UTF-8 or
+// a lone surrogate escape, or past its depth or token bound) is walked token by
+// token as encoding/json reads it, so a repeat is found wherever that reader
+// would read the body, and nowhere past MaxDepth, where it reads nothing (the
+// walk holds one level per open object or array, so the bound is its memory's
+// too).
+func RepeatsAName(body []byte) bool {
+	var whole json.RawMessage
+	err := relay.Decode(relay.NewBody(body, relay.OriginPeerFrame), &whole)
+	if err == nil || errors.Is(err, relay.ErrDuplicateKey) {
+		return err != nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	type object struct {
+		names map[string]bool
+		// name is set when the next token is a member name or the object's end.
+		name bool
+	}
+	var open []*object // nil for an array
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if n := len(open); n > 0 && open[n-1] != nil && open[n-1].name {
+			in := open[n-1]
+			if tok != json.Delim('}') {
+				s, _ := tok.(string)
+				k := FoldedName(s)
+				if in.names[k] {
+					return true
+				}
+				in.names[k], in.name = true, false
+				continue
+			}
+			open = open[:n-1]
+		} else {
+			switch tok {
+			case json.Delim('{'):
+				if len(open) == MaxDepth {
+					return false
+				}
+				open = append(open, &object{names: map[string]bool{}, name: true})
+				continue
+			case json.Delim('['):
+				if len(open) == MaxDepth {
+					return false
+				}
+				open = append(open, nil)
+				continue
+			case json.Delim(']'):
+				open = open[:len(open)-1]
+			}
+		}
+		// A value has ended: the object holding it reads a name next.
+		if n := len(open); n > 0 && open[n-1] != nil {
+			open[n-1].name = true
+		}
+	}
+}
+
+// FoldedName maps name to a canonical form such that FoldedName(a) ==
+// FoldedName(b) exactly when strings.EqualFold(a, b), as the relay's strict
+// reader folds names: each rune becomes the smallest rune of its simple
+// case-folding orbit.
+func FoldedName(name string) string {
+	out := make([]byte, 0, len(name))
+	for _, r := range name {
+		for {
+			f := unicode.SimpleFold(r)
+			if f <= r {
+				r = f
+				break
+			}
+			r = f
+		}
+		out = utf8.AppendRune(out, r)
+	}
+	return string(out)
 }

@@ -7,6 +7,8 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -45,12 +47,15 @@ func (c *countingSoR) count() int {
 	return c.reads
 }
 
-// fakeAuthz is an Authorization Framework that mints a token echoing each
-// request, counting the requests. refuse and fail name subjects it refuses
-// (403) or fails (500); unlabelled names subjects whose token it mints without
-// the involvement requested.
+// fakeAuthz is an Authorization Framework that mints a signed token echoing
+// each request, counting the requests. refuse and fail name subjects it
+// refuses (403) or fails (500); unlabelled names subjects whose token it mints
+// without the involvement requested; tamper names subjects whose token it
+// changes before signing; signFor names subjects it signs for with another key.
 type fakeAuthz struct {
 	mu                             sync.Mutex
+	tamper                         map[string]func(*shnsdk.Token)
+	signFor                        map[string]ed25519.PrivateKey
 	requests                       []authorizeReq
 	refuse, fail, unlabelled, hang map[string]bool
 	inFlight, maxInFlight          int
@@ -79,15 +84,34 @@ func (f *fakeAuthz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	case f.fail[req.SubjectPCI]:
-		http.Error(w, `{"error":"decision audit failed"}`, http.StatusBadGateway)
+		// The Framework's answer to a decision it could not record.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"decision audit failed","rule":"audit"}`)
 		return
 	}
 	tok := shnsdk.Token{Operation: req.Operation, Frame: req.Frame, Subject: req.SubjectPCI, CorrelationID: req.CorrelationID, PayloadHash: req.PayloadHash, Involvement: req.Involvement}
+	tok.Holder, tok.Expiry = "provider", fakeAuthzNow.Add(time.Hour)
 	if f.unlabelled[req.SubjectPCI] {
 		tok.Involvement = ""
 	}
-	_ = json.NewEncoder(w).Encode(authorizeResp{Token: tok})
+	if change := f.tamper[req.SubjectPCI]; change != nil {
+		change(&tok)
+	}
+	key := fakeAuthzKey
+	if other := f.signFor[req.SubjectPCI]; other != nil {
+		key = other
+	}
+	tok = signTestToken(tok, key)
+	_ = json.NewEncoder(w).Encode(authorizeResp{Token: &tok})
 }
+
+// fakeAuthzKey signs fakeAuthz's tokens, which the gateway verifies against its
+// public half; fakeAuthzNow is involvedGateway's clock.
+var (
+	fakeAuthzKey = ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	fakeAuthzNow = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+)
 
 func (f *fakeAuthz) calls() []authorizeReq {
 	f.mu.Lock()
@@ -115,7 +139,8 @@ func involvedGateway(t *testing.T, hubAccepts bool) (*Gateway, *fakeAuthz, *coun
 		Identity:           shnsdk.Identity{HolderID: "provider", SignPriv: priv},
 		Client:             srv.Client(),
 		AuthzURL:           srv.URL,
-		Clock:              func() time.Time { return time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC) },
+		Clock:              func() time.Time { return fakeAuthzNow },
+		AuthzPub:           fakeAuthzKey.Public().(ed25519.PublicKey),
 		SoR:                sor,
 		HubAcceptsInvolved: hubAccepts,
 		InvolvedMetric: func(reason string) {
@@ -461,6 +486,186 @@ func TestInvolvedList_MintsBoundTokensAndLeavesOutWhatFails(t *testing.T) {
 	}
 	if n := len(authz.calls()); n != 5 {
 		t.Fatalf("%d authorize calls, want one per distinct other patient (5)", n)
+	}
+}
+
+// A token the Framework mints for an involved patient is verified before it
+// joins the list, one binding at a time: one that does not verify for this leg
+// and patient leaves its patient out as a failed authorization, and the token
+// metric says failed. The Hub binds no subject, so a token for another patient
+// is caught only here. The leg's other patient stays listed: nothing here
+// refuses the leg.
+func TestInvolvedList_LeavesOutATokenThatDoesNotVerify(t *testing.T) {
+	other := ed25519.NewKeyFromSeed(append(make([]byte, ed25519.SeedSize-1), 1))
+	for _, row := range []struct {
+		name   string
+		change func(*shnsdk.Token)
+		resign ed25519.PrivateKey
+	}{
+		{"signed by another key", func(*shnsdk.Token) {}, other},
+		{"for another leg", func(k *shnsdk.Token) { k.CorrelationID = "another-leg" }, nil},
+		{"for another payload", func(k *shnsdk.Token) { k.PayloadHash = "another-hash" }, nil},
+		{"with no payload hash", func(k *shnsdk.Token) { k.PayloadHash = "" }, nil},
+		{"for another patient", func(k *shnsdk.Token) { k.Subject = "pci:another" }, nil},
+		{"for another holder", func(k *shnsdk.Token) { k.Holder = "payer" }, nil},
+		{"for another operation", func(k *shnsdk.Token) { k.Operation = "pas-update" }, nil},
+		{"for another frame", func(k *shnsdk.Token) { k.Frame = "payer-coverage" }, nil},
+		{"expired", func(k *shnsdk.Token) { k.Expiry = fakeAuthzNow.Add(-time.Second) }, nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			g, authz, _, omitted := involvedGateway(t, true)
+			var outcomes []string
+			var mu sync.Mutex
+			g.cfg.TokenMetric = func(outcome string, _ time.Duration) {
+				mu.Lock()
+				defer mu.Unlock()
+				outcomes = append(outcomes, outcome)
+			}
+			authz.tamper = map[string]func(*shnsdk.Token){"pci:bad": row.change}
+			if row.resign != nil {
+				authz.signFor = map[string]ed25519.PrivateKey{"pci:bad": row.resign}
+			}
+			entries := []involvedPatient{
+				{pci: "pci:bad", involvement: shnsdk.InvolvementRequestNamed},
+				{pci: "pci:good", involvement: shnsdk.InvolvementRequestNamed},
+			}
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			encoded := g.involvedList(r, "originate", "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", "pci:subject", entries)
+			list, err := shnsdk.DecodeInvolved(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list) != 1 {
+				t.Fatalf("listed %d, want only the patient whose token verifies", len(list))
+			}
+			var tok shnsdk.Token
+			if err := json.Unmarshal([]byte(list[0].Token), &tok); err != nil {
+				t.Fatal(err)
+			}
+			if tok.Subject != "pci:good" {
+				t.Fatalf("listed %q, want pci:good", tok.Subject)
+			}
+			if !slices.Equal(*omitted, []string{involvedOmitFailed}) {
+				t.Fatalf("omitted %v, want %s", *omitted, involvedOmitFailed)
+			}
+			slices.Sort(outcomes)
+			if !slices.Equal(outcomes, []string{TokenFailed, TokenOK}) {
+				t.Fatalf("token outcomes %v, want one failed and one ok", outcomes)
+			}
+		})
+	}
+}
+
+// A token minted with another involvement than the one asked for keeps its own
+// reason: it is not verified, so the token metric says ok, and it never lists.
+func TestInvolvedList_AnotherInvolvementKeepsItsOwnReason(t *testing.T) {
+	g, authz, _, omitted := involvedGateway(t, true)
+	var outcomes []string
+	g.cfg.TokenMetric = func(outcome string, _ time.Duration) { outcomes = append(outcomes, outcome) }
+	authz.tamper = map[string]func(*shnsdk.Token){"pci:other": func(k *shnsdk.Token) { k.Involvement = shnsdk.InvolvementPayerHeld }}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	encoded := g.involvedList(r, "originate", "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", "pci:subject",
+		[]involvedPatient{{pci: "pci:other", involvement: shnsdk.InvolvementRequestNamed}})
+	if encoded != "" || !slices.Equal(*omitted, []string{involvedOmitUnlabelled}) || !slices.Equal(outcomes, []string{TokenOK}) {
+		t.Fatalf("list %q, omitted %v, token outcomes %v", encoded, *omitted, outcomes)
+	}
+}
+
+// A token that does not verify is a failed authorization even when the budget
+// ends as it is read: the docs' reason for it, and what the token metric says.
+func TestMintInvolved_AnUnverifiedTokenAsTheBudgetEndsIsNoBudgetOmission(t *testing.T) {
+	g, _, _, _ := involvedGateway(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tok := signTestToken(shnsdk.Token{Frame: "provider-tpo", Operation: "pas-submit", Subject: "pci:another", CorrelationID: "corr-1", PayloadHash: "hash-1",
+		Holder: "provider", Involvement: shnsdk.InvolvementRequestNamed, Expiry: fakeAuthzNow.Add(time.Hour)}, fakeAuthzKey)
+	answer, err := json.Marshal(authorizeResp{Token: &tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.cfg.AuthzClient = &http.Client{Transport: certRoundTrip(func(*http.Request) (*http.Response, error) {
+		cancel()
+		return tokenAnswer(http.StatusOK, string(answer))(nil)
+	})}
+	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	_, reason := g.mintInvolved(r, "provider-tpo", "pas-submit", "corr-1", "hash-1",
+		involvedPatient{pci: "pci:bad", involvement: shnsdk.InvolvementRequestNamed})
+	if reason != involvedOmitFailed || ctx.Err() == nil {
+		t.Fatalf("reason %q (context %v), want %s", reason, ctx.Err(), involvedOmitFailed)
+	}
+}
+
+// The answer side's list reaches the record through the context its budget
+// runs in, as the request side's does: the payer's own binding left out of an
+// answer is on the payer's record for the call.
+func TestInvolvedForAnswer_AnOmissionIsOnTheRecord(t *testing.T) {
+	g, authz, _, _ := involvedGateway(t, true)
+	authz.tamper = map[string]func(*shnsdk.Token){"pci:held": func(k *shnsdk.Token) { k.Subject = "pci:another" }}
+	x := &exchangeRecorder{}
+	c := &involvedCollector{held: map[string]bool{}}
+	c.bound("pci:held", true)
+	c.differs("pci:held")
+	ctx := context.WithValue(context.WithValue(context.Background(), exchangeRecorderKey{}, x), involvedCollectorKey{}, c)
+	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	if got := g.involvedForAnswer(r, "pas-claim", "payer-tpo", "pas-respond", "corr-1", "hash-1", "pci:subject"); got != "" {
+		t.Fatalf("listed %q", got)
+	}
+	if !maps.Equal(x.rec.InvolvedOmitted, map[string]int{involvedOmitFailed: 1}) {
+		t.Fatalf("record %v, want one %s", x.rec.InvolvedOmitted, involvedOmitFailed)
+	}
+}
+
+// A patient left out of an involved list has no record of the exchange under
+// it, so that is never silent: every reason reaches the call's record, the
+// observer event and the metric, and a call that left no one out says nothing.
+func TestOmitInvolved_EveryReasonReachesTheRecordTheEventAndTheMetric(t *testing.T) {
+	g, _, _, omitted := involvedGateway(t, true)
+	var events []ObserverEvent
+	g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+	x := &exchangeRecorder{}
+	ctx := context.WithValue(context.Background(), exchangeRecorderKey{}, x)
+	want := map[string]int{}
+	for _, reason := range InvolvedOmitReasons {
+		g.omitInvolved(ctx, "originate", "pas-claim", "corr-1", reason)
+		want[reason] = 1
+	}
+	g.omitInvolved(ctx, "originate", "pas-claim", "corr-1", involvedOmitFailed)
+	want[involvedOmitFailed] = 2
+	if !maps.Equal(x.rec.InvolvedOmitted, want) {
+		t.Fatalf("record %v, want %v", x.rec.InvolvedOmitted, want)
+	}
+	if len(*omitted) != len(InvolvedOmitReasons)+1 || len(events) != len(*omitted) {
+		t.Fatalf("metric %v, events %d, want one of each per patient", *omitted, len(events))
+	}
+	for i, e := range events {
+		if e.Kind != InvolvedOmittedEvent || e.Detail != (*omitted)[i] {
+			t.Fatalf("event %+v, want %s for %q", e, InvolvedOmittedEvent, (*omitted)[i])
+		}
+	}
+	none := &exchangeRecorder{}
+	g.involvedList(httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.WithValue(context.Background(), exchangeRecorderKey{}, none)),
+		"originate", "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", "pci:subject",
+		[]involvedPatient{{pci: "pci:a", involvement: shnsdk.InvolvementRequestNamed}})
+	if none.rec.InvolvedOmitted != nil {
+		t.Fatalf("a call that left no one out recorded %v", none.rec.InvolvedOmitted)
+	}
+}
+
+// A token that does not verify reaches the call's record through the list that
+// left its patient out, and a reason outside the closed list reads other.
+func TestInvolvedList_AnUnverifiedTokenIsOnTheRecord(t *testing.T) {
+	g, authz, _, _ := involvedGateway(t, true)
+	authz.tamper = map[string]func(*shnsdk.Token){"pci:bad": func(k *shnsdk.Token) { k.Subject = "pci:another" }}
+	x := &exchangeRecorder{}
+	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.WithValue(context.Background(), exchangeRecorderKey{}, x))
+	g.involvedList(r, "originate", "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", "pci:subject",
+		[]involvedPatient{{pci: "pci:bad", involvement: shnsdk.InvolvementRequestNamed}})
+	if !maps.Equal(x.rec.InvolvedOmitted, map[string]int{involvedOmitFailed: 1}) {
+		t.Fatalf("record %v, want one %s", x.rec.InvolvedOmitted, involvedOmitFailed)
+	}
+	x.involvedOmitted("not-a-reason")
+	if x.rec.InvolvedOmitted[ExchangeOther] != 1 {
+		t.Fatalf("record %v: a reason outside the list must read %s", x.rec.InvolvedOmitted, ExchangeOther)
 	}
 }
 

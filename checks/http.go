@@ -78,7 +78,7 @@ const bearerPrefix = "Bearer "
 // The bearer comparison uses crypto/subtle.ConstantTimeCompare — never Go's
 // built-in !=/== on the token value — mirroring this package's own cited
 // precedent (kitd's /api/verify, kit/kitd/kitd.go's authMiddleware) and
-// cmd/testdoor/token.go: a timing side-channel on a bearer-token comparison
+// the platform's provider test endpoint's token check: a timing side-channel on a bearer-token comparison
 // is exactly the kind of thing that IS worth the extra care here, even
 // though this is an operator surface rather than a partner-facing one.
 func authorized(r *http.Request, token string) (ok bool, code int) {

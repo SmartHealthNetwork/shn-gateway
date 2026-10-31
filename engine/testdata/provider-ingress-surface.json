@@ -1,13 +1,17 @@
 [
   "GET /.well-known/davinci-configuration",
   "GET /.well-known/smart-configuration",
+  "GET /cdex/payers",
   "GET /cds-services",
   "GET /metadata",
+  "POST /$submit-attachment",
   "POST /Claim/$inquire",
   "POST /Claim/$submit",
   "POST /CoverageEligibilityRequest/$submit",
   "POST /Questionnaire/$questionnaire-package",
   "POST /Task",
+  "POST /cdex/payer/{payer}",
+  "POST /cdex/payer/{payer}/$submit-attachment",
   "POST /cds-services/{id}",
   "POST /oauth/token"
 ]

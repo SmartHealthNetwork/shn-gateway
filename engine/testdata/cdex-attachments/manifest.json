@@ -1,0 +1,54 @@
+{
+  "declaredLimit": 65536,
+  "fixtures": [
+    {
+      "file": "below.json",
+      "what": "one inline file below the limit",
+      "files": 1,
+      "largestInline": 40000,
+      "measured": true
+    },
+    {
+      "file": "at-limit.json",
+      "what": "one inline file exactly at the limit",
+      "files": 1,
+      "largestInline": 65536,
+      "measured": true
+    },
+    {
+      "file": "over-limit.json",
+      "what": "one inline file one byte over the limit",
+      "files": 1,
+      "largestInline": 65537,
+      "measured": true
+    },
+    {
+      "file": "many-under.json",
+      "what": "three inline files, each under the limit, together over it",
+      "files": 3,
+      "largestInline": 50000,
+      "measured": true
+    },
+    {
+      "file": "url.json",
+      "what": "one file by url, its declared size over the limit",
+      "files": 1,
+      "largestInline": 0,
+      "measured": false
+    },
+    {
+      "file": "malformed.json",
+      "what": "one file whose data is not well-formed base64, longer than the limit",
+      "files": 1,
+      "largestInline": 0,
+      "measured": false
+    },
+    {
+      "file": "questionnaire-answer-over.json",
+      "what": "a QuestionnaireResponse whose answer carries one inline file one byte over the limit",
+      "files": 1,
+      "largestInline": 65537,
+      "measured": true
+    }
+  ]
+}

@@ -149,6 +149,86 @@ func TestIngressAnswerThatFailsVerificationIsReportedAsDelivered(t *testing.T) {
 	}
 }
 
+// The Hub's refusal of a large envelope it has no room to hold reaches the
+// caller as a 503 with the Hub's wait, on the leg's own route as on any other,
+// and is recorded as the Hub's routing refusal. A wait that cannot be read is
+// the default; a 503 with another reason, or one the Hub did not write, states
+// no wait.
+func TestIngressRelaysTheHubsWaitOnALargeEnvelopeRefusal(t *testing.T) {
+	const budget = `{"error":"large envelope budget exhausted"}`
+	rows := map[string]struct {
+		body, delivered, retryAfter string
+		want                        string
+	}{
+		"the Hub's wait":      {budget, "no", "7", "7"},
+		"no wait stated":      {budget, "no", "", "5"},
+		"a wait out of range": {budget, "no", "600", "5"},
+		"a wait of zero":      {budget, "no", "0", "5"},
+		"a wait below zero":   {budget, "no", "-1", "5"},
+		"another reason":      {`{"error":"forward to recipient failed"}`, "no", "7", ""},
+		"not from the Hub":    {budget, "", "7", ""},
+	}
+	for name, row := range rows {
+		t.Run(name, func(t *testing.T) {
+			env := newInProcessExchange(t)
+			base := env.originator.cfg.Client.Transport
+			env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(r.URL.Path, "/route") {
+					return base.RoundTrip(r)
+				}
+				h := http.Header{"Content-Type": []string{"application/json"}}
+				if row.delivered != "" {
+					h.Set(HubDeliveredHeader, row.delivered)
+				}
+				if row.retryAfter != "" {
+					h.Set("Retry-After", row.retryAfter)
+				}
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(row.body)), Header: h}, nil
+			})
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(cdexRoute(""))(rec, cdexPost(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), ""))
+			if got := rec.Header().Get("Retry-After"); got != row.want {
+				t.Errorf("Retry-After = %q, want %q (answer %d %.200s)", got, row.want, rec.Code, rec.Body)
+			}
+			if row.want != "" && (rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), hubReasonEnvelopeBudget)) {
+				t.Errorf("answer %d %.200s, want 503 naming the budget", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// A requester that does not know a not-acted value, as a v1.0.0 gateway does not
+// know at-capacity, still gives its caller a safe answer: 503, and the Hub's own
+// reason, which says nothing was done and to resend. It states no wait of its
+// own. withNotActed reads only the values it names, so a later value read here
+// is that release's reading.
+func TestIngressReadsANotActedValueItDoesNotKnowSafely(t *testing.T) {
+	const reason = `{"error":"forward to recipient failed: the recipient's gateway has no room for this envelope and took no action; resend with a freshly sealed envelope"}`
+	env := newInProcessExchange(t)
+	base := env.originator.cfg.Client.Transport
+	env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, "/route") {
+			return base.RoundTrip(r)
+		}
+		h := http.Header{"Content-Type": []string{"application/json"}}
+		h.Set(HubDeliveredHeader, "no")
+		h.Set(NotActedHeader, "a-value-from-a-later-release")
+		h.Set("Retry-After", "5")
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(reason)), Header: h}, nil
+	})
+	rec := httptest.NewRecorder()
+	env.originator.withIngressCorrelation(env.originator.handleCRDIngress)(rec, env.crdIngressRequest(t))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "took no action; resend with a freshly sealed envelope") {
+		t.Fatalf("got %d %s, want 503 saying nothing was done and to resend", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want none: only a value it knows states a wait", got)
+	}
+	if got := rec.Header().Get(HubDeliveredHeader); got == "yes" {
+		t.Fatalf("%s = %q on a leg the recipient did not act on", HubDeliveredHeader, got)
+	}
+}
+
 // The recipient gateway's not-acted refusal, relayed by the Hub as a 503 not
 // delivered carrying NotActedHeader, reaches the caller as a retryable 503
 // that says nothing was done and when to resend. Each row that misses one
@@ -181,6 +261,10 @@ func TestIngressReportsTheRecipientsNotActedRefusal(t *testing.T) {
 			http.StatusServiceUnavailable, "resend after 3s", "3"},
 		"Retry-After not a number": {503, notActed(503, "no", NotActedRequesterUnknown, "Fri, 31 Dec 1999 23:59:59 GMT"),
 			http.StatusServiceUnavailable, "resend after 3s", "3"},
+		"at capacity": {503, notActed(503, "no", NotActedAtCapacity, "7"),
+			http.StatusServiceUnavailable, errRecipientAtCapacity + "; resend after 7s", "7"},
+		"at capacity, no Retry-After": {503, notActed(503, "no", NotActedAtCapacity, ""),
+			http.StatusServiceUnavailable, errRecipientAtCapacity + "; resend after 5s", "5"},
 		"another header value": {503, notActed(503, "no", "something-else", "5"),
 			http.StatusServiceUnavailable, "hub refused the exchange: forward to recipient failed", ""},
 		"not a 503": {502, notActed(502, "no", NotActedRequesterUnknown, "5"),

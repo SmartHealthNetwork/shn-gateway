@@ -113,7 +113,7 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 			// Bind the member from the OPERATIVE Claim — the FIRST Claim entry, exactly as br-payer
 			// selects it (PasBundleValidator.validateCommon → getEntryFirstRep). A PAS Claim Update
 			// may also carry the PRIOR Claim as a non-first entry: from PAS 2.1 the IG requires it
-			// (sdk buildPriorClaimEntry), and at 2.0 a requester's own update, one built at 2.1 or 2.2
+			// (the sdk carries the submitted Claim), and at 2.0 a requester's own update, one built at 2.1 or 2.2
 			// and translated down, or one from an earlier SDK may still carry it. It must NOT clobber
 			// the operative Claim.patient, whatever the line. First-Claim-wins.
 			if !haveClaim {
@@ -608,7 +608,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		result.Response, answerKey("pas-claim", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), successMediaType(result.Response), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeResponseLegFailure(w, status, msg)
 		return
 	}
 	writeFailed := false
@@ -757,7 +757,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), successMediaType(result.Response), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeResponseLegFailure(w, status, msg)
 		return
 	}
 	// An answer relayed unread writes nothing: the Commit is not run, and the
@@ -860,9 +860,9 @@ func parseConformantPASUpdateFacts(bundleJSON []byte) (conformantUpdateFacts, in
 //
 // WHICH Claim entry the facts come from: a bundle can carry MORE THAN ONE Claim. From PAS 2.1 the sdk
 // appends the ORIGINAL SUBMIT's Claim as a resolvable bundle ENTRY after the operative update Claim
-// (shnsdk buildPriorClaimEntry — so the update Claim's related[].claim.reference resolves, as the IG
+// (the submitted Claim as sent — so the update Claim's related[].claim.reference resolves, as the IG
 // requires), and at 2.0 a requester's own update, one translated down, or one from an earlier sdk may
-// still carry it; that prior entry's only identifier is urn:shn:correlation|<original submit corr>.
+// still carry it; that prior entry's first identifier is urn:shn:correlation|<original submit corr>.
 // So relatedClaim and claimCorrelation
 // are read from THE OPERATIVE UPDATE CLAIM — the (first) Claim entry carrying related[] — and, when
 // no Claim carries related[] (a plain initial submit), from the FIRST Claim entry. A later Claim

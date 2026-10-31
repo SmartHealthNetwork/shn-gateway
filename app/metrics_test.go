@@ -13,6 +13,7 @@ import (
 	"time"
 
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/recording"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	metrics "github.com/SmartHealthNetwork/shn-sdk/metrics"
 )
@@ -325,6 +326,19 @@ func TestExchangeMetricHook(t *testing.T) {
 			},
 		},
 		{
+			// A requester's leg the Authorization Framework refused because it
+			// could not record the decision: the audit rule, by the Framework.
+			name: "refused on the audit rule by the Authorization Framework",
+			rec: engine.ExchangeRecord{Direction: engine.DirectionIngress, Exchange: "crd-order-select", Outcome: engine.ExchangeRefused,
+				RefusedBy: engine.RefusedByAuthorizationFramework, Rule: engine.RefusalAudit},
+			wantLines: map[string]map[string]string{
+				"Exchange":              {"direction": "ingress", "exchange": "crd-order-select", "outcome": "refused"},
+				"ExchangeLatency":       {"direction": "ingress", "exchange": "crd-order-select"},
+				"ExchangeRefused":       {"direction": "ingress", "rule": "audit", "by": "authorization-framework"},
+				"ExchangeRefusedByRule": {"rule": "audit"},
+			},
+		},
+		{
 			name: "values outside the closed lists",
 			rec: engine.ExchangeRecord{Direction: "sideways", Exchange: "caller-chosen", Outcome: "made-up",
 				Backend: &engine.BackendCall{Latency: time.Millisecond, ErrorClass: "novel"}},
@@ -407,11 +421,16 @@ func TestExchangeMetricBound(t *testing.T) {
 					hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: o, Backend: &engine.BackendCall{Latency: time.Millisecond, ErrorClass: cl}})
 				}
 			}
-			// The additions: every refusal rule and party, every stage, and
-			// both sizes.
+			// The additions: every refusal rule and party, at every refusal
+			// stage (none, which no EMF line carries, so it adds no series:
+			// a build-stage fidelity refusal only leaves out its
+			// ExchangeRefusedByRule line), every latency stage, and both
+			// sizes.
 			for _, rule := range append(engine.RefusalRules, "junk") {
 				for _, by := range append(engine.RefusalParties, "junk") {
-					hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: engine.ExchangeRefused, Rule: rule, RefusedBy: by})
+					for _, stage := range append(append([]string{""}, recording.RefusalStages...), "junk") {
+						hook(engine.ExchangeRecord{Direction: d, Exchange: x, Outcome: engine.ExchangeRefused, Rule: rule, RefusedBy: by, RefusalStage: stage})
+					}
 				}
 			}
 			n := int64(1)
@@ -435,8 +454,8 @@ func TestExchangeMetricBound(t *testing.T) {
 	}
 	// The count RUNNING.md states for today's lists, in a release build (a
 	// test profile's legs add their own series).
-	if !toyProfileBuild && exchangeSeriesBound != 647 {
-		t.Fatalf("exchangeSeriesBound=%d; update the bound in docs/RUNNING.md \"Hosted tenant exchange metrics\" and this pin", exchangeSeriesBound)
+	if !toyProfileBuild && exchangeSeriesBound != 694 {
+		t.Fatalf("exchangeSeriesBound=%d; update the bound in the platform's running guide (\"Hosted tenant exchange metrics\") and this pin", exchangeSeriesBound)
 	}
 }
 
@@ -483,10 +502,10 @@ func TestConformanceMetricBound(t *testing.T) {
 		t.Fatalf("distinct series=%d, conformanceSeriesBound=%d", len(series), conformanceSeriesBound)
 	}
 	// The counts RUNNING.md states for today's lists, in a release build:
-	// this bound, and every series the additions add to the 311 before them.
-	if !toyProfileBuild && (conformanceSeriesBound != 225 || exchangeSeriesBound-311+conformanceSeriesBound != 561) {
-		t.Fatalf("conformanceSeriesBound=%d, additions=%d; update the bounds in docs/RUNNING.md \"Hosted tenant exchange metrics\" and these pins",
-			conformanceSeriesBound, exchangeSeriesBound-311+conformanceSeriesBound)
+	// this bound, and every series the additions add to the 342 before them.
+	if !toyProfileBuild && (conformanceSeriesBound != 225 || exchangeSeriesBound-342+conformanceSeriesBound != 577) {
+		t.Fatalf("conformanceSeriesBound=%d, additions=%d; update the bounds in the platform's running guide (\"Hosted tenant exchange metrics\") and these pins",
+			conformanceSeriesBound, exchangeSeriesBound-342+conformanceSeriesBound)
 	}
 }
 

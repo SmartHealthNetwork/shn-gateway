@@ -372,7 +372,7 @@ func TestHandleHomeOxygen(t *testing.T) {
 	clock := func() time.Time { return time.Unix(1700000000, 0).UTC() }
 
 	base := newCensusSoR()
-	// MBR-OX is a FHIR-store seed persona (internal/fhirseed) and, as of 8408638, also lives in
+	// MBR-OX is a FHIR-store seed persona (the platform seeder) and, as of 8408638, also lives in
 	// the engine's censusPersonas census (payer-side crd-order-dispatch bind) with the same demo
 	// values — either source yields the same PCI. Derive it the same way the SoR does (member +
 	// birthDate + familyName).
@@ -502,8 +502,8 @@ func TestHandleHomeOxygen(t *testing.T) {
 	}
 }
 
-// buildHomeOxygenDeviceRequest mirrors fhirmap.BuildDeviceRequest's shape (E0431 +
-// performer) without importing internal/fhirmap into the engine test — an inline JSON
+// buildHomeOxygenDeviceRequest mirrors the platform FHIR mapping's BuildDeviceRequest shape (E0431 +
+// performer) without importing that mapping into the engine test — an inline JSON
 // fixture matching the seeded order is sufficient for the hermetic chain.
 func buildHomeOxygenDeviceRequest(id, patientRef, performerRef string) ([]byte, error) {
 	dr := map[string]any{

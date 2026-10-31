@@ -136,7 +136,7 @@ func certifyAt(t *testing.T, v shnsdk.Validator, line string, payload []byte) (L
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, unchecked := certificationUnchecked(res, payload, line, profile)
+	_, _, unchecked := certificationUnchecked(res, payload, line, profile)
 	return got, unchecked
 }
 
@@ -506,5 +506,33 @@ func TestCertificationClaimExceptionScope(t *testing.T) {
 				t.Fatalf("the same miss attributed to both profiles: %+v unchecked=%v, want invalid", got, unchecked)
 			}
 		})
+	}
+}
+
+// Through a certification run: the 2.1 lane answers a regex check it could
+// not run, alone; the 2.2 lane the same beside a structural error. The first
+// is unavailable and never certified, the second invalid.
+func TestCertificationRunRegexCheckCouldNotRun(t *testing.T) {
+	payload := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse"}}]}`)
+	issue := func(sev, id string) map[string]any {
+		return map[string]any{"severity": sev, "code": "processing", "expression": []any{regexTimeoutURL},
+			"details": map[string]any{"coding": []any{map[string]any{"system": "http://hl7.org/fhir/java-core-messageId", "code": id}}}}
+	}
+	g := certificationGatewayByLine(t, map[string]shnsdk.Validator{
+		"2.0": &shnsdk.FakeValidator{},
+		"2.1": serveOutcome(t, outcomeIssues{issue("error", regexCheckCouldNotRun)}),
+		"2.2": serveOutcome(t, outcomeIssues{issue("error", regexCheckCouldNotRun), issue("error", "Validation_VAL_Profile_Minimum")}),
+	}, nil)
+	certificationSubmitPayload(g, "consumers", payload)
+	certificationFlush(t, g)
+	e := g.CertificationEvidenceForTest()[0]
+	if slices.Contains(e.Certified, "2.1") || slices.Contains(e.Certified, "2.2") {
+		t.Fatalf("a lane with a regex check that could not run certified: %v", e.Certified)
+	}
+	if got := laneVerdict(t, e, "2.1"); got.State != "unavailable" || got.Valid || got.Error != "a primitive regex check could not run" {
+		t.Fatalf("2.1: %+v, want unavailable for the regex check", got)
+	}
+	if got := laneVerdict(t, e, "2.2"); got.State != "invalid" || got.Valid {
+		t.Fatalf("2.2: %+v, want invalid", got)
 	}
 }

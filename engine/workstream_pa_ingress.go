@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -44,6 +43,12 @@ func prefetchValues(prefetch map[string][]byte) [][]byte {
 	return out
 }
 
+// noCoverageInRequestOrSoR refuses a request with no coverage to route by when
+// the system of record holds the member: a null coverage prefetch or parameter,
+// or none the system holds. The protocol tells partners that this reason begins
+// the refusal, so its text is pinned byte for byte.
+const noCoverageInRequestOrSoR = "no coverage in request or system of record"
+
 // crdIngressRecipient routes a prepared CDS Hooks request by the coverage it
 // carries (FR-G40; no default): a bare Coverage or a Bundle of Coverages that
 // name one payer. The payer's Organization is looked up among the request's
@@ -65,7 +70,7 @@ func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRe
 	case !carried || string(bytes.TrimSpace(coverage)) == "null":
 		// CDS Hooks' 412: the service could not obtain the data the request
 		// left out (a null coverage prefetch, or none the system holds).
-		return "", http.StatusPreconditionFailed, "no coverage in request or system of record"
+		return "", http.StatusPreconditionFailed, noCoverageInRequestOrSoR
 	}
 	// The payor is resolved among the prefetch values first (a coverage the
 	// system of record supplied among them, with the records its search
@@ -177,9 +182,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	if !moduleCRDCallback(w, builder, body) {
@@ -190,7 +194,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	// A hook of the wrong type is decided, once, with every other value of
 	// the wrong type when the request is read for its subject below.
-	err = decodeMessage(body, &head)
+	err := decodeMessage(body, &head)
 	if err != nil && !valueTypeError(err) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse cds request failed"})
 		return
@@ -368,9 +372,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	prepared, status, msg := g.prepareDTRPackageRequest(r.Context(), body)
@@ -489,9 +492,8 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if g.ingressAuthRefused(w, r) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	// F-PB-INGRESS: discriminate $submit vs amended re-POST. A conformant $submit carrying
@@ -700,10 +702,16 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	} else if res, perr := shnsdk.ParseClaimResponse(crJSON); perr == nil && res.Outcome != "" {
 		outcome = res.Outcome // approved | denied
 	}
+	// Near-relay: the payer's Bundle as it arrived, apart from a pend's
+	// documentation return address, re-keyed to the network (E-10).
+	answer, err := g.pendReturnRekey(r.Context(), crJSON, "application/fhir+json", recipient)
+	if err != nil {
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
+		refusePendRekey(w, r, err)
+		return
+	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	// Near-relay: return the validated payer Bundle verbatim.
-	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json",
-		relay.Exact(relay.NewBody(crJSON, relay.OriginPeerFrame), "application/fhir+json"),
+	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json", answer,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

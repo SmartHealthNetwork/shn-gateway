@@ -78,7 +78,7 @@ func TestFenceConformantPASUpdate_SubjectSwap_Rejected(t *testing.T) {
 // TestFenceResponseSubject_Eligibility is the direct rejection-test for the (C) fence's
 // coverage-eligibility arm: a CoverageEligibilityResponse whose
 // patient does not match the bound request patient must 403. This is the arm's OWN unit
-// test — TestAdversarial_ResponseSubjectSwap_Eligibility (test/adversarial) proves a
+// test — TestAdversarial_ResponseSubjectSwap_Eligibility (the platform's adversarial suite) proves a
 // DIFFERENT, complementary property (the promoted handler never lets an injected
 // occupant reach this leg at all, so the fence has nothing to catch there); it does not
 // exercise fenceResponseSubject's "coverage-eligibility" case directly, so it cannot

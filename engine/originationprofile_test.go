@@ -250,6 +250,10 @@ var providerOtherRoutes = []string{
 	"POST /Claim/$submit",
 	"POST /Claim/$inquire",
 	"POST /CoverageEligibilityRequest/$submit",
+	"POST /$submit-attachment",
+	"POST /cdex/payer/{payer}",
+	"POST /cdex/payer/{payer}/$submit-attachment",
+	"GET /cdex/payers",
 	"POST /Task",
 	"GET /metadata",
 	"POST /oauth/token",
@@ -292,8 +296,17 @@ var otherRoleRoutes = map[string][]string{
 //     moduleRoutesMethodBodies, so neither registry decides anything about
 //     which routes mount;
 //   - readsClaimFacts is called once in the package, by originationRoutes,
-//     on the routes it declares originating, and requireScenarioCaller once, by
-//     routes, on the routes declared as the operator surface;
+//     on the routes it declares originating, requireScenarioCaller once, by
+//     routes, on the routes declared as the operator surface, and
+//     recordExchange only by ingressRoute, inboundRoute and routes (on the
+//     routes declared with an exchange route);
+//   - on-behalf building's routes are its static table, originationRouteTable
+//     (originationTableFaults): each row a pattern literal, an originates
+//     literal and a method of the gateway; originationRoutes, which mounts it,
+//     and moduleOne.exchangeRoutes, which names its exchange routes, are
+//     exactly originationRoutesBody and moduleOneExchangeRoutesBody, so an
+//     originating row, and only one, reads the Claim facts and records its
+//     exchange; the table is named nowhere else;
 //   - in a declaration every route pattern is a string literal, given to a
 //     local closure or as a mountedRoute's pattern, and it is declared
 //     originating (its handler is readsClaimFacts over its own, directly or
@@ -306,7 +319,10 @@ var otherRoleRoutes = map[string][]string{
 //
 // By running every declaration for every role, under every condition that
 // gates a route: every /scenario route and no other is mounted behind
-// requireScenarioCaller, and only with a declared origination profile, a route a role mounts is declared once, each piece
+// requireScenarioCaller, and only with a declared origination profile; a
+// route is declared with an exchange route exactly when it is an originating
+// /scenario route, and that name is its originationExchangeRoute, one of
+// ExchangeRoutes, named by no other route; a route a role mounts is declared once, each piece
 // declares only its own routes (the core its inbound, on-behalf building
 // /scenario/*, the workstream adapters the rest), and every pattern a
 // piece's source names is mounted by that piece under some driven condition,
@@ -334,7 +350,10 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		t.Fatalf("parsed %d files; the package has more", len(files))
 	}
 
-	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "fqsRoutes": "fqs", "originationRoutes": "origination"}
+	declarations := map[string]string{"coreRoutes": "core", "paRoutes": "pa", "fqsRoutes": "fqs"}
+	// pinnedDeclarations are declarations whose whole body is pinned: on-behalf
+	// building's mounts its static table, read by originationTableFaults.
+	pinnedDeclarations := map[string]string{"originationRoutes": originationRoutesBody}
 	// mountable are what routes mounts: the core's declaration, and the
 	// workstream and module registries' routes.
 	mountable := map[string]bool{"coreRoutes": true, "workstreamRoutes": true, "moduleRoutes": true}
@@ -374,7 +393,11 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		return ok && (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && len(call.Args) == 2
 	}
-	var literals []declaredRoute
+	literals, tableFaults := originationTableFaults(fset, files)
+	for _, f := range tableFaults {
+		t.Error(f)
+	}
+	pinnedBodies := map[string]int{}
 	routesFuncs, handlers, muxRegistrations, mountLists, registryBodies, adapterBodies := 0, 0, 0, 0, 0, 0
 	moduleRegistryBodies, moduleBodies := 0, 0
 	moduleTypes := map[string]bool{}
@@ -408,6 +431,12 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			}
 			if piece, ok := declarations[method]; ok {
 				literals = append(literals, readRouteDeclaration(t, fset, fn, recv, piece, gatewayFields)...)
+			}
+			if want, ok := pinnedDeclarations[method]; ok {
+				pinnedBodies[method]++
+				if err := bodyIs(fset, fn, strings.ReplaceAll(want, "g.", recv+".")); err != nil {
+					t.Errorf("%s: %s %v", fset.Position(fn.Pos()), method, err)
+				}
 			}
 			// signature is where mountedRoute may be named as a type alone: the
 			// registries' routes and the workstream adapters' and modules'
@@ -484,7 +513,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					}
 				case *ast.Ident:
 					inSignature := signature != nil && x.Pos() >= signature.Pos() && x.End() <= signature.End()
-					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" && !inSignature && !inOriginationField(stack) {
+					if x.Name == "mountedRoute" && method != "routes" && declarations[method] == "" && pinnedDeclarations[method] == "" && !inSignature && !inOriginationField(stack) {
 						t.Errorf("%s: mountedRoute is named outside its type, routes and the route declarations", fset.Position(x.Pos()))
 					}
 				case *ast.SelectorExpr:
@@ -493,6 +522,11 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 							t.Errorf("%s: %s is used outside %s", fset.Position(x.Pos()), x.Sel.Name, wantIn)
 						}
 						guards[x.Sel.Name]++
+					}
+					if x.Sel.Name == "recordExchange" {
+						if call, isCall := stack[len(stack)-2].(*ast.CallExpr); !isCall || call.Fun != x || !map[string]bool{"ingressRoute": true, "inboundRoute": true, "routes": true}[method] {
+							t.Errorf("%s: recordExchange is used outside ingressRoute, inboundRoute and routes", fset.Position(x.Pos()))
+						}
 					}
 				case *ast.CompositeLit:
 					if method != "routes" {
@@ -559,6 +593,11 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 	if mountLists != 1 {
 		t.Errorf("routes builds %d lists of declarations, want one", mountLists)
 	}
+	for name := range pinnedDeclarations {
+		if pinnedBodies[name] != 1 {
+			t.Errorf("found %d %s, want 1", pinnedBodies[name], name)
+		}
+	}
 	for g, in := range map[string]string{"readsClaimFacts": "originationRoutes", "requireScenarioCaller": "routes"} {
 		if guards[g] != 1 {
 			t.Errorf("%s is called %d times in the package, want once (by %s)", g, guards[g], in)
@@ -604,7 +643,8 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 		}
 	}
 	got := map[string]bool{}
-	produced := map[string]bool{} // "piece pattern"
+	produced := map[string]bool{}        // "piece pattern"
+	exchangeNames := map[string]string{} // exchange route -> pattern
 	for _, role := range []string{"provider", "payer", "facility", "phg"} {
 		for _, c := range everyRouteCondition() {
 			g := routeGateway(role, c)
@@ -644,6 +684,19 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					if rt.operator != (piece == "origination") {
 						t.Errorf("%s under %s is mounted operator=%v, want it behind requireScenarioCaller exactly when it is /scenario", key, c, rt.operator)
 					}
+					// An originating /scenario route, and only one, records its
+					// exchange, under its own closed route name.
+					if records := piece == "origination" && originating[rt.pattern]; (rt.exchangeRoute != "") != records {
+						t.Errorf("%s under %s is declared with exchange route %q, want one exactly when it originates", key, c, rt.exchangeRoute)
+					} else if records {
+						if rt.exchangeRoute != originationExchangeRoute(rt.pattern) || !slices.Contains(ExchangeRoutes, rt.exchangeRoute) || rt.exchangeRoute == ExchangeOther {
+							t.Errorf("%s records route %q, want its originationExchangeRoute %q, one of ExchangeRoutes", key, rt.exchangeRoute, originationExchangeRoute(rt.pattern))
+						}
+						if other, dup := exchangeNames[rt.exchangeRoute]; dup && other != rt.pattern {
+							t.Errorf("%s and %s record the same route %q", rt.pattern, other, rt.exchangeRoute)
+						}
+						exchangeNames[rt.exchangeRoute] = rt.pattern
+					}
 					got[key] = true
 				}
 			}
@@ -659,6 +712,12 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 			t.Errorf("%s is classified but no declaration mounts it", key)
 		}
 	}
+	// Every exchange route a module names is recorded by a route it mounts.
+	for _, name := range moduleExchangeRouteNames() {
+		if _, ok := exchangeNames[name]; !ok {
+			t.Errorf("module exchange route %q is recorded by no mounted route", name)
+		}
+	}
 	for _, l := range literals {
 		if !produced[l.piece+" "+l.pattern] {
 			t.Errorf("%s: %s declares %s under a role or condition this test does not drive, or this test does not run the %s declaration", l.pos, l.piece, l.pattern, l.piece)
@@ -670,7 +729,7 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 // the same ones the operator surface.
 func sameRoutes(a, b []mountedRoute) bool {
 	return slices.EqualFunc(a, b, func(x, y mountedRoute) bool {
-		return x.pattern == y.pattern && x.operator == y.operator && (x.handler == nil) == (y.handler == nil)
+		return x.pattern == y.pattern && x.operator == y.operator && x.exchangeRoute == y.exchangeRoute && (x.handler == nil) == (y.handler == nil)
 	})
 }
 
@@ -904,6 +963,194 @@ func readRouteDeclaration(t *testing.T, fset *token.FileSet, fn *ast.FuncDecl, r
 		return true
 	})
 	return out
+}
+
+// originationRoutesBody is (*Gateway).originationRoutes' whole body: the
+// profile check, the role and profile gate, and the table mounted, each row the
+// operator surface over its own handler, an originating row reading the Claim
+// facts and recording its exchange under its exchange route, any other doing
+// neither.
+const originationRoutesBody = `{
+	if err := checkOriginationProfile(g.cfg.OriginationProfile); err != nil {
+		return nil, err
+	}
+	if role != "provider" || g.cfg.OriginationProfile == "" {
+		return nil, nil
+	}
+	var out []mountedRoute
+	for _, rt := range originationRouteTable {
+		h := func(w http.ResponseWriter, r *http.Request) { rt.handler(g, w, r) }
+		if !rt.originates {
+			out = append(out, mountedRoute{pattern: rt.pattern, handler: h, operator: true, credential: carriesCredential})
+			continue
+		}
+		out = append(out, mountedRoute{pattern: rt.pattern, handler: g.readsClaimFacts(h), operator: true, exchangeRoute: originationExchangeRoute(rt.pattern), credential: carriesCredential})
+	}
+	return out, nil
+}`
+
+// moduleOneExchangeRoutesBody is moduleOne.exchangeRoutes' whole body: the
+// exchange route of every originating row of the table, and no other.
+const moduleOneExchangeRoutesBody = `{
+	var out []string
+	for _, rt := range originationRouteTable {
+		if rt.originates {
+			out = append(out, originationExchangeRoute(rt.pattern))
+		}
+	}
+	return out
+}`
+
+// originationTableFaults reads on-behalf building's route table from files:
+// the one originationRouteTable, a []originationRoute literal whose every row
+// names exactly a pattern (a route pattern literal), originates (true or
+// false) and a handler ((*Gateway).<method>), each with its field name. It
+// returns the routes the table declares, each the operator surface (as
+// originationRoutesBody mounts it), and the faults: a row it cannot read, a
+// moduleOne.exchangeRoutes other than moduleOneExchangeRoutesBody, and the
+// table named anywhere but its declaration, originationRoutes and
+// moduleOne.exchangeRoutes.
+func originationTableFaults(fset *token.FileSet, files []*ast.File) ([]declaredRoute, []string) {
+	var out []declaredRoute
+	var faults []string
+	fault := func(n ast.Node, msg string) {
+		faults = append(faults, fset.Position(n.Pos()).String()+": "+msg)
+	}
+	tables, exchangeRoutes := 0, 0
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
+				for _, spec := range gd.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "originationRouteTable" {
+						continue
+					}
+					tables++
+					lit := originationTableLiteral(vs)
+					if lit == nil {
+						fault(vs, "originationRouteTable is not a []originationRoute literal")
+						continue
+					}
+					for _, e := range lit.Elts {
+						row, ok := e.(*ast.CompositeLit)
+						if !ok || row.Type != nil {
+							fault(e, "an originationRouteTable row is not an originationRoute literal")
+							continue
+						}
+						var pattern string
+						var originates, hasPattern, hasOriginates, hasHandler bool
+						for _, f := range row.Elts {
+							kv, _ := f.(*ast.KeyValueExpr)
+							var key *ast.Ident
+							if kv != nil {
+								key, _ = kv.Key.(*ast.Ident)
+							}
+							if key == nil {
+								fault(f, "an originationRouteTable row is not written with field names")
+								continue
+							}
+							switch key.Name {
+							case "pattern":
+								bl, ok := kv.Value.(*ast.BasicLit)
+								v := ""
+								if ok && bl.Kind == token.STRING {
+									v, _ = strconv.Unquote(bl.Value)
+								}
+								if !routePatternLit.MatchString(v) {
+									fault(kv.Value, "an originationRouteTable pattern is not a route pattern literal")
+									continue
+								}
+								pattern, hasPattern = v, true
+							case "originates":
+								id, ok := kv.Value.(*ast.Ident)
+								if !ok || (id.Name != "true" && id.Name != "false") {
+									fault(kv.Value, "an originationRouteTable row declares originates other than as a literal")
+									continue
+								}
+								originates, hasOriginates = id.Name == "true", true
+							case "handler":
+								if !isGatewayMethodExpr(kv.Value) {
+									fault(kv.Value, "an originationRouteTable handler is not a method of the gateway, (*Gateway).<method>")
+									continue
+								}
+								hasHandler = true
+							default:
+								fault(kv, "an originationRouteTable row names "+key.Name+", which is not pattern, originates or handler")
+							}
+						}
+						if !hasPattern || !hasOriginates || !hasHandler {
+							fault(row, "an originationRouteTable row does not name its pattern, originates and handler")
+							continue
+						}
+						out = append(out, declaredRoute{piece: "origination", pattern: pattern, pos: fset.Position(row.Pos()).String(), originates: originates, operator: true})
+					}
+				}
+				// The table's own declaration is not a use.
+				continue
+			}
+			fn, _ := decl.(*ast.FuncDecl)
+			method, _ := gatewayMethod(fn)
+			isExchangeRoutes := fn != nil && fn.Recv != nil && len(fn.Recv.List) == 1 && receiverType(fn) == "moduleOne" && fn.Name.Name == "exchangeRoutes"
+			if isExchangeRoutes {
+				exchangeRoutes++
+				if err := bodyIs(fset, fn, moduleOneExchangeRoutesBody); err != nil {
+					fault(fn, "moduleOne.exchangeRoutes "+err.Error())
+				}
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == "originationRouteTable" && method != "originationRoutes" && !isExchangeRoutes {
+					fault(id, "originationRouteTable is named other than by originationRoutes and moduleOne.exchangeRoutes")
+				}
+				return true
+			})
+		}
+	}
+	if tables != 1 {
+		faults = append(faults, fmt.Sprintf("found %d originationRouteTable declarations, want 1", tables))
+	}
+	if exchangeRoutes != 1 {
+		faults = append(faults, fmt.Sprintf("found %d moduleOne.exchangeRoutes methods, want 1", exchangeRoutes))
+	}
+	return out, faults
+}
+
+// originationTableLiteral is vs's value when it is one []originationRoute
+// literal, else nil.
+func originationTableLiteral(vs *ast.ValueSpec) *ast.CompositeLit {
+	if len(vs.Values) != 1 {
+		return nil
+	}
+	lit, ok := vs.Values[0].(*ast.CompositeLit)
+	if !ok {
+		return nil
+	}
+	arr, ok := lit.Type.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return nil
+	}
+	if elt, ok := arr.Elt.(*ast.Ident); !ok || elt.Name != "originationRoute" {
+		return nil
+	}
+	return lit
+}
+
+// isGatewayMethodExpr reports whether e is a method expression of *Gateway,
+// (*Gateway).<method>.
+func isGatewayMethodExpr(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	paren, ok := sel.X.(*ast.ParenExpr)
+	if !ok {
+		return false
+	}
+	star, ok := paren.X.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	id, ok := star.X.(*ast.Ident)
+	return ok && id.Name == "Gateway"
 }
 
 // gatewayMethod is fn's name and its receiver's name, when fn is a method of
@@ -1423,6 +1670,92 @@ func TestRouteFence_RegistryBodiesArePinned(t *testing.T) {
 		"a module with no pinned body": module("moduleTwo", "{ return nil }"),
 	} {
 		if err == nil {
+			t.Errorf("%s: the fence accepts it", name)
+		}
+	}
+}
+
+// TestRouteFence_OriginationTableIsRead: originationTableFaults reads module
+// 1's static route table and its exchangeRoutes method exactly as pinned, and
+// refuses every way of declaring a row it cannot classify, of naming an
+// exchange route other than an originating row's, or of using the table
+// elsewhere; originationRoutes passes the fence only as originationRoutesBody,
+// so a local row cannot record its exchange and an originating row cannot skip
+// it.
+func TestRouteFence_OriginationTableIsRead(t *testing.T) {
+	read := func(src string) ([]declaredRoute, []string) {
+		t.Helper()
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "probe.go", "package engine\n\n"+src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return originationTableFaults(fset, []*ast.File{f})
+	}
+	const table = "var originationRouteTable = []originationRoute{\n" +
+		"\t{pattern: \"POST /scenario/uc01\", originates: true, handler: (*Gateway).handleScenario},\n" +
+		"\t{pattern: \"POST /scenario/reset\", originates: false, handler: (*Gateway).handleScenarioReset},\n" +
+		"}\n"
+	const exchangeRoutes = "func (moduleOne) exchangeRoutes() []string " + moduleOneExchangeRoutesBody + "\n"
+	const mount = "func (g *Gateway) originationRoutes(role string) ([]mountedRoute, error) " + originationRoutesBody + "\n"
+	got, faults := read(table + exchangeRoutes + mount)
+	if len(faults) != 0 {
+		t.Fatalf("the pinned table, mount and exchangeRoutes are refused: %v", faults)
+	}
+	if len(got) != 2 || got[0].pattern != "POST /scenario/uc01" || !got[0].originates || !got[0].operator || got[1].originates || !got[1].operator {
+		t.Fatalf("read %+v, want uc01 originating and reset local, both the operator surface", got)
+	}
+	row := func(old, new string) string { return strings.Replace(table, old, new, 1) + exchangeRoutes }
+	for name, r := range map[string]struct{ src, want string }{
+		"a pattern from a constant":      {row(`pattern: "POST /scenario/uc01"`, "pattern: uc01Pattern"), "not a route pattern literal"},
+		"a string that is not a pattern": {row(`"POST /scenario/uc01"`, `"scenario-uc01"`), "not a route pattern literal"},
+		"originates from a variable":     {row("originates: true", "originates: recorded"), "originates other than as a literal"},
+		"a handler closure":              {row("handler: (*Gateway).handleScenario", "handler: func(g *Gateway, w http.ResponseWriter, r *http.Request) {}"), "not a method of the gateway"},
+		"another type's method":          {row("(*Gateway).handleScenario", "(*nativeResponder).handleScenario"), "not a method of the gateway"},
+		"a row with another field":       {row("originates: false,", "originates: false, records: true,"), "names records"},
+		"a row without originates":       {row("originates: true, ", ""), "does not name its pattern, originates and handler"},
+		"a row without field names":      {row(`{pattern: "POST /scenario/uc01", originates: true, handler: (*Gateway).handleScenario}`, `{"POST /scenario/uc01", true, (*Gateway).handleScenario}`), "not written with field names"},
+		"a table of another type":        {strings.Replace(table, "[]originationRoute{", "[]mountedRoute{", 1) + exchangeRoutes, "not a []originationRoute literal"},
+		"no table":                       {exchangeRoutes, "found 0 originationRouteTable"},
+		"two tables":                     {table + table + exchangeRoutes, "found 2 originationRouteTable"},
+		"a method edits a row":           {table + exchangeRoutes + "func (g *Gateway) open() { originationRouteTable[1].originates = true }\n", "named other than by originationRoutes"},
+		"a function appends a row":       {table + exchangeRoutes + "func init() { originationRouteTable = append(originationRouteTable, originationRoute{}) }\n", "named other than by originationRoutes"},
+		"no exchangeRoutes":              {table, "found 0 moduleOne.exchangeRoutes"},
+		"exchangeRoutes names every row": {table + "func (moduleOne) exchangeRoutes() (out []string) {\n\tfor _, rt := range originationRouteTable {\n\t\tout = append(out, originationExchangeRoute(rt.pattern))\n\t}\n\treturn out\n}\n", "moduleOne.exchangeRoutes is not exactly"},
+	} {
+		_, faults := read(r.src)
+		if !slices.ContainsFunc(faults, func(f string) bool { return strings.Contains(f, r.want) }) {
+			t.Errorf("%s: faults %v, want one containing %q", name, faults, r.want)
+		}
+	}
+
+	parse := func(body string) *ast.FuncDecl {
+		t.Helper()
+		f, err := parser.ParseFile(token.NewFileSet(), "probe.go", "package engine\n\nfunc (g *Gateway) originationRoutes(role string) ([]mountedRoute, error) "+body, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.Decls[0].(*ast.FuncDecl)
+	}
+	fset := token.NewFileSet()
+	if err := bodyIs(fset, parse(originationRoutesBody), originationRoutesBody); err != nil {
+		t.Fatalf("the pinned originationRoutes body is refused: %v", err)
+	}
+	const recorded = "out = append(out, mountedRoute{pattern: rt.pattern, handler: g.readsClaimFacts(h), operator: true, exchangeRoute: originationExchangeRoute(rt.pattern), credential: carriesCredential})"
+	const local = "out = append(out, mountedRoute{pattern: rt.pattern, handler: h, operator: true, credential: carriesCredential})"
+	for name, body := range map[string]string{
+		"a local row records its exchange":   strings.Replace(originationRoutesBody, local, "out = append(out, mountedRoute{pattern: rt.pattern, handler: h, operator: true, exchangeRoute: originationExchangeRoute(rt.pattern), credential: carriesCredential})", 1),
+		"an originating row records nothing": strings.Replace(originationRoutesBody, recorded, "out = append(out, mountedRoute{pattern: rt.pattern, handler: g.readsClaimFacts(h), operator: true, credential: carriesCredential})", 1),
+		"an originating row names its own":   strings.Replace(originationRoutesBody, "exchangeRoute: originationExchangeRoute(rt.pattern)", `exchangeRoute: "other"`, 1),
+		"an originating row reads no facts":  strings.Replace(originationRoutesBody, "handler: g.readsClaimFacts(h)", "handler: h", 1),
+		"a row leaves the operator surface":  strings.Replace(originationRoutesBody, "operator: true, credential: carriesCredential})\n\t\t\tcontinue", "operator: false, credential: carriesCredential})\n\t\t\tcontinue", 1),
+		"the mount gates on gateway state":   strings.Replace(originationRoutesBody, `role != "provider" ||`, `role != "provider" || g.cfg.HubAcceptsInvolved ||`, 1),
+		"the mount skips the profile check":  strings.Replace(originationRoutesBody, "if err := checkOriginationProfile(g.cfg.OriginationProfile); err != nil {\n\t\treturn nil, err\n\t}\n", "", 1),
+	} {
+		if body == originationRoutesBody {
+			t.Fatalf("%s: the probe does not change the pinned body", name)
+		}
+		if err := bodyIs(fset, parse(body), originationRoutesBody); err == nil {
 			t.Errorf("%s: the fence accepts it", name)
 		}
 	}

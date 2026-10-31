@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 )
 
 const eligibilitySubmitPath = "/CoverageEligibilityRequest/$submit"
@@ -244,6 +246,12 @@ func TestEligibilityIngress_RefusesWhatIsNoEligibilityRequest(t *testing.T) {
 	}
 	const unreadInput = "parse eligibility request failed: "
 	const unreadRouting = `"parse eligibility request failed"`
+	// nestedTo nests a member of the request so the body reaches depth (the
+	// request object counts one), with inner innermost.
+	nestedTo := func(depth int, inner string) []byte {
+		x := strings.Repeat(`{"a":`, depth-2) + inner + strings.Repeat(`}`, depth-2)
+		return bytes.Replace(cer, []byte(`"insurer":`), []byte(`"x":`+x+`,"insurer":`), 1)
+	}
 	for name, row := range map[string]struct {
 		body []byte
 		msg  string
@@ -257,10 +265,15 @@ func TestEligibilityIngress_RefusesWhatIsNoEligibilityRequest(t *testing.T) {
 		"Parameters holding a Claim": {eligibilityAsParameters(t, []byte(`{"resourceType":"Claim"}`)), unreadInput + "the resource parameter holds no CoverageEligibilityRequest"},
 		// The input is read one way only: a repeated member, or a member named
 		// only in another case, is not read as either.
-		"resource member repeated":                    {param(`{"name":"resource","resource":` + string(cer) + `,"resource":` + string(cer) + `}`), `eligibility request repeats the JSON member \"resource\" in parameter[0]: it can be read two ways, so it is not read`},
-		"resource member in another case":             {param(`{"name":"resource","Resource":` + string(cer) + `}`), `eligibility request names \"Resource\" for \"resource\": member names are case-sensitive, so the request names no patient to bind`},
-		"another parameter's name in another case":    {param(`{"Name":"other","valueString":"x"},{"name":"resource","resource":` + string(cer) + `}`), `eligibility request names \"Name\" for \"name\": member names are case-sensitive, so the request names no patient to bind`},
-		"insurer member repeated":                     {bytes.Replace(cer, []byte(`"insurer":`), []byte(`"insurer":{"display":"x"},"insurer":`), 1), `eligibility request repeats the JSON member \"insurer\" in the top-level object: it can be read two ways, so it is not read`},
+		"resource member repeated":                 {param(`{"name":"resource","resource":` + string(cer) + `,"resource":` + string(cer) + `}`), `eligibility request repeats the JSON member \"resource\" in parameter[0]: it can be read two ways, so it is not read`},
+		"resource member in another case":          {param(`{"name":"resource","Resource":` + string(cer) + `}`), `eligibility request names \"Resource\" for \"resource\": member names are case-sensitive, so the request names no patient to bind`},
+		"another parameter's name in another case": {param(`{"Name":"other","valueString":"x"},{"name":"resource","resource":` + string(cer) + `}`), `eligibility request names \"Name\" for \"name\": member names are case-sensitive, so the request names no patient to bind`},
+		"insurer member repeated":                  {bytes.Replace(cer, []byte(`"insurer":`), []byte(`"insurer":{"display":"x"},"insurer":`), 1), `eligibility request repeats the JSON member \"insurer\" in the top-level object: it can be read two ways, so it is not read`},
+		// A repeat is found however deep, up to encoding/json's own depth bound;
+		// a body nested past it is read by no decoder, so it is refused as any
+		// body the request reader cannot read, never as a repeat.
+		"a repeat nested to the depth bound":          {nestedTo(jsonmember.MaxDepth, `{"k":1,"k":2}`), "eligibility request repeats a member name: it can be read two ways, so it is not read"},
+		"a repeat nested past the depth bound":        {nestedTo(jsonmember.MaxDepth+1, `{"k":1,"k":2}`), unreadInput},
 		"insurer member in another case":              {bytes.Replace(cer, []byte(`"insurer":`), []byte(`"Insurer":`), 1), unreadRouting},
 		"request's resourceType in another case":      {bytes.Replace(cer, []byte(`"resourceType":"CoverageEligibilityRequest"`), []byte(`"RESOURCETYPE":"CoverageEligibilityRequest"`), 1), `eligibility request names \"RESOURCETYPE\" for \"resourceType\": member names are case-sensitive, so the request names no patient to bind`},
 		"input's resourceType in another case":        {bytes.Replace(eligibilityAsParameters(t, cer), []byte(`"resourceType":"Parameters"`), []byte(`"RESOURCETYPE":"Parameters"`), 1), `eligibility request names \"RESOURCETYPE\" for \"resourceType\": member names are case-sensitive, so the request names no patient to bind`},

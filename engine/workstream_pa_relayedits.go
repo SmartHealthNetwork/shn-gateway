@@ -1,7 +1,7 @@
 //go:build !shn_coreonly
 
 // workstream_pa_relayedits.go — the PA workstream's registered relay edits
-// (E-01 … E-09), the rows of package paedits. The registry, its kinds and its
+// (E-01 … E-10), the rows of package paedits. The registry, its kinds and its
 // closed-set check are core (engine/relay), and the core gathers the rows
 // (workstreams.go).
 package engine

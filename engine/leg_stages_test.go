@@ -212,9 +212,13 @@ func TestExchangeRecord_LegStagesLedger(t *testing.T) {
 }
 
 // When the answer, decided after the payer's system answered, cannot be
-// authorized, the requester still gets 502 authorization failed, and the
-// record and the log say why: the requester gone (cancelled), the call out
-// of time (timeout), a denial (auth), or no answer (unreachable).
+// authorized, the payer gateway answers the forward with its attested 502
+// (X-SHN-Delivered: yes: the system answered), and the record and the log
+// say why: the call out of time (timeout), a denial (auth), no answer
+// (unreachable), or any other failure (other), the Framework's refusal on the
+// audit rule included: the answer's own class list does not name rules. The
+// requester gone (cancelled) is said the same way, on the plain 502: nobody is
+// listening for an attestation.
 func TestExchangeRecord_AnswerErrorClass(t *testing.T) {
 	var logs bytes.Buffer
 	var mu sync.Mutex
@@ -235,6 +239,10 @@ func TestExchangeRecord_AnswerErrorClass(t *testing.T) {
 		ExchangeUnreachable: func(context.CancelFunc) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Header: http.Header{}}, nil
 		},
+		ExchangeOther: func(context.CancelFunc) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"error":"decision audit failed","rule":"audit"}`))}, nil
+		},
 	} {
 		t.Run(class, func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, EnforcementObserve)
@@ -249,8 +257,8 @@ func TestExchangeRecord_AnswerErrorClass(t *testing.T) {
 				return resp, err
 			}}}
 			ans := p.send(t, "crd-order-select", "", conformantCRD("MBR-COVERED", "72148"))
-			if ans.status != http.StatusBadGateway || !strings.Contains(string(ans.body), "authorization failed") {
-				t.Fatalf("answer %d %s: the Hub's answer changed", ans.status, ans.body)
+			if attested := class != BackendCancelled; ans.status != http.StatusBadGateway || ans.framed || (ans.header.Get(HubDeliveredHeader) == "yes") != attested {
+				t.Fatalf("answer %d %s (delivered %q), want the 502, attested %v", ans.status, ans.body, ans.header.Get(HubDeliveredHeader), attested)
 			}
 			rec := got.only(t)
 			if rec.AnswerError != class || rec.Backend == nil || rec.Backend.ErrorClass != "" {

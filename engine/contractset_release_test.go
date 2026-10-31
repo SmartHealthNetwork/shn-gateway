@@ -13,16 +13,13 @@ import (
 
 // TestContractSets_ReleaseBuildIsPAs pins the release build's contract sets
 // to what they were before the compiled-in workstreams supplied them: the
-// SDK's native set and default without pa.pdex@2.1, in the SDK's order, and no
-// test profile's contract.
+// SDK's native set and default, in the SDK's order, and no test profile's
+// contract.
 func TestContractSets_ReleaseBuildIsPAs(t *testing.T) {
-	strip := func(set []string) []string {
-		return slices.DeleteFunc(set, func(tok string) bool { return tok == shnsdk.ContractPAPDex21 })
-	}
-	if got, want := NativeContractVersions(), strip(shnsdk.NativeContractVersions()); !slices.Equal(got, want) {
+	if got, want := NativeContractVersions(), shnsdk.NativeContractVersions(); !slices.Equal(got, want) {
 		t.Errorf("NativeContractVersions() = %v, want %v", got, want)
 	}
-	if got, want := DefaultContractVersions(), strip(shnsdk.SupportedContractVersions()); !slices.Equal(got, want) {
+	if got, want := DefaultContractVersions(), shnsdk.SupportedContractVersions(); !slices.Equal(got, want) {
 		t.Errorf("DefaultContractVersions() = %v, want %v", got, want)
 	}
 	for _, tok := range append(NativeContractVersions(), DefaultContractVersions()...) {

@@ -321,6 +321,11 @@ func buildEligibilityInboundRequest(t *testing.T, gw *Gateway, cerJSON []byte, c
 	authzPub, authzPriv := genED25519(t)
 	gw.cfg.HubTransportPub = hubPub
 	gw.cfg.AuthzPub = authzPub
+	// One Framework: a gateway answering through the shared stub verifies its
+	// answer token against the same key before sealing it in.
+	if stub, ok := gw.cfg.Client.Transport.(*inboundAuthzStub); ok {
+		stub.authzPriv = authzPriv
+	}
 	// The requester is a registered holder that does not decode message
 	// frames, so a refusal reaches it as a bare status (PARTICIPANT_PROTOCOL
 	// §6.2 step 9) — the status each migrated site is pinned at. An

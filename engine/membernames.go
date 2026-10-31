@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 )
 
 // errNamedInAnotherCase is a request that names its type, its patient, the
@@ -26,59 +25,9 @@ func readsTwoWays(err error) bool {
 }
 
 // repeatsAName reports whether body repeats a member name in some object,
-// exactly or under case folding. The strict reader decides for a body it can
-// read. A body it refuses for its own limits (not well-formed UTF-8 or a lone
-// surrogate escape, or past its depth or token bound) is walked token by token
-// as encoding/json reads it, so a repeat is found wherever that reader would
-// read the body.
-func repeatsAName(body []byte) bool {
-	err := scanMessage(body)
-	if err == nil || errors.Is(err, relay.ErrDuplicateKey) {
-		return err != nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	type object struct {
-		names map[string]bool
-		// name is set when the next token is a member name or the object's end.
-		name bool
-	}
-	var open []*object // nil for an array
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return false
-		}
-		if n := len(open); n > 0 && open[n-1] != nil && open[n-1].name {
-			in := open[n-1]
-			if tok != json.Delim('}') {
-				s, _ := tok.(string)
-				k := foldedName(s)
-				if in.names[k] {
-					return true
-				}
-				in.names[k], in.name = true, false
-				continue
-			}
-			open = open[:n-1]
-		} else {
-			switch tok {
-			case json.Delim('{'):
-				open = append(open, &object{names: map[string]bool{}, name: true})
-				continue
-			case json.Delim('['):
-				open = append(open, nil)
-				continue
-			case json.Delim(']'):
-				open = open[:len(open)-1]
-			}
-		}
-		// A value has ended: the object holding it reads a name next.
-		if n := len(open); n > 0 && open[n-1] != nil {
-			open[n-1].name = true
-		}
-	}
-}
+// exactly or under case folding, wherever encoding/json would read it
+// (jsonmember.RepeatsAName).
+func repeatsAName(body []byte) bool { return jsonmember.RepeatsAName(body) }
 
 // resourceRepeatsAName reports whether body repeats a member name in a way a reader may
 // read two ways: exactly, in any object, or under case folding, in a FHIR resource (an
@@ -167,20 +116,5 @@ func resourceRepeatsAName(body []byte) bool {
 
 // foldedName maps name to a canonical form such that foldedName(a) ==
 // foldedName(b) exactly when strings.EqualFold(a, b), as the strict reader
-// folds names: each rune becomes the smallest rune of its simple
-// case-folding orbit.
-func foldedName(name string) string {
-	out := make([]byte, 0, len(name))
-	for _, r := range name {
-		for {
-			f := unicode.SimpleFold(r)
-			if f <= r {
-				r = f
-				break
-			}
-			r = f
-		}
-		out = utf8.AppendRune(out, r)
-	}
-	return string(out)
-}
+// folds names (jsonmember.FoldedName).
+func foldedName(name string) string { return jsonmember.FoldedName(name) }

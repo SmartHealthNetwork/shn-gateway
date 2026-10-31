@@ -9,6 +9,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,25 +53,27 @@ func TestNativePost_Unreachable_IsErrorReturn(t *testing.T) {
 	}
 }
 
-// TestNativePost_OverCapNon2xxBody_DegradesToError covers the relayBodyCap headroom check
-// an upstream non-2xx body too large to relay is NOT a relayable LegResult — it
-// degrades to a no-response-shaped fault (error return), same as build/dial/read.
-func TestNativePost_OverCapNon2xxBody_DegradesToError(t *testing.T) {
-	oversized := bytes.Repeat([]byte("a"), relayBodyCap+1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write(oversized)
-	}))
-	defer srv.Close()
-	n := &nativeResponder{client: srv.Client()}
-	up, lr, err := n.post(context.Background(), srv.URL, "/x", testRequest([]byte("{}")), "pas-claim", "PAS submit")
-	if err == nil {
-		t.Fatal("over-cap non-2xx body must be an error return, not a relayable LegResult")
-	}
-	if up.raw != nil {
-		t.Fatalf("expected nil body on over-cap fault, got %d bytes", len(up.raw))
-	}
-	if lr.Status != 0 {
-		t.Fatalf("over-cap fault must not carry a relayable Status, got %d", lr.Status)
+// TestNativePost_AnswerOverTheReadLimitIsRefusedForSize: an upstream answer,
+// 2xx or not, over what the gateway reads is NOT a relayable LegResult and is
+// never kept cut short: it is an error return the system answered
+// (errAnswerTooLarge), with no body. Whether a smaller answer fits the sealed
+// answer is decided when it is sealed (buildResponseLeg).
+func TestNativePost_AnswerOverTheReadLimitIsRefusedForSize(t *testing.T) {
+	oversized := bytes.Repeat([]byte("a"), maxPartnerBody+1)
+	for _, status := range []int{http.StatusOK, http.StatusBadGateway} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write(oversized)
+		}))
+		n := &nativeResponder{client: srv.Client()}
+		up, lr, err := n.post(context.Background(), srv.URL, "/x", testRequest([]byte("{}")), "pas-claim", "PAS submit")
+		srv.Close()
+		var uf *upstreamFailure
+		if !errors.Is(err, errAnswerTooLarge) || !errors.As(err, &uf) || !uf.sent {
+			t.Fatalf("%d: err %v, want the system's answer refused for size", status, err)
+		}
+		if up.raw != nil || lr.Status != 0 {
+			t.Fatalf("%d: kept %d bytes, status %d; want nothing relayable", status, len(up.raw), lr.Status)
+		}
 	}
 }

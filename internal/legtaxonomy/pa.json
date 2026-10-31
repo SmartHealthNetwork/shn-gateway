@@ -110,6 +110,20 @@
       "observe": false,
       "frameOperations": [],
       "advertise": true
+    },
+    {
+      "transactionType": "cdex-attachment-submit",
+      "stagedName": "pa.cdex-attachment-submit",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "cdex-attachment-submit"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "cdex-attachment-submit-response"},
+      "scope": "attachment-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.1.0"
     }
   ]
 }

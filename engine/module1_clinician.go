@@ -4,8 +4,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
 )
 
@@ -85,14 +87,43 @@ func (g *Gateway) requireStatedAnswer(w http.ResponseWriter, answer, recipient s
 }
 
 // refuseOwnBuild answers a request this gateway cannot build faithfully for
-// the participant: 422, recorded as the leg it would have sent failing and as
-// a fidelity refusal, as sealTransformed records its own.
+// the participant because a statement it needs is missing (from the request
+// or the participant's own records): 422, recorded as the leg it would have
+// sent failing and as a fidelity refusal at the build stage (refuseBuilder).
 func (g *Gateway) refuseOwnBuild(w http.ResponseWriter, recipient, legType, msg string) {
 	g.observe(ObserverEvent{
 		Kind: "leg.failed", Direction: "originate", LegType: legType,
 		Counterpart: recipient, Detail: msg,
 	})
 	refuseBuilder(w, msg)
+}
+
+// refuseBuildFailure answers a request this gateway could not build for the
+// participant, err the build's failure: 422 msg, as before, recorded by what
+// the failure is about. A statement or record of the participant's it cannot
+// build faithfully from (an ordering clinician named nowhere, an order record
+// it cannot read, a device history without the dispatched order) is a
+// fidelity refusal at the build stage (refuseOwnBuild); this gateway's own
+// assembly failing (reading the Coverage searchset it assembled, sealing the
+// questionnaire-package request) is one at the verify stage. The SDK
+// builder's own errors do not say yet which of the two they are, so they are
+// answered the same and recorded nothing here: the exchange's 4xx fallback
+// records them as rule other.
+func (g *Gateway) refuseBuildFailure(ctx context.Context, w http.ResponseWriter, recipient, legType, msg string, err error) {
+	var fault *buildFault
+	switch {
+	case errors.Is(err, errNoOrderingClinician), errors.As(err, &fault) && !fault.own:
+		g.refuseOwnBuild(w, recipient, legType, msg)
+	case errors.As(err, &fault):
+		g.observe(ObserverEvent{
+			Kind: "leg.failed", Direction: "originate", LegType: legType,
+			Counterpart: recipient, Detail: msg,
+		})
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageVerify)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+	default:
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+	}
 }
 
 // ValidNPI reports whether npi is an NPI: ten digits whose last is the NPI

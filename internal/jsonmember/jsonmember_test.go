@@ -38,3 +38,33 @@ func TestRepeatedMemberNamesTheMemberAndWhere(t *testing.T) {
 		t.Errorf("an offset inside a value named %q", p)
 	}
 }
+
+// A repeat is found however deep it is nested, up to encoding/json's own
+// bound (MaxDepth) and past the strict reader's; a body nested deeper is read
+// by no decoder, so it is no repeat, and the walk holds no more than MaxDepth
+// levels. Names equal under case folding repeat.
+func TestRepeatsAName_DepthBoundAndFolding(t *testing.T) {
+	nested := func(depth int, inner string) string {
+		// depth counts every open object and array, inner's included.
+		return strings.Repeat(`{"a":`, depth-1) + inner + strings.Repeat(`}`, depth-1)
+	}
+	for name, row := range map[string]struct {
+		body string
+		want bool
+	}{
+		"a repeat at the bound":          {nested(MaxDepth, `{"k":1,"k":2}`), true},
+		"a repeat past the bound":        {nested(MaxDepth+1, `{"k":1,"k":2}`), false},
+		"no repeat at the bound":         {nested(MaxDepth, `{"k":1}`), false},
+		"an array past the bound":        {nested(MaxDepth, `[{"k":1,"k":2}]`), false},
+		"a repeat under case folding":    {`{"Name":1,"nAME":2}`, true},
+		"names in sibling objects":       {`[{"k":1},{"k":2}]`, false},
+		"a repeat past a lone surrogate": {`{"s":"\ud800","k":1,"k":2}`, true},
+	} {
+		if got := RepeatsAName([]byte(row.body)); got != row.want {
+			t.Errorf("%s: RepeatsAName = %v, want %v", name, got, row.want)
+		}
+	}
+	if FoldedName("Name") != FoldedName("nAME") || FoldedName("name") == FoldedName("names") {
+		t.Error("FoldedName does not fold as EqualFold does")
+	}
+}

@@ -289,11 +289,11 @@ func TestEMFMetricCombinations_MON_R47(t *testing.T) {
 	}
 	// The most the exchange record's, conformance and in-flight metrics can
 	// write for one gateway, at today's lists in a release build: the
-	// exchange record's 311 series before the additions, and the additions'
-	// 561 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
+	// exchange record's 342 series before the additions, and the additions'
+	// 577 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
 	// The gateway's other EMF metrics have series of their own.
-	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 311+561 {
-		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 311+561)
+	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 342+577 {
+		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 342+577)
 	}
 }
 
@@ -484,7 +484,7 @@ var emfCostMixPins = map[string][4]int{
 // after, and their bytes, as hosted tenants write them (namespace SHN/Preview,
 // Env shn-preview, a Service of shn-cloud-acme); then the lines and bytes per
 // 1,000 exchanges for each stated mix. The figures are MONITORING.md's "What
-// EMF costs" and docs/RUNNING.md's: a change to a pin is a change to every
+// EMF costs" and the platform's running guide's: a change to a pin is a change to every
 // hosted tenant's EMF volume, so update the pin and the published figures
 // together.
 func TestEMFCost_MON_R47(t *testing.T) {

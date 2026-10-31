@@ -139,14 +139,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, err, "build bundle failed: "+err.Error())
-		return pendState{}, false
-	}
-	// The submission the resume amendment restates, recorded off the bytes it
-	// built and pinned in the pend state.
-	submitted, err := recordPASSubmission(bundleJSON)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
 		return pendState{}, false
 	}
 	// pasReports is the pended leg's own loss record: its Carried entries are
@@ -156,6 +149,16 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
+		return pendState{}, false
+	}
+	// The submission the resume amendment carries as its prior Claim, recorded
+	// off the bytes the leg sends (built and completed) and pinned in the pend
+	// state. The amendment is built at the same line, completed the same way
+	// and sent on the pinned route, so its prior-Claim entry reaches the payer
+	// as this Claim did.
+	submitted, err := recordPASSubmission(bundleJSON)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return pendState{}, false
 	}
 	// This helper owns the pas-claim submit leg wholesale, on the correlation it
@@ -247,7 +250,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 // Returns false iff it refused (and has already written the response).
 //
 // FAIL-CLOSED WHEN LIVE, by construction: the payload both resume sites hand
-// this guard is a FRESH build (BuildConformantClaimUpdateBundleAtLine from
+// this guard is a FRESH build (buildModuleOnePASUpdate, over
+// BuildConformantClaimUpdateBundleAtLineExact, from
 // st.qrJSON) and the only producers of shn-carried-content wrappers are the
 // transform Down steps — so once the readiness trigger fires (a carry
 // adjacency above the pinned target), a non-empty declared record + a
@@ -277,7 +281,7 @@ func (g *Gateway) guardPendCarry(w http.ResponseWriter, st pendState, route legR
 }
 
 // handleUC06 is the single-call clinician-attestation path (FR-16/17), preserved
-// for the harness + make smoke + conformance: run to PENDED, then resume to
+// for the harness + the platform's smoke gate + conformance: run to PENDED, then resume to
 // APPROVED with the clinician's answer, and optionally its npi, in one request.
 func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 	// The clinician's answer is the request's to state; its npi is one source
@@ -443,9 +447,9 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			// stated (the requester's own earlier statement, pinned at
 			// run-to-PENDED); its certificationType is always the resume
 			// request's (the builder refuses one required and not stated). The
-			// prior Claim it restates is the recorded submission's, read off the
-			// bytes the submission built — never a constant; the infoChanged
-			// marker is derived from it by the builder.
+			// prior Claim it carries is the submitted Claim, read off the bytes
+			// the submission's leg sent and carried as sent — never rebuilt; the
+			// infoChanged marker is derived from it by the builder.
 			PASClaimFacts:     amend.facts,
 			CertificationType: amend.certificationType,
 			PriorClaim:        st.submitted.prior,
@@ -454,7 +458,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			Pend: st.submitted.pendFor(targetLine),
 		}, st.requester)
 		if err != nil {
-			pasBuildFailure(w, err, "build update bundle failed")
+			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		// Carry-intact guard: BEFORE the chain runs (pasStep2122Up's restore cannot itself tell
@@ -545,7 +549,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 }
 
 // handleUC07 is the single-call patient-attestation path (FR-21), preserved for
-// the harness + make smoke + conformance.
+// the harness + the platform's smoke gate + conformance.
 func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 	// The patient's answer arrives in the caller's answer body, and a request
 	// that states none is refused. A malformed body is rejected.
@@ -731,9 +735,9 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			// stated (the requester's own earlier statement, pinned at
 			// run-to-PENDED); its certificationType is always the resume
 			// request's (the builder refuses one required and not stated). The
-			// prior Claim it restates is the recorded submission's, read off the
-			// bytes the submission built — never a constant; the infoChanged
-			// marker is derived from it by the builder.
+			// prior Claim it carries is the submitted Claim, read off the bytes
+			// the submission's leg sent and carried as sent — never rebuilt; the
+			// infoChanged marker is derived from it by the builder.
 			PASClaimFacts:     amend.facts,
 			CertificationType: amend.certificationType,
 			PriorClaim:        st.submitted.prior,
@@ -742,7 +746,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			Pend: st.submitted.pendFor(targetLine),
 		}, st.requester)
 		if err != nil {
-			pasBuildFailure(w, err, "build update bundle failed")
+			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		// The same pre-chain carry-intact guard completeClinician's sibling

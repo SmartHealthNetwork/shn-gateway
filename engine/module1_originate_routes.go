@@ -2,7 +2,10 @@
 
 package engine
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+)
 
 // moduleOne is on-behalf building as a module of the gateway (gatewayModule):
 // New builds its state, and routes() mounts its routes, through the module
@@ -50,15 +53,91 @@ func (g *Gateway) moduleOneState() *moduleOneState {
 	return st
 }
 
-// originationRoutes are on-behalf building's routes for role: the provider's
-// /scenario/* origination API. Module 1 runs only where the participant
-// declares it, by its origination profile (Config.OriginationProfile): with
-// none, no route here is mounted, and a /scenario path is the mux's own 404.
-// Every route that ORIGINATES (builds and sends a request of this gateway's
-// own) is marked so, and reads the Claim facts the request states
-// (readsClaimFacts); the routes that only read or drop this gateway's own
-// pended state (cancel, pending, reset) do not. Every route here is the
-// operator surface: each caller is authenticated (requireScenarioCaller).
+// originationRoute is one row of module 1's route table: its pattern,
+// whether it originates (builds and sends a request of this gateway's own),
+// and its handler, a method of the gateway it is mounted on.
+type originationRoute struct {
+	pattern    string
+	originates bool
+	handler    func(*Gateway, http.ResponseWriter, *http.Request)
+}
+
+// originationRouteTable is every route on-behalf building declares, in mount
+// order: the provider's /scenario/* origination API. It is static, so the
+// exchange routes it names are known at package init (exchangeRoutes);
+// originationRoutes mounts it for a gateway.
+var originationRouteTable = []originationRoute{
+	{pattern: "POST /scenario/uc01", originates: true, handler: (*Gateway).handleScenario},
+	{pattern: "POST /scenario/uc02", originates: true, handler: (*Gateway).handleUC02},
+	// FR-G41 live routing lanes off the /holders feed: uc02-payerb resolves a SECOND payer
+	// identity (MBR-PD-UC02-PB / 00078); uc02-unknownpayer fails closed 422 (MBR-UNKNOWN-PAYER /
+	// 00099 → no registered payer). Both share the handleUC02 no-PA CRD body. Whether 00078
+	// resolves is a deployment fact — see handleUC02PayerB.
+	{pattern: "POST /scenario/uc02-payerb", originates: true, handler: (*Gateway).handleUC02PayerB},
+	{pattern: "POST /scenario/uc02-unknownpayer", originates: true, handler: (*Gateway).handleUC02UnknownPayer},
+	{pattern: "POST /scenario/uc03", originates: true, handler: (*Gateway).handleUC03},
+	{pattern: "POST /scenario/uc04", originates: true, handler: (*Gateway).handleUC04},
+	{pattern: "POST /scenario/uc05", originates: true, handler: (*Gateway).handleUC05},
+	{pattern: "POST /scenario/uc06", originates: true, handler: (*Gateway).handleUC06},
+	{pattern: "POST /scenario/uc07", originates: true, handler: (*Gateway).handleUC07},
+	{pattern: "POST /scenario/uc07hcpcs", originates: true, handler: (*Gateway).handleUC07HCPCS},
+	{pattern: "POST /scenario/uc08", originates: true, handler: (*Gateway).handleUC08},
+	{pattern: "POST /scenario/homeoxygen", originates: true, handler: (*Gateway).handleHomeOxygen},
+	{pattern: "POST /scenario/dispatch", originates: true, handler: (*Gateway).handleDispatch},
+	{pattern: "POST /scenario/uc06/start", originates: true, handler: (*Gateway).handleUC06Start},
+	{pattern: "POST /scenario/uc06/complete", originates: true, handler: (*Gateway).handleUC06Complete},
+	{pattern: "POST /scenario/uc06/cancel", originates: false, handler: (*Gateway).handleScenarioCancel},
+	{pattern: "POST /scenario/uc07/start", originates: true, handler: (*Gateway).handleUC07Start},
+	{pattern: "POST /scenario/uc07/complete", originates: true, handler: (*Gateway).handleUC07Complete},
+	{pattern: "POST /scenario/uc07/cancel", originates: false, handler: (*Gateway).handleScenarioCancel},
+	{pattern: "GET /scenario/uc07/pending", originates: false, handler: (*Gateway).handleUC07Pending},
+	// Continue a prior-authorization decision this gateway pended earlier
+	// (module1_originate_wait.go). It belongs on this surface and nowhere else: the
+	// continuation is server-held state for the gateway's OWN originator
+	// flows, and a participant's own system inquires through its own
+	// `POST /Claim/$inquire` ingress instead, with no SHN state involved.
+	// Like the rest of /scenario/*, it is never publicly routed.
+	{pattern: "POST /scenario/pa/inquire", originates: true, handler: (*Gateway).handlePAInquire},
+	// Admin reset of the in-memory pended-scenario store. The reset caller
+	// (the platform's cloud smoke, after the holder simulator's POST /admin/reset) hits this route so a
+	// pended UC-06/07 does not survive as an orphaned questionnaire (which would
+	// 502 on a stale patient submit). Internal — provider-gw is not public.
+	{pattern: "POST /scenario/reset", originates: false, handler: (*Gateway).handleScenarioReset},
+}
+
+// originationExchangeRoute is the closed route name an exchange record names
+// for an originating route: its path, without the leading slash, its
+// segments joined by "-" ("POST /scenario/uc07/complete" is
+// "scenario-uc07-complete").
+func originationExchangeRoute(pattern string) string {
+	_, path, _ := strings.Cut(pattern, " ")
+	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "-")
+}
+
+// exchangeRoutes are the routes module 1 originates exchanges from: every
+// originating route of its table, by its exchange route name.
+func (moduleOne) exchangeRoutes() []string {
+	var out []string
+	for _, rt := range originationRouteTable {
+		if rt.originates {
+			out = append(out, originationExchangeRoute(rt.pattern))
+		}
+	}
+	return out
+}
+
+// originationRoutes are on-behalf building's routes for role: its route
+// table (originationRouteTable), mounted for the gateway. Module 1 runs only
+// where the participant declares it, by its origination profile
+// (Config.OriginationProfile): with none, no route here is mounted, and a
+// /scenario path is the mux's own 404. Every route that ORIGINATES (builds and
+// sends a request of this gateway's own) reads the Claim facts the request
+// states (readsClaimFacts) and records its exchange (exchangeRoute: routes()
+// mounts the exchange record outermost, direction ingress, so each call's
+// record, a refusal's included, exists before any handler can refuse); the
+// routes that only read or drop this gateway's own pended state (cancel,
+// pending, reset) do neither. Every route here is the operator surface: each
+// caller is authenticated (requireScenarioCaller).
 // A profile that names no lane is refused first, on every role
 // (checkOriginationProfile): module 1's newGatewayState calls this once, as New
 // builds its state, New refuses with its error, and the routes are kept for
@@ -71,47 +150,13 @@ func (g *Gateway) originationRoutes(role string) ([]mountedRoute, error) {
 		return nil, nil
 	}
 	var out []mountedRoute
-	originates := func(pattern string, h http.HandlerFunc) {
-		out = append(out, mountedRoute{pattern: pattern, handler: g.readsClaimFacts(h), operator: true})
+	for _, rt := range originationRouteTable {
+		h := func(w http.ResponseWriter, r *http.Request) { rt.handler(g, w, r) }
+		if !rt.originates {
+			out = append(out, mountedRoute{pattern: rt.pattern, handler: h, operator: true, credential: carriesCredential})
+			continue
+		}
+		out = append(out, mountedRoute{pattern: rt.pattern, handler: g.readsClaimFacts(h), operator: true, exchangeRoute: originationExchangeRoute(rt.pattern), credential: carriesCredential})
 	}
-	local := func(pattern string, h http.HandlerFunc) {
-		out = append(out, mountedRoute{pattern: pattern, handler: h, operator: true})
-	}
-	originates("POST /scenario/uc01", g.handleScenario)
-	originates("POST /scenario/uc02", g.handleUC02)
-	// FR-G41 live routing lanes off the /holders feed: uc02-payerb resolves a SECOND payer
-	// identity (MBR-PD-UC02-PB / 00078); uc02-unknownpayer fails closed 422 (MBR-UNKNOWN-PAYER /
-	// 00099 → no registered payer). Both share the handleUC02 no-PA CRD body. Whether 00078
-	// resolves is a deployment fact — see handleUC02PayerB.
-	originates("POST /scenario/uc02-payerb", g.handleUC02PayerB)
-	originates("POST /scenario/uc02-unknownpayer", g.handleUC02UnknownPayer)
-	originates("POST /scenario/uc03", g.handleUC03)
-	originates("POST /scenario/uc04", g.handleUC04)
-	originates("POST /scenario/uc05", g.handleUC05)
-	originates("POST /scenario/uc06", g.handleUC06)
-	originates("POST /scenario/uc07", g.handleUC07)
-	originates("POST /scenario/uc07hcpcs", g.handleUC07HCPCS)
-	originates("POST /scenario/uc08", g.handleUC08)
-	originates("POST /scenario/homeoxygen", g.handleHomeOxygen)
-	originates("POST /scenario/dispatch", g.handleDispatch)
-	originates("POST /scenario/uc06/start", g.handleUC06Start)
-	originates("POST /scenario/uc06/complete", g.handleUC06Complete)
-	local("POST /scenario/uc06/cancel", g.handleScenarioCancel)
-	originates("POST /scenario/uc07/start", g.handleUC07Start)
-	originates("POST /scenario/uc07/complete", g.handleUC07Complete)
-	local("POST /scenario/uc07/cancel", g.handleScenarioCancel)
-	local("GET /scenario/uc07/pending", g.handleUC07Pending)
-	// Continue a prior-authorization decision this gateway pended earlier
-	// (module1_originate_wait.go). It belongs on this surface and nowhere else: the
-	// continuation is server-held state for the gateway's OWN originator
-	// flows, and a participant's own system inquires through its own
-	// `POST /Claim/$inquire` ingress instead, with no SHN state involved.
-	// Like the rest of /scenario/*, it is never publicly routed.
-	originates("POST /scenario/pa/inquire", g.handlePAInquire)
-	// Admin reset of the in-memory pended-scenario store. The reset caller
-	// (tools/cloudsmoke, after holdersim's POST /admin/reset) hits this route so a
-	// pended UC-06/07 does not survive as an orphaned questionnaire (which would
-	// 502 on a stale patient submit). Internal — provider-gw is not public.
-	local("POST /scenario/reset", g.handleScenarioReset)
 	return out, nil
 }

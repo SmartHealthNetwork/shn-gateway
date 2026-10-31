@@ -16,7 +16,7 @@ import (
 // before the seed-complete marker the smokes wait on, with a deadline of its own
 // that is deliberately far above the consumers' budget and deliberately far
 // below the marker waiters' patience (the cloud smoke waits 900 s for the
-// marker; a test in tools/cloudsmoke pins WarmDeadline*3 <= that wait).
+// marker; a test in the platform's cloud smoke tool pins WarmDeadline*3 <= that wait).
 const WarmDeadline = 300 * time.Second
 
 // warmBody is the smallest resource that exercises the profile path consumers

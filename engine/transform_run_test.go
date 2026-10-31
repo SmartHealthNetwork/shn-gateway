@@ -3,7 +3,7 @@
 // transform_run_test.go — RunTransformChain: the exported,
 // contract-parameterized sibling of TransformPASForTest/TransformDTRForTest.
 // Exercises the SAME real fixtures and idioms workstream_pa_transform_dtr_test.go and
-// test/conformance/dtr_transform_live_test.go already establish for pa.dtr
+// the platform's live DTR transform conformance test already establish for pa.dtr
 // 2.1<->2.2, through the new exported entry point rather than the *ForTest
 // wrapper or chainFor/applyChain directly — proving the demo/diagnostic seam
 // runs the identical chain a real leg would.
@@ -45,10 +45,8 @@ func TestRunTransformChain_DTR2122AutofillGoldenBothDirections(t *testing.T) {
 
 // TestRunTransformChain_DTRItemWeightCarryDown pins the loss-policy carry
 // mechanism through the exported entry point: a real 2.2 autofill golden with
-// a synthetic-but-realistic item.answer.value.extension:itemWeight injected (the
-// exact idiom test/conformance/dtr_transform_live_test.go's
-// injectAnswerExtension establishes — SHN's own builder never stamps
-// itemWeight, so no real golden carries one) downcasts to 2.1 with a Carried
+// a synthetic-but-realistic item.answer.value.extension:itemWeight injected (SHN's
+// own builder never stamps itemWeight, so no real golden carries one) downcasts to 2.1 with a Carried
 // LossEntry naming item.answer.value.extension:itemWeight, never silently dropped.
 func TestRunTransformChain_DTRItemWeightCarryDown(t *testing.T) {
 	in22 := pasGolden(t, "2.2/questionnaireresponse-autofill.json")
@@ -131,10 +129,8 @@ func TestRunTransformChain_MultiCoverageSemanticChange(t *testing.T) {
 // injectItemWeight returns qrJSON (a bare QuestionnaireResponse) with a
 // dtrItemWeightExt extension appended to the first answer of the item
 // matching linkID — at whatever depth it sits, on either QR nesting axis (the
-// demo lumbar questionnaire groups its leaves) — mirrors
-// test/conformance/dtr_transform_live_test.go's injectAnswerExtension (same
-// rationale: a synthetic-but-realistic fixture for the live-lane carry check
-// without touching any checked-in golden).
+// demo lumbar questionnaire groups its leaves): a synthetic-but-realistic
+// fixture for the carry check without touching any checked-in golden.
 func injectItemWeight(t *testing.T, qrJSON []byte, linkID string) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -225,7 +221,7 @@ func TestChainSteps(t *testing.T) {
 }
 
 // anyCarried reports whether any LossReport in reports carries a LossEntry
-// whose Path is path — mirrors test/conformance/pas_transform_live_test.go's
+// whose Path is path — mirrors the platform's live PAS transform test's
 // anyCarried.
 func anyCarried(reports []LossReport, path string) bool {
 	for _, r := range reports {

@@ -97,7 +97,8 @@ func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (strin
 	}
 	demo, ok := engine.PatientDemographics(raw)
 	if !ok {
-		return "", engine.Demo{}, false, invalidResponse()
+		// Unreadable, and when it repeats a member name, saying so.
+		return "", engine.Demo{}, false, engine.SoRInvalidAnswer(raw)
 	}
 	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true, nil
 }
@@ -173,7 +174,7 @@ func (s *SoR) CoverageInforceContext(ctx context.Context, memberID string) (bool
 //
 // OxygenSaturationPct/ArterialPaO2mmHg (task-B, register §4/FR-17) — the HomeOxygen-family
 // facts UC-03's re-key (R3) reads: real Observation searches by LOINC 59408-5 (pulse-ox
-// O₂-sat) and 2703-7 (arterial PaO₂), mirroring internal/fixturesor's hermetic equivalent
+// O₂-sat) and 2703-7 (arterial PaO₂), mirroring the platform's hermetic fixture SoR equivalent
 // field-for-field. Before this, this live connector never read them at all, so
 // gateway/engine's homeOxygenAutoFillEvidence cross-check was structurally DEAD against any
 // real FHIR server: cc.OxygenSaturationRef/ArterialPaO2Ref were always "" here, so no QR
@@ -470,13 +471,13 @@ func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([][]byt
 		if errors.As(err, &se) && se.Outcome == engine.SearchUnavailable {
 			return nil, &engine.SoRReadError{Kind: engine.SoRUnavailable}
 		}
-		return nil, &engine.SoRReadError{Kind: engine.SoRInvalidResponse}
+		return nil, safeReadError(err)
 	}
 	var out [][]byte
 	for i, page := range res.Pages {
 		parsed, err := engine.ParseSearchPage(page, "Coverage")
 		if err != nil {
-			return nil, &engine.SoRReadError{Kind: engine.SoRInvalidResponse}
+			return nil, safeReadError(err)
 		}
 		for j, r := range parsed.Resources {
 			if parsed.Match[j] {

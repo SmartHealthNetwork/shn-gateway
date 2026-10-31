@@ -44,6 +44,9 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// is relayed exactly, in the form it was submitted.
 		k("coverage-eligibility", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 		k("pas-claim-update", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried):     {Allowed: paRelayed},
+		// A CDex submission the participant's own system sends is relayed
+		// exactly.
+		k("cdex-attachment-submit", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 
 		// Requester to the network, with a request its own workflow makes.
 		k("coverage-eligibility", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):    {Allowed: paAuthored, Builders: []relay.BuilderID{relay.BuilderSDKEligibility}},
@@ -71,10 +74,13 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		k("dtr-questionnaire-fetch", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {
 			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: []relay.EditID{relay.EditDTRAnswerLineNames},
 		},
-		k("pas-claim", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):            {Allowed: paRelayed},
-		k("pas-claim-inquire", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):    {Allowed: paRelayed},
-		k("coverage-eligibility", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
-		k("pas-claim-update", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):     {Allowed: paRelayed},
+		// A PAS answer reaches the requester's system with a pend's
+		// documentation return address re-keyed to the network.
+		k("pas-claim", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):              paPendRekeyed,
+		k("pas-claim-inquire", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):      paPendRekeyed,
+		k("coverage-eligibility", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):   {Allowed: paRelayed},
+		k("pas-claim-update", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):       paPendRekeyed,
+		k("cdex-attachment-submit", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 
 		// Recipient to its participant's system, carrying the network's
 		// request. A prior-authorization Bundle and a CDS Hooks request are
@@ -103,6 +109,9 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// A coverage-eligibility request goes to the payer's own system only when
 		// the payer declares its own eligibility endpoint, and then exactly.
 		k("coverage-eligibility", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		// A CDex submission is sent to the payer's own $submit-attachment
+		// exactly.
+		k("cdex-attachment-submit", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 
 		// Recipient to the network, answering. Patient-authored answers are
 		// the gateway's own messages; eligibility is the
@@ -121,6 +130,9 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// An inquiry's answer is the payer's own message, relayed. No builder is
 		// listed: this leg has never rebuilt an answer, so nothing may author one.
 		k("pas-claim-inquire", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		// A submission's answer is the payer's own message, relayed; nothing may
+		// author one.
+		k("cdex-attachment-submit", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 	}
 	// An application error from the participant's system is relayed exactly
 	// as it answered (for coverage-eligibility, from a payer that declares its
@@ -128,7 +140,7 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 	// frame. A requester that did not cannot receive it: the gateway checks
 	// the error under this key, then answers with its own refusal under the
 	// refused key, so the participant's bytes never leave it unsealed.
-	for _, leg := range []string{"coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
+	for _, leg := range []string{"cdex-attachment-submit", "coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[k(leg, relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeUpstreamError)] = relay.Rule{Allowed: paRelayed}
 	}
 	return m
@@ -144,4 +156,8 @@ var (
 	// paPayerIdentityMapped is a request relayed exactly or with the payer
 	// identity mapped.
 	paPayerIdentityMapped = []relay.EditID{relay.EditPayorEdgeRestamp}
+	// paPendRekeyed is a PAS answer relayed exactly or with a pend's
+	// payer-url re-keyed to the network return path.
+	paPendRekeyed = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
+		Edits: []relay.EditID{relay.EditPASPendReturnRekey}}
 )

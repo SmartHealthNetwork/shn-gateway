@@ -104,6 +104,12 @@ const (
 	// requesting participant speaks, to that line's names, so its system finds
 	// the package and the outcome under the names its line gives them.
 	EditDTRAnswerLineNames EditID = "E-08"
+	// EditPASPendReturnRekey re-keys the payer-url input of a PAS Task in a
+	// payer's answer, as the provider's gateway relays it to its own
+	// system, to the gateway's network return path for the payer that
+	// answered, so documentation sent there stays on the network. It is
+	// made even where a signature covers the payer-url (signedExempt, D127).
+	EditPASPendReturnRekey EditID = "E-10"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -112,7 +118,7 @@ const (
 	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept
@@ -125,7 +131,7 @@ func EditIDs() []EditID { return slices.Clone(editIDs) }
 // TransformEditIDs returns the registered edits a payload keeps its builder
 // through (transformEdits), in order. The SDK publishes the same set as
 // shnsdk.BuilderKeepingEdits, for the Audit Plane's bound on a module
-// record's builder; test/sdkparity holds the two equal.
+// record's builder; the platform's SDK parity suite holds the two equal.
 func TransformEditIDs() []EditID { return slices.Clone(transformEdits) }
 
 // Payload is a message a gateway may send. Make one with Exact, Apply,
@@ -142,6 +148,9 @@ type sealed struct {
 	edits       []EditID
 	builder     BuilderID
 	contentType string
+	// signed names the signatures, by carrier, whose covered content an
+	// exempt edit changed (signedExempt).
+	signed []string
 }
 
 // Ownership reports how the payload was made (0 for the zero Payload).
@@ -159,6 +168,16 @@ func (p Payload) Edits() []EditID {
 		return nil
 	}
 	return slices.Clone(p.c.edits)
+}
+
+// SignedEdited names, by carrier (as SignedContentError does), each in-payload
+// signature whose covered content an edit exempt from the signed-content
+// refusal changed, so the forward can disclose it; nil when none did.
+func (p Payload) SignedEdited() []string {
+	if p.c == nil {
+		return nil
+	}
+	return slices.Clone(p.c.signed)
 }
 
 // Builder returns the builder id of an OwnershipAuthored payload, and of an
@@ -255,7 +274,9 @@ var spliceHook = func(d *splice.Doc, ops ...splice.Op) ([]byte, []splice.Edit, e
 // whitespace inside an object the change creates.
 //
 // A change that would alter content covered by an in-payload signature is
-// refused with a *SignedContentError naming the change's edit. An
+// refused with a *SignedContentError naming the change's edit, except the
+// one place an exempt edit may change there (signedExempt): that change is
+// made, and SignedEdited names the signatures it covered. An
 // operation that leaves the bytes as they were (a same-value replace, or
 // ensuring an object that already exists) is not an edit: when no
 // operation changes anything, the result is the body relayed exactly, and
@@ -310,6 +331,7 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 	}
 	cov := coverage(doc)
 	var applied []EditID
+	var signed []string
 	i := 0
 	for _, c := range changes {
 		changed := false
@@ -320,8 +342,17 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 				continue
 			}
 			changed = true
-			if carrier, hit := cov.hit(*eff); hit {
-				return Payload{}, &SignedContentError{Edit: c.Edit, Carrier: carrier}
+			carriers := cov.hits(*eff)
+			if len(carriers) == 0 {
+				continue
+			}
+			if !m.signedExemption(c.Edit, *eff) {
+				return Payload{}, &SignedContentError{Edit: c.Edit, Carrier: carriers[0]}
+			}
+			for _, carrier := range carriers {
+				if !slices.Contains(signed, carrier) {
+					signed = append(signed, carrier)
+				}
 			}
 		}
 		if changed && !slices.Contains(applied, c.Edit) {
@@ -332,7 +363,7 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 		// The output changed although no operation declares a change.
 		return Payload{}, fmt.Errorf("%w: output changed but no operation did", ErrVerifyMismatch)
 	}
-	return Payload{c: &sealed{b: seal(out), own: OwnershipEdited, edits: applied, contentType: contentType}}, nil
+	return Payload{c: &sealed{b: seal(out), own: OwnershipEdited, edits: applied, contentType: contentType, signed: signed}}, nil
 }
 
 // Transformed seals out as src, a message the gateway built (OwnershipAuthored),

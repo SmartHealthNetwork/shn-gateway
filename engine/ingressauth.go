@@ -24,10 +24,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
 )
 
 const (
@@ -80,9 +83,33 @@ func (s *ingressAuthServer) noteStoreError(store string) {
 	}
 }
 
+// checkIngressBase refuses an ingress base that is not an absolute http or
+// https URL with a host, no query or fragment and no user information: the SMART audience, and the
+// base every path the gateway serves or names under its ingress (its token
+// endpoint, its documentation return paths) is built under.
+func checkIngressBase(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("ingress auth: baseURL (aud) %q is not an absolute http or https URL", baseURL)
+	}
+	// Refused by the byte: a bare trailing "?" or "#" parses as no query or
+	// fragment at all.
+	if strings.ContainsAny(baseURL, "?#") {
+		return fmt.Errorf("ingress auth: baseURL (aud) %q carries a query or fragment", baseURL)
+	}
+	// Every path built under the base would carry the credential.
+	if u.User != nil {
+		return fmt.Errorf("ingress auth: baseURL (aud) %q carries user information", baseURL)
+	}
+	return nil
+}
+
 func newIngressAuthServer(baseURL string, clients map[string]IngressClientRegistration, now func() time.Time, keys IngressKeyStore, replay ReplayStore) (*ingressAuthServer, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("ingress auth: baseURL (aud) required")
+	}
+	if err := checkIngressBase(baseURL); err != nil {
+		return nil, err
 	}
 	if len(clients) == 0 {
 		return nil, fmt.Errorf("ingress auth: at least one registered client required")
@@ -155,6 +182,12 @@ func oauthUnavailable(w http.ResponseWriter, desc string) {
 func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		oauthErr(w, http.StatusMethodNotAllowed, "invalid_request", "POST required")
+		return
+	}
+	// Before the form: ParseForm reads a body only under a form Content-Type.
+	if contentcoding.Unsupported(r) {
+		contentcoding.Advertise(w.Header())
+		oauthErr(w, http.StatusUnsupportedMediaType, "invalid_request", errUnsupportedCoding)
 		return
 	}
 	if err := r.ParseForm(); err != nil {

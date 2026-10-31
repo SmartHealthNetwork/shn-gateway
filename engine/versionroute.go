@@ -225,7 +225,7 @@ func legContract(legType string) (string, error) {
 //
 // Every consumer of "what do we speak" reads THIS — leg selection, the
 // CapabilityStatement / davinci-configuration builders, the responder's
-// symmetric recomputation, and (through internal/provision) the registry entry
+// symmetric recomputation, and (through platform provisioning) the registry entry
 // peers select against — so a deployment cannot declare one set locally and
 // another to its peers.
 func (g *Gateway) declaredContractVersions() []string {

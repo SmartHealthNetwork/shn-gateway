@@ -8,7 +8,7 @@ import (
 
 // TestNoSubstrateInternalImports asserts the shn-gateway module's PRODUCTION
 // closure (go list .Imports — NOT .TestImports) imports no shn-platform/internal/*
-// package. Mirrors internal/gateway/boundary_test.go's production-only scoping: the
+// package. Only the production closure counts: the
 // lifted test files (gateway/engine + connectors/fhirsor) may have their own imports,
 // but only production imports gate liftability. A substrate-internal import here would
 // mean the lift is incomplete (and would not compile cross-module anyway).

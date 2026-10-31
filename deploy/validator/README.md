@@ -108,6 +108,14 @@ strict passes and negative controls (38 rows). `verify-verdicts` runs one strict
 negative controls (20 rows), without priming, retrying or writing the runtime marker.
 Both include the two encounter rows and reject a missing explicitly requested
 profile version and canonical while preserving the valid in-band profile.
+A failed row prints the answer's issues, bounded and without their text:
+severity, code, message id, expression and a digest of the diagnostics, the
+issues that can decide a verdict first, each error marked against the row's
+expected outcome where it has one. When a row fails for an unexpected verdict
+and its only deviation is an error the validator reports because it could not evaluate a primitive's type regex in
+time (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`, which a CPU-starved
+validator gives on a value that matches), the row also prints
+`named=regex-check-timeout`. It still fails.
 
 `verify.sh` builds fresh per-line source images on an internal Docker network. Once
 each image first reports healthy, it runs `verify-verdicts` immediately and at

@@ -3,7 +3,6 @@
 package engine
 
 import (
-	"io"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -37,9 +36,8 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: legType, Seam: "provider-ingress", Whose: "own"}))
-	task, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	task, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	// The patient the query is for, read as the facility reads it

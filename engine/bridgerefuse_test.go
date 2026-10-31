@@ -8,7 +8,7 @@
 //   - handleUC03Bridge's own egressAdapt call site — the APPLY-time *SemanticChangeError
 //     reshape (bridgeRefusalText/writeBridgeRefusal, shared by both sites).
 //
-// Both reshape into the SAME 200 structured body scenariodrive's Client.Post/RunCheck can
+// Both reshape into the SAME 200 structured body the platform scenario driver's Client.Post/RunCheck can
 // actually assert against — Post treats ANY non-2xx as a transport failure and never hands
 // the body to a Check's Want matcher, so a non-2xx refusal could never be pinned at all.
 // Minimal literal Gateway construction (mirroring versionroute_test.go's
@@ -57,7 +57,7 @@ func TestSelectLegLineOrBridgeRefuse_Success(t *testing.T) {
 // g.validatorForLine before considering a target line), and selectLegRoute fails closed
 // with a *RouteRefusalError — exactly the shape provider-gw hits against the real deployed
 // bridge-demo-refuse-gw (it declares no 2.1/2.2 validator lane of its own; see
-// scenariodrive.BridgeChecks's doc comment). Asserts the EXACT 200 structured body task2's
+// the platform scenario driver's BridgeChecks doc comment). Asserts the EXACT 200 structured body task2's
 // brief specifies, not just its absence of an error.
 func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	reg := shnsdk.NewRegistry()
@@ -73,7 +73,7 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	}
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200 (the demo lane's own structured-refusal surface, never a non-2xx — "+
-			"scenariodrive's Client.Post treats any non-2xx as a transport failure and never hands the "+
+			"the platform scenario driver's Client.Post treats any non-2xx as a transport failure and never hands the "+
 			"body to a Check's Want matcher)", rec.Code)
 	}
 	body := rec.Body.String()
@@ -91,7 +91,7 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 
 // TestSelectLegLineOrBridgeRefuse_OnlyRouteRefusalErrorReshapes is the A3
 // "must-not-pass-on-any-other-red" boundary asserted at the engine layer (complementing
-// scenariodrive's own TestBridgeRefuseWant_RejectsImpostors, which asserts the SAME
+// the platform scenario driver's own TestBridgeRefuseWant_RejectsImpostors, which asserts the SAME
 // property from the check-matcher side): a leg whose contract this build's catalog does
 // not even recognize returns a plain (non-RouteRefusalError) error from legContract, which
 // selectLegLine propagates as-is — selectLegLineOrBridgeRefuse must NOT reshape that into
@@ -160,7 +160,7 @@ func TestWriteBridgeRefusal(t *testing.T) {
 		`"refusedAt":"pas-claim"`,
 		// NOT "2.0->2.1" — writeJSON's json.Encoder HTML-escapes ">" to > on the wire
 		// (Go's json package's default SetEscapeHTML(true)), so a matcher (or a test
-		// asserting the raw body bytes, as scenariodrive.Has does) that includes the arrow
+		// asserting the raw body bytes, as the platform scenario driver's Has does) that includes the arrow
 		// literally can never match. "semantic-change refusal: pa.pas" alone is what
 		// BridgeChecks's own refuseWant pins, for exactly this reason.
 		"semantic-change refusal: pa.pas",
@@ -219,7 +219,7 @@ func TestHandleUC03BridgeEgressAdapt_SemanticChangeErrorReshapesTo200(t *testing
 		`"refusedAt":"pas-claim"`,
 		// NOT "2.0->2.1" — writeJSON's json.Encoder HTML-escapes ">" to > on the wire
 		// (Go's json package's default SetEscapeHTML(true)), so a matcher (or a test
-		// asserting the raw body bytes, as scenariodrive.Has does) that includes the arrow
+		// asserting the raw body bytes, as the platform scenario driver's Has does) that includes the arrow
 		// literally can never match. "semantic-change refusal: pa.pas" alone is what
 		// BridgeChecks's own refuseWant pins, for exactly this reason.
 		"semantic-change refusal: pa.pas",

@@ -112,6 +112,7 @@ func TestPACatalog_Contracts(t *testing.T) {
 		"pas-claim":               "pa.pas",
 		"pas-claim-update":        "pa.pas",
 		"pas-claim-inquire":       "pa.pas",
+		"cdex-attachment-submit":  "",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("catalog has %d legs, pin has %d — update BOTH", len(paCatalog), len(want))

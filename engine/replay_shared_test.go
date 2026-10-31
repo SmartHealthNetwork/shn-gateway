@@ -188,7 +188,7 @@ func TestReplayStoreOutage_InboundAnswers503(t *testing.T) {
 		// …and a healthy record opens the gate: the body is read and decoded, and the
 		// refusal that comes back is the envelope's own (this stub envelope carries no
 		// authority frame). The full 200 delivery is the control row in
-		// test/engineconformance's hop-authority table, which drives a real sealed leg.
+		// the platform's engine-conformance hop-authority table, which drives a real sealed leg.
 		rec, stores = serve(t, NewInMemoryReplayStore(), req())
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "missing authority frame") {
 			t.Fatalf("healthy record = %d %s, want the delivery past the hop-auth gate and into the envelope", rec.Code, rec.Body.String())

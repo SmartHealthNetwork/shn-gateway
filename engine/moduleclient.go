@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
 // moduleclient.go — a registered module ingress client.
@@ -177,7 +178,7 @@ func sealModuleRequest(w http.ResponseWriter, builder relay.BuilderID, p relay.P
 	}
 	out, err := relay.Authored(builder, body, p.ContentType())
 	if err != nil {
-		refuseBuilder(w, "a module ingress client's request could not be sealed as "+string(builder)+": "+err.Error())
+		refuseUnsealed(w, "a module ingress client's request could not be sealed as "+string(builder)+": "+err.Error())
 		return p, false
 	}
 	return out, true
@@ -207,10 +208,23 @@ func moduleCRDCallback(w http.ResponseWriter, builder relay.BuilderID, body []by
 	return true
 }
 
-// refuseBuilder answers a builder declaration this gateway refuses: the
-// fidelity of SHN's own edits, before any leg is sent.
+// refuseBuilder answers a request this gateway refuses to build or seal as
+// its own because of what the caller declared or did not state (a builder
+// declaration it does not honour, a request it would have to edit, a
+// statement missing from the request or the participant's records): the
+// fidelity of SHN's own edits, at recording.RefusalStageBuild, the caller's to fix,
+// before any leg of the refused message is sent.
 func refuseBuilder(w http.ResponseWriter, msg string) {
-	exchangeOfWriter(w).refused(RefusalFidelity)
+	exchangeOfWriter(w).refusedFidelity(vocab.RefusalStageBuild)
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+}
+
+// refuseUnsealed answers a request whose seal as this gateway's own message
+// failed in its own machinery (the builder table refused the body it was
+// handed to seal): the fidelity of SHN's own edits at recording.RefusalStageVerify, a
+// fault that is SHN's to fix. Nothing is sent.
+func refuseUnsealed(w http.ResponseWriter, msg string) {
+	exchangeOfWriter(w).refusedFidelity(vocab.RefusalStageVerify)
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
 }
 

@@ -32,6 +32,8 @@ var outboundSites = map[string]outboundSite{
 	"app/app.go fhirHTTPClient smartauth.NewHTTPClient":                {1, "fhirSmartConfig tags it fhir / fhir-token"},
 	"app/app.go payerDavinciHTTPClient smartauth.NewHTTPClient":        {1, "payerDavinciSmartConfig tags it with the payer Router / payer-token"},
 	"app/app.go providerDTRPopulateHTTPClient smartauth.NewHTTPClient": {1, "providerDTRPopulateSmartBase tags it populate / populate-token"},
+	"app/attachmentinflight.go taskMetadataClient http.Client{}":       {1, "the task's own ECS metadata endpoint, read once at boot: the platform's, no peer and no endpoint kind"},
+	"app/attachmentinflight.go taskMetadataClient http.Transport{}":    {1, "that read's transport: no proxy, since the endpoint is on the task's own link"},
 	"app/bootfetch.go bootClient http.DefaultTransport":                {1, "a nil transport's meaning; resolveDiscovery passes tagged clients"},
 	"app/diagnostic.go newDiagnosticSource http.Client{}":              {1, "the sink's publisher client: tagged diagnostic by build right after"},
 	"app/diagnostic.go smart http.Client{}":                            {1, "the token client's copy: its transport is the tagged one tagSmart set"},

@@ -363,7 +363,7 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 // system of record names no patient for (one it does not hold, or holds but
 // cannot name): nothing to route by. It names what the participant sends
 // instead.
-const dtrNoCoverageToRouteBy = "no coverage to route by: send the coverage parameter (this gateway's system of record names no patient for this member)"
+const dtrNoCoverageToRouteBy = "no coverage to route by: send the coverage parameter (this gateway's records name no patient for this member)"
 
 // obtainDTRCoverage reads the Coverage a request without one is routed by
 // and, under enrichment, sent with: the system of record's Coverage search for
@@ -438,7 +438,7 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 	switch s.Outcome {
 	case SearchOK:
 	case SearchZero:
-		return nil, nil, http.StatusUnprocessableEntity, "no coverage in request or system of record"
+		return nil, nil, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR
 	default:
 		status, msg := coverageOmitted(s.Outcome)
 		return nil, nil, status, msg
@@ -547,7 +547,7 @@ func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRe
 		}
 	}
 	if recipient == "" {
-		return "", nil, http.StatusUnprocessableEntity, "no coverage in request or system of record"
+		return "", nil, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR
 	}
 	return recipient, payers, 0, ""
 }

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	jwt "github.com/golang-jwt/jwt/v5"
 )
@@ -287,8 +288,8 @@ func TestModuleClient_RefusesWhatItCannotVouchFor(t *testing.T) {
 				if env.routeHitCount() != 0 {
 					t.Fatal("a refused request crossed the network")
 				}
-				if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.Ownership != "" {
-					t.Fatalf("recorded %s rule %q ownership %q, want refused on fidelity, nothing sent", x.Outcome, x.Rule, x.Ownership)
+				if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.RefusalStage != vocab.RefusalStageBuild || x.Ownership != "" {
+					t.Fatalf("recorded %s rule %q at %q ownership %q, want refused on fidelity at build, nothing sent", x.Outcome, x.Rule, x.RefusalStage, x.Ownership)
 				}
 			})
 		}
@@ -316,8 +317,8 @@ func TestModuleClient_EveryRouteChecksTheDeclaration(t *testing.T) {
 					if env.routeHitCount() != 0 {
 						t.Fatal("a refused request crossed the network")
 					}
-					if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.Ownership != "" {
-						t.Fatalf("recorded %s rule %q ownership %q, want refused on fidelity, nothing sent", x.Outcome, x.Rule, x.Ownership)
+					if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.RefusalStage != vocab.RefusalStageBuild || x.Ownership != "" {
+						t.Fatalf("recorded %s rule %q at %q ownership %q, want refused on fidelity at build, nothing sent", x.Outcome, x.Rule, x.RefusalStage, x.Ownership)
 					}
 				})
 			}
@@ -393,8 +394,8 @@ func TestModuleClient_RefusesARequestTheGatewayWouldEdit(t *testing.T) {
 			if env.routeHitCount() != 0 {
 				t.Fatal("a refused request crossed the network")
 			}
-			if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.Ownership != "" {
-				t.Fatalf("recorded %s rule %q ownership %q", x.Outcome, x.Rule, x.Ownership)
+			if x := env.last(t); x.Outcome != ExchangeRefused || x.Rule != RefusalFidelity || x.RefusalStage != vocab.RefusalStageBuild || x.Ownership != "" {
+				t.Fatalf("recorded %s rule %q at %q ownership %q", x.Outcome, x.Rule, x.RefusalStage, x.Ownership)
 			}
 		})
 	}

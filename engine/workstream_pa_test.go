@@ -20,6 +20,7 @@ func TestPACatalog_Ops(t *testing.T) {
 		"pas-claim":               "pas-submit",
 		"pas-claim-update":        "pas-update-submit",
 		"pas-claim-inquire":       "pas-inquire",
+		"cdex-attachment-submit":  "cdex-attachment-submit",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))
@@ -116,14 +117,15 @@ func TestPACatalog_Pinned(t *testing.T) {
 	readOnly := LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
 	mutating := LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate}
 	want := map[string]legSpec{
-		"coverage-eligibility":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native", WireName: "pa.coverage-eligibility"},
-		"dtr-questionnaire-fetch": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", FrameOperations: []string{"questionnaire-package", "next-question"}, Seam: "payer-native", WireName: "pa.dtr-questionnaire-fetch"},
-		"patient-dtr":             {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound", WireName: "pa.patient-dtr"},
-		"crd-order-select":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-select"},
-		"crd-order-dispatch":      {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-dispatch"},
-		"pas-claim":               {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim"},
-		"pas-claim-update":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-update"},
-		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire"},
+		"coverage-eligibility":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native", WireName: "pa.coverage-eligibility", RecipientRoles: []string{"payer"}},
+		"dtr-questionnaire-fetch": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", FrameOperations: []string{"questionnaire-package", "next-question"}, Seam: "payer-native", WireName: "pa.dtr-questionnaire-fetch", RecipientRoles: []string{"payer"}},
+		"patient-dtr":             {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound", WireName: "pa.patient-dtr", RecipientRoles: []string{"phg"}},
+		"crd-order-select":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-select", RecipientRoles: []string{"payer"}},
+		"crd-order-dispatch":      {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-dispatch", RecipientRoles: []string{"payer"}},
+		"pas-claim":               {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim", RecipientRoles: []string{"payer"}},
+		"pas-claim-update":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-update", RecipientRoles: []string{"payer"}},
+		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire", RecipientRoles: []string{"payer"}},
+		"cdex-attachment-submit":  {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "cdex-attachment-submit", RespOp: "cdex-attachment-submit-response", Scope: "attachment-only", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-attachment-submit", RecipientRoles: []string{"payer"}},
 	}
 	if !reflect.DeepEqual(paCatalog, want) {
 		for tx := range want {
@@ -132,6 +134,17 @@ func TestPACatalog_Pinned(t *testing.T) {
 			}
 		}
 		t.Fatalf("paCatalog has %d rows, want %d", len(paCatalog), len(want))
+	}
+}
+
+// A payer's gateway takes the documentation submission, and a provider's none of
+// PA's legs.
+func TestAnsweredLegs_PA(t *testing.T) {
+	if payer := AnsweredLegs("payer"); !slices.Contains(payer, legCDexSubmit) {
+		t.Fatalf("payer legs = %q", payer)
+	}
+	if provider := AnsweredLegs("provider"); slices.Contains(provider, legCDexSubmit) {
+		t.Fatalf("provider legs = %q", provider)
 	}
 }
 
@@ -146,7 +159,7 @@ func sameLegSpec(a, b legSpec) bool { return reflect.DeepEqual(a, b) }
 func TestFQSCatalog_Pinned(t *testing.T) {
 	readOnly := LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
 	want := map[string]legSpec{
-		"federated-query": {ReqFrame: "provider-tpo", RespFrame: "facility-disclosure", Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only", Physics: readOnly, Seam: "facility-inbound", WireName: "fqs.federated-query"},
+		"federated-query": {ReqFrame: "provider-tpo", RespFrame: "facility-disclosure", Op: "federated-query-submit", RespOp: "federated-query-response", Scope: "named-docs-only", Physics: readOnly, Seam: "facility-inbound", WireName: "fqs.federated-query", RecipientRoles: []string{"facility"}},
 	}
 	if got := fqsAdapter.catalog(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the FQS catalog = %+v, want %+v", got, want)

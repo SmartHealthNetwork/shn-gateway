@@ -28,6 +28,7 @@ func zoneOwnership() map[Key]Rule {
 		{"coverage-eligibility", rq, req, OutcomeCarried}:    relayOnly,
 		{"federated-query", rq, req, OutcomeCarried}:         relayOnly,
 		{"pas-claim-update", rq, req, OutcomeCarried}:        relayOnly,
+		{"cdex-attachment-submit", rq, req, OutcomeCarried}:  relayOnly,
 
 		{"coverage-eligibility", rq, req, OutcomeOriginated}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rq, req, OutcomeOriginated}:      {Allowed: own(A), Builders: b("sdk-crd-request")},
@@ -42,11 +43,12 @@ func zoneOwnership() map[Key]Rule {
 		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
 		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-08"}},
-		{"pas-claim", rq, resp, OutcomeAnswered}:               relayOnly,
-		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       relayOnly,
+		{"pas-claim", rq, resp, OutcomeAnswered}:               {Allowed: own(R, E), Edits: []EditID{"E-10"}},
+		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       {Allowed: own(R, E), Edits: []EditID{"E-10"}},
 		{"coverage-eligibility", rq, resp, OutcomeAnswered}:    relayOnly,
 		{"federated-query", rq, resp, OutcomeAnswered}:         relayOnly,
-		{"pas-claim-update", rq, resp, OutcomeAnswered}:        relayOnly,
+		{"pas-claim-update", rq, resp, OutcomeAnswered}:        {Allowed: own(R, E), Edits: []EditID{"E-10"}},
+		{"cdex-attachment-submit", rq, resp, OutcomeAnswered}:  relayOnly,
 
 		{"coverage-eligibility", rq, resp, OutcomeUpstreamError}:    relayOnly,
 		{"crd-order-dispatch", rq, resp, OutcomeUpstreamError}:      relayOnly,
@@ -57,6 +59,7 @@ func zoneOwnership() map[Key]Rule {
 		{"pas-claim", rq, resp, OutcomeUpstreamError}:               relayOnly,
 		{"pas-claim-inquire", rq, resp, OutcomeUpstreamError}:       relayOnly,
 		{"pas-claim-update", rq, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-attachment-submit", rq, resp, OutcomeUpstreamError}:  relayOnly,
 
 		{"coverage-eligibility", rc, req, OutcomeCarried}:    relayOnly,
 		{"crd-order-dispatch", rc, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-03"}},
@@ -65,6 +68,7 @@ func zoneOwnership() map[Key]Rule {
 		{"pas-claim", rc, req, OutcomeCarried}:               {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-inquire", rc, req, OutcomeCarried}:       {Allowed: own(R, E), Edits: []EditID{"E-03"}},
 		{"pas-claim-update", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-03"}},
+		{"cdex-attachment-submit", rc, req, OutcomeCarried}:  relayOnly,
 
 		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A, R), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rc, resp, OutcomeAnswered}:      relayOnly,
@@ -75,6 +79,7 @@ func zoneOwnership() map[Key]Rule {
 		{"pas-claim", rc, resp, OutcomeAnswered}:               {Allowed: own(R)},
 		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
 		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
+		{"cdex-attachment-submit", rc, resp, OutcomeAnswered}:  relayOnly,
 
 		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    relayOnly,
 		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      relayOnly,
@@ -83,8 +88,9 @@ func zoneOwnership() map[Key]Rule {
 		{"pas-claim", rc, resp, OutcomeUpstreamError}:               relayOnly,
 		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       relayOnly,
 		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-attachment-submit", rc, resp, OutcomeUpstreamError}:  relayOnly,
 	}
-	for _, leg := range []string{"coverage-eligibility", "crd-order-dispatch", "crd-order-select",
+	for _, leg := range []string{"cdex-attachment-submit", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
 		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[Key{leg, rq, resp, OutcomeRefused}] = refusal
 		m[Key{leg, rc, resp, OutcomeRefused}] = refusal

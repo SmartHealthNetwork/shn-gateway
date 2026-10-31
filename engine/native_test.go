@@ -44,7 +44,9 @@ type stubPartner struct {
 	listingHeader http.Header
 	lastBody      []byte
 	status        int
-	respByPath    map[string][]byte
+	// errBody, when set, is the body of a non-2xx answer (none otherwise).
+	errBody    []byte
+	respByPath map[string][]byte
 	// calls counts every request the stub answered, listings included.
 	calls atomic.Int32
 	// delay holds each operation's answer back this long: a slow system.
@@ -81,7 +83,11 @@ func newStubPartner(t *testing.T) *stubPartner {
 			}
 		}
 		if s.status/100 != 2 {
+			if s.errBody != nil {
+				w.Header().Set("Content-Type", "application/fhir+json")
+			}
 			w.WriteHeader(s.status)
+			_, _ = w.Write(s.errBody)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

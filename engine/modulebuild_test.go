@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -189,8 +190,8 @@ func TestEgressBuild_TheTransformRefuses(t *testing.T) {
 			if status != http.StatusInternalServerError || !strings.Contains(msg, r.says) || !strings.Contains(msg, "nothing was sent") {
 				t.Fatalf("got %d %q, want 500 saying %q", status, msg, r.says)
 			}
-			if rec.rule != RefusalFidelity {
-				t.Fatalf("recorded refusal %q, want %s", rec.rule, RefusalFidelity)
+			if rec.rule != RefusalFidelity || rec.refusalStage != vocab.RefusalStageVerify {
+				t.Fatalf("recorded refusal %q at %q, want %s at %s: the translation SHN built failed its own verification", rec.rule, rec.refusalStage, RefusalFidelity, vocab.RefusalStageVerify)
 			}
 		})
 	}

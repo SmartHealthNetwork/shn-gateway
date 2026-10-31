@@ -16,7 +16,7 @@ import (
 // oxygenFakeFHIR stands up an httptest FHIR stub with an anchoring Condition (so
 // ClinicalContext returns found=true) and, when withOxygen is true, two Observations coded
 // with the real LOINC O2-sat (59408-5) and arterial PaO2 (2703-7) codes — the SAME codes
-// internal/fixturesor's hermetic equivalent reads (task-B parity). The Observation search
+// the platform's hermetic fixture SoR equivalent reads (task-B parity). The Observation search
 // only returns a match when the request's code filter names the matching LOINC, mirroring
 // fhirsor_procedure_test.go's procFakeFHIR code-aware pattern.
 func oxygenFakeFHIR(t *testing.T, withOxygen bool) *fhirclient.Client {

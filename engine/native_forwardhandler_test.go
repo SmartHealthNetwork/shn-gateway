@@ -18,7 +18,7 @@ import (
 // own system. Eligibility, the federated query and patient-authored DTR are
 // answered by engine handlers and never reach it.
 var paForwardedLegs = []string{
-	"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch",
+	"cdex-attachment-submit", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch",
 	"pas-claim", "pas-claim-inquire", "pas-claim-update",
 }
 

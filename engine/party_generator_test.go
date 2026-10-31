@@ -22,7 +22,7 @@ import (
 // reader (strictRead, below) is written from the FHIR resolution rules alone and shares no
 // helper with the gateway's walk.
 //
-// make check runs a fixed seed and case count. SHN_PARTYGEN_SEED and SHN_PARTYGEN_CASES
+// By default it runs a fixed seed and case count. SHN_PARTYGEN_SEED and SHN_PARTYGEN_CASES
 // (cases per base request) run another.
 
 // genBase is a request the generator moves: a dependent's request on one leg, naming the

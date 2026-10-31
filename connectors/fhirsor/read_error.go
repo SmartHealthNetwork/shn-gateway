@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirclient"
 )
 
@@ -16,6 +17,11 @@ func safeReadError(err error) error {
 	var safe *engine.SoRReadError
 	if errors.As(err, &safe) {
 		return safe
+	}
+	// An answer that repeats a member name can be read two ways: an invalid
+	// response that says so, which the gateway records as message integrity.
+	if errors.Is(err, relay.ErrDuplicateKey) {
+		return engine.SoRRepeatedMember()
 	}
 	kind := engine.SoRInvalidResponse
 	var status *fhirclient.HTTPError

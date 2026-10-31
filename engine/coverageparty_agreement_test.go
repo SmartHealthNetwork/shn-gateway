@@ -18,7 +18,7 @@ import (
 // These rows run each of those call sites over every row of the sdk's shared
 // table. The module carries its own copy of the table
 // (testdata/coverageparty/rows.json), as a published module must carry its
-// own testdata; test/twinfence pins it byte-identical to the sdk's
+// own testdata; the platform's twin fence pins it byte-identical to the sdk's
 // (sdk/testdata/coverageparty/rows.json), so a row added there is pinned here
 // too.
 

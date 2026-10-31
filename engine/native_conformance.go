@@ -3,7 +3,7 @@ package engine
 // The native responder's conformance options: the level it certifies the
 // participant's answers at, and where it records what it finds. They are the
 // only functions of the core responder that read the level, so a change to
-// them owes the level gates (tools/gateroute conformance-levels).
+// them owes the platform's conformance-level gates.
 
 // WithConformancePolicy gives the responder the enforcement policy of the
 // gateway it runs in. Unset ⇒ the zero value, strict.

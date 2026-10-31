@@ -79,11 +79,17 @@ const msgPatientUnidentifiable = "cannot identify the patient: the request carri
 // subjectBindingFailure is the answer to a failed bind of the member a request names:
 // a patient the request cannot identify is refused 400, recorded as authority (the
 // patient the exchange is for cannot be identified); any other failure is the system of
-// record's (SoRFailureResponse).
+// record's (SoRFailureResponse). On a leg this gateway answers, one whose answer repeats
+// a member name is recorded as sorFailure records it, on message integrity; on the
+// requester's side, where its system's reads are not the exchange's backend calls, the
+// record is unchanged.
 func subjectBindingFailure(ctx context.Context, err error) (int, string) {
 	if errors.Is(err, errPatientUnidentifiable) {
 		exchangeOf(ctx).refusing(RefusalAuthority)
 		return http.StatusBadRequest, msgPatientUnidentifiable
+	}
+	if x := exchangeOf(ctx); readRepeatsAMember(err) && x.answering() {
+		x.sorFailure(err)
 	}
 	return SoRFailureResponse(err)
 }

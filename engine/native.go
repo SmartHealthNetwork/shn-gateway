@@ -17,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httptrace"
@@ -33,8 +32,6 @@ import (
 )
 
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
-
-const relayBodyCap = 6 << 20 // 6 MiB — headroom under the 8 MiB MaxResponseBytes for seal + wrapper
 
 type nativeResponder struct {
 	diagnostic DiagnosticSink
@@ -474,8 +471,14 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	x.sent(p)
 	systemAnswered(ctx)
 	defer resp.Body.Close()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	rb, err := readCapped(resp.Body, maxPartnerBody)
 	n.emitDiagnostic(ctx, "native.response", rb, resp.StatusCode, diagnosticReadDetail(err, len(rb)), req, resp.Header)
+	// An answer over what this gateway reads is never relayed cut short: the
+	// system answered, so the refusal says it was delivered (responderFailed).
+	if isBodyTooLarge(err) {
+		x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s answer over %d bytes: %w", label, maxPartnerBody, errAnswerTooLarge), sent: true}
+	}
 	if capture != nil {
 		capture.response = append([]byte(nil), rb...)
 	}
@@ -597,9 +600,8 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 	}
 	reply := upstreamReply{body: relay.NewBody(rb, relay.OriginUpstreamResponse), raw: rb, contentType: ct, declared: resp.Header.Get("Content-Type"), status: resp.StatusCode}
 	if resp.StatusCode/100 != 2 {
-		if len(rb) > relayBodyCap { // headroom under MaxResponseBytes for seal + wrapper
-			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s body too large to relay (%d bytes)", label, len(rb)), sent: true}
-		}
+		// Whether it fits the sealed answer is decided exactly when it is
+		// sealed (buildResponseLeg), as a 2xx answer's is.
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
 	return reply, LegResult{}, nil

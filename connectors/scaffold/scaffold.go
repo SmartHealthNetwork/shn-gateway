@@ -6,8 +6,7 @@
 // This is a DEMO/TEMPLATE connector. It is deliberately NOT wired into the gateway's
 // build() env switch (gateway/app/app.go — the `if cfg.FHIRDataURL == ""` selection of
 // memstub vs the generic FHIR connector) — a template carrying demo persona data must never be config-selectable
-// in a production image. Reach it by clone-and-edit (see README) or the Tier-3 override
-// test (test/tier3override). Real vendor connectors are the opposite: they SHOULD ship in
+// in a production image. Reach it by clone-and-edit (see README). Real vendor connectors are the opposite: they SHOULD ship in
 // the image and be config-selected (the future connector-registry track).
 package scaffold
 
@@ -28,7 +27,7 @@ type Scaffold struct{}
 func New() *Scaffold { return &Scaffold{} }
 
 // scaffoldMember is the one wired demo persona: MBR-D-UC03, the demo roster's PA subject.
-// Demographics are IDENTICAL to the seeded persona (internal/fhirseed's demo roster) so the
+// Demographics are IDENTICAL to the seeded persona (the platform seeder's demo roster) so the
 // derived PCI matches and the provider→payer leg correlates.
 //
 // ConservativeTherapyWeeks is deliberately 9 — a value no other source produces, so a

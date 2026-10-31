@@ -3,8 +3,8 @@ package fhirseed
 import _ "embed"
 
 // LumbarMRIQuestionnaireCanonical is the absolute canonical URL for the demo lumbar-MRI
-// PA questionnaire. Must equal internal/crd.QuestionnaireCanonicalLumbarMRI /
-// internal/dtr.LumbarMRICanonical — the three are independent module-local copies of the
+// PA questionnaire. Must equal the platform's CRD and DTR packages' own constants
+// (QuestionnaireCanonicalLumbarMRI / LumbarMRICanonical) — the three are independent module-local copies of the
 // SAME fact, not a hierarchy (register §8, 2026-08-24 retirement: the SDK's public
 // DemoLumbarQuestionnaire/QuestionnaireCanonicalLumbarMRI exports were retired from
 // shn-sdk's published API before the v0.46.0 breaking window closed; the fixture content
@@ -15,9 +15,9 @@ const LumbarMRIQuestionnaireCanonical = "http://smarthealth.network/fhir/Questio
 
 // lumbarQuestionnaireJSON is the demo lumbar-MRI PA questionnaire, captured byte-for-byte
 // from the last shnsdk.DemoLumbarQuestionnaire() output before that export was retired
-// (test/sdkparity's byte-comparison proved the two identical for as long as both existed).
+// (the platform's SDK parity byte-comparison proved the two identical for as long as both existed).
 // Its cqf-library extension MUST match DemoLumbarLibrary's Library.url — pinned by
-// internal/fhirseed's TestSDKQuestionnaireCanonicalMatchesLibrary.
+// the platform seeder's TestSDKQuestionnaireCanonicalMatchesLibrary.
 //
 //go:embed testdata/lumbar-mri-questionnaire.json
 var lumbarQuestionnaireJSON []byte

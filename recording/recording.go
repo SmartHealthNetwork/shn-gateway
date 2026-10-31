@@ -1,9 +1,9 @@
 // Package recording is the network's exchange record vocabulary: the closed
 // lists an exchange record's direction, outcome, refusing party, refusal
-// rule, backend error class and answer error class are drawn from, each
-// ending in ExchangeOther. It names no workstream, and it imports no engine
-// package, so a reader of recorded exchanges can use the gateway's own words
-// without importing the engine.
+// rule, refusal stage, backend error class and answer error class are drawn
+// from, each ending in ExchangeOther. It names no workstream, and it imports
+// no engine package, so a reader of recorded exchanges can use the gateway's
+// own words without importing the engine.
 //
 // The vocabulary moved here from package engine, which keeps its names
 // (engine.RefusalRules and the rest) as deprecated aliases of these.
@@ -49,6 +49,21 @@ const (
 	RefusalLimit          = "limit"
 )
 
+// Refusal stages: where in this gateway's own work a fidelity refusal
+// (RefusalFidelity) was made, which says whose it is to fix.
+// RefusalStageBuild is SHN refusing to build the message the refusal is
+// about because of what the caller declared or did not state (facts stated
+// for another order, a builder declaration it does not honour, a statement
+// missing from the request or the participant's records); earlier legs of the
+// same call may already have been sent. RefusalStageVerify is an edit or a
+// message the gateway built failing its own verification (the transmit
+// check, a seal, the re-derivation of a translation, a bridged $validate).
+// Only a fidelity refusal carries a stage.
+const (
+	RefusalStageBuild  = "build"
+	RefusalStageVerify = "verify"
+)
+
 // Backend error classes.
 const (
 	BackendTimeout   = "timeout"
@@ -73,6 +88,7 @@ var (
 	ExchangeOutcomes    = []string{ExchangeAnswered, ExchangeRefused, ExchangeUnreachable, ExchangeUpstreamError, ExchangeOther}
 	RefusalParties      = []string{RefusedByProviderGateway, RefusedByHub, RefusedByAuthorizationFramework, RefusedByPayerGateway, ExchangeOther}
 	RefusalRules        = []string{RefusalAuthentication, RefusalAuthority, RefusalConsent, RefusalRouting, RefusalReplay, RefusalIntegrity, RefusalAudit, RefusalFidelity, RefusalConformance, RefusalLimit, ExchangeOther}
+	RefusalStages       = []string{RefusalStageBuild, RefusalStageVerify, ExchangeOther}
 	BackendErrorClasses = []string{BackendTimeout, BackendConnect, BackendTLS, BackendAuth, BackendHTTP3xx, BackendHTTP4xx, BackendHTTP5xx, BackendRead, BackendMalformed, BackendCancelled, ExchangeOther}
 	// AnswerErrorClasses say why an inbound leg's answer could not be
 	// authorized: the request ended before it (cancelled: the requester was

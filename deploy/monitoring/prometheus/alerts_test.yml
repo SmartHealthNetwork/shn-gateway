@@ -216,17 +216,22 @@ tests:
               description: "Its last successful read was 9m 0s ago. The feed carries registrations and revocations: until it is read again, a revocation since then does not reach this gateway, and a newly registered peer is not known to it."
 
   # Refused by rule, fidelity and audit (one refusal in the last 5 minutes): a lone fidelity refusal
-  # fires at once and clears five minutes later (gwa); an audit series whose first sample holds its
-  # first refusal fires (gwb); a fidelity counter at three that restarts and reports one fires
-  # (gwc); a fidelity counter holding four old refusals whose samples stop for 12 minutes and resume
-  # with no new refusal does not fire (gwd). Pinned to SHN's alarm gateway_refused_by_rule
-  # (ExchangeRefusedByRule per service and rule, Sum >= 1 for fidelity and audit in one 300 s
-  # period, warning).
+  # at stage verify fires at once and clears five minutes later (gwa), while a fidelity refusal at
+  # stage build in the same minute never fires (gwe: the gateway refused to build from what the
+  # request stated, which ExchangeRefusedByRule{rule=fidelity} does not count); an audit series
+  # whose first sample holds its first refusal fires (gwb); a fidelity counter at three that
+  # restarts and reports one fires (gwc); a fidelity counter holding four old refusals whose samples
+  # stop for 12 minutes and resume with no new refusal does not fire (gwd). gwc and gwd carry no
+  # stage, as a gateway that reports none: they count. Pinned to SHN's alarm
+  # gateway_refused_by_rule (ExchangeRefusedByRule per service and rule, Sum >= 1 for fidelity and
+  # audit in one 300 s period, warning).
   - interval: 1m
     input_series:
-      - series: 'shn_gateway_refusals_total{job="gwa",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
+      - series: 'shn_gateway_refusals_total{job="gwa",instance="a",shn_direction="inbound",shn_exchange="pas-claim",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity",shn_refusal_stage="verify"}'
         values: '0x20 1x40'
-      - series: 'shn_gateway_refusals_total{job="gwb",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="audit"}'
+      - series: 'shn_gateway_refusals_total{job="gwe",instance="a",shn_direction="ingress",shn_exchange="other",shn_refusal_by="provider-gateway",shn_refusal_rule="fidelity",shn_refusal_stage="build"}'
+        values: '0x20 1x40'
+      - series: 'shn_gateway_refusals_total{job="gwb",instance="a",shn_direction="ingress",shn_exchange="pas-claim",shn_refusal_by="provider-gateway",shn_refusal_rule="audit",shn_refusal_stage="none"}'
         values: '_x30 1x30'
       - series: 'shn_gateway_refusals_total{job="gwc",instance="a",shn_direction="inbound",shn_exchange="crd-order-select",shn_refusal_by="payer-gateway",shn_refusal_rule="fidelity"}'
         values: '3x40 1x20'
@@ -242,14 +247,14 @@ tests:
           - exp_labels: {severity: warning, job: gwa, shn_refusal_rule: fidelity}
             exp_annotations:
               summary: "gwa refused an exchange under the fidelity rule in the last 5 minutes"
-              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - eval_time: 25m
         alertname: ShnGatewayRefusedFidelityOrAudit
         exp_alerts:
           - exp_labels: {severity: warning, job: gwa, shn_refusal_rule: fidelity}
             exp_annotations:
               summary: "gwa refused an exchange under the fidelity rule in the last 5 minutes"
-              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - eval_time: 26m
         alertname: ShnGatewayRefusedFidelityOrAudit
         exp_alerts: []
@@ -259,7 +264,7 @@ tests:
           - exp_labels: {severity: warning, job: gwb, shn_refusal_rule: audit}
             exp_annotations:
               summary: "gwb refused an exchange under the audit rule in the last 5 minutes"
-              description: "At least one audit refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+              description: "At least one audit refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - eval_time: 36m
         alertname: ShnGatewayRefusedFidelityOrAudit
         exp_alerts: []
@@ -269,7 +274,7 @@ tests:
           - exp_labels: {severity: warning, job: gwc, shn_refusal_rule: fidelity}
             exp_annotations:
               summary: "gwc refused an exchange under the fidelity rule in the last 5 minutes"
-              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - eval_time: 46m
         alertname: ShnGatewayRefusedFidelityOrAudit
         exp_alerts: []
@@ -386,7 +391,7 @@ tests:
           - exp_labels: {severity: warning, job: gwg, shn_refusal_rule: fidelity}
             exp_annotations:
               summary: "gwg refused an exchange under the fidelity rule in the last 5 minutes"
-              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is the gateway's own edit of a message refused; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
+              description: "At least one fidelity refusal in the last 5 minutes. A fidelity refusal is an edit the gateway built failing its own verification; an audit refusal is an exchange whose audit could not be recorded. Either is the network's own machinery failing, not a partner. shn_refusal_by names who refused."
       - eval_time: 90m
         alertname: ShnGatewayRefusedIntegrityOrRouting
         exp_alerts: []

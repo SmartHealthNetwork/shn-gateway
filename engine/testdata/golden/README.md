@@ -17,18 +17,18 @@ They are read by this package's tests through two helpers:
 
 The `gateway` module is **published standalone** (as `shn-gateway`) and does
 not carry the repo root's `testdata/` alongside it. A reach above the module
-root resolves in the monorepo and nowhere else, so it makes these tests either
+root resolves in the platform repository and nowhere else, so it makes these tests either
 red or silently skipped in the published module — which means the module's own
 `go test ./...` stops telling the truth about the code it ships. Both failure
-modes have happened; `gateway/sweep_test.go`'s `TestNoRepoRootReach` now fails
+modes have happened; the module root's `sweep_test.go` `TestNoRepoRootReach` now fails
 at authoring time on any such reach, in either the literal (`"../../…"`) or the
 split (`filepath.Join("..", "..", …)`) spelling.
 
 ## Drift guard
 
-These copies are **not** independently maintained. The root module's
-`test/conformance/gateway_vendored_golden_drift_test.go` asserts byte-equality
-between every file here and its repo-root original on each `make check` run —
+These copies are **not** independently maintained. A drift test in the
+platform repository's root module asserts byte-equality between every file
+here and its repo-root original on each run of the platform's default gate —
 discovery-based, so a newly vendored fixture is pinned automatically. Only the
 root module can see both trees in one build.
 

@@ -1,7 +1,7 @@
 // compat.go — the compatibility manifest: a Go table
 // consulted at runtime inside a deployed binary, NEVER JSON. This is
-// deliberately NOT tools/contracts/manifest.json — that file is IG package-pin
-// text consumed by contractsgen's KV/curl-site machinery (a repo-file read
+// deliberately NOT the platform's contracts manifest JSON — that file is IG
+// package-pin text consumed by the platform contract generator's KV/curl-site machinery (a repo-file read
 // cannot serve a routing filter inside a running process, and the parser must
 // never see unrelated content — the "hapi.fhir.implementationguides.<key>.
 // <field>=" block-indexing gotcha, hit twice in practice).

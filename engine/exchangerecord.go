@@ -2,7 +2,9 @@ package engine
 
 // exchangerecord.go — the exchange record seam.
 //
-// Every call this gateway answers on a Da Vinci ingress route or on
+// Every call this gateway answers on a Da Vinci ingress route, on a route a
+// compiled-in module originates exchanges from (gatewayModule.exchangeRoutes:
+// on-behalf building's /scenario origination routes) or on
 // /substrate/inbound produces exactly one ExchangeRecord, handed to
 // Config.ExchangeObserved once the answer is written: on success, on every
 // refusal (the earliest authentication refusal included) and when the handler
@@ -48,7 +50,8 @@ type ExchangeRecord struct {
 	// Start is when this gateway received the call (Config.Clock).
 	Start time.Time
 	// CorrelationID is the leg's id: the X-SHN-Leg-Id an ingress answer
-	// carries, or the envelope correlationId of an inbound leg, as boundedID
+	// carries, the first leg's correlation id on a module's origination
+	// route, or the envelope correlationId of an inbound leg, as boundedID
 	// records it. Empty when the call was refused before it was settled (an
 	// inbound leg refused before its envelope was verified).
 	CorrelationID string
@@ -59,14 +62,17 @@ type ExchangeRecord struct {
 	// proof (ingress only; empty elsewhere).
 	CallID string
 	// Direction is DirectionIngress (a call from this gateway's own
-	// participant) or DirectionInbound (a leg from the network).
+	// participant, a module's origination route's included: the request
+	// enters from the participant's own side and this gateway sends the leg)
+	// or DirectionInbound (a leg from the network).
 	Direction string
 	// Route is the route the call arrived on (ExchangeRoutes).
 	Route string
 	// Exchange is the leg's transaction type (ExchangeKinds), or ExchangeOther
 	// when the call was answered before a leg was known. On an inbound leg it
 	// is read from the envelope before the leg's token is verified; it is a
-	// closed value either way.
+	// closed value either way. A call that sends more than one leg (a
+	// module's origination) records the first leg it sent.
 	Exchange string
 	// Operation is the CDS hook or the DTR operation the leg carries, when it
 	// names one (ExchangeOperations; empty when it names none). Not a metric
@@ -100,6 +106,14 @@ type ExchangeRecord struct {
 	// over its bound (maxEligibilityBatch), and from v0.58.0 the gateway records an
 	// Authorization Framework denial as RefusalAuthority, whatever its reason.
 	RefusedBy, Rule string
+	// RefusalStage is where a fidelity refusal (Rule RefusalFidelity) was
+	// made (recording.RefusalStages): recording.RefusalStageBuild, SHN
+	// refusing to build the message the refusal is about because of what the
+	// caller declared or did not state (earlier legs of the call may have been
+	// sent); recording.RefusalStageVerify, an edit or message this gateway
+	// built failing its own verification. Each site that refuses on fidelity
+	// names its stage; empty for every other rule and outcome.
+	RefusalStage string
 	// Status is the status the requester received: the HTTP status of an
 	// ingress answer; the application status inside an inbound answer's frame
 	// (the HTTP status to the Hub when the answer was not framed).
@@ -135,6 +149,13 @@ type ExchangeRecord struct {
 	// gateway's own refusal) could not be authorized (AnswerErrorClasses);
 	// empty otherwise.
 	AnswerError string
+	// AuthorizeError is why no authority could be obtained for a request leg
+	// this gateway was sending (AnswerErrorClasses); empty otherwise.
+	AuthorizeError string
+	// InvolvedOmitted counts, by reason (InvolvedOmitReasons), the patients this
+	// call's involved lists left out: the exchange has no record under them.
+	// Nil when none was.
+	InvolvedOmitted map[string]int
 	// Findings summarizes the conformance findings the call's checks recorded.
 	Findings FindingSummary
 	// Edits are the ids of the registered edits (relay.EditIDs: E-01 …) this
@@ -192,6 +213,12 @@ type ExchangeRecord struct {
 	// LineCarriedAnswer when the answer was stamped with another line than
 	// the leg routed. Empty when it was not. Not a metric dimension.
 	LineCarried []string
+	// EditsNotMade names each registered edit the gateway makes by default
+	// that it could not make on the call, with why (EditNotMadeValues, each
+	// at most once): the bytes it would have changed were carried as sent.
+	// Empty when every such edit was made or had nothing to change.
+	// Content-free; not a metric dimension. Evolving.
+	EditsNotMade []string
 	// HubDelivered is the Hub's own word on whether the recipient's gateway
 	// received an ingress call's leg, read from the HubDeliveredHeader of the
 	// Hub's error answer to the leg: "no", "yes" or "unknown". Empty when the
@@ -338,8 +365,15 @@ var (
 	// Deprecated: use recording.ExchangeDirections, which this is; a later minor release removes it.
 	ExchangeDirections = vocab.ExchangeDirections
 	// ExchangeRoutes are the ingress routes the compiled-in workstreams
-	// declare, and the core's inbound route (set in init).
+	// declare, the routes the compiled-in modules originate exchanges from
+	// (gatewayModule.exchangeRoutes), and the core's inbound route (set in
+	// init).
 	ExchangeRoutes []string
+	// ExchangeOriginationRoutes are the routes of ExchangeRoutes that the
+	// compiled-in modules originate exchanges from: on-behalf building's
+	// originating /scenario routes, each recorded with direction ingress
+	// (set in init).
+	ExchangeOriginationRoutes []string
 	// ExchangeKinds is every leg of the compiled-in workstreams' catalogs
 	// (set in init).
 	ExchangeKinds []string
@@ -356,23 +390,24 @@ var (
 	RefusalRules = vocab.RefusalRules
 	// Deprecated: use recording.BackendErrorClasses, which this is; a later minor release removes it.
 	BackendErrorClasses = vocab.BackendErrorClasses
-	// AnswerErrorClasses say why an inbound leg's answer could not be
-	// authorized: the request ended before it (cancelled: the requester was
-	// gone), the authorize call ran out of time (timeout), the Authorization
-	// Framework denied it (auth) or never answered it (unreachable), or
-	// another failure (other).
+	// AnswerErrorClasses say why an inbound leg's answer, or a request leg (its
+	// AuthorizeError), could not be authorized: the request ended before it
+	// (cancelled: the requester was gone), the authorize call ran out of time
+	// (timeout), the Authorization Framework denied it (auth) or never answered
+	// it (unreachable), or another failure (other).
 	//
 	// Deprecated: use recording.AnswerErrorClasses, which this is; a later minor release removes it.
 	AnswerErrorClasses = vocab.AnswerErrorClasses
 )
 
-// init derives ExchangeRoutes, ExchangeKinds and ExchangeOperations from the
-// compiled-in workstreams. It runs after every package-level variable is
+// init derives ExchangeRoutes, ExchangeOriginationRoutes, ExchangeKinds and
+// ExchangeOperations from the compiled-in workstreams and modules. It runs after every package-level variable is
 // set: the workstreams' ingress handlers record exchanges against these
 // lists, so the lists cannot be initializers of their own without an
 // initialization cycle.
 func init() {
-	ExchangeRoutes = append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther)
+	ExchangeOriginationRoutes = moduleExchangeRouteNames()
+	ExchangeRoutes = slices.Concat(workstreamIngressRouteNames(), ExchangeOriginationRoutes, []string{RouteSubstrateInbound, ExchangeOther})
 	ExchangeKinds = append(workstreamKinds(), ExchangeOther)
 	ExchangeOperations = append(workstreamOperations(), ExchangeOther)
 }
@@ -395,15 +430,20 @@ type exchangeRecorder struct {
 	// tally follows the leg's findings at observe (module3_finding_tally.go); nil at
 	// every other level.
 	tally *legTally
-	// outcome/party/rule are the settled outcome, set by decided.
-	outcome, party, rule string
+	// outcome/party/rule are the settled outcome, set by decided;
+	// refusalStage is a settled fidelity refusal's stage.
+	outcome, party, rule, refusalStage string
 	// appStatus is the status inside an inbound answer's frame.
 	appStatus int
 	// guardRule is the rule of a check that refused after the last decided
 	// outcome; it names the refusal when the answer written is non-2xx.
-	guardRule string
+	// guardStage is its stage when the rule is fidelity.
+	guardRule, guardStage string
 	// self is the party this gateway is.
 	self string
+	// attested is set once a refusal has been attested to the Hub: the outcome
+	// it settled is final (refusedAttested).
+	attested bool
 	// forwarded is set once the operation has been forwarded to the
 	// participant's own system (backend); reads after it do not replace it.
 	forwarded bool
@@ -445,6 +485,22 @@ func (x *exchangeRecorder) leg(txType string) {
 	x.with(func() { x.rec.Exchange = closed(ExchangeKinds, txType) })
 }
 
+// sending notes the transaction type and correlation id of a leg this
+// gateway sends, each unless the call's is already noted: an ingress handler
+// notes its leg itself (and its answer names the leg's id, which the record
+// takes), and a call that sends more than one leg (a module's origination)
+// records the first leg's. A refusal recorded later may be a later leg's.
+func (x *exchangeRecorder) sending(txType, correlationID string) {
+	x.with(func() {
+		if x.rec.Exchange == ExchangeOther {
+			x.rec.Exchange = closed(ExchangeKinds, txType)
+		}
+		if x.rec.CorrelationID == "" {
+			x.rec.CorrelationID = correlationID
+		}
+	})
+}
+
 func (x *exchangeRecorder) operation(op string) {
 	x.with(func() {
 		if op != "" {
@@ -470,22 +526,28 @@ func (x *exchangeRecorder) responseHash(h string) {
 	x.with(func() { x.rec.ResponseCiphertextHash = h })
 }
 
-// decided settles the outcome. A refusal that names no rule takes the rule of
-// the check that refused since the last decided outcome. by "" is this
-// gateway.
-func (x *exchangeRecorder) decided(outcome, by, rule string) {
+// decided settles the outcome. A refusal that names no rule takes the rule
+// (and the stage) of the check that refused since the last decided outcome.
+// by "" is this gateway.
+func (x *exchangeRecorder) decided(outcome, by, rule string) { x.settle(outcome, by, rule, "") }
+
+// settle is decided with a fidelity refusal's stage.
+func (x *exchangeRecorder) settle(outcome, by, rule, stage string) {
 	x.with(func() {
+		if x.attested {
+			return
+		}
 		if outcome == ExchangeRefused {
 			if rule == "" {
-				rule = x.guardRule
+				rule, stage = x.guardRule, x.guardStage
 			}
 			if by == "" {
 				by = x.self
 			}
 		} else {
-			by, rule = "", ""
+			by, rule, stage = "", "", ""
 		}
-		x.outcome, x.party, x.rule, x.guardRule = outcome, by, rule, ""
+		x.outcome, x.party, x.rule, x.refusalStage, x.guardRule, x.guardStage = outcome, by, rule, stage, "", ""
 	})
 }
 
@@ -508,6 +570,34 @@ func (x *exchangeRecorder) sent(p relay.Payload) {
 			x.rec.Edits = addEdits(x.rec.Edits, p.Edits())
 		})
 	}
+}
+
+// Why a default edit was not made (ExchangeRecord.EditsNotMade).
+const (
+	// EditNotMadeNoStructuralPayerURL: a PAS Task in the answer names a
+	// payer-url input that is not a string valueUrl, so the return-path
+	// re-key (E-10) has no value to replace.
+	EditNotMadeNoStructuralPayerURL = "E-10:no-structural-payer-url"
+	// EditNotMadeUnreadableAnswer: the answer could not be read as JSON, so
+	// whether it carries a payer-url to re-key (E-10) is unknown.
+	EditNotMadeUnreadableAnswer = "E-10:unreadable-answer"
+	// EditNotMadePayerDoesNotTake: the payer that answered is not known to
+	// take the documentation submission, so a return path (E-10) to it would
+	// always refuse.
+	EditNotMadePayerDoesNotTake = "E-10:payer-does-not-take"
+)
+
+// EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
+var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake}
+
+// editNotMade records that a default edit was not made, and why (one of
+// EditNotMadeValues).
+func (x *exchangeRecorder) editNotMade(why string) {
+	x.with(func() {
+		if !slices.Contains(x.rec.EditsNotMade, why) {
+			x.rec.EditsNotMade = append(x.rec.EditsNotMade, why)
+		}
+	})
 }
 
 // answered records the answer this gateway wrote on the call, once the
@@ -577,12 +667,43 @@ func exchangeOfWriter(w http.ResponseWriter) *exchangeRecorder {
 	return nil
 }
 
-// refused settles a refusal by this gateway on rule.
+// ownFailure settles this gateway's own internal failure: other, never a
+// refusal, even after a leg of the same call was answered.
+func (x *exchangeRecorder) ownFailure() { x.decided(ExchangeOther, "", "") }
+
+// refused settles a refusal by this gateway on rule. A fidelity refusal is
+// settled by refusedFidelity, which names its stage.
 func (x *exchangeRecorder) refused(rule string) { x.decided(ExchangeRefused, "", rule) }
 
+// refusedAttested settles a refusal this gateway has attested to the Hub: what
+// the wire said is final, so nothing that unwinds after it (a responder's
+// failure settling its own class) can make the record say otherwise.
+func (x *exchangeRecorder) refusedAttested(by, rule string) {
+	x.decided(ExchangeRefused, by, rule)
+	x.with(func() { x.attested = true })
+}
+
 // refusing names the rule of a refusal about to be written, for the outcome
-// the refusal's answer settles.
-func (x *exchangeRecorder) refusing(rule string) { x.with(func() { x.guardRule = rule }) }
+// the refusal's answer settles. A fidelity refusal is named by
+// refusingFidelity, which names its stage.
+func (x *exchangeRecorder) refusing(rule string) {
+	x.with(func() { x.guardRule, x.guardStage = rule, "" })
+}
+
+// refusedFidelity settles a fidelity refusal by this gateway (the fidelity of
+// its own edits and builds) made at stage: recording.RefusalStageBuild or
+// recording.RefusalStageVerify. It and refusingFidelity are the only ways a fidelity
+// refusal is recorded, so every one names its stage
+// (TestFidelityRefusals_EveryOneNamesItsStage).
+func (x *exchangeRecorder) refusedFidelity(stage string) {
+	x.settle(ExchangeRefused, "", RefusalFidelity, stage)
+}
+
+// refusingFidelity names a fidelity refusal about to be written, made at
+// stage, as refusing names any other.
+func (x *exchangeRecorder) refusingFidelity(stage string) {
+	x.with(func() { x.guardRule, x.guardStage = RefusalFidelity, stage })
+}
 
 // frameRefusalRule names the rule behind a request-frame refusal: a line the
 // recipient does not serve (422) is routing; a frame it cannot read (400) is
@@ -621,7 +742,7 @@ func (x *exchangeRecorder) checked(kind CheckKind, rule string, recorded, refuse
 			}
 		}
 		if refused {
-			x.guardRule = refusalRuleFor(kind, rule)
+			x.guardRule, x.guardStage = refusalRuleFor(kind, rule)
 		}
 	})
 }
@@ -649,6 +770,19 @@ func (x *exchangeRecorder) since(now func() time.Time, start time.Time) time.Dur
 		return 0
 	}
 	return now().Sub(start)
+}
+
+// systemAnswered reports whether the participant's own system has answered
+// the operation forwarded to it with a status (any status: it may have acted).
+// A read made on the way to the forward (the CDS service listing) is not that
+// answer: the system has been asked nothing to act on yet. It is what decides
+// whether a responder's failure to authorize its answer is attested delivered,
+// so a gateway with no recorder gets the plain 502, which claims less, not
+// more.
+func (x *exchangeRecorder) systemAnswered() bool {
+	answered := false
+	x.with(func() { answered = x.forwarded && x.rec.Backend != nil && x.rec.Backend.Status != 0 })
+	return answered
 }
 
 // backend notes the call that asks the participant's own system for the
@@ -758,9 +892,9 @@ func (x *exchangeRecorder) network() func() {
 // addLedger adds a pend ledger read or write to its stage.
 func addLedger(s *LegStages, d time.Duration) { s.Ledger += d }
 
-// answerErrorClass is the class of an inbound leg's failed answer
-// authorization (AnswerErrorClasses): the request ending first is cancelled
-// whatever the call returned, since the requester had gone.
+// answerErrorClass is the class of a failed authorize call (AnswerErrorClasses),
+// for an inbound leg's answer or a request leg: the request ending first is
+// cancelled whatever the call returned, since the requester had gone.
 func answerErrorClass(ctx context.Context, err error) string {
 	var ne net.Error
 	switch {
@@ -818,6 +952,23 @@ func (x *exchangeRecorder) answerError(class string) {
 	x.with(func() { x.rec.AnswerError = closed(AnswerErrorClasses, class) })
 }
 
+// authorizeError notes why no authority could be obtained for a request leg
+// (AnswerErrorClasses). A leg that fails ends its call's legs, so this is about
+// the call's last.
+func (x *exchangeRecorder) authorizeError(class string) {
+	x.with(func() { x.rec.AuthorizeError = closed(AnswerErrorClasses, class) })
+}
+
+// involvedOmitted notes a patient left out of an involved list.
+func (x *exchangeRecorder) involvedOmitted(reason string) {
+	x.with(func() {
+		if x.rec.InvolvedOmitted == nil {
+			x.rec.InvolvedOmitted = map[string]int{}
+		}
+		x.rec.InvolvedOmitted[closed(InvolvedOmitReasons, reason)]++
+	})
+}
+
 // clock is the time the recorder reads latencies by: the gateway's own.
 func (x *exchangeRecorder) clock() time.Time {
 	if x.now == nil {
@@ -864,15 +1015,30 @@ func repeatsAMember(ctx context.Context, body []byte) bool {
 	return true
 }
 
-// sorFailure settles an answering-side refusal caused by a failed read of
-// the participant's own system of record (the read itself is noted where it
-// ran, recordingSoR): that system not answering usably, an upstream failure.
-// A read the request's end cut short was noted as such (readEndedClass), and
-// the exchange settles "other" (emitExchange), whatever the connector
-// returned: a connector's own cancellation is its system not answering.
-func (x *exchangeRecorder) sorFailure() {
+// sorFailure settles an answering-side refusal caused by err, a failed read
+// of the participant's own system of record (the read itself is noted where
+// it ran, recordingSoR): that system not answering usably, an upstream
+// failure. A read the request's end cut short was noted as such
+// (readEndedClass), and the exchange settles "other" (emitExchange), whatever
+// the connector returned: a connector's own cancellation is its system not
+// answering. An answer that repeats a member name (relay.ErrDuplicateKey) can
+// be read two ways, so it is recorded as repeatsAMember records it on every
+// leg: refused on message integrity, that call's failure malformed.
+func (x *exchangeRecorder) sorFailure(err error) {
+	if readRepeatsAMember(err) {
+		x.malformed()
+		// Settled now, and named for the refusal the leg writes after it too
+		// (a caller can settle before its answer is written).
+		x.decided(ExchangeRefused, "", RefusalIntegrity)
+		x.refusing(RefusalIntegrity)
+		return
+	}
 	x.decided(ExchangeUpstreamError, "", "")
 }
+
+// readRepeatsAMember reports a failed read of the participant's own system of
+// record whose answer repeats a member name (relay.ErrDuplicateKey).
+func readRepeatsAMember(err error) bool { return errors.Is(err, relay.ErrDuplicateKey) }
 
 // sorClass is the class of a read of the participant's own system of record:
 // the same categories SoRFailureResponse answers with.
@@ -896,19 +1062,21 @@ func sorClass(err error) string {
 	return BackendMalformed
 }
 
-// refusalRuleFor names the network rule behind a refusing check.
-func refusalRuleFor(kind CheckKind, rule string) string {
+// refusalRuleFor names the network rule behind a refusing check, and its
+// stage when the rule is fidelity: a bridged message failing its $validate is
+// an edit this gateway built failing its own verification.
+func refusalRuleFor(kind CheckKind, rule string) (string, string) {
 	switch {
 	case kind == KindFHIRBridged:
-		return RefusalFidelity
+		return RefusalFidelity, vocab.RefusalStageVerify
 	case rule == RuleSubjectPCI, rule == RuleSubjectToken:
 		// No site routes these through the guard. The federated-query bind
 		// records its refusal as consent itself (handleFederatedQueryInbound).
-		return RefusalAuthority
+		return RefusalAuthority, ""
 	case rule == RuleDuplicateKey:
-		return RefusalIntegrity
+		return RefusalIntegrity, ""
 	}
-	return RefusalConformance
+	return RefusalConformance, ""
 }
 
 // callEndedClass is a failed call's class, with cancelled kept only when the
@@ -971,23 +1139,26 @@ func backendClass(status int, err error) string {
 	return ExchangeOther
 }
 
-// hubRules are the Hub's own refusals of a leg (internal/hubsvc), by the
+// hubRules are the Hub's own refusals of a leg (the platform's Hub service), by the
 // reason it answers, with the network rule each is. Only these name a rule:
 // any other answer from the Hub is "other".
 var hubRules = map[string]string{
-	"missing X-Holder-Assertion header":      RefusalAuthentication,
-	"invalid X-Holder-Assertion encoding":    RefusalAuthentication,
-	"invalid X-Holder-Assertion JSON":        RefusalAuthentication,
-	"unknown sender":                         RefusalAuthentication,
-	"assertion holder id mismatch":           RefusalAuthentication,
-	"assertion verification failed":          RefusalAuthentication,
-	"invalid authz token":                    RefusalAuthority,
-	"authz token verification failed":        RefusalAuthority,
-	"response leg authorization failed":      RefusalAuthority,
-	"replay detected":                        RefusalReplay,
+	"missing X-Holder-Assertion header":   RefusalAuthentication,
+	"invalid X-Holder-Assertion encoding": RefusalAuthentication,
+	"invalid X-Holder-Assertion JSON":     RefusalAuthentication,
+	"unknown sender":                      RefusalAuthentication,
+	"assertion holder id mismatch":        RefusalAuthentication,
+	"assertion verification failed":       RefusalAuthentication,
+	"invalid authz token":                 RefusalAuthority,
+	"authz token verification failed":     RefusalAuthority,
+	"response leg authorization failed":   RefusalAuthority,
+	"replay detected":                     RefusalReplay,
+	// Routing, and transient: the network cannot carry this body right now.
+	"large envelope budget exhausted":        RefusalRouting,
 	"stale or future timestamp":              RefusalReplay,
 	"unknown recipient":                      RefusalRouting,
 	"read body failed":                       RefusalIntegrity,
+	"unsupported content coding":             RefusalIntegrity,
 	"decode envelope failed":                 RefusalIntegrity,
 	"missing authority frame":                RefusalIntegrity,
 	"missing correlation id":                 RefusalIntegrity,
@@ -997,8 +1168,20 @@ var hubRules = map[string]string{
 	"response leg sender mismatch":           RefusalIntegrity,
 	"response leg transaction-type mismatch": RefusalIntegrity,
 	"audit append failed":                    RefusalAudit,
+	"request body too large":                 RefusalRouting,
+	"response body too large":                RefusalRouting,
 	"response audit append failed":           RefusalAudit,
 }
+
+// The Hub's reasons for an answer refused after the recipient answered
+// (the platform's Hub service): the Hub's own refusal of an answer over the network's
+// limit (in hubRules), and a recipient gateway's attested refusal of its
+// system's answer, which the Hub relays with the refusal's rule
+// (hubRefusalError.rule; hubRefusalOutcome reads it by its marker).
+const (
+	hubReasonAnswerTooLarge         = "response body too large"
+	hubReasonRecipientRefusedAnswer = "forward to recipient failed: the recipient's gateway refused its system's answer"
+)
 
 // hubRefusalOutcome reads a non-2xx answer to the leg's POST to the Hub: the
 // Hub's own refusal on a network rule, the recipient's gateway refusing or
@@ -1013,11 +1196,27 @@ func hubRefusalOutcome(e *hubRefusalError) (outcome, by, rule string) {
 		// It may have been forwarded before the connection failed.
 		return ExchangeOther, "", ""
 	}
+	// A leg the recipient does not declare it takes, refused before
+	// forwarding: where the leg can be delivered.
+	if e.legNotTaken() {
+		return ExchangeRefused, RefusedByHub, RefusalRouting
+	}
 	reason := e.reason
 	if strings.HasPrefix(reason, "forward to recipient failed") {
 		switch {
+		case strings.Contains(reason, "the recipient's gateway refused its system's answer"):
+			// Its attested refusal after its system answered, on the rule
+			// the Hub relayed; unknown ("other") when it relayed none.
+			if e.rule == "" {
+				return ExchangeRefused, RefusedByPayerGateway, ExchangeOther
+			}
+			return ExchangeRefused, RefusedByPayerGateway, e.rule
 		case strings.Contains(reason, "the recipient refused it"):
 			return ExchangeRefused, RefusedByPayerGateway, ExchangeOther
+		case strings.Contains(reason, "has no room for this envelope"):
+			// Its attested refusal before acting (NotActedAtCapacity): the
+			// network cannot carry this body right now.
+			return ExchangeRefused, RefusedByPayerGateway, RefusalRouting
 		case strings.Contains(reason, "the recipient answered"):
 			return ExchangeUpstreamError, "", ""
 		case strings.Contains(reason, "could not be read"):
@@ -1052,6 +1251,8 @@ func (x *exchangeRecorder) legOutcome(err error) {
 	var re *RelayError
 	var hr *hubRefusalError
 	var lost *answerLostError
+	var authzRefused *authzRefusal
+	var noAuthority *requestNoAuthority
 	// The Hub's delivery value, as its route handler stated it, for this leg
 	// only: a later leg's answer replaces an earlier one's.
 	delivered := ""
@@ -1069,10 +1270,16 @@ func (x *exchangeRecorder) legOutcome(err error) {
 		x.decided(ExchangeUpstreamError, "", "")
 	case errors.Is(err, errAuthorizationDenied):
 		x.decided(ExchangeRefused, RefusedByAuthorizationFramework, RefusalAuthority)
+	case errors.As(err, &authzRefused):
+		x.decided(ExchangeRefused, RefusedByAuthorizationFramework, authzRefused.rule)
+	case errors.As(err, &noAuthority):
+		x.refused(RefusalAuthority)
 	case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout), errors.Is(err, errAuthzUnreachable):
 		x.decided(ExchangeUnreachable, "", "")
 	case errors.As(err, &hr):
 		x.decided(hubRefusalOutcome(hr))
+	case errors.As(err, &lost) && lost.tooLarge:
+		x.decided(ExchangeRefused, RefusedByProviderGateway, RefusalRouting)
 	case errors.As(err, &lost) && lost.cause == "the Hub's answer could not be read":
 		// A read that failed on the way back: transport, not integrity.
 		x.decided(ExchangeOther, "", "")
@@ -1277,6 +1484,7 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	}
 	hubOut, hubSince := x.hubOut, x.hubSince
 	outcome, by, rule, appStatus, guardRule := x.outcome, x.party, x.rule, x.appStatus, x.guardRule
+	stage, guardStage := x.refusalStage, x.guardStage
 	backendFailed := rec.Backend != nil && rec.Backend.ErrorClass != "" && rec.Backend.ErrorClass != BackendCancelled
 	backendCancelled := x.cut
 	x.mu.Unlock()
@@ -1303,7 +1511,11 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 		rec.Status = http.StatusOK // a handler that wrote nothing answered 200
 	}
 	if rec.Direction == DirectionIngress {
-		rec.CorrelationID = w.Header().Get(LegIDHeader)
+		// The leg id the answer names, when it names one; an origination
+		// route's answer names none, and its record keeps its first leg's.
+		if id := w.Header().Get(LegIDHeader); id != "" {
+			rec.CorrelationID = id
+		}
 	} else if appStatus != 0 && rec.Status == http.StatusOK {
 		rec.Status = appStatus
 	}
@@ -1314,15 +1526,15 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	ok := rec.Status/100 == 2
 	switch {
 	case panicked:
-		outcome, by, rule = ExchangeOther, "", ""
+		outcome, by, rule, stage = ExchangeOther, "", "", ""
 	case guardRule != "" && !ok:
 		// A check refused after the last settled outcome, and the answer
 		// says so.
-		outcome, by, rule = ExchangeRefused, x.self, guardRule
+		outcome, by, rule, stage = ExchangeRefused, x.self, guardRule, guardStage
 	case outcome == ExchangeAnswered && !ok:
 		// The leg was answered, and this gateway answered its caller with an
 		// error anyway: its own refusal, on a rule nothing named.
-		outcome, by, rule = ExchangeRefused, x.self, ExchangeOther
+		outcome, by, rule, stage = ExchangeRefused, x.self, ExchangeOther, ""
 	case outcome != "":
 	case ok:
 		outcome = ExchangeAnswered
@@ -1346,6 +1558,11 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	rec.Outcome = closed(ExchangeOutcomes, outcome)
 	if rec.Outcome == ExchangeRefused {
 		rec.RefusedBy, rec.Rule = closed(RefusalParties, by), closed(RefusalRules, rule)
+		if rec.Rule == RefusalFidelity {
+			// Only a fidelity refusal carries a stage; one whose site named
+			// none would be "other".
+			rec.RefusalStage = closed(vocab.RefusalStages, stage)
+		}
 	}
 	if rec.Backend != nil && rec.Backend.ErrorClass != "" {
 		rec.Backend.ErrorClass = closed(BackendErrorClasses, rec.Backend.ErrorClass)

@@ -1368,3 +1368,33 @@ func TestIngressToken_AckLostRecordWrite_FreshAssertionIsTheRetry(t *testing.T) 
 		t.Fatalf("record consulted %d times across the three requests, want 3", replay.calls)
 	}
 }
+
+// A provider gateway serving the ingress without the test bypass refuses to
+// start without its base: the documentation return path a pended answer's
+// re-key writes (E-10) is built under it, so only the test bypass
+// (EnableIngressForTest, with the base cleared) reaches the re-key's
+// no-return-path refusal.
+func TestNew_IngressWithoutBaseRefusesToStart(t *testing.T) {
+	_, pub := newTestClientKey(t)
+	_, signPriv := genED25519(t)
+	sor := newCensusSoR()
+	_, err := New(Config{
+		Role:           "provider",
+		HolderID:       "provider",
+		PayerRouter:    payerRouterFor(t, "payer"),
+		Identity:       shnsdk.Identity{HolderID: "provider", SignPriv: signPriv},
+		IngressEnabled: true,
+		IngressClients: map[string]IngressClientRegistration{
+			"br-provider": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope}},
+		},
+		Reg:       shnsdk.NewRegistry(),
+		Validator: shnsdk.NewFakeValidator(),
+		SoR:       sor,
+		Store:     sor,
+		Clock:     ingressFixedClock(),
+		HubURL:    "http://hub.test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "baseURL (aud) required") {
+		t.Fatalf("an ingress with no base: want New refused, got %v", err)
+	}
+}

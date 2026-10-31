@@ -4,8 +4,10 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -204,7 +207,7 @@ func TestOriginationRoute_EachRequiredFactAtEachLine(t *testing.T) {
 				continue
 			}
 			rec := httptest.NewRecorder()
-			pasBuildFailure(rec, err, "build bundle failed")
+			pasBuildFailure(rec, httptest.NewRequest(http.MethodPost, "/", nil), err, "build bundle failed")
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), r.element) {
 				t.Errorf("%s without %s: the route answers %d %s, want 422 naming it", line, r.member, rec.Code, rec.Body.String())
 			}
@@ -270,7 +273,7 @@ func TestOriginationAmendment_CertificationTypeIsTheRequests(t *testing.T) {
 				continue
 			}
 			rec := httptest.NewRecorder()
-			pasBuildFailure(rec, err, "build update bundle failed")
+			pasBuildFailure(rec, httptest.NewRequest(http.MethodPost, "/", nil), err, "build update bundle failed")
 			if out != nil || !errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 				t.Fatalf("%s without certificationType: %v → %d %s, want a 422 naming it", line, err, rec.Code, rec.Body.String())
 			}
@@ -291,17 +294,22 @@ func TestOriginationAmendment_CertificationTypeIsTheRequests(t *testing.T) {
 	}
 }
 
-// TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission: an amendment
-// restates the submission it continues from the bytes that submission built —
-// its own created, not the amendment's.
-func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T) {
-	member := "MBR-COVERED"
-	order := pasTailServiceRequest()
+// TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission: the record
+// is read off the bytes the submission's leg sends, and the amendment built
+// from it derives its infoChanged marker from the submitted items. PAS 2.0's
+// update names its prior by identifier and carries none. From PAS 2.1 the
+// prior-Claim entry is the submitted Claim as sent:
+// TestAmendment_ThePriorClaimOnTheWireIsTheSubmittedClaim pins it.
+func TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission(t *testing.T) {
+	const statedType = `{"system":"http://terminology.hl7.org/CodeSystem/claim-type","version":"4.0.1","code":"professional","userSelected":true}`
 	submittedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
 	for _, line := range []string{"2.0", "2.2"} {
-		sub, err := buildPASSubmitBundle(line, false, order, nil, testRequestingProvider(), testMemberCoverage(member),
-			testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-			"corr-sub", submittedAt, shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+		in := attachmentUpdateInputs(line, false, false)
+		facts := in.PASClaimFacts
+		facts.ClaimType = json.RawMessage(statedType)
+		in.PASClaimFacts = facts
+		sub, err := buildPASSubmitBundle(line, false, in.SR, nil, in.Provider, in.Coverage, in.Insurer, in.MemberIDSystem,
+			in.PatientRef, in.CoverageRef, in.MemberID, in.OriginalCorr, submittedAt, in.Payer, facts, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -309,23 +317,14 @@ func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rec.prior.Created != "2026-05-01T09:30:00Z" || !bytes.Contains(rec.prior.ClaimType, []byte(`"professional"`)) ||
-			!bytes.Contains(rec.prior.Priority, []byte(`"normal"`)) || len(rec.prior.Items) != 1 {
-			t.Fatalf("%s: recorded %+v, want the submitted Claim's own created, type, priority and item", line, rec.prior)
-		}
-		in := attachmentUpdateInputs(line, false, false)
+		submitted := firstClaimEntry(t, sub)
 		in.PriorClaim = rec.prior
-		in.SR = order
-		in.OriginalCorr = "corr-sub"
 		upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
 		if err != nil {
 			t.Fatalf("%s: %v", line, err)
 		}
-		// From PAS 2.1 the update carries the prior Claim, restating the submission; PAS
-		// 2.0's update names it by identifier and restates nothing (shn-sdk's
-		// PASDef.UpdateCarriesPriorClaim).
-		if line != "2.0" && !bytes.Contains(upd, []byte(`"created":"2026-05-01T09:30:00Z"`)) {
-			t.Fatalf("%s: the prior-Claim entry does not restate the submission's own created", line)
+		if line == "2.0" && bytes.Contains(upd, submitted) {
+			t.Fatalf("%s: PAS 2.0's update carries the prior Claim; it names it by identifier", line)
 		}
 		// The amendment re-sends the submitted item exactly as it was: no
 		// infoChanged (it is derived from the recorded submission, never
@@ -343,6 +342,30 @@ func TestRecordPASSubmission_AmendmentRestatesTheRecordedSubmission(t *testing.T
 			t.Fatalf("%s: an item changed since the submission carries infoChanged %q, want changed", line, code)
 		}
 	}
+}
+
+// firstClaimEntry is a bundle's first Claim entry's resource, exactly as the
+// bundle's bytes hold it.
+func firstClaimEntry(t *testing.T, bundle []byte) json.RawMessage {
+	t.Helper()
+	var b struct {
+		Entry []struct {
+			Resource json.RawMessage `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range b.Entry {
+		var head struct {
+			ResourceType string `json:"resourceType"`
+		}
+		if json.Unmarshal(e.Resource, &head) == nil && head.ResourceType == "Claim" {
+			return e.Resource
+		}
+	}
+	t.Fatal("the bundle carries no Claim")
+	return nil
 }
 
 // updateItemInfoChanged is the infoChanged code an amendment's first Claim
@@ -384,66 +407,37 @@ func TestContinuation_RoundTripsCreated(t *testing.T) {
 }
 
 // TestPASBuildFailure_NamesTheFidelityRefusal: a build refused for an unstated
-// fact is answered 422 with the element named; any other failure stays the
-// opaque 500.
+// fact is answered 422 with the element named, recorded as a fidelity refusal
+// at the build stage; any other failure stays the opaque 500, this gateway's
+// own internal error, settled other, never a refusal.
 func TestPASBuildFailure_NamesTheFidelityRefusal(t *testing.T) {
+	// The 500 settles other, also after a leg of the same call was answered,
+	// which the record would otherwise read as this gateway's refusal.
+	recorded := func(x *exchangeRecorder) *http.Request {
+		return httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.WithValue(context.Background(), exchangeRecorderKey{}, x))
+	}
+	x := &exchangeRecorder{}
+	x.decided(ExchangeAnswered, "", "")
 	rec := httptest.NewRecorder()
-	pasBuildFailure(rec, errors.New("boom"), "build bundle failed")
+	pasBuildFailure(&exchangeWriter{ResponseWriter: rec, x: x}, recorded(x), errors.New("boom"), "build bundle failed")
 	body, _ := io.ReadAll(rec.Result().Body)
 	if rec.Code != http.StatusInternalServerError || bytes.Contains(body, []byte("boom")) {
 		t.Fatalf("an unrelated build failure must stay the opaque 500: %d %s", rec.Code, body)
 	}
-}
+	if x.outcome != ExchangeOther || x.rule != "" {
+		t.Fatalf("the 500 settled %q/%q, want other: an internal error is not a refusal", x.outcome, x.rule)
+	}
 
-// TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent: the prior-Claim
-// entry an amendment carries restates the submitted Claim's type and priority
-// exactly as the submission sent them — every member of the coding (here its
-// version and userSelected), never rebuilt from system and code. At PAS 2.2, a
-// line whose update carries the prior Claim.
-func TestRecordPASSubmission_RestatesTheSubmittedCodingsAsSent(t *testing.T) {
-	const statedType = `{"system":"http://terminology.hl7.org/CodeSystem/claim-type","version":"4.0.1","code":"professional","userSelected":true}`
-	member := "MBR-COVERED"
-	order := pasTailServiceRequest()
-	facts := testClaimFacts()
-	facts.ClaimType = json.RawMessage(statedType)
-	sub, err := buildPASSubmitBundle("2.2", false, order, nil, testRequestingProvider(), testMemberCoverage(member),
-		testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-		"corr-sub", time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC), shnsdk.CMSPayerIdentity, facts, nil)
-	if err != nil {
-		t.Fatal(err)
+	x = &exchangeRecorder{}
+	rec = httptest.NewRecorder()
+	err := fmt.Errorf("%w: Claim.type", shnsdk.ErrPASClaimFactAbsent)
+	pasBuildFailure(&exchangeWriter{ResponseWriter: rec, x: x}, recorded(x), err, "build bundle failed")
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "Claim.type") {
+		t.Fatalf("an unstated fact: %d %s, want 422 naming it", rec.Code, rec.Body.String())
 	}
-	rec, err := recordPASSubmission(sub)
-	if err != nil {
-		t.Fatal(err)
+	if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+		t.Fatalf("an unstated fact settled %s/%s stage %q, want refused fidelity at the build stage", x.outcome, x.rule, x.refusalStage)
 	}
-	in := attachmentUpdateInputs("2.2", false, false)
-	in.PriorClaim, in.SR, in.OriginalCorr = rec.prior, order, "corr-sub"
-	upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact("2.2", in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var b struct {
-		Entry []struct {
-			Resource struct {
-				ResourceType string          `json:"resourceType"`
-				ID           string          `json:"id"`
-				Type         json.RawMessage `json:"type"`
-			} `json:"resource"`
-		} `json:"entry"`
-	}
-	if err := json.Unmarshal(upd, &b); err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range b.Entry[1:] {
-		if e.Resource.ResourceType != "Claim" {
-			continue
-		}
-		if canonicalJSON(t, e.Resource.Type) != canonicalJSON(t, []byte(`{"coding":[`+statedType+`]}`)) {
-			t.Fatalf("prior-Claim type %s, want the submitted coding with every member", e.Resource.Type)
-		}
-		return
-	}
-	t.Fatal("the amendment carries no prior-Claim entry")
 }
 
 // amendmentLinkPend is a payer's pended answer at line whose Task asks item
@@ -559,5 +553,44 @@ func TestAmendment_LinksTheAnswerThePayerAskedFor(t *testing.T) {
 				t.Errorf("%s %s: informationSequence %v infoChanged %v, want item 1 → [1], added", line, name, infoSeq, marks)
 			}
 		}
+	}
+}
+
+// TestCompleteAuthoredPASRequest_Deterministic: the gateway records the
+// submission after completion and the amendment is completed the same way, so
+// completion must give the same bytes for the same input — no clock, no
+// minted id.
+func TestCompleteAuthoredPASRequest_Deterministic(t *testing.T) {
+	sor := requesterSoR(nil)
+	g := &Gateway{cfg: Config{SoR: sor, OriginationProfile: "provider-data"}}
+	in := attachmentInputs("ServiceRequest", "2.2", true)
+	in.SR = bytes.ReplaceAll(in.SR, []byte("Patient/MBR-COVERED"), []byte(in.PatientRef))
+	qc := contextInputs()
+	qc.PatientRef, qc.CoverageRef, qc.OrderRef = in.PatientRef, in.CoverageRef, "ServiceRequest/source-order"
+	qr, err := composeDTRContextAtLine(bytes.ReplaceAll([]byte(contextQR), []byte("Patient/synthetic"), []byte(in.PatientRef)), "2.2", qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.QR = qr
+	in.SR = withOrderRequester(t, in.SR, "Practitioner/prac-2")
+	records, refusal := g.orderRequesterRecords(context.Background(), in.SR)
+	if refusal != nil {
+		t.Fatal(refusal.msg)
+	}
+	body, err := buildModuleOnePASSubmit("2.2", in, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := func(b []byte) []byte {
+		t.Helper()
+		out, err := g.completeAuthoredPASRequest(context.Background(), b, in.QR, in.SR, in.CoverageRef, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	once, twice := complete(body), complete(body)
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("completion of the same input differs:\n%s\n%s", once, twice)
 	}
 }

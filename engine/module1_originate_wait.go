@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -421,9 +420,9 @@ func (g *Gateway) continuationsAreDurable() bool {
 // later decision, shared by the bounded wait and by the route that continues one
 // later, so the two can never ask different questions.
 func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont Continuation) (PASDecision, int, string, error) {
-	records, status, msg := g.inquiryRecords(ctx, cont)
+	records, status, msg, err := g.inquiryRecords(ctx, cont)
 	if status != 0 {
-		return PASDecision{}, status, msg, nil
+		return PASDecision{}, status, msg, err
 	}
 	corr := g.cfg.CorrelationGen()
 	// The inquiry runs at the line the SUBMISSION ran at, pinned on the
@@ -599,7 +598,7 @@ func inquiryRecordBody(records shnsdk.PASInquiryRecords, input string) (relay.Bo
 // coverage or the provider is one the payer is required to refuse anyway, and
 // saying "the inquiry failed" would leave an operator guessing which of the four
 // it was.
-func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk.PASInquiryRecords, int, string) {
+func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk.PASInquiryRecords, int, string, error) {
 	sor := ReadSystemOfRecord(g.cfg.SoR)
 	var out shnsdk.PASInquiryRecords
 
@@ -607,19 +606,19 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// is how a changed order is detected rather than followed.
 	order, found, err := sor.ResolveByReferenceContext(ctx, cont.OrderRef)
 	if err != nil {
-		return out, http.StatusBadGateway, "read the order from the system of record: " + err.Error()
+		return out, http.StatusBadGateway, "read the order from the system of record: " + err.Error(), nil
 	}
 	if !found {
-		return out, http.StatusConflict, ErrOrderChanged.Error() + ": the order is no longer in the system of record"
+		return out, http.StatusConflict, ErrOrderChanged.Error() + ": the order is no longer in the system of record", nil
 	}
 	if changed, detail := pasOrderChanged(order, cont); changed {
-		return out, http.StatusConflict, ErrOrderChanged.Error() + ": " + detail
+		return out, http.StatusConflict, ErrOrderChanged.Error() + ": " + detail, nil
 	}
 
 	if out.Patient, found, err = sor.ResolveByReferenceContext(ctx, cont.SoRPatientID); err != nil {
-		return out, http.StatusBadGateway, "read the patient from the system of record: " + err.Error()
+		return out, http.StatusBadGateway, "read the patient from the system of record: " + err.Error(), nil
 	} else if !found {
-		return out, http.StatusBadGateway, "the system of record has no patient " + cont.SoRPatientID
+		return out, http.StatusBadGateway, "the system of record has no patient " + cont.SoRPatientID, nil
 	}
 
 	// The Coverage the submission was built under: memberRoutingCoverage, the
@@ -631,12 +630,15 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// whichever the system of record happened to list first. The continuation
 	// does not keep the submitted Coverage, so it is read again here, by the
 	// same rule.
-	coverage, hasCoverage, status, msg := g.memberRoutingCoverage(ctx, cont.MemberID)
+	// An ambiguous coverage is handed on as its error: the inquire route
+	// answers it as a routing refusal (relayOriginationError); a waiting
+	// inquiry keeps its pend.
+	coverage, hasCoverage, status, msg, err := g.memberRoutingCoverage(ctx, cont.MemberID)
 	if status != 0 {
-		return out, status, msg
+		return out, status, msg, err
 	}
 	if !hasCoverage {
-		return out, http.StatusBadGateway, "the system of record has no coverage for member " + cont.MemberID
+		return out, http.StatusBadGateway, "the system of record has no coverage for member " + cont.MemberID, nil
 	}
 	out.Coverage = coverage
 
@@ -649,10 +651,10 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// the patient's own name changes; nothing the record asserts does.
 	if sorID, ok := strings.CutPrefix(cont.SoRPatientID, "Patient/"); ok && sorID != cont.MemberID {
 		if out.Patient, err = namePatientByMember(out.Patient, sorID, cont.MemberID); err != nil {
-			return out, http.StatusBadGateway, "name the patient by the member id: " + err.Error()
+			return out, http.StatusBadGateway, "name the patient by the member id: " + err.Error(), nil
 		}
 		if out.Coverage, err = namePatientByMember(out.Coverage, sorID, cont.MemberID); err != nil {
-			return out, http.StatusBadGateway, "name the patient in the coverage by the member id: " + err.Error()
+			return out, http.StatusBadGateway, "name the patient in the coverage by the member id: " + err.Error(), nil
 		}
 	}
 
@@ -660,7 +662,7 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// records — the order names its provider, the coverage names its payer — and
 	// each is then read from the same system. No identity is chosen here.
 	if _, out.Provider, status, msg = g.pasProvider(ctx, order); status != 0 {
-		return out, status, msg
+		return out, status, msg, nil
 	}
 
 	// Through memberPayerOrganization, the ONE reader of "which organization is
@@ -670,14 +672,14 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// records use — as a coverage naming a record the system does not hold. Two
 	// readings of one fact, and this one was wrong.
 	if coveragePayorRef(out.Coverage) == "" {
-		return out, http.StatusBadGateway, "the coverage names no payer organization, and an inquiry must name one"
+		return out, http.StatusBadGateway, "the coverage names no payer organization, and an inquiry must name one", nil
 	}
 	insurer, status, msg := g.memberPayerOrganization(ctx, out.Coverage)
 	if status != 0 {
-		return out, status, msg
+		return out, status, msg, nil
 	}
 	out.Insurer = insurer
-	return out, 0, ""
+	return out, 0, "", nil
 }
 
 // pasOrderChanged compares the order as the participant's system holds it NOW
@@ -931,9 +933,8 @@ type paInquireResp struct {
 // to localhost). They are local and in-VPC operator routes with no operator
 // authentication of their own, and this handler adds none.
 func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
+	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+	if !ok {
 		return
 	}
 	var req paInquireReq

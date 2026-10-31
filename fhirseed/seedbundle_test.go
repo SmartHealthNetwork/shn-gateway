@@ -34,10 +34,10 @@ func bundleKeys(t *testing.T, b []byte) []struct{ Method, URL string } {
 }
 
 // The provider-data seed Bundle is an embedded, pre-baked artifact (assembled +
-// drift-guarded in the monorepo). This validates the shipped embed getter itself,
+// drift-guarded in the platform repository). This validates the shipped embed getter itself,
 // STRUCTURALLY and deliberately independent of the shn-sdk pin (per F1 the
 // published module embeds a frozen artifact — persona-completeness vs the SDK is
-// asserted in the monorepo's TestBakeProviderDataSeedBundle_AllPersonasNoDupURL,
+// asserted in the platform repository's TestBakeProviderDataSeedBundle_AllPersonasNoDupURL,
 // so the public clone's tests never depend on the exact pin): one valid
 // transaction Bundle, no duplicate request.url, the single collapsed org-cms-payer
 // PUT, and a Patient PUT per provider persona (12).

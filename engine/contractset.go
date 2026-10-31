@@ -11,36 +11,35 @@ import (
 // The gateway's own contract sets: the union of the compiled-in workstreams'
 // (workstream.contractVersions). The SDK publishes PA's contract lines, and PA
 // supplies them; the SDK's set is not the whole native set once another
-// workstream is compiled in. shn-sdk v0.62.0 still lists pa.pdex@2.1
-// (shnsdk.ContractPAPDex21) natively and by default, and its parser accepts
-// it; this gateway declares no PDex surface: it serves no Patient Access API
-// and builds no PDex resource, so a declaration must not claim it. Every gateway read of the native set, the
-// build default and a declared set goes through these, never the SDK's
-// directly (the SDK drops the line in the release after v0.62.0).
+// workstream is compiled in. A workstream may also have retired a token it no
+// longer declares (contractRetirer): a declared set naming one is refused with
+// the workstream's own reason. Every gateway read of the native set, the build
+// default and a declared set goes through these, never the SDK's directly.
 
 // NativeContractVersions is every contract-version token this gateway builds
 // natively: each compiled-in workstream's, in registry order (PA's are the
-// SDK's native set without pa.pdex@2.1, in its order).
+// SDK's native set, in its order).
 func NativeContractVersions() []string {
 	return workstreamContractVersions(func(native, _ []string) []string { return native })
 }
 
 // DefaultContractVersions is this gateway's build default declaration: each
 // compiled-in workstream's default, in registry order (PA's is the SDK's
-// default without pa.pdex@2.1).
+// default).
 func DefaultContractVersions() []string {
 	return workstreamContractVersions(func(_, defaults []string) []string { return defaults })
 }
 
 // ParseDeclaredContractVersions reads a deployment's declared set as
 // shnsdk.ParseDeclaredContractVersions does, against this gateway's native
-// set rather than the SDK's, and refuses a set naming pa.pdex@2.1, saying to
-// remove it. A value that names no token (empty, or only commas and spaces) is
-// this gateway's default.
+// set rather than the SDK's, and refuses a set naming a token a compiled-in
+// workstream retired, with that workstream's reason, wherever it stands and
+// whatever else the set names. A value that names no token (empty, or only
+// commas and spaces) is this gateway's default.
 func ParseDeclaredContractVersions(csv string) ([]string, error) {
 	for _, raw := range strings.Split(csv, ",") {
-		if strings.TrimSpace(raw) == shnsdk.ContractPAPDex21 {
-			return nil, ErrPDexUndeclared
+		if err := retiredContractVersion(strings.TrimSpace(raw)); err != nil {
+			return nil, err
 		}
 	}
 	native := NativeContractVersions()
@@ -65,16 +64,10 @@ func ParseDeclaredContractVersions(csv string) ([]string, error) {
 	return out, nil
 }
 
-// ErrPDexUndeclared refuses a declared set naming pa.pdex@2.1.
-var ErrPDexUndeclared = fmt.Errorf("contract-version token %q is no longer declared by any gateway: a gateway serves no Patient Access API and builds no PDex resource, so a declaration must not claim it: remove it from the declared set (SHN_CONTRACT_VERSIONS)", shnsdk.ContractPAPDex21)
-
-// sdkContractVersions are the SDK's native set and default without
-// pa.pdex@2.1: the PA contract lines the PA workstream supplies. It is the one
-// read of the SDK's sets outside the gateway's own (above).
+// sdkContractVersions are the SDK's native set and default: the PA contract
+// lines the PA workstream supplies. The SDK the gateway requires carries no
+// retired PA token in either (a test pins that). It is the one read of the
+// SDK's sets outside the gateway's own (above).
 func sdkContractVersions() (native, defaults []string) {
-	return withoutPDex(shnsdk.NativeContractVersions()), withoutPDex(shnsdk.SupportedContractVersions())
-}
-
-func withoutPDex(set []string) []string {
-	return slices.DeleteFunc(set, func(tok string) bool { return tok == shnsdk.ContractPAPDex21 })
+	return shnsdk.NativeContractVersions(), shnsdk.SupportedContractVersions()
 }

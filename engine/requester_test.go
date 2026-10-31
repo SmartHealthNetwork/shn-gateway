@@ -216,15 +216,17 @@ func TestNotActedFence(t *testing.T) {
 		{"attested but not a 503", true, http.StatusForbidden, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			f := &notActedFence{ResponseWriter: rec, attested: row.attested}
-			f.Header().Set(NotActedHeader, NotActedRequesterUnknown)
-			if row.status != 0 {
-				f.WriteHeader(row.status)
-			}
-			_, _ = f.Write([]byte(`{}`))
-			if got := rec.Result().Header.Get(NotActedHeader) != ""; got != row.want {
-				t.Errorf("header carried = %v, want %v", got, row.want)
+			for _, value := range []string{NotActedRequesterUnknown, NotActedAtCapacity} {
+				rec := httptest.NewRecorder()
+				f := &notActedFence{ResponseWriter: rec, attested: row.attested}
+				f.Header().Set(NotActedHeader, value)
+				if row.status != 0 {
+					f.WriteHeader(row.status)
+				}
+				_, _ = f.Write([]byte(`{}`))
+				if got := rec.Result().Header.Get(NotActedHeader) != ""; got != row.want {
+					t.Errorf("%s: header carried = %v, want %v", value, got, row.want)
+				}
 			}
 		})
 	}

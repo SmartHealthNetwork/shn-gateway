@@ -967,6 +967,34 @@ func TestProbeRetainsEndpointURLs(t *testing.T) {
 	}
 }
 
+// A payer's published CDex endpoint (HRex 1.2.0's
+// davinci_cdex_attachsubmit_endpoint, the base $submit-attachment is invoked
+// on) is kept as pa.cdex evidence, the base its gateway forwards a CDex
+// submission under. No gateway declares a pa.cdex line, so it never drifts
+// against a declaration.
+func TestProbeKeepsTheCDexEndpoint(t *testing.T) {
+	wellKnown := `{"endpoints":{
+		"davinci_pas_submission_endpoint#2.0":"https://p.example/fhir",
+		"davinci_cdex_attachsubmit_endpoint#2.1":"https://p.example/fhir/cdex"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(wellKnown))
+	}))
+	defer srv.Close()
+	r := NewRunner([]Target{{ID: "PAYER_DAVINCI_WELL_KNOWN", Kind: KindDavinciConfig, URL: srv.URL,
+		DeclaredVersions: []string{"pa.crd@2.0", "pa.dtr@2.0", "pa.pas@2.0"}}}, srv.Client(), nil)
+	results, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	res := results[0]
+	if !res.OK || res.Capability == nil {
+		t.Fatalf("OK = %v (%s), want the probe to pass with evidence", res.OK, res.Detail)
+	}
+	if got := res.Capability.EndpointURLs["pa.cdex@2.1"]; got != "https://p.example/fhir/cdex" {
+		t.Fatalf("EndpointURLs = %+v, want the CDex base as pa.cdex@2.1", res.Capability.EndpointURLs)
+	}
+}
+
 // TestDavinciConfigProbe: the HRex well-known probe (an evidence
 // path). ABSENCE IS TOLERATED — .well-known/davinci-configuration is an
 // HRex 1.2.0 optional; a 404 peer is OK ("not published"), never a failure.

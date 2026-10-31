@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
 // ContextSystemOfRecord optionally extends SystemOfRecord with request cancellation
@@ -219,7 +221,39 @@ const (
 )
 
 // SoRReadError intentionally contains no raw cause, URL, response, or identifier.
-type SoRReadError struct{ Kind SoRFailureKind }
+type SoRReadError struct {
+	Kind SoRFailureKind
+	// repeatsAMember: the system answered with a body that repeats a member
+	// name (SoRInvalidAnswer), so it can be read two ways. Unwrap reports it
+	// as relay.ErrDuplicateKey; it is a structural fact, not the cause's text.
+	repeatsAMember bool
+}
+
+// Unwrap reports an answer that repeats a member name as relay.ErrDuplicateKey.
+func (e *SoRReadError) Unwrap() error {
+	if e != nil && e.repeatsAMember {
+		return relay.ErrDuplicateKey
+	}
+	return nil
+}
+
+// SoRInvalidAnswer is the read error for an answer of the participant's own
+// system that a connector could not read (SoRInvalidResponse). When body
+// repeats a member name the error says so (errors.Is relay.ErrDuplicateKey):
+// that answer can be read two ways, so the exchange record names its refusal
+// message integrity, as on every leg. The answer the requester gets is the
+// same either way.
+func SoRInvalidAnswer(body []byte) error {
+	return &SoRReadError{Kind: SoRInvalidResponse, repeatsAMember: errors.Is(scanMessage(body), relay.ErrDuplicateKey)}
+}
+
+// SoRRepeatedMember is the read error for an answer of the participant's own
+// system that repeats a member name, exactly or under case folding (a connector
+// whose reader found the repeat returns it): an invalid response that says so
+// (errors.Is relay.ErrDuplicateKey), recorded as refused on message integrity.
+func SoRRepeatedMember() *SoRReadError {
+	return &SoRReadError{Kind: SoRInvalidResponse, repeatsAMember: true}
+}
 
 func (e *SoRReadError) Error() string {
 	if e != nil {

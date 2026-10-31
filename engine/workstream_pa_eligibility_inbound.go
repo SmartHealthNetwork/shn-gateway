@@ -170,7 +170,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		// member Coverage to name an insurer from, so this reads the payer's OWN
 		// well-known Organization instead (Organization/payer — the same literal
 		// every other payor reference in this codebase already resolves against,
-		// seeded with an identifier by internal/fhirseed) — one self-read, not a
+		// seeded with an identifier by the platform seeder) — one self-read, not a
 		// fabricated identity.
 		orgJSON, orgFound, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(r.Context(), "Organization/payer")
 		if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {

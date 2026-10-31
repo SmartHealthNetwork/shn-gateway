@@ -115,12 +115,20 @@ assert_effective_heap() {
 }
 
 # build_line LINE IMAGE — builds the per-line sidecar image (network at BUILD
-# time only, for the IG package downloads baked into the image).
+# time only, for the IG package downloads baked into the image). With
+# IG_PACKAGES_DIR set, the build reads the IG packages from that directory (the
+# Dockerfile's igpackages build context) before the registry, and with
+# IG_PACKAGES_OFFLINE=1 it refuses the registry; either way each package is
+# checked against its pinned sha256.
 build_line() {
-  local line="$1" image="$2"
+  local line="$1" image="$2" ig=()
   echo "building ${image} (SHN_IG_LINE=${line})..."
   BUILT+=("${image}")
-  docker build --build-arg "SHN_IG_LINE=${line}" -t "${image}" "${DIR}"
+  if [ -n "${IG_PACKAGES_DIR:-}" ]; then
+    ig=(--build-context "igpackages=${IG_PACKAGES_DIR}")
+  fi
+  docker build --build-arg "SHN_IG_LINE=${line}" --build-arg "IG_PACKAGES_OFFLINE=${IG_PACKAGES_OFFLINE:-}" \
+    ${ig[@]+"${ig[@]}"} -t "${image}" "${DIR}"
   local base platform
   base="$(awk '/^FROM hapiproject\/hapi@/{print $2; exit}' "${DIR}/Dockerfile")"
   docker image inspect "${image}" >"${RUN_DIR}/image.json"

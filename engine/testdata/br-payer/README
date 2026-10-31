@@ -136,16 +136,15 @@ answer with its dates moved, so the correction is the only change between the im
 (2026-06-22), and `pas-update-response-amend-after-resolution.json`,
 `pas-update-response-amend-before-resolution.json`, `pas-claimresponse-amend-repend-window.json`
 and `pas-claimresponse-amend-resolved.json` (2026-08-30) were recorded from the upstream
-reference payer at a8bece458cb31f151845db9ea5a892e398deef56, before this repository's reviewed
-correction series (`tools/brpayer/patches`) existed. They are the shapes that payer sent then,
+reference payer at a8bece458cb31f151845db9ea5a892e398deef56, before the platform repository's
+reviewed correction series for that payer existed. They are the shapes that payer sent then,
 and a gateway must still accept them from a payer that answers the same way. They are not the
 shapes the pinned image sends now.
 
 One difference is measured. In every pended answer here, the administration reference number
 is on the ClaimResponse item. The series puts it on the ClaimResponse itself, because PAS 2.0.1
 allows that extension only on Claim.item and the ClaimResponse ("PAS 2.0.1 pending documentation
-fields" in `tools/brpayer/patches/README.md`). The series' replay proofs
-(`tools/brpayer/proof/prior1/replay/*.new.json`) carry it on the root only. The
+fields" in the series' own notes). The series' replay proofs carry it on the root only. The
 reference-payer mirror follows the current image, not these files.
 
 ## The other files

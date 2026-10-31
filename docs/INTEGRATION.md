@@ -668,7 +668,11 @@ defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
   extensions, lengths, any other terminology issue, or one the gateway cannot
   classify) and every fatal issue refuses. CDS Hooks summary length,
   topic and selection behavior, another patient in one message, and the content
-  business rules are recorded. A validator that cannot be reached is recorded.
+  business rules are recorded. A validator that cannot be reached is recorded,
+  and so is a primitive's regex check the validator could not run
+  (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`: it gives this when it is
+  short of CPU, or on a very long valid `code` or `oid` value), unless an issue
+  that refuses at this level is beside it.
 - `strict`: a defect refuses the message. A FHIR profile refusal names the
   validator issues it was based on; a CDS Hooks response-rules refusal names the
   rule (and the violating path) as well.

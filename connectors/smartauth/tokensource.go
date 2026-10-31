@@ -3,7 +3,7 @@
 // FHIR-data-server edge ONLY — backend data access, where SMART Backend Services
 // belongs. It is NOT the per-operation substrate authority on the sealed Hub legs
 // (OWD-6/AI-11 still refuse a reusable bearer there); see the credentialing posture.
-// Signing/verification use golang-jwt/jwt/v5 (the internal/accountsvc pattern,
+// Signing/verification use golang-jwt/jwt/v5 (the platform account service's pattern,
 // WithValidMethods alg-pinning); no hand-rolled JWS.
 // Client auth is private_key_jwt (asymmetric, preferred) or — for partner servers
 // that cannot issue asymmetric credentials — client_secret_post (Config.ClientSecret);

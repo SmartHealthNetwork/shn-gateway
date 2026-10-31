@@ -19,11 +19,11 @@ import (
 // corpus a live HAPI validates.
 //
 // The fixtures are vendored copies under this package's own testdata/golden/
-// (see that directory's README.md), NOT a reach into the surrounding monorepo:
+// (see that directory's README.md), NOT a reach into the surrounding platform repository:
 // the gateway module is published standalone, so a reach above the module root
 // would make these tests unrunnable — and therefore untrue — in the published
 // module. The copies are pinned byte-for-byte against their originals by the
-// root module's test/conformance/gateway_vendored_golden_drift_test.go.
+// platform repository's vendored-golden drift test.
 func pasGolden(t *testing.T, relPath string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "golden", relPath))
@@ -393,7 +393,7 @@ func TestPasStep2122_CarryRoundTrip(t *testing.T) {
 	// ({"url":…,"extension":[…]}) surfaced that the byte-faithful claim was
 	// true by coincidence, never by mechanism. That is the same shape as the
 	// S1 defect where a "byte-faithful" claim passed green through a comparison
-	// that normalized both sides; test/xmatrix/effects_test.go has documented
+	// that normalized both sides; the platform's expectations-matrix effects test has documented
 	// the real bar as value-identical-not-byte-identical all along.
 	//
 	// Strengthening the engine to carry raw bytes is deliberately out of scope

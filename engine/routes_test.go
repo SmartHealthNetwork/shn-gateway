@@ -25,6 +25,10 @@ var (
 		"POST /Claim/$submit",
 		"POST /Claim/$inquire",
 		"POST /CoverageEligibilityRequest/$submit",
+		"POST /$submit-attachment",
+		"POST /cdex/payer/{payer}",
+		"POST /cdex/payer/{payer}/$submit-attachment",
+		"GET /cdex/payers",
 		"POST /Task",
 		"GET /metadata",
 	}

@@ -49,6 +49,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/auditappend"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry/otelsetup"
@@ -377,6 +378,23 @@ type config struct {
 	// (unset or "false") nothing is translated. Set by TRANSLATE_IG_LINES
 	// ("true" or "false").
 	TranslateIGLines bool
+	// AttachmentCeiling is the largest documentation attachment submission
+	// body this gateway sends or accepts. Set by ATTACHMENT_CEILING_BYTES, a
+	// positive integer no larger than the network's ceiling
+	// (shnsdk.MaxAttachmentBytes); unset, it is the network's ceiling.
+	AttachmentCeiling int64
+	// AttachmentInflightBytes bounds the bytes of documentation attachments and
+	// large envelopes held at once (ATTACHMENT_INFLIGHT_BYTES), from the task's
+	// memory, at boot, when it is unset (attachmentInflightDefault).
+	AttachmentInflightBytes int64
+	// PayerAttachmentMaxBytes is the largest single inline attachment (file),
+	// in bytes after base64 decoding, the payer's system accepts in one
+	// documentation submission, as this gateway declares it on the network
+	// (attachmentMaxBytes). nil when unset: the payer declares no limit, which
+	// is unknown, never zero. Set by PAYER_ATTACHMENT_MAX_BYTES on a payer
+	// gateway, a positive integer up to 2^53-1, declared as set: a value above
+	// a sender's ceiling stays the payer's statement.
+	PayerAttachmentMaxBytes *int64
 	// EnrichNativeRequests is the participant's opt-in to having its gateway add
 	// what a Da Vinci-native request leaves out, from its own system of record:
 	// the CDS Hooks prefetch fill (E-02) and the questionnaire-package Coverage
@@ -435,8 +453,8 @@ func validOriginationProfile(v string) bool {
 }
 
 // contractVersionTokenRe mirrors the registrar admission grammar
-// (internal/registrar/service.go contractVersionRe) — the gateway cannot
-// import internal/, so the pattern is pinned here verbatim.
+// (the platform registrar's contractVersionRe) — the gateway cannot import
+// the registrar, so the pattern is pinned here verbatim.
 var contractVersionTokenRe = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9]+)*@[0-9]+(\.[0-9]+)*$`)
 
 // splitTrimmed splits a comma-separated env value, trims whitespace off each
@@ -793,7 +811,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// but not always to strict: a lane a partner's bytes can reach runs
 	// observe, so the partner sees their defect recorded rather than meeting a
 	// refusal produced by our configuration. Which lanes those are, and the evidence
-	// for each, is in test/invariants' TestInvariant_EveryGateRunsStrict.
+	// for each, is in the platform invariant suite's TestInvariant_EveryGateRunsStrict.
 	if raw := getenv("CONFORMANCE_ENFORCEMENT"); raw != "" {
 		level, err := engine.ParseConformanceEnforcement(raw)
 		if err != nil {
@@ -843,6 +861,41 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.TranslateIGLines = true
 	default:
 		return config{}, fmt.Errorf("gateway: TRANSLATE_IG_LINES must be true or false, got %q", raw)
+	}
+
+	// A documentation attachment submission is bounded by the network's
+	// ceiling, the bound the strict JSON scan reads a body to. A participant
+	// may set a lower one; a higher one refuses to boot.
+	cfg.AttachmentCeiling = shnsdk.MaxAttachmentBytes
+	if raw := getenv("ATTACHMENT_CEILING_BYTES"); raw != "" {
+		n, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || n < 1 || n > shnsdk.MaxAttachmentBytes {
+			return config{}, fmt.Errorf("gateway: ATTACHMENT_CEILING_BYTES must be an integer in [1, %d] (the network's ceiling), got %q", shnsdk.MaxAttachmentBytes, raw)
+		}
+		cfg.AttachmentCeiling = n
+	}
+
+	// A full submission always fits the budget for large bodies, so a value
+	// under the ceiling refuses to boot.
+	if raw := getenv("ATTACHMENT_INFLIGHT_BYTES"); raw != "" {
+		n, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || n < cfg.AttachmentCeiling {
+			return config{}, fmt.Errorf("gateway: ATTACHMENT_INFLIGHT_BYTES must be an integer of at least %d (the attachment ceiling), got %q", cfg.AttachmentCeiling, raw)
+		}
+		cfg.AttachmentInflightBytes = n
+	}
+
+	// A payer declares the largest attachment its system accepts only when it
+	// sets one: unset is no declaration (unknown), never zero.
+	if raw := getenv("PAYER_ATTACHMENT_MAX_BYTES"); raw != "" {
+		if cfg.Role != "payer" {
+			return config{}, fmt.Errorf("gateway: PAYER_ATTACHMENT_MAX_BYTES is a payer gateway setting; this gateway's ROLE is %q", cfg.Role)
+		}
+		n, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || n < 1 || n > maxDeclaredAttachmentBytes {
+			return config{}, fmt.Errorf("gateway: PAYER_ATTACHMENT_MAX_BYTES must be an integer in [1, %d], got %q", int64(maxDeclaredAttachmentBytes), raw)
+		}
+		cfg.PayerAttachmentMaxBytes = &n
 	}
 
 	// A Da Vinci-native request is carried as sent unless the participant opts
@@ -1053,6 +1106,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		if cfg.ProviderDavinciIngressBaseURL == "" {
 			return config{}, fmt.Errorf("gateway: PROVIDER_DAVINCI_INGRESS requires PROVIDER_DAVINCI_INGRESS_BASE_URL (the config-pinned SMART aud)")
+		}
+		// The documentation return paths the gateway writes into a pended
+		// answer (E-10) are built under this base: a base they cannot be
+		// built under refuses to boot, so a serving gateway never meets an
+		// answer it cannot re-key.
+		if _, err := cdexroute.ReturnBase(cfg.ProviderDavinciIngressBaseURL, "boot-check"); err != nil {
+			return config{}, fmt.Errorf("gateway: invalid PROVIDER_DAVINCI_INGRESS_BASE_URL %q: %v", cfg.ProviderDavinciIngressBaseURL, err)
 		}
 		clients, err := loadIngressClients(cfg.ProviderDavinciIngressClientsFile)
 		if err != nil {
@@ -1689,6 +1749,11 @@ type built struct {
 	// requireSharedLine is the shared-line opt-in exactly as build() handed it
 	// to engine.New, recorded for the same reason.
 	requireSharedLine bool
+	// attachmentCeiling and attachmentInflight are the attachment ceiling and
+	// the budget for large bodies exactly as build() handed them to engine.New,
+	// for the wiring test.
+	attachmentCeiling  int64
+	attachmentInflight int64
 	// translateIGLines is the module 2 opt-in exactly as build() handed it to
 	// engine.New, recorded for the same reason.
 	translateIGLines bool
@@ -1711,6 +1776,11 @@ type built struct {
 	handler      http.Handler
 	reg          shnsdk.Registry // shared-reference value type; the poller mutates the same state the engine reads
 	registrarURL string
+	// identity and capabilities are this gateway's holder and what its system
+	// declares it takes (declareCapabilities), under registrarURL.
+	identity     shnsdk.Identity
+	capabilities shnsdk.CapabilityDeclaration
+	declared     *declarationCell
 	client       *http.Client // the registrar poller's: registrar-tagged
 
 	// certs is the outbound certificate recorder every client above was
@@ -1811,6 +1881,11 @@ var (
 )
 
 const minPayerBackendTimeout = time.Second
+
+// maxDeclaredAttachmentBytes is the largest attachment limit a payer may
+// declare (2^53-1): the largest integer every JSON reader of its registry
+// entry holds exactly.
+const maxDeclaredAttachmentBytes = 1<<53 - 1
 
 // Shared-state pool sizing (see config.StoreMaxConns).
 const (
@@ -2081,9 +2156,11 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	log.Print(versionLine)
 	hreg := health.New(bundle.Identity.HolderID, healthVersion)
 	var feedCell *health.PollerCell
+	declared := &declarationCell{}
 	if registrarURL != "" {
 		feedCell = health.NewPollerCell("registrar-poller", 30*time.Second)
 		hreg.Register(feedCell.Check)
+		hreg.Register(declared.Check)
 	}
 	if pool != nil {
 		hreg.Register(health.DBPing("store", pool.Ping))
@@ -2091,7 +2168,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 
 	// PayerRouter (FR-G40/G41): default to feed-derived discovery off the converged /holders
 	// registry (FeedPayerRouter). PAYER_DIRECTORY, when set, overrides with a static
-	// provider-maintained map (test/bootstrap fallback). No default payer holder either way.
+	// provider-maintained map (a fallback for bootstrap or testing). No default payer holder either way.
 	var payerRouter engine.PayerRouter = engine.NewFeedPayerRouter(reg)
 	if dir := getenv("PAYER_DIRECTORY"); dir != "" {
 		entries, derr := engine.LoadPayerDirectory(dir)
@@ -2320,6 +2397,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	gwCfg.RequireKnownMembers = cfg.RequireKnownMembers
 	gwCfg.RequireSharedLine = cfg.RequireSharedLine
 	gwCfg.TranslateIGLines = cfg.TranslateIGLines
+	gwCfg.AttachmentCeiling = cfg.AttachmentCeiling
+	inflightFrom := inflightFromSetting
+	if cfg.AttachmentInflightBytes == 0 {
+		cfg.AttachmentInflightBytes, inflightFrom = attachmentInflightDefault(ctx, cfg.AttachmentCeiling, os.ReadFile, getenv(taskMetadataEnv), taskMetadataClient())
+	}
+	gwCfg.AttachmentInflightBytes = cfg.AttachmentInflightBytes
 	gwCfg.EnrichNativeRequests = cfg.EnrichNativeRequests
 	gwCfg.FHIRServerRead = cfg.FHIRServerRead
 	gwCfg.HubAcceptsInvolved = endpoints.HubAcceptsInvolved
@@ -2368,6 +2451,13 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	}
 	if cfg.RequireSharedLine {
 		log.Printf("gateway: REQUIRE_SHARED_LINE=true — a pair that shares no declared IG line is refused as routing")
+	}
+	if cfg.AttachmentCeiling < shnsdk.MaxAttachmentBytes {
+		log.Printf("gateway: ATTACHMENT_CEILING_BYTES=%d — a documentation attachment submission over it is refused 413 as routing (the network's ceiling is %d)", cfg.AttachmentCeiling, shnsdk.MaxAttachmentBytes)
+	}
+	log.Printf("gateway: attachment budget %d bytes, %s (a documentation attachment or large envelope that does not fit is refused 503 with Retry-After)", cfg.AttachmentInflightBytes, inflightFrom)
+	if cfg.PayerAttachmentMaxBytes != nil {
+		log.Printf("gateway: PAYER_ATTACHMENT_MAX_BYTES=%d — the largest single inline attachment this payer's system accepts, stated in its capability declaration", *cfg.PayerAttachmentMaxBytes)
 	}
 	if cfg.TranslateIGLines {
 		log.Printf("gateway: TRANSLATE_IG_LINES=true — a message this gateway builds is translated to a peer's IG line where a certified translation exists, and a questionnaire package answer is carried into this gateway's DTR line's names")
@@ -2604,6 +2694,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		httpServerMetered:    httpServerMetered,
 		requireKnownMembers:  gwCfg.RequireKnownMembers,
 		requireSharedLine:    gwCfg.RequireSharedLine,
+		attachmentCeiling:    gwCfg.AttachmentCeiling,
+		attachmentInflight:   gwCfg.AttachmentInflightBytes,
 		translateIGLines:     gwCfg.TranslateIGLines,
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 		fhirServerRead:       gwCfg.FHIRServerRead,
@@ -2616,6 +2708,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		handler:         handler,
 		reg:             reg,
 		registrarURL:    registrarURL,
+		identity:        bundle.Identity,
+		capabilities:    capabilityDeclaration(cfg),
+		declared:        declared,
 		client:          registrarClient,
 		certs:           cfg.certs,
 		tlsCert:         tlsCert,
@@ -2798,6 +2893,9 @@ func (b built) startWorkers(parent context.Context) func() {
 	if b.registrarURL != "" {
 		start(func(ctx context.Context) {
 			pollFeed(ctx, b.client, b.registrarURL, b.reg, 3*time.Second, b.healthCell, b.feed)
+		})
+		start(func(ctx context.Context) {
+			declareCapabilities(ctx, b.client, b.registrarURL, b.identity, b.capabilities, declareCapabilitiesRetry, b.declared)
 		})
 	}
 	// Shared ingress-key reload: non-nil only under SHN_STORE_DATABASE_URL, and
@@ -3102,10 +3200,176 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		if raw, derr := base64.StdEncoding.DecodeString(h.SignPub); derr == nil && len(raw) == ed25519.PublicKeySize {
 			signPub = ed25519.PublicKey(raw)
 		}
-		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames, ContractVersions: h.ContractVersions, RequestFrames: h.RequestFrames})
+		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames, ContractVersions: h.ContractVersions, RequestFrames: h.RequestFrames, Legs: h.Legs, AttachmentMaxBytes: h.AttachmentMaxBytes})
 		n++
 	}
 	return n, nil
+}
+
+// declareCapabilitiesRetry is the first wait before a failed declaration is
+// sent again; it doubles to declareCapabilitiesMaxRetry.
+const (
+	declareCapabilitiesRetry    = 15 * time.Second
+	declareCapabilitiesMaxRetry = 10 * time.Minute
+	// declareCapabilitiesAbsentTries is how many 404s or 405s pass before the
+	// gateway says so once and falls to a try an hour: the holder may be a moment
+	// from registered, or the registrar older than the declaration. Those tries
+	// never end, because a registrar updated later reads a gateway that stopped
+	// as one that takes no marked leg, and the Hub would refuse it until someone
+	// restarted it.
+	declareCapabilitiesAbsentTries = 4
+	declareCapabilitiesSlowFactor  = 240 // of the first wait: an hour
+)
+
+// capabilityDeclaration is what this gateway's system takes as a recipient: the
+// network's legs it compiles for its role.
+func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
+	return shnsdk.CapabilityDeclaration{Legs: networkLegs(engine.AnsweredLegs(cfg.Role)), AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes}
+}
+
+// networkLegs is legs without any leg the SDK does not name: a test profile's,
+// which the network does not route. The release check holds every leg of a
+// released gateway to the SDK it pins, so a released gateway drops none.
+func networkLegs(legs []string) []string {
+	return slices.DeleteFunc(legs, func(leg string) bool {
+		_, ok := shnsdk.FlatTransactionType(leg)
+		return !ok
+	})
+}
+
+// nextDeclareRetry is the wait after retry: twice as long, to the cap, or slow
+// once the tries have slowed.
+func nextDeclareRetry(retry time.Duration, slowed bool, slow time.Duration) time.Duration {
+	if slowed {
+		return slow
+	}
+	return min(2*retry, declareCapabilitiesMaxRetry)
+}
+
+// declareCapabilities declares d to the registrar, as this gateway's system does
+// each time it starts, and sends it again after a failure until the registrar
+// has it or refuses it with a 409. A failure never stops the gateway: until the
+// declaration lands, a peer reads what the registrar holds. A 409 is final: this
+// holder's list was set when the network was founded and no declaration applies
+// to it, or the registrar holds a declaration issued no earlier. In that second
+// case a later resend could land, but the two share a status, so a gateway whose
+// clock is behind the last declarer's waits for its next start. After
+// declareCapabilitiesAbsentTries answers of 404 or 405 it logs once and tries
+// hourly, in silence: the holder is not registered, or the registrar is older
+// than the declaration, and until one lands the gateway runs as one that declared
+// nothing.
+func declareCapabilities(ctx context.Context, c *http.Client, registrarURL string, id shnsdk.Identity, d shnsdk.CapabilityDeclaration, retry time.Duration, cell *declarationCell) {
+	answered := &answerStatus{next: c.Transport}
+	client := *c
+	client.Transport = answered
+	absent, slowed, slow := 0, false, declareCapabilitiesSlowFactor*retry
+	for {
+		_, err := id.DeclareCapabilities(ctx, &client, registrarURL, d)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			cell.set(declarationStored)
+			return
+		}
+		if answered.status == http.StatusConflict {
+			cell.set(declarationNotApplied)
+			log.Printf("gateway: capability declaration not applied, not resending: %v", err)
+			return
+		}
+		cell.set(declarationFailing)
+		noRoute := answered.status == http.StatusNotFound || answered.status == http.StatusMethodNotAllowed
+		if noRoute {
+			if absent++; absent == declareCapabilitiesAbsentTries {
+				slowed, retry = true, slow
+				log.Printf("gateway: capability declaration not applied, trying hourly: this holder is not registered, or the registrar takes no declaration: %v", err)
+			}
+		}
+		switch {
+		case !slowed || !noRoute:
+			// Any other failure is said, at the slow pace too: it is not the
+			// absent route the tries slowed for.
+			if slowed {
+				log.Printf("gateway: capability declaration not stored: %v", err)
+			} else {
+				log.Printf("gateway: capability declaration not stored, retrying in %s: %v", retry, err)
+			}
+		default:
+			cell.set(declarationNoRoute)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retry):
+		}
+		retry = nextDeclareRetry(retry, slowed, slow)
+	}
+}
+
+// What a capability declaration came to, as /health states it. A failure is the
+// check's lastError, a coarse class.
+const (
+	declarationPending    = ""
+	declarationStored     = "stored"
+	declarationNotApplied = "not-applied"
+	declarationNoRoute    = "registrar-takes-no-declaration"
+	declarationFailing    = "failing"
+)
+
+// declarationCell is the /health check of the capability declaration. Its
+// status is always ok: a gateway a registrar has not taken a declaration from
+// serves as before, and on a network whose registrar is older than the
+// declaration every gateway would otherwise read unhealthy. lastError says it was
+// not stored, and lastSuccess when it was.
+type declarationCell struct {
+	mu     sync.Mutex
+	state  string
+	stored time.Time
+}
+
+// set records state. c may be nil, as pollFeed's cell may.
+func (c *declarationCell) set(state string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = state
+	if state == declarationStored {
+		c.stored = time.Now()
+	}
+}
+
+// Check is the cell's health.CheckFunc.
+func (c *declarationCell) Check(context.Context) health.Check {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := health.Check{Name: "capability-declaration", Status: health.StatusOK}
+	switch c.state {
+	case declarationPending:
+	case declarationStored:
+		out.LastSuccess = c.stored.UTC().Format(time.RFC3339)
+	default:
+		out.LastError = c.state
+	}
+	return out
+}
+
+// answerStatus is a transport that keeps the status of the last answer: the
+// SDK's error for a refused declaration is text, and a refusal is read by its
+// status, never by that text. One goroutine uses it.
+type answerStatus struct {
+	next   http.RoundTripper
+	status int
+}
+
+func (a *answerStatus) RoundTrip(r *http.Request) (*http.Response, error) {
+	a.status = 0
+	resp, err := a.next.RoundTrip(r)
+	if err == nil {
+		a.status = resp.StatusCode
+	}
+	return resp, err
 }
 
 // registryRefresh is the engine's on-miss registry refresh: one read of the

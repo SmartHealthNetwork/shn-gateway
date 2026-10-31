@@ -105,7 +105,7 @@ func TestConformantCRDBind_AcceptsOriginatorBuilt(t *testing.T) {
 	srJSON = []byte(strings.Replace(string(srJSON), `{`, `{"id":"sr1",`, 1))
 	covJSON, err := containedPayorCoverage("Patient/MBR-COVERED", "MBR-COVERED", shnsdk.CMSPayerIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	reqJSON, err := shnsdk.BuildCRDRequest(shnsdk.CRDRequestInputs{
 		Hook: "order-select", HookInstance: "5f0c3a8e-2b4d-4c6e-8a1f-3d9b7e5c1a20", UserID: "Practitioner/p1",

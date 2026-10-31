@@ -22,17 +22,22 @@ import (
 )
 
 // NotActedHeader is the reserved network header a recipient's gateway sets on
-// one answer only: the 503 it gives a leg whose requester it does not know
-// yet, before acting on it. Its value states why, from the closed set below.
+// two answers only: the 503 it gives a leg before acting on it because it does
+// not know the requester yet, or has no room for it. Its value states why, from
+// the closed set below.
 // It is the recipient's own attestation that it took no action; the Hub
 // relays it to the requester and does not verify it. No other answer this
 // gateway writes on its inbound route carries it (notActedFence).
-// internal/hubsvc reads it; the root module's tests pin the two names equal.
+// The platform's Hub service reads it; the root module's tests pin the two names equal.
 const NotActedHeader = "X-SHN-Not-Acted"
 
-// NotActedRequesterUnknown is NotActedHeader's one value: the requester is not
-// in this gateway's registry yet.
+// NotActedRequesterUnknown is a NotActedHeader value: the requester is not in
+// this gateway's registry yet.
 const NotActedRequesterUnknown = "requester-unknown"
+
+// NotActedAtCapacity is a NotActedHeader value: this gateway has no room for a
+// large envelope now (bodyBudget).
+const NotActedAtCapacity = "at-capacity"
 
 // refusalRequesterUnknown is the inbound refusal's text.
 const refusalRequesterUnknown = "requester not yet in this gateway's registry"
@@ -117,7 +122,7 @@ func (g *Gateway) requesterKnown(ctx context.Context, id string) bool {
 }
 
 // notActedFence is the inbound route's writer: it removes NotActedHeader from
-// every answer except the one the requester guard attests, so no handler,
+// every answer except the two refusals that attest it, so no handler,
 // connector or relayed answer can claim on this gateway's behalf that it took
 // no action.
 type notActedFence struct {

@@ -32,6 +32,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -88,6 +89,14 @@ func wantClosed(t *testing.T, rec ExchangeRecord) {
 	} else if rec.RefusedBy != "" || rec.Rule != "" {
 		t.Errorf("RefusedBy/Rule %q/%q set on outcome %q", rec.RefusedBy, rec.Rule, rec.Outcome)
 	}
+	// Only a fidelity refusal carries a stage, and every one names its own.
+	if rec.Rule == RefusalFidelity {
+		if !slices.Contains(vocab.RefusalStages, rec.RefusalStage) || rec.RefusalStage == ExchangeOther {
+			t.Errorf("fidelity refusal at stage %q, want one its site named (vocab.RefusalStages)", rec.RefusalStage)
+		}
+	} else if rec.RefusalStage != "" {
+		t.Errorf("RefusalStage %q set on rule %q", rec.RefusalStage, rec.Rule)
+	}
 	if b := rec.Backend; b != nil && b.ErrorClass != "" && !slices.Contains(BackendErrorClasses, b.ErrorClass) {
 		t.Errorf("Backend.ErrorClass %q not in its closed list", b.ErrorClass)
 	}
@@ -125,6 +134,7 @@ func TestExchangeKindsAreThePACatalog(t *testing.T) {
 	for name, list := range map[string][]string{
 		"ExchangeDirections": ExchangeDirections, "ExchangeRoutes": ExchangeRoutes, "ExchangeKinds": ExchangeKinds,
 		"ExchangeOperations": ExchangeOperations, "ExchangeOutcomes": ExchangeOutcomes, "RefusalParties": RefusalParties, "RefusalRules": RefusalRules,
+		"vocab.RefusalStages": vocab.RefusalStages,
 		"BackendErrorClasses": BackendErrorClasses,
 	} {
 		if list[len(list)-1] != ExchangeOther {
@@ -144,8 +154,11 @@ func TestExchangeKindsAreThePACatalog(t *testing.T) {
 	if !slices.Equal(legs, kinds) {
 		t.Fatalf("ExchangeKinds %v, want the compiled-in catalogs' legs %v", kinds, legs)
 	}
-	if want := append(workstreamIngressRouteNames(), RouteSubstrateInbound, ExchangeOther); !slices.Equal(ExchangeRoutes, want) {
-		t.Errorf("ExchangeRoutes %v, want the workstreams' ingress routes and the inbound route %v", ExchangeRoutes, want)
+	if !slices.Equal(ExchangeOriginationRoutes, moduleExchangeRouteNames()) {
+		t.Errorf("ExchangeOriginationRoutes %v, want the modules' origination routes %v", ExchangeOriginationRoutes, moduleExchangeRouteNames())
+	}
+	if want := slices.Concat(workstreamIngressRouteNames(), moduleExchangeRouteNames(), []string{RouteSubstrateInbound, ExchangeOther}); !slices.Equal(ExchangeRoutes, want) {
+		t.Errorf("ExchangeRoutes %v, want the workstreams' ingress routes, the modules' origination routes and the inbound route %v", ExchangeRoutes, want)
 	}
 	if want := append(workstreamOperations(), ExchangeOther); !slices.Equal(ExchangeOperations, want) {
 		t.Errorf("ExchangeOperations %v, want the workstreams' operations %v", ExchangeOperations, want)
@@ -269,6 +282,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		outcome, by, rule string
 	}{
 		{"replay", hubAnswers{status: 409, reason: "replay detected", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
+		{"large envelope budget", hubAnswers{status: 503, reason: "large envelope budget exhausted", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"authority", hubAnswers{status: 403, reason: "authz token verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"authentication", hubAnswers{status: 401, reason: "assertion verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthentication},
 		{"routing", hubAnswers{status: 502, reason: "unknown recipient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
@@ -278,9 +292,14 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"audit", hubAnswers{status: 502, reason: "audit append failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAudit},
 		{"stale timestamp", hubAnswers{status: 400, reason: "stale or future timestamp", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
 		{"involved refused", hubAnswers{status: 400, reason: "involved patients refused: another patient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
+		{"a leg the recipient does not take", hubAnswers{status: 422, reason: "the recipient does not take cdex-attachment-submit: it declares no legs, and cdex-attachment-submit is since 1.1.0", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
+		{"a leg the recipient does not take, whatever its reason says", hubAnswers{status: 422, reason: "some other wording", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
+		{"a 422 the recipient received is not that refusal", hubAnswers{status: 422, reason: "some other wording", delivered: "yes"}, ExchangeOther, "", ""},
+		{"a 422 the recipient may have received is not that refusal", hubAnswers{status: 422, reason: "some other wording", delivered: "unknown"}, ExchangeOther, "", ""},
 		{"malformed request", hubAnswers{status: 400, reason: "missing authority frame", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalIntegrity},
 		{"answer's token", hubAnswers{status: 502, reason: "response leg authorization failed", delivered: "yes"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"hub fault", hubAnswers{status: 500, reason: "encode envelope failed", delivered: "no"}, ExchangeOther, "", ""},
+		{"recipient at capacity", hubAnswers{status: 503, reason: "forward to recipient failed: the recipient's gateway has no room for this envelope and took no action; resend with a freshly sealed envelope", delivered: "no"}, ExchangeRefused, RefusedByPayerGateway, RefusalRouting},
 		{"recipient refused", hubAnswers{status: 502, reason: recipientRefusedPrefix + "(403)", delivered: "no"}, ExchangeRefused, RefusedByPayerGateway, ExchangeOther},
 		{"recipient 5xx", hubAnswers{status: 502, reason: "forward to recipient failed: the recipient answered 500", delivered: "unknown"}, ExchangeUpstreamError, "", ""},
 		{"answer lost", hubAnswers{status: 502, reason: "forward to recipient failed: the recipient's answer could not be read", delivered: "yes"}, ExchangeOther, "", ""},
@@ -357,7 +376,11 @@ func TestExchangeRecord_OwnershipFaultIsFidelity(t *testing.T) {
 		w, _ = g.withScope(w, relay.RoleRequester)
 		writeOwnershipFault(w)
 	})(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
-	wantRefusal(t, got.only(t), http.StatusInternalServerError, RefusedByProviderGateway, RefusalFidelity)
+	rec := got.only(t)
+	wantRefusal(t, rec, http.StatusInternalServerError, RefusedByProviderGateway, RefusalFidelity)
+	if rec.RefusalStage != vocab.RefusalStageVerify {
+		t.Fatalf("stage %q, want %s: a message this gateway built failed its own transmit check", rec.RefusalStage, vocab.RefusalStageVerify)
+	}
 }
 
 // ---- the payer side ----
@@ -542,20 +565,22 @@ func (timeoutError) Temporary() bool { return true }
 
 func TestRefusalRuleFor(t *testing.T) {
 	for _, row := range []struct {
-		kind CheckKind
-		rule string
-		want string
+		kind            CheckKind
+		rule            string
+		want, wantStage string
 	}{
-		{KindFHIRBridged, "", RefusalFidelity},
-		{KindNetwork, RuleSubjectPCI, RefusalAuthority},
-		{KindContent, RuleSubjectToken, RefusalAuthority},
-		{KindNetwork, RuleDuplicateKey, RefusalIntegrity},
-		{KindContent, RulePatientMixed, RefusalConformance},
-		{KindFHIRIngress, "", RefusalConformance},
-		{KindCDSEnvelope, "response.json", RefusalConformance},
+		// A bridged message failing its $validate is an edit this gateway
+		// built failing its own verification.
+		{KindFHIRBridged, "", RefusalFidelity, vocab.RefusalStageVerify},
+		{KindNetwork, RuleSubjectPCI, RefusalAuthority, ""},
+		{KindContent, RuleSubjectToken, RefusalAuthority, ""},
+		{KindNetwork, RuleDuplicateKey, RefusalIntegrity, ""},
+		{KindContent, RulePatientMixed, RefusalConformance, ""},
+		{KindFHIRIngress, "", RefusalConformance, ""},
+		{KindCDSEnvelope, "response.json", RefusalConformance, ""},
 	} {
-		if got := refusalRuleFor(row.kind, row.rule); got != row.want {
-			t.Errorf("refusalRuleFor(%s, %q) = %q, want %q", row.kind, row.rule, got, row.want)
+		if got, stage := refusalRuleFor(row.kind, row.rule); got != row.want || stage != row.wantStage {
+			t.Errorf("refusalRuleFor(%s, %q) = %q at %q, want %q at %q", row.kind, row.rule, got, stage, row.want, row.wantStage)
 		}
 	}
 }
@@ -1053,8 +1078,8 @@ func TestExchangeRecord_InboundOwnershipFault(t *testing.T) {
 		p.g.refuseInbound(w, r, inboundLegs["crd-order-select"], env, tok, "", http.StatusInternalServerError, errOwnershipFault, nil)
 	})(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/substrate/inbound", nil))
 	rec := got.only(t)
-	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity {
-		t.Fatalf("record %s %s/%s", rec.Outcome, rec.RefusedBy, rec.Rule)
+	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageVerify {
+		t.Fatalf("record %s %s/%s at %q", rec.Outcome, rec.RefusedBy, rec.Rule, rec.RefusalStage)
 	}
 	if rec.AnswerOwnership != "authored" || rec.AnswerBuilder != string(relay.BuilderGatewayRefusal) || len(rec.AnswerEdits) != 0 {
 		t.Fatalf("answer %q by %q edits %v, want the gateway's own refusal", rec.AnswerOwnership, rec.AnswerBuilder, rec.AnswerEdits)
@@ -1171,7 +1196,7 @@ func TestHubRefusalOutcome_Transport(t *testing.T) {
 }
 
 // The record carries the Hub's own delivery value from its error answer to the
-// leg, one row per reason the Hub's forward fails with (hubsvc forwardFailure)
+// leg, one row per reason the Hub's forward fails with (the platform Hub service's forwardFailure)
 // and its refusal before forwarding, read through hubRefusal as the leg reads
 // the answer. An answer the Hub's route handler did not write, and a leg that
 // never drew one, carry none: the gateway does not infer it.
@@ -1307,8 +1332,8 @@ func TestExchangeRecord_InboundOwnershipFaults(t *testing.T) {
 	rec := run(func(w http.ResponseWriter, r *http.Request) {
 		p.g.respondLeg(w, r, spec.RespFrame, spec.RespOp, "crd-order-select", env.Metadata.CorrelationID, LegResult{}.Response, http.StatusOK, tok.Subject, p.requester.ID, "", "")
 	})
-	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity {
-		t.Fatalf("answer build: %s %s/%s", rec.Outcome, rec.RefusedBy, rec.Rule)
+	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageVerify {
+		t.Fatalf("answer build: %s %s/%s at %q", rec.Outcome, rec.RefusedBy, rec.Rule, rec.RefusalStage)
 	}
 	_, fault := relay.Transmit(LegResult{}.Response, relay.Check(answerKey("crd-order-select", relay.OutcomeAnswered)))
 	if !isOwnershipFault(fault) {
@@ -1317,8 +1342,8 @@ func TestExchangeRecord_InboundOwnershipFaults(t *testing.T) {
 	rec = run(func(w http.ResponseWriter, r *http.Request) {
 		p.g.responderFailed(w, r, inboundLegs["crd-order-select"], env, tok, "", fault)
 	})
-	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity {
-		t.Fatalf("responder fault: %s %s/%s", rec.Outcome, rec.RefusedBy, rec.Rule)
+	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageVerify {
+		t.Fatalf("responder fault: %s %s/%s at %q", rec.Outcome, rec.RefusedBy, rec.Rule, rec.RefusalStage)
 	}
 }
 
@@ -1363,27 +1388,44 @@ func TestExchangeRecord_BackendReadAndListing(t *testing.T) {
 // The system-of-record read classes, as the answer names them, and the
 // outcome a refusal they cause settles. The error alone never says the
 // request ended (a connector can cancel its own read): that is read from the
-// request's context (TestExchangeRecord_ReadEndedWithTheRequest).
+// request's context (TestExchangeRecord_ReadEndedWithTheRequest). An answer
+// that repeats a member name can be read two ways: refused on message
+// integrity, as on the PA legs, and still that system's malformed answer.
 func TestSoRFailureClass(t *testing.T) {
+	repeated := []byte(`{"resourceType":"Patient","id":"p","id":"q"}`)
 	for name, row := range map[string]struct {
 		err     error
 		class   string
 		outcome string
+		rule    string
 	}{
-		"deadline":         {context.DeadlineExceeded, BackendTimeout, ExchangeUpstreamError},
-		"cancelled":        {context.Canceled, ExchangeOther, ExchangeUpstreamError},
-		"authentication":   {&SoRReadError{Kind: SoRAuthenticationFailed}, BackendAuth, ExchangeUpstreamError},
-		"unavailable":      {&SoRReadError{Kind: SoRUnavailable}, ExchangeOther, ExchangeUpstreamError},
-		"invalid response": {&SoRReadError{Kind: SoRInvalidResponse}, BackendMalformed, ExchangeUpstreamError},
-		"untyped":          {errors.New("read failed"), BackendMalformed, ExchangeUpstreamError},
+		"deadline":                     {context.DeadlineExceeded, BackendTimeout, ExchangeUpstreamError, ""},
+		"cancelled":                    {context.Canceled, ExchangeOther, ExchangeUpstreamError, ""},
+		"authentication":               {&SoRReadError{Kind: SoRAuthenticationFailed}, BackendAuth, ExchangeUpstreamError, ""},
+		"unavailable":                  {&SoRReadError{Kind: SoRUnavailable}, ExchangeOther, ExchangeUpstreamError, ""},
+		"invalid response":             {&SoRReadError{Kind: SoRInvalidResponse}, BackendMalformed, ExchangeUpstreamError, ""},
+		"untyped":                      {errors.New("read failed"), BackendMalformed, ExchangeUpstreamError, ""},
+		"an answer read otherwise":     {SoRInvalidAnswer([]byte(`{"resourceType":"Patient"}`)), BackendMalformed, ExchangeUpstreamError, ""},
+		"an answer not JSON":           {SoRInvalidAnswer([]byte(`{`)), BackendMalformed, ExchangeUpstreamError, ""},
+		"an answer repeating a member": {SoRInvalidAnswer(repeated), BackendMalformed, ExchangeRefused, RefusalIntegrity},
+		"made safe":                    {safeSoRError(SoRInvalidAnswer(repeated)), BackendMalformed, ExchangeRefused, RefusalIntegrity},
 	} {
 		if got := sorClass(row.err); got != row.class {
 			t.Errorf("%s: class %q, want %q", name, got, row.class)
 		}
-		x := &exchangeRecorder{}
-		x.sorFailure()
-		if x.outcome != row.outcome {
-			t.Errorf("%s: outcome %q, want %q", name, x.outcome, row.outcome)
+		x := &exchangeRecorder{self: RefusedByPayerGateway, rec: ExchangeRecord{Backend: &BackendCall{}}}
+		x.sorFailure(row.err)
+		if x.outcome != row.outcome || x.rule != row.rule {
+			t.Errorf("%s: outcome %q rule %q, want %q %q", name, x.outcome, x.rule, row.outcome, row.rule)
+		}
+		if row.rule != "" && x.rec.Backend.ErrorClass != BackendMalformed {
+			t.Errorf("%s: backend %q, want the system's answer malformed", name, x.rec.Backend.ErrorClass)
+		}
+		var readErr *SoRReadError
+		if errors.As(row.err, &readErr) && readErr.Kind == SoRInvalidResponse {
+			if status, msg := SoRFailureResponse(row.err); status != http.StatusBadGateway || msg != "system of record returned an invalid response" {
+				t.Errorf("%s: answers %d %q, want the invalid response every such read answers", name, status, msg)
+			}
 		}
 	}
 	if sorClass(nil) != "" {
@@ -1420,7 +1462,7 @@ func TestExchangeRecord_SettlingRules(t *testing.T) {
 // ---- the Hub reason table, timeouts, the DTR leg and 1xx ----
 
 // Every Hub reason the record names a rule for, with that rule. The strings
-// are pinned against the Hub's own by test/invariants (TestHubRulesMatchTheHub).
+// are pinned against the Hub's own by the platform invariant suite's TestHubRulesMatchTheHub.
 func TestHubRules(t *testing.T) {
 	for reason, rule := range hubRules {
 		delivered := "no"
@@ -1926,9 +1968,16 @@ func TestExchangeRecord_FacilitySearchesAreNoted(t *testing.T) {
 			t.Errorf("%s: %s backend %+v calls %d", name, rec.Outcome, rec.Backend, rec.BackendCalls)
 		}
 	}
+	// A page repeating a member name can be read two ways: refused on
+	// message integrity, the system's answer malformed (as on the PA legs).
+	// One malformed otherwise is that system's failure.
 	rec := record(&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {[]byte(`{"resourceType":"Bundle","type":"searchset","type":"x"}`)}}})
-	if rec.Outcome != ExchangeUpstreamError || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
-		t.Errorf("malformed page: %s backend %+v", rec.Outcome, rec.Backend)
+	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+		t.Errorf("page repeating a member: %s %s/%s backend %+v", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
+	}
+	rec = record(&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {[]byte(`{"resourceType":"Bundle","type":"searchset","entry":[7]}`)}}})
+	if rec.Outcome != ExchangeUpstreamError || rec.Rule != "" || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+		t.Errorf("page malformed otherwise: %s %s/%s backend %+v", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
 	}
 }
 
@@ -2174,6 +2223,121 @@ func TestExchangeRecord_FacilityAnswerOutOfShape(t *testing.T) {
 	}
 }
 
+// repeatingSoR is a participant's system answering the patient bind
+// (bindErr), the member's coverage (coverageErr), the member's Patient id
+// (fhirRefErr), a read by reference (refErr, for references with refPrefix),
+// its records (recordsErr, for a connector that cannot search: noSearch) or
+// every records search (page) out of shape; otherwise the test system of
+// record.
+type repeatingSoR struct {
+	SystemOfRecord
+	ContextSystemOfRecord
+	bindErr     error
+	coverageErr error
+	fhirRefErr  error
+	refErr      error
+	refPrefix   string
+	recordsErr  error
+	noSearch    bool
+	page        []byte
+}
+
+func (s *repeatingSoR) PatientFHIRRefContext(ctx context.Context, m string) (string, bool, error) {
+	if s.fhirRefErr != nil {
+		return "", false, s.fhirRefErr
+	}
+	return s.ContextSystemOfRecord.PatientFHIRRefContext(ctx, m)
+}
+
+func (s *repeatingSoR) ResolveByReferenceContext(ctx context.Context, ref string) ([]byte, bool, error) {
+	if s.refErr != nil && strings.HasPrefix(ref, s.refPrefix) {
+		return nil, false, s.refErr
+	}
+	return s.ContextSystemOfRecord.ResolveByReferenceContext(ctx, ref)
+}
+
+func (s *repeatingSoR) FacilityRecordsContext(ctx context.Context, m string) (map[string][]byte, bool, error) {
+	if s.recordsErr != nil {
+		return nil, false, s.recordsErr
+	}
+	return s.ContextSystemOfRecord.FacilityRecordsContext(ctx, m)
+}
+
+func (s *repeatingSoR) CoverageInforceContext(ctx context.Context, m string) (bool, string, error) {
+	if s.coverageErr != nil {
+		return false, "", s.coverageErr
+	}
+	return s.ContextSystemOfRecord.CoverageInforceContext(ctx, m)
+}
+
+func (s *repeatingSoR) ResolvePatientContext(ctx context.Context, m string) (string, Demo, bool, error) {
+	if s.bindErr != nil {
+		return "", Demo{}, false, s.bindErr
+	}
+	return s.ContextSystemOfRecord.ResolvePatientContext(ctx, m)
+}
+
+func (s *repeatingSoR) SearchPatientContext(context.Context, string, string, ...SearchDateRange) (SearchResult, error) {
+	if s.noSearch {
+		return SearchResult{}, &SearchError{Outcome: SearchUnsupported, Reason: "no search"}
+	}
+	return SearchResult{Pages: [][]byte{s.page}}, nil
+}
+
+// A federated query whose facility's own system answers with a body that
+// repeats a member name is refused at every level and recorded as on the PA
+// legs (TestExchangeRecord_EligibilityAnswerRepeatingAMember): message
+// integrity, the system's answer malformed. The requester's answer is the one
+// the same system's otherwise malformed answer gets, byte for byte, and that
+// one stays an upstream failure: the patient bind's patient-match refusal,
+// and the records search's invalid response.
+func TestExchangeRecord_FederatedQuerySystemRepeatingAMember(t *testing.T) {
+	repeatedPatient := []byte(`{"resourceType":"Patient","id":"p","birthDate":"1961-02-03","birthDate":"1971-02-03"}`)
+	for _, level := range bindLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			p, got := newRecordingLevelPayer(t, level)
+			p.g.cfg.ConsentURL = "http://consent.test"
+			p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
+			held := p.g.cfg.SoR
+			send := func(sor *repeatingSoR) (payerAnswer, ExchangeRecord) {
+				t.Helper()
+				sor.SystemOfRecord, sor.ContextSystemOfRecord = held, ReadSystemOfRecord(held)
+				p.g.cfg.SoR = sor
+				got.reset()
+				ans := sendConsented(t, p, "federated-query", cdexTaskFor(t, dtrFrameMember), p.pci, "Consent/c-1")
+				return ans, got.only(t)
+			}
+			for name, row := range map[string]struct {
+				repeating, otherwise *repeatingSoR
+				status               int
+			}{
+				"the patient bind": {
+					&repeatingSoR{bindErr: SoRInvalidAnswer(repeatedPatient)},
+					&repeatingSoR{bindErr: &SoRReadError{Kind: SoRInvalidResponse}},
+					http.StatusForbidden,
+				},
+				"a records search": {
+					&repeatingSoR{page: []byte(`{"resourceType":"Bundle","type":"searchset","type":"searchset"}`)},
+					&repeatingSoR{page: []byte(`{"resourceType":"Bundle","type":"searchset","entry":[7]}`)},
+					http.StatusBadGateway,
+				},
+			} {
+				ans, rec := send(row.repeating)
+				if rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByPayerGateway || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+					t.Errorf("%s repeating a member: %s %s/%s backend %+v", name, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
+				}
+				control, crec := send(row.otherwise)
+				if crec.Outcome != ExchangeUpstreamError || crec.Rule != "" || crec.Backend == nil || crec.Backend.ErrorClass != BackendMalformed {
+					t.Errorf("%s malformed otherwise: %s %s/%s backend %+v", name, crec.Outcome, crec.RefusedBy, crec.Rule, crec.Backend)
+				}
+				if ans.status != row.status || ans.status != control.status || ans.framed != control.framed || !bytes.Equal(ans.body, control.body) {
+					t.Errorf("%s: answered %d %s, the otherwise malformed answer %d %s, want both %d and byte-equal", name, ans.status, ans.body, control.status, control.body, row.status)
+				}
+			}
+		})
+	}
+}
+
 // A lowercase X-Correlation-Id configured through the Go API is dropped too.
 func TestBackendCorrelation_ConfiguredLowercaseIsNeverSent(t *testing.T) {
 	p := newLevelPayer(t, EnforcementObserve)
@@ -2202,9 +2366,175 @@ func TestExchangeRecord_EligibilityAnswerRepeatingAMember(t *testing.T) {
 	}
 }
 
+// A payer's PAS answer that repeats a member name is recorded as it is on
+// every leg, the facility's own system's included
+// (TestExchangeRecord_FederatedQuerySystemRepeatingAMember): refused on
+// message integrity, the answer malformed, at every level.
+func TestExchangeRecord_PASAnswerRepeatingAMember(t *testing.T) {
+	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
+	for _, level := range allLevels {
+		p, got := newRecordingLevelPayer(t, level)
+		p.partner.respByPath[pasSubmitPath] = []byte(`{"resourceType":"Bundle","type":"collection","type":"collection"}`)
+		ans := p.send(t, "pas-claim", "", request)
+		if rec := got.only(t); ans.status != http.StatusBadGateway || rec.Outcome != ExchangeRefused || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+			t.Errorf("%s: answered %d; %s %s/%s backend %+v", level, ans.status, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
+		}
+	}
+}
+
+// The payer's own system answering the eligibility leg with a body that
+// repeats a member name is recorded the same way, at every level: the member's
+// Patient and its Coverage, read for an answer from the payer's records, through
+// the system-of-record refusal (refuseSoRFailure), and the member's Patient on a
+// leg forwarded to the payer's own eligibility service, through the member
+// binding (subjectBindingFailure), here on that one leg. The requester's answer is
+// the one the same read failing otherwise gets, byte for byte, and that one
+// stays an upstream failure.
+func TestExchangeRecord_EligibilitySystemRepeatingAMember(t *testing.T) {
+	repeatedPatient := []byte(`{"resourceType":"Patient","id":"p","birthDate":"1961-02-03","birthDate":"1971-02-03"}`)
+	repeatedCoverage := []byte(`{"resourceType":"Coverage","id":"c","status":"active","status":"cancelled"}`)
+	for _, level := range allLevels {
+		for name, row := range map[string]struct {
+			forwarded            bool
+			repeating, otherwise *repeatingSoR
+		}{
+			"the member's Patient":          {false, &repeatingSoR{bindErr: SoRInvalidAnswer(repeatedPatient)}, &repeatingSoR{bindErr: &SoRReadError{Kind: SoRInvalidResponse}}},
+			"the member's Coverage":         {false, &repeatingSoR{coverageErr: SoRInvalidAnswer(repeatedCoverage)}, &repeatingSoR{coverageErr: &SoRReadError{Kind: SoRInvalidResponse}}},
+			"the member binding, forwarded": {true, &repeatingSoR{bindErr: SoRInvalidAnswer(repeatedPatient)}, &repeatingSoR{bindErr: &SoRReadError{Kind: SoRInvalidResponse}}},
+		} {
+			p := eligibilityPayer(t, level, row.forwarded)
+			var got exchangeRecords
+			p.g.cfg.ExchangeObserved = got.observe
+			held := p.g.cfg.SoR
+			send := func(sor *repeatingSoR) (payerAnswer, ExchangeRecord) {
+				t.Helper()
+				sor.SystemOfRecord, sor.ContextSystemOfRecord = held, ReadSystemOfRecord(held)
+				p.g.cfg.SoR = sor
+				ans := p.send(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember))
+				return ans, got.only(t)
+			}
+			ans, rec := send(row.repeating)
+			if rec.Outcome != ExchangeRefused || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+				t.Errorf("%s %s repeating a member: %s %s/%s backend %+v", level, name, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
+			}
+			control, crec := send(row.otherwise)
+			if crec.Outcome != ExchangeUpstreamError || crec.Rule != "" || crec.Backend == nil || crec.Backend.ErrorClass != BackendMalformed {
+				t.Errorf("%s %s malformed otherwise: %s %s/%s backend %+v", level, name, crec.Outcome, crec.RefusedBy, crec.Rule, crec.Backend)
+			}
+			if ans.status != http.StatusBadGateway || ans.status != control.status || ans.framed != control.framed || !bytes.Equal(ans.body, control.body) {
+				t.Errorf("%s %s: answered %d %s, the otherwise malformed answer %d %s, want both 502 and byte-equal", level, name, ans.status, ans.body, control.status, control.body)
+			}
+		}
+	}
+}
+
+// On the requester's side a read of its own system is not a backend call of
+// the exchange (noteRead notes reads only on a leg this gateway answers), and
+// a failed member binding is recorded as it always was, whether or not that
+// system's answer repeats a member name: no rule is named, and the caller's
+// answer is the same, byte for byte.
+func TestExchangeRecord_IngressBindingRepeatingAMemberUnchanged(t *testing.T) {
+	env := newInProcessExchange(t)
+	var got exchangeRecords
+	env.originator.cfg.ExchangeObserved = got.observe
+	h := env.originator.ingressRoute(RouteCRD)
+	held := env.originator.cfg.SoR
+	send := func(bindErr error) (*httptest.ResponseRecorder, ExchangeRecord) {
+		t.Helper()
+		env.originator.cfg.SoR = &repeatingSoR{SystemOfRecord: held, ContextSystemOfRecord: ReadSystemOfRecord(held), bindErr: bindErr}
+		w := httptest.NewRecorder()
+		h(w, env.crdIngressRequest(t))
+		return w, got.only(t)
+	}
+	repeating, rec := send(SoRInvalidAnswer([]byte(`{"resourceType":"Patient","id":"p","birthDate":"1961-02-03","birthDate":"1971-02-03"}`)))
+	otherwise, crec := send(&SoRReadError{Kind: SoRInvalidResponse})
+	if repeating.Code != http.StatusBadGateway || !strings.Contains(repeating.Body.String(), "system of record returned an invalid response") {
+		t.Fatalf("answered %d %s, want the binding's system-of-record failure", repeating.Code, repeating.Body)
+	}
+	if repeating.Code != otherwise.Code || !bytes.Equal(repeating.Body.Bytes(), otherwise.Body.Bytes()) {
+		t.Errorf("answered %d %s, the otherwise malformed answer %d %s, want them byte-equal", repeating.Code, repeating.Body, otherwise.Code, otherwise.Body)
+	}
+	if rec.Outcome != crec.Outcome || rec.Rule != crec.Rule || rec.Rule != "" || rec.Backend != nil {
+		t.Errorf("record %s %s/%s backend %+v, the otherwise malformed record %s %s/%s: want the same, no rule", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend, crec.Outcome, crec.RefusedBy, crec.Rule)
+	}
+}
+
+// Every read of a participant's own system on a leg this gateway answers
+// that the connector reports repeats a member name (the bundled FHIR
+// connector reports every such answer: SoRRepeatedMember) is refused at every
+// level and recorded on message integrity, the call malformed. The requester's
+// answer is the one the same read failing otherwise gets, byte for byte, and
+// that one stays an upstream failure. These are the reads a lenient connector
+// answered as if clean; the federated query's patient bind and records search,
+// and coverage eligibility's member and coverage, are the rows above.
+func TestExchangeRecord_AnsweredReadsRepeatingAMember(t *testing.T) {
+	repeated := func() error { return SoRRepeatedMember() }
+	otherwise := func() error { return &SoRReadError{Kind: SoRInvalidResponse} }
+	for name, row := range map[string]struct {
+		leg    string
+		set    func(s *repeatingSoR, err error)
+		status int
+		msg    string
+	}{
+		"the federated query's member Patient id": {leg: "federated-query",
+			set: func(s *repeatingSoR, err error) { s.fhirRefErr = err }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+		"the federated query's own Patient read": {leg: "federated-query",
+			set: func(s *repeatingSoR, err error) { s.refErr, s.refPrefix = err, "Patient/" }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+		"the federated query's records, read without search": {leg: "federated-query",
+			set: func(s *repeatingSoR, err error) { s.recordsErr, s.noSearch = err, true }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+		"coverage eligibility's insurer": {leg: "coverage-eligibility",
+			set: func(s *repeatingSoR, err error) { s.refErr, s.refPrefix = err, "Organization/" }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+		"the patient-authored DTR's member": {leg: "patient-dtr",
+			set: func(s *repeatingSoR, err error) { s.bindErr = err }, status: http.StatusForbidden, msg: refusalPatientNotAuthorized},
+		"a CRD order-select's member binding": {leg: "crd-order-select",
+			set: func(s *repeatingSoR, err error) { s.bindErr = err }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+		"a PAS claim's member binding": {leg: "pas-claim",
+			set: func(s *repeatingSoR, err error) { s.bindErr = err }, status: http.StatusBadGateway, msg: "system of record returned an invalid response"},
+	} {
+		for _, level := range allLevels {
+			p, got := newRecordingLevelPayer(t, level)
+			p.g.cfg.ConsentURL = "http://consent.test"
+			p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
+			held := p.g.cfg.SoR
+			send := func(err error) (payerAnswer, ExchangeRecord) {
+				t.Helper()
+				sor := &repeatingSoR{SystemOfRecord: held, ContextSystemOfRecord: ReadSystemOfRecord(held)}
+				row.set(sor, err)
+				p.g.cfg.SoR = sor
+				got.reset()
+				var ans payerAnswer
+				switch row.leg {
+				case "federated-query":
+					ans = sendConsented(t, p, row.leg, cdexTaskFor(t, dtrFrameMember), p.pci, "Consent/c-1")
+				case "coverage-eligibility":
+					ans = p.send(t, row.leg, "", eligibilityRequest(t, dtrFrameMember))
+				case "patient-dtr":
+					ans = p.send(t, row.leg, "", patientDTRFor(t, dtrFrameMember))
+				case "crd-order-select":
+					ans = p.send(t, row.leg, "", conformantCRD(dtrFrameMember, "72148"))
+				case "pas-claim":
+					ans = p.send(t, row.leg, "", originatorBuiltConformantBundle(t, dtrFrameMember))
+				}
+				return ans, got.only(t)
+			}
+			ans, rec := send(repeated())
+			if rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByPayerGateway || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+				t.Errorf("%s/%s repeating a member: %s %s/%s backend %+v", name, level, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
+			}
+			control, crec := send(otherwise())
+			if crec.Outcome != ExchangeUpstreamError || crec.Rule != "" || crec.Backend == nil || crec.Backend.ErrorClass != BackendMalformed {
+				t.Errorf("%s/%s malformed otherwise: %s %s/%s backend %+v", name, level, crec.Outcome, crec.RefusedBy, crec.Rule, crec.Backend)
+			}
+			if ans.status != row.status || !bytes.Contains(ans.body, []byte(row.msg)) || ans.status != control.status || ans.framed != control.framed || !bytes.Equal(ans.body, control.body) {
+				t.Errorf("%s/%s: answered %d %s, the otherwise malformed answer %d %s, want both %d naming %q, byte-equal", name, level, ans.status, ans.body, control.status, control.body, row.status, row.msg)
+			}
+		}
+	}
+}
+
 // TestExchangeClosedLists_Pinned: the exchange kinds and routes a PA gateway
 // records, as sets, and the observer kinds its ingress emits. Deriving them
-// from the registered workstreams changes none of them.
+// from the registered workstreams and modules changes none of them.
 func TestExchangeClosedLists_Pinned(t *testing.T) {
 	asSet := func(list []string) []string {
 		out := slices.Clone(list)
@@ -2212,12 +2542,19 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 		return out
 	}
 	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", ExchangeOther}
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", ExchangeOther}
 	wantKinds = append(wantKinds, profileLegs()...)
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther}
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+		// On-behalf building's origination routes, each recorded under its
+		// path's name (the local cancel, pending and reset routes record
+		// nothing).
+		"scenario-uc01", "scenario-uc02", "scenario-uc02-payerb", "scenario-uc02-unknownpayer", "scenario-uc03", "scenario-uc04",
+		"scenario-uc05", "scenario-uc06", "scenario-uc07", "scenario-uc07hcpcs", "scenario-uc08", "scenario-homeoxygen",
+		"scenario-dispatch", "scenario-uc06-start", "scenario-uc06-complete", "scenario-uc07-start", "scenario-uc07-complete",
+		"scenario-pa-inquire"}
 	if got := asSet(ExchangeRoutes); !slices.Equal(got, asSet(wantRoutes)) {
 		t.Errorf("ExchangeRoutes %v, want %v", got, asSet(wantRoutes))
 	}

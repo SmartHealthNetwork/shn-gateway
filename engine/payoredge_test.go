@@ -18,7 +18,7 @@ import (
 // seam's tests translate between — the shape of the live 2026-08-26 defect (a bridge
 // persona's Coverage payor vs. the real reference payer's CMS identifier), but with
 // invented values so these tests never depend on shnsdk.CMSPayerIdentity's literal
-// contents beyond what BuildCoverageWithPayer itself needs.
+// contents beyond what containedPayorCoverage itself needs.
 var (
 	ownIdentity     = shnsdk.PayerIdentifier{System: "urn:shn:demo-payer", Value: "SHN-BRIDGE-DEMO"}
 	backendIdentity = shnsdk.CMSPayerIdentity
@@ -302,7 +302,7 @@ func TestNativeResponder_PayorEdge_CRD_SeamOff(t *testing.T) {
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":` + string(cov) + `}}`)
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
@@ -328,7 +328,7 @@ func TestNativeResponder_PayorEdge_CRD_MismatchRefuses(t *testing.T) {
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", foreignIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":` + string(cov) + `}}`)
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
@@ -370,7 +370,7 @@ func TestNativeResponder_PayorEdge_CRD_OwnIdentityRestamps(t *testing.T) {
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	req := []byte(`{"hook":"order-sign","context":{"draftOrders":{"resourceType":"Bundle","entry":[]}},"prefetch":{"coverage":` + string(cov) + `}}`)
 	res, err := n.Handle(context.Background(), "crd-order-select", "corr", "pci", req)
@@ -414,7 +414,7 @@ func dtrPackageWithCoverage(cov []byte) []byte {
 func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 	cov, err := containedPayorCoverage("Patient/p1", "MBR-1", ownIdentity)
 	if err != nil {
-		t.Fatalf("BuildCoverageWithPayer: %v", err)
+		t.Fatalf("containedPayorCoverage: %v", err)
 	}
 	reqFHIR := dtrPackageWithCoverage(cov)
 
@@ -449,7 +449,7 @@ func TestNativeResponder_PayorEdge_DTR_SeamOffAndRestamp(t *testing.T) {
 		p := newStubPartner(t)
 		foreignCov, ferr := containedPayorCoverage("Patient/p1", "MBR-1", foreignIdentity)
 		if ferr != nil {
-			t.Fatalf("BuildCoverageWithPayer: %v", ferr)
+			t.Fatalf("containedPayorCoverage: %v", ferr)
 		}
 		foreignReq := dtrPackageWithCoverage(foreignCov)
 		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
@@ -678,7 +678,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 	}
 	ref := "Patient/" + member
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"` + ref + `"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimUpdateBundleExact(shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), PriorClaim: testPriorClaim(), Coverage: testMemberCoverage(member),
+	in := shnsdk.ConformantClaimUpdateInputs{PASClaimFacts: testClaimFacts(), CertificationType: testCertificationType(), Coverage: testMemberCoverage(member),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON, SR: sr, PatientRef: ref, CoverageRef: "Coverage/" + member, MemberID: member,
@@ -691,7 +691,9 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 		PayerOrgEntry: true,
 		Insurer:       testPayerOrganization(payer),
 		Payer:         payer,
-	})
+	}
+	in.PriorClaim = testSubmissionFor("2.0", in)
+	b, err := shnsdk.BuildConformantClaimUpdateBundleExact(in)
 	if err != nil {
 		t.Fatalf("conformantUpdateBundle: %v", err)
 	}

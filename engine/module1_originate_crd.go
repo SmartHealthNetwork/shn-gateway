@@ -125,7 +125,7 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 		status, msg := coverageOmitted(outcome)
 		return out, status, msg
 	case string(coverage) == "null":
-		return out, http.StatusUnprocessableEntity, "no coverage in request or system of record"
+		return out, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR
 	}
 	if out.renamed() {
 		if patient, err = namePatientByMember(patient, sorID, member); err != nil {
@@ -405,12 +405,33 @@ func nameBasedUUID(name string) string {
 	return x[0:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
 }
 
+// buildFault is a failure to build a request this gateway originates, by what
+// it is about (refuseBuildFailure): the participant's own records it builds
+// from (stage build: SHN cannot build faithfully from them) or this gateway's
+// own assembly of them (stage verify: SHN's machinery). Its text is the
+// failure's own, unchanged.
+type buildFault struct {
+	// own is this gateway's own assembly failing; else the participant's
+	// records are at fault.
+	own bool
+	err error
+}
+
+func (f *buildFault) Error() string { return f.err.Error() }
+func (f *buildFault) Unwrap() error { return f.err }
+
+// recordFault is a build failure in the participant's own records.
+func recordFault(err error) error { return &buildFault{err: err} }
+
+// assemblyFault is a build failure in this gateway's own assembly.
+func assemblyFault(err error) error { return &buildFault{own: true, err: err} }
+
 // originatedOrderingRequest builds an order-sign or order-select request for
 // order from recs.
 func (g *Gateway) originatedOrderingRequest(ctx context.Context, hook, correlationID string, recs crdOriginRecords, order []byte) ([]byte, error) {
 	rt, id, err := resourceTypeAndID(order)
 	if err != nil {
-		return nil, fmt.Errorf("order: %w", err)
+		return nil, recordFault(fmt.Errorf("order: %w", err))
 	}
 	draft, err := collectionBundle(hookInstanceFor(correlationID)+"/draftOrders", order)
 	if err != nil {
@@ -449,12 +470,12 @@ func (g *Gateway) originatedOrderingRequest(ctx context.Context, hook, correlati
 func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOriginRecords, order []byte, performer string) ([]byte, error) {
 	rt, id, err := resourceTypeAndID(order)
 	if err != nil {
-		return nil, fmt.Errorf("order: %w", err)
+		return nil, recordFault(fmt.Errorf("order: %w", err))
 	}
 	prefetch := cloneValues(recs.history)
 	switch history, obtained := prefetch["deviceHistory"]; {
 	case obtained && !bundleHolds(history, rt, id):
-		return nil, fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s", rt, id)
+		return nil, recordFault(fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s", rt, id))
 	case !obtained:
 		history, err := collectionBundle(hookInstanceFor(correlationID)+"/deviceHistory", order)
 		if err != nil {

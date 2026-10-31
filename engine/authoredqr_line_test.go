@@ -10,7 +10,7 @@
 // the other two — handleUC04's and scenarioToPend's attestation refill — end
 // to end against a live (fake-Hub) round trip, reading the ACTUAL wire bytes
 // of the submitted PAS bundle (the same discipline
-// test/conformance/per_line_uc_test.go's assertWireBuiltAtLines uses).
+// the platform's per-line use-case conformance test's assertWireBuiltAtLines uses).
 //
 // WIRE-MARKER NOTE (load-bearing for why this fixture pins the 2.2 line):
 // DTR 2.0 and 2.1 are BYTE-IDENTICAL on every marker this build can check —

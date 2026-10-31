@@ -102,7 +102,7 @@ func TestPASIngressPayorReference_ResolvesInTheBundle(t *testing.T) {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env, rec, _ := levelPASRow(t, level, body, levelPASPayerAnswer)
-				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), levelPASPayerAnswer) {
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, levelPASPayerAnswer)) {
 					t.Fatalf("answer %d %s, want the payer's answer", rec.Code, rec.Body.String())
 				}
 				wantCarriedExactly(t, env, body)

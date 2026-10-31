@@ -2,7 +2,7 @@
 
 // originate_uc03_oxygen_test.go — TestUC03_AutoFillMutations is the executable mutation
 // evidence for homeOxygenAutoFillEvidence (the hermetic FR-17 source=auto attribution
-// proof, register §9 row 4 / §11) that test/conformance's TestUC03_AutoApproved names but
+// proof, register §9 row 4 / §11) that the platform conformance suite's TestUC03_AutoApproved names but
 // never carried: each row independently breaks one condition the cross-check depends on
 // and asserts the specific item it protects disappears, never the whole result going
 // empty by coincidence.
@@ -83,7 +83,7 @@ func oxygenQRJSON(t *testing.T, o2sat, pao2 string) []byte {
 	return raw
 }
 
-// TestUC03_AutoFillMutations is the mutation evidence test/conformance's
+// TestUC03_AutoFillMutations is the mutation evidence the platform conformance suite's
 // TestUC03_AutoApproved cites: homeOxygenAutoFillEvidence attributes an item
 // Origin="auto" ONLY when the QR's answer for that linkId EXACTLY matches the member's
 // OWN seeded ClinicalContext value — never on the QR's say-so alone, and never for any

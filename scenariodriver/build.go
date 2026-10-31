@@ -42,7 +42,7 @@ var cmsPayorOrg = payorOrg{id: shnsdk.CMSPayerIdentity, containedID: "cms-payer"
 // payorOrgs overrides that default for members whose OWN Coverage names a
 // different payer — today, the two bridging-demo personas, whose seeded
 // Coverage payor is gateway/engine's BridgeDemoPayerID / BridgeRefusePayerID
-// (seeded by internal/fhirseed's origination-Coverage block).
+// (seeded by the platform seeder's origination-Coverage block).
 //
 // Why the DRIVER has to know this: the conformant lane routes payload-FIRST
 // (AI-G13) — the gateway derives the payer holder from the Coverage carried in
@@ -277,7 +277,7 @@ func BuildQuestionnairePackageRequest(canonical, member string) ([]byte, error) 
 					"resourceType": "Coverage", "id": "coverage-1", "status": "active",
 					"beneficiary": map[string]any{"reference": "Patient/" + member},
 					// The urn:shn:coverage business identifier is the SAME convention
-					// shnsdk.BuildCoverageWithPayer stamps (sdk/crd.go): the MB member
+					// shnsdk.BuildCoverageExact stamps (sdk/order.go): the MB member
 					// number, bare — not a reference. Nothing derives a reference from
 					// it — a payer answering $questionnaire-package at DTR 2.2 must return a
 					// QuestionnaireResponse shell whose coverage reference comes from this

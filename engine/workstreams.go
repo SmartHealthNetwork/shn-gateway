@@ -55,7 +55,7 @@ type workstream interface {
 	// catalog.
 	ownershipRows() map[relay.Key]relay.Rule
 	// certifiedBuilds are the workstream's builder and line pairs that
-	// build-time certification proves, each with the make validate test that
+	// build-time certification proves, each with the validation-gate test that
 	// proves it and the shn-sdk release it holds from (certifiedbuilds.go), or
 	// nil.
 	certifiedBuilds() map[certifiedBuild]certification
@@ -132,6 +132,12 @@ type gatewayModule interface {
 	// (routes() passes cfg.Role); a module may declare its routes once, for
 	// that role, as New builds its state, and return what it declared.
 	routes(g *Gateway, role string) []mountedRoute
+	// exchangeRoutes are the closed names of the routes the module
+	// originates exchanges from, each an exchange record's Route
+	// (ExchangeRoutes): every route it declares with an exchange route, read
+	// from the same static table its routes are declared from, so the list is
+	// known at package init, before any gateway is built.
+	exchangeRoutes() []string
 }
 
 // modules are the modules compiled into this build (zoneModules: on-behalf
@@ -234,6 +240,23 @@ func workstreamCatalogs() []map[string]legSpec {
 		out = append(out, w.catalog())
 	}
 	return out
+}
+
+// AnsweredLegs are the legs a gateway of role takes as a recipient, by flat name
+// and sorted: every leg compiled in whose response side role may hold. A role
+// that answers none gets an empty list, never nil: a declared list that names
+// no leg, which is not a holder that declares none.
+func AnsweredLegs(role string) []string {
+	legs := []string{}
+	for _, catalog := range workstreamCatalogs() {
+		for leg, spec := range catalog {
+			if slices.Contains(spec.RecipientRoles, role) {
+				legs = append(legs, leg)
+			}
+		}
+	}
+	slices.Sort(legs)
+	return legs
 }
 
 // workstreamMemStates is each compiled-in workstream's own state for a new
@@ -475,6 +498,16 @@ func workstreamIngressRouteNames() []string {
 	return out
 }
 
+// moduleExchangeRouteNames are the routes the compiled-in modules originate
+// exchanges from (gatewayModule.exchangeRoutes), in registry order.
+func moduleExchangeRouteNames() []string {
+	var out []string
+	for _, m := range modules {
+		out = append(out, m.exchangeRoutes()...)
+	}
+	return out
+}
+
 // workstreamOperations are the operations an exchange record names on the
 // compiled-in workstreams' legs (operationsOf).
 func workstreamOperations() []string { return operationsOf(workstreams) }
@@ -607,6 +640,26 @@ var certifiedBuilds = func() map[certifiedBuild]certification {
 	return out
 }()
 
+// contractRetirer is a workstream that retired a contract-version token it
+// once declared: retiredContractVersion returns the refusal of a declared set
+// naming tok, or nil when the workstream retired no such token.
+type contractRetirer interface {
+	retiredContractVersion(tok string) error
+}
+
+// retiredContractVersion is the first compiled-in workstream's refusal of tok,
+// in registry order, or nil when none retired it.
+func retiredContractVersion(tok string) error {
+	for _, w := range workstreams {
+		if r, ok := w.(contractRetirer); ok {
+			if err := r.retiredContractVersion(tok); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // workstreamContractVersions is every compiled-in workstream's tokens, as pick
 // reads them from each, in registry order and each workstream's own order,
 // each once.
@@ -694,6 +747,9 @@ type legSpec struct {
 	// Seam names where the leg's inbound request is judged, on the findings
 	// its checks record (gatewayConformance.certify's seam strings).
 	Seam string
+	// RecipientRoles are the roles that may answer the leg: the taxonomy's
+	// response side.
+	RecipientRoles []string
 	// WireName is the leg's name on the wire from wire protocol 2.0.0: the
 	// transaction type with its workstream's prefix (the taxonomy's
 	// stagedName, "pa.pas-claim"). The catalog stays keyed by the flat name.
@@ -746,6 +802,7 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
+			RecipientRoles: l.Response.Roles,
 		}
 	}
 	for _, tx := range slices.Sorted(maps.Keys(detail)) {

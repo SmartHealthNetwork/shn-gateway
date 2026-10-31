@@ -275,7 +275,7 @@ func TestBuildQuestionnairePackageRequest(t *testing.T) {
 	for _, want := range []string{`"Parameters"`, `"valueCanonical"`, `http://example.org/Questionnaire/q1|1.0`,
 		`"Coverage"`, `Patient/MBR-COVERED`, `dtr-qpackage-input-parameters`,
 		// The urn:shn:coverage business identifier, carrying the BARE member
-		// id — the same convention shnsdk.BuildCoverageWithPayer stamps (a member
+		// id — the same convention shnsdk.BuildCoverageExact stamps (a member
 		// number, not a reference), including its "type" v2-0203 MB coding
 		// (close-out: completes the copy).
 		// The prefetch Coverage is what makes a payer answering at DTR 2.2 able to return

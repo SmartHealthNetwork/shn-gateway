@@ -2,8 +2,11 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
@@ -99,6 +102,9 @@ func (t opTarget) home() splice.NodeID {
 type effect struct {
 	start, end int
 	inside     bool
+	// replaced is the value a replace changes, for the signed-content
+	// exemption (signedExempt); -1 for every other operation.
+	replaced splice.NodeID
 }
 
 // model is the expected result of a change set, derived from the
@@ -152,7 +158,7 @@ func (m *model) touch(n splice.NodeID) {
 // inside is the effect of adding content somewhere within container n.
 func (m *model) inside(n splice.NodeID) *effect {
 	cs, ce := m.doc.Span(n)
-	return &effect{start: cs, end: ce, inside: true}
+	return &effect{start: cs, end: ce, inside: true, replaced: -1}
 }
 
 func (m *model) resolve(n splice.NodeID) (opTarget, error) {
@@ -202,7 +208,7 @@ func (m *model) add(op splice.OpInfo) (*effect, error) {
 		if bytes.Equal(op.Value, m.src[s:e]) {
 			return nil, nil
 		}
-		return &effect{start: s, end: e}, nil
+		return &effect{start: s, end: e, replaced: n}, nil
 
 	case splice.OpRemoveMember:
 		t, err := m.resolve(op.Target)
@@ -226,7 +232,7 @@ func (m *model) add(op splice.OpInfo) (*effect, error) {
 			m.touch(t.real)
 			_, ve := m.doc.Span(mem.Value)
 			m.removedSpans = append(m.removedSpans, span{mem.KeyStart, ve})
-			return &effect{start: mem.KeyStart, end: ve}, nil
+			return &effect{start: mem.KeyStart, end: ve, replaced: -1}, nil
 		}
 		return nil, fmt.Errorf("no member %q to remove", op.Key)
 
@@ -574,22 +580,89 @@ type coveredRegion struct {
 
 type coverageMap []coveredRegion
 
-// hit reports the first covered region an effect touches. A byte range
-// touches a region when they overlap; an insertion inside a container
-// touches a region that contains the whole container.
-func (c coverageMap) hit(e effect) (string, bool) {
+// hits reports the carriers of every covered region an effect touches, in
+// coverage order, each once. A byte range touches a region when they
+// overlap; an insertion inside a container touches a region that contains
+// the whole container.
+func (c coverageMap) hits(e effect) []string {
+	var out []string
 	for _, r := range c {
+		touched := e.start < r.end && r.start < e.end
 		if e.inside {
-			if r.start <= e.start && e.end <= r.end {
-				return r.carrier, true
-			}
-			continue
+			touched = r.start <= e.start && e.end <= r.end
 		}
-		if e.start < r.end && r.start < e.end {
-			return r.carrier, true
+		if touched && !slices.Contains(out, r.carrier) {
+			out = append(out, r.carrier)
 		}
 	}
-	return "", false
+	return out
+}
+
+// signedExempt are the registered edits made even where an in-payload
+// signature covers what they change, each with the one place it may change
+// there: a replace of the value that place names. Any other change an
+// exempt edit makes to signed content is refused, as every other edit's is.
+var signedExempt = map[EditID]func(m *model, n splice.NodeID) bool{
+	// D127: the return address of a pended PAS answer's Task is re-keyed
+	// to the network even when signed, and the forward discloses it.
+	EditPASPendReturnRekey: (*model).payerURLValue,
+}
+
+// pasTempCodes is the PAS code system that names a Task's payer-url input.
+const pasTempCodes = "http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes"
+
+// signedExemption reports whether the change eff of edit id may be made to
+// signed content: id is exempt, eff replaces the one place id may change, and
+// the new value is a JSON string.
+func (m *model) signedExemption(id EditID, eff effect) bool {
+	place, ok := signedExempt[id]
+	if !ok || eff.replaced < 0 {
+		return false
+	}
+	v := m.replaced[eff.replaced]
+	if len(v) < 2 || v[0] != '"' || !json.Valid(v) || m.doc.Kind(eff.replaced) != splice.KindString {
+		return false
+	}
+	return place(m, eff.replaced)
+}
+
+// payerURLValue reports whether n is the valueUrl of a Task input whose type
+// is PASTempCodes#payer-url, decided by structure: n is the valueUrl member
+// of an element of the input array of an object whose resourceType is Task.
+func (m *model) payerURLValue(n splice.NodeID) bool {
+	d := m.doc
+	in := m.parent[n]
+	if in < 0 || d.Kind(in) != splice.KindObject {
+		return false
+	}
+	if v, ok := d.Member(in, "valueUrl"); !ok || v != n {
+		return false
+	}
+	arr := m.parent[in]
+	if arr < 0 || d.Kind(arr) != splice.KindArray {
+		return false
+	}
+	task := m.parent[arr]
+	if task < 0 || d.Kind(task) != splice.KindObject || stringMember(d, task, "resourceType") != "Task" {
+		return false
+	}
+	if v, ok := d.Member(task, "input"); !ok || v != arr {
+		return false
+	}
+	typ, ok := d.Member(in, "type")
+	if !ok || d.Kind(typ) != splice.KindObject {
+		return false
+	}
+	codings, ok := d.Member(typ, "coding")
+	if !ok || d.Kind(codings) != splice.KindArray {
+		return false
+	}
+	for _, c := range d.Elems(codings) {
+		if d.Kind(c) == splice.KindObject && stringMember(d, c, "system") == pasTempCodes && stringMember(d, c, "code") == "payer-url" {
+			return true
+		}
+	}
+	return false
 }
 
 type resource struct {
@@ -620,9 +693,10 @@ func hasMember(d *splice.Doc, obj splice.NodeID, key string) bool {
 //     document its target references resolve to (by fullUrl, by
 //     type and id, or by #id for contained resources); a target that
 //     resolves to nothing in the document covers nothing here;
-//   - any Signature element (an object with type, when or its extension
-//     form _when, and who) covers its
-//     nearest enclosing resource, or the whole document when it has none.
+//   - any other Signature element (an object with type, when or its
+//     extension form _when, and who) covers its nearest enclosing resource,
+//     or the whole document when it has none. A Bundle's or a Provenance's
+//     own signature is that resource's carrier, counted once.
 func coverage(d *splice.Doc) coverageMap {
 	parent := parents(d)
 	byNode := map[splice.NodeID]*resource{}
@@ -682,19 +756,46 @@ func coverage(d *splice.Doc) coverageMap {
 				}
 			}
 		}
-		if hasMember(d, n, "type") && (hasMember(d, n, "when") || hasMember(d, n, "_when")) && hasMember(d, n, "who") {
+		if hasMember(d, n, "type") && (hasMember(d, n, "when") || hasMember(d, n, "_when")) && hasMember(d, n, "who") && !ownSignature(d, parent, byNode, n) {
 			enc := parent[n]
 			for enc >= 0 && byNode[enc] == nil {
 				enc = parent[enc]
 			}
-			if enc >= 0 {
+			if enc >= 0 && fhirTypeName(byNode[enc].typ) {
 				add(enc, "Signature in "+byNode[enc].typ)
+			} else if enc >= 0 {
+				// A resource type that is no FHIR type name is the
+				// payload's own text: the carrier does not repeat it.
+				add(enc, "Signature")
 			} else {
 				add(d.Root(), "Signature")
 			}
 		}
 	}
 	return c
+}
+
+// fhirTypeName reports whether typ reads as a FHIR resource type name (an
+// upper-case letter, then letters), the only payload text a carrier repeats.
+func fhirTypeName(typ string) bool { return fhirTypeNamePattern.MatchString(typ) }
+
+var fhirTypeNamePattern = regexp.MustCompile(`^[A-Z][A-Za-z]*$`)
+
+// ownSignature reports whether the Signature element n is the signature
+// member of a Bundle or a Provenance (directly, or as an element of it): that
+// signature is already that resource's carrier (Bundle.signature,
+// Provenance.signature), one signature, not a second.
+func ownSignature(d *splice.Doc, parent []splice.NodeID, byNode map[splice.NodeID]*resource, n splice.NodeID) bool {
+	holder := parent[n]
+	if holder >= 0 && d.Kind(holder) == splice.KindArray {
+		holder = parent[holder]
+	}
+	r := byNode[holder]
+	if holder < 0 || r == nil || (r.typ != "Bundle" && r.typ != "Provenance") {
+		return false
+	}
+	sig, ok := d.Member(holder, "signature")
+	return ok && (sig == n || sig == parent[n])
 }
 
 // stripHistory drops a trailing `/_history/<version>` (one segment) from ref.

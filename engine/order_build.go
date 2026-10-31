@@ -4,7 +4,7 @@
 // will eventually get (BuildServiceRequestCoded). When a real partner consumer needs to build
 // HCPCS orders via the SDK, lift this into sdk/order.go (additive) and honor the D-PCB-1
 // rejection test before recording it closed. Parity-pinned to shnsdk.BuildServiceRequest for
-// CPT (test/sdkparity/order_coded_parity_test.go) so it cannot drift before the pull-in.
+// CPT (by the platform's SDK parity suite) so it cannot drift before the pull-in.
 package engine
 
 import (
