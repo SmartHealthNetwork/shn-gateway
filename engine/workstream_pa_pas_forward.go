@@ -155,6 +155,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		ResponseSubjectForeign: true,
 		Response:               relay.Exact(up.body, up.contentType),
 		AnswerStatus:           up.status,
+		AnswerHeaders:          up.headers,
 		Rollback:               rollback,
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(response)
@@ -351,6 +352,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 		ResponseSubjectForeign: true,
 		Response:               relay.Exact(up.body, up.contentType),
 		AnswerStatus:           up.status,
+		AnswerHeaders:          up.headers,
 	}
 	pended, _, err := shnsdk.ParsePendedResponse(response)
 	if err != nil {
@@ -464,6 +466,7 @@ func relayUnread(ctx context.Context, up upstreamReply, rule string, rollback fu
 		ResponseSubjectForeign: true,
 		Response:               relay.Exact(up.body, up.contentType),
 		AnswerStatus:           up.status,
+		AnswerHeaders:          up.headers,
 		Rollback:               rollback,
 	}
 }

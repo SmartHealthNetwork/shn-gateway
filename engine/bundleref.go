@@ -1,4 +1,5 @@
-// bundleref.go — how a PAS request Bundle's own entries answer a reference
+// bundleref.go — how a Bundle's own entries answer a reference (a PAS request
+// Bundle's, or the Coverage search result a request the gateway builds carries)
 // written inside it.
 //
 // Routing reads one reference this way: the Coverage's payor. An absolute
@@ -13,10 +14,12 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -405,4 +408,86 @@ func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string,
 			fmt.Sprintf("no registered payer for identifier %s|%s", first.System, first.Value)
 	}
 	return holder, first, 0, ""
+}
+
+// The reasons coveragePayorRecords gives for a payor reference it leaves out.
+const (
+	payorRefNoneAnswers   = "none-answers"
+	payorRefSeveralAnswer = "several-answer"
+)
+
+// coveragePayorRecords resolves the payor reference each of coverages names
+// outside itself (coveragePayorRef: not contained, not an identifier) against
+// bundle, the Bundle the coverages came in, by entryAnswers' rule (resolve),
+// each distinct reference once, and returns the Organizations they name in
+// order, as bundle holds them, each record once. known is a record the caller already holds for
+// knownRef, answered when no entry of bundle does. A reference that no entry
+// and no known record answers, or that several different Organizations
+// answer, adds nothing: leftOut, when not nil, is told the reason
+// (payorRefNoneAnswers, payorRefSeveralAnswer) and the reference's resource
+// type (referenceResourceType). A reference that answers with a record that
+// is not an Organization adds nothing and is not told. Nothing is minted.
+func coveragePayorRecords(bundle []byte, coverages [][]byte, knownRef string, known []byte, leftOut func(reason, resourceType string)) [][]byte {
+	refs := readBundleRefs(bundle)
+	tell := func(reason, ref string) {
+		if leftOut != nil {
+			leftOut(reason, referenceResourceType(ref))
+		}
+	}
+	var out [][]byte
+	seen := map[string]bool{}
+	for _, c := range coverages {
+		ref := coveragePayorRef(c)
+		if ref == "" || strings.HasPrefix(ref, "#") || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		record, how := refs.resolve(ref)
+		if how == refNoEntry && ref == knownRef && len(known) > 0 {
+			record, how = known, refResolved
+		}
+		switch how {
+		case refResolved:
+			if resourceTypeOf(record) == "Organization" && !slices.ContainsFunc(out, func(o []byte) bool { return bytes.Equal(o, record) }) {
+				out = append(out, record)
+			}
+		case refAmbiguous:
+			tell(payorRefSeveralAnswer, ref)
+		default:
+			tell(payorRefNoneAnswers, ref)
+		}
+	}
+	return out
+}
+
+// resourceTypeOf is resource's resourceType, or "" when it is not a JSON
+// object naming one.
+func resourceTypeOf(resource []byte) string {
+	var head struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if len(resource) == 0 || json.Unmarshal(resource, &head) != nil {
+		return ""
+	}
+	return head.ResourceType
+}
+
+// referenceResourceType is the resource type a reference names, read from
+// its "[type]/[id]" tail, relative or absolute, when patientBindingPaths
+// (the R4 resource types of the Patient CompartmentDefinition's listing)
+// names it, or "" otherwise (a URN, or a tail that is no such type). Nothing
+// else of the reference is returned.
+func referenceResourceType(ref string) string {
+	parts := strings.Split(strings.TrimSuffix(ref, "/"), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	typ := parts[len(parts)-2]
+	if typ == "_history" && len(parts) >= 4 {
+		typ = parts[len(parts)-4]
+	}
+	if _, ok := patientBindingPaths[typ]; !ok {
+		return ""
+	}
+	return typ
 }

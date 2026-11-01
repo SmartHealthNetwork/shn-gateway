@@ -290,10 +290,9 @@ func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
 	x.decided(ExchangeAnswered, "", "")
 	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
 	req := claimRequest(testOrderBody(pasFollowSubmit(0).orderJSON, "")).WithContext(ctx)
-	// No payer Organization: the builder refuses (shn-sdk requires the
-	// Insurer), a failure of this gateway's own assembly, not a fact the
-	// caller left out.
-	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, nil, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	// A record that is no Organization: the builder refuses it, a failure of
+	// this gateway's own assembly, not a fact the caller left out.
+	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, []byte(`{"resourceType":"Patient","id":"p"}`), patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
 	if err != nil || status != http.StatusInternalServerError || !strings.HasPrefix(msg, "build bundle failed") {
 		t.Fatalf("submitPASClaim = %d %q %v, want the 500 build bundle failed", status, msg, err)
 	}

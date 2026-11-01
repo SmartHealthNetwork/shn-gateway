@@ -323,5 +323,5 @@ func (g *Gateway) handleCRDNativeInbound(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	g.observeCRDEmbedded(ctx, "crd-order-select", env.Metadata.CorrelationID, result.Response)
-	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "crd-cards", "crd-order-select", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }

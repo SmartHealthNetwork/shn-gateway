@@ -387,7 +387,7 @@ func TestRespondLegFramesSuccessForCapableRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", testResponse(fhir), http.StatusOK, "pci-1", requester.ID, "", "")
+		"corr-1", testResponse(fhir), builtAnswer, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -413,7 +413,7 @@ func TestRespondLegBareSuccessForLegacyRequester(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r := newSignedInboundRequest(t, g, requester.ID)
 	g.respondLeg(rec, r, "payer-coverage", "crd-cards", "crd-order-select",
-		"corr-1", testResponse(fhir), http.StatusOK, "pci-1", requester.ID, "", "")
+		"corr-1", testResponse(fhir), builtAnswer, "pci-1", requester.ID, "", "")
 	if rec.Code != 200 {
 		t.Fatalf("to-Hub status = %d, want 200", rec.Code)
 	}
@@ -447,7 +447,7 @@ func TestFramePayloadStampsContractVersion(t *testing.T) {
 	reg.Set("legacy-prov", shnsdk.RegistryEntry{ID: "legacy-prov", Role: "provider"})
 	g := &Gateway{cfg: Config{Reg: reg}}
 
-	framed := g.framePayload("prov-1", 200, "application/fhir+json", mustToken(t, g, "pas-claim", ""), []byte(`{}`))
+	framed := frameForTest(g, "prov-1", mustToken(t, g, "pas-claim", ""))
 	hdr, _, err := shnsdk.DecodeHTTPFrame(framed)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -457,14 +457,14 @@ func TestFramePayloadStampsContractVersion(t *testing.T) {
 	}
 
 	// Version-neutral leg: framed but unstamped.
-	neutral := g.framePayload("prov-1", 200, "application/fhir+json", mustToken(t, g, "federated-query", ""), []byte(`{}`))
+	neutral := frameForTest(g, "prov-1", mustToken(t, g, "federated-query", ""))
 	nh, _, _ := shnsdk.DecodeHTTPFrame(neutral)
 	if _, has := nh.Headers[shnsdk.FrameHeaderContractVersion]; has {
 		t.Fatal("version-neutral leg must not be stamped")
 	}
 
 	// Legacy (non-negotiated) requester: bare payload, byte-unchanged.
-	bare := g.framePayload("legacy-prov", 200, "application/fhir+json", mustToken(t, g, "pas-claim", ""), []byte(`{}`))
+	bare := frameForTest(g, "legacy-prov", mustToken(t, g, "pas-claim", ""))
 	if shnsdk.IsFramed(bare) {
 		t.Fatal("legacy requester must stay bare")
 	}
@@ -522,4 +522,10 @@ func TestPASNativeSuccessFramedForCapableRequester(t *testing.T) {
 	if parsed, perr := shnsdk.ParseClaimResponse(body); perr != nil || parsed.Outcome != "approved" {
 		t.Fatalf("framed PAS body not an approved ClaimResponse: %+v err=%v", parsed, perr)
 	}
+}
+
+// frameForTest frames a 200 answer as a recipient's gateway does.
+func frameForTest(g *Gateway, requester, contractToken string) []byte {
+	out, _, _, _, _ := g.frameAnswer(requester, builtAnswer, "application/fhir+json", contractToken, []byte(`{}`))
+	return out
 }

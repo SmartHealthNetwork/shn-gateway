@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -357,58 +358,60 @@ func TestBuild_UnprotectedPullBindServesNothing_MON_R7_R44(t *testing.T) {
 // listener's; the pull listener scrapes what the gateway records, and Run's
 // workers serve it on its own bind.
 func TestPull_OwnListenerNeverIngress_MON_R6(t *testing.T) {
-	// A loopback port that is free now; a bind that loses the race to
-	// another process shows in telemetry-config, and the test picks again.
-	for attempt := 0; ; attempt++ {
-		probe, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := fmt.Sprint(probe.Addr().(*net.TCPAddr).Port)
-		_ = probe.Close()
-		b, _ := buildMonitored(t, monitoringGateway(t, map[string]string{"OTEL_METRICS_EXPORTER": "prometheus",
-			"OTEL_EXPORTER_PROMETHEUS_HOST": "127.0.0.1", "OTEL_EXPORTER_PROMETHEUS_PORT": port}))
-		if !b.httpServerMetered {
-			t.Fatal("a gateway that exports left the main listener without the HTTP server metric")
-		}
-		if b.telemetry.PullAddr() != "127.0.0.1:"+port {
-			t.Fatalf("pull addr %q", b.telemetry.PullAddr())
-		}
-		w := httptest.NewRecorder()
-		b.handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-		if strings.Contains(w.Body.String(), "shn_gateway_") || strings.Contains(w.Body.String(), "target_info") {
-			t.Fatalf("the ingress listener serves metrics: %d", w.Code)
-		}
-		stop := b.startWorkers(context.Background())
-		body, scraped := "", false
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && !scraped; time.Sleep(20 * time.Millisecond) {
-			if !b.telemetry.ConfigCheck().OK {
-				break
-			}
-			resp, err := (&http.Client{Timeout: time.Second}).Get("http://127.0.0.1:" + port + "/metrics")
-			if err != nil {
-				continue
-			}
-			raw, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			body, scraped = string(raw), resp.StatusCode == http.StatusOK
-		}
+	// The test binds the pull port itself and hands the listener to
+	// ServePull, so the port is this test's from the bind to the close: no
+	// other test can take it between a probe and the gateway's bind, and a
+	// scrape of it can only reach this gateway.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otelsetup.HandListenerForTest(t, ln)
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+	b, _ := buildMonitored(t, monitoringGateway(t, map[string]string{"OTEL_METRICS_EXPORTER": "prometheus",
+		"OTEL_EXPORTER_PROMETHEUS_HOST": "127.0.0.1", "OTEL_EXPORTER_PROMETHEUS_PORT": port}))
+	if !b.httpServerMetered {
+		t.Fatal("a gateway that exports left the main listener without the HTTP server metric")
+	}
+	if b.telemetry.PullAddr() != "127.0.0.1:"+port {
+		t.Fatalf("pull addr %q", b.telemetry.PullAddr())
+	}
+	w := httptest.NewRecorder()
+	b.handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if strings.Contains(w.Body.String(), "shn_gateway_") || strings.Contains(w.Body.String(), "target_info") {
+		t.Fatalf("the ingress listener serves metrics: %d", w.Code)
+	}
+	stop := b.startWorkers(context.Background())
+	// The port is bound already, so the connection queues until Run's
+	// listener serves it: one scrape, no retry.
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://127.0.0.1:" + port + "/metrics")
+	if err != nil {
 		stop()
-		if !scraped && !b.telemetry.ConfigCheck().OK && attempt < 3 {
-			continue
-		}
-		if !scraped || !strings.Contains(body, "target_info") || !strings.Contains(body, `shn_holder_id="h-payer-mon"`) {
-			t.Fatalf("scrape of Run's pull listener: %t\n%s", scraped, body)
-		}
-		// The main listener's own request, answered 404 with no route, is
-		// recorded by the HTTP server metric of a gateway that exports (MON-R29).
-		if !strings.Contains(body, `http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="404",`) {
-			t.Fatalf("the main listener's request is not in the scrape:\n%s", body)
-		}
-		if _, err := (&http.Client{Timeout: time.Second}).Get("http://127.0.0.1:" + port + "/metrics"); err == nil {
-			t.Fatal("the pull listener outlives its workers")
-		}
-		return
+		t.Fatalf("scrape of Run's pull listener: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	stop()
+	body := string(raw)
+	if !b.telemetry.ConfigCheck().OK {
+		t.Fatalf("telemetry-config is not OK on a pull listener served from a listener the test bound: %+v", b.telemetry.ConfigCheck())
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "target_info") || !strings.Contains(body, `shn_holder_id="h-payer-mon"`) {
+		t.Fatalf("scrape of Run's pull listener: %d\n%s", resp.StatusCode, body)
+	}
+	// The main listener's own request, answered 404 with no route, is
+	// recorded by the HTTP server metric of a gateway that exports (MON-R29).
+	if !strings.Contains(body, `http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="404",`) {
+		t.Fatalf("the main listener's request is not in the scrape:\n%s", body)
+	}
+	// The pull listener does not outlive its workers: stopping them closed
+	// the listener itself, so nothing can be accepted on it.
+	err = ln.(*net.TCPListener).SetDeadline(time.Now().Add(time.Millisecond))
+	if err == nil {
+		_, err = ln.Accept()
+	}
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("the pull listener outlives its workers: %v", err)
 	}
 }
 

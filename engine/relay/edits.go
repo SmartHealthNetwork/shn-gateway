@@ -1,6 +1,9 @@
 package relay
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // EditKind is the one kind of change a registered edit makes.
 type EditKind string
@@ -38,11 +41,20 @@ type Edit struct {
 	Authority    string
 	// Disclosure is the statement participants are given about the edit.
 	Disclosure string
+	// DropsAnswerHeaders are the headers of the participant's answer the edit
+	// makes untrue, left out as part of it and stated in its Disclosure. An
+	// edit of an answer names ETagHeader: the bytes the caller receives are not
+	// the ones that validator named.
+	DropsAnswerHeaders []string
 }
 
+// ETagHeader is the header an edit of an answer always drops.
+const ETagHeader = "ETag"
+
 // ValidateEdits reports why rows cannot be a registry of edits, or nil: an
-// edit whose id is not in the closed set (EditIDs), or an id two edits
-// declare. It reads rows and changes nothing.
+// edit whose id is not in the closed set (EditIDs), an id two edits declare,
+// or an edit of an answer that leaves its ETag standing. It reads rows and
+// changes nothing.
 func ValidateEdits(rows []Edit) error {
 	closed := map[EditID]bool{}
 	for _, id := range editIDs {
@@ -57,8 +69,18 @@ func ValidateEdits(rows []Edit) error {
 			return fmt.Errorf("edit %s is declared twice", e.ID)
 		}
 		seen[e.ID] = true
+		if e.Direction == DirectionResponse && !slices.Contains(e.DropsAnswerHeaders, ETagHeader) {
+			return fmt.Errorf("edit %s changes an answer and does not drop its %s", e.ID, ETagHeader)
+		}
 	}
 	return nil
+}
+
+// EditDropsAnswerHeaders returns the answer headers the edit of rows with the
+// given id drops.
+func EditDropsAnswerHeaders(rows []Edit, id EditID) []string {
+	e, _ := editIn(rows, id)
+	return e.DropsAnswerHeaders
 }
 
 // editIn returns the edit of rows with the given id.

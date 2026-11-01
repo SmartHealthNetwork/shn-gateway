@@ -80,6 +80,9 @@ type pendResumeSubstrate struct {
 	// and pas-claim-update legs, so the only place to drift the registry underneath
 	// them is here, from inside the pas-claim answer.
 	onLeg func(legType string)
+	// denyOperation, when set, answers an /authorize for that operation 403: the
+	// Authorization Framework's denial.
+	denyOperation string
 
 	legTypes []string
 	// requests records each leg's opened request payload, per legType.
@@ -118,6 +121,9 @@ func (s *pendResumeSubstrate) handleAuthorize(body []byte) (*http.Response, erro
 		PayloadHash   string `json:"payloadHash"`
 	}
 	_ = json.Unmarshal(body, &req)
+	if s.denyOperation != "" && req.Operation == s.denyOperation {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"denied"}`))}, nil
+	}
 	tok := shnsdk.Token{
 		Operation:     req.Operation,
 		Scope:         "crd-context",

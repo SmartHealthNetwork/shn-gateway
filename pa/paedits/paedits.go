@@ -183,7 +183,9 @@ func Rows() []relay.Edit {
 				"provider's line's names (PackageBundle and packagebundle, operationOutcome and outcome), and carries each " +
 				"QuestionnaireResponse in the package across the lines through the network's registered DTR steps (the " +
 				"Coverage context's place and the intended-use code system); every other byte is the payer's. An answer " +
-				"that cannot be valid at the provider's line is refused, never filled.",
+				"that cannot be valid at the provider's line is refused, never filled. The payer's ETag is left out of the " +
+				"answer so changed, since it named the payer's bytes.",
+			DropsAnswerHeaders: []string{relay.ETagHeader},
 		},
 		{
 			ID:        relay.EditRegisteredTransform,
@@ -225,7 +227,9 @@ func Rows() []relay.Edit {
 			Disclosure: "When a payer's prior-authorization answer carries a Task whose payer-url names where to send " +
 				"documentation, the provider's gateway replaces that address with its own return path for the same payer, " +
 				"so the documentation the provider sends there reaches that payer through the network. The forward to the " +
-				"provider's system names the edit in a header, and names any signature that covered the address.",
+				"provider's system names the edit in a header, and names any signature that covered the address. The payer's " +
+				"ETag is left out of that forward, since it named the payer's bytes.",
+			DropsAnswerHeaders: []string{relay.ETagHeader},
 		},
 	}
 }

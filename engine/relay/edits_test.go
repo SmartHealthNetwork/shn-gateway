@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -64,5 +65,24 @@ func TestEditLookupsReadTheRows(t *testing.T) {
 	}
 	if _, ok := EditName(nil, EditCDSCallbackStrip); ok {
 		t.Error("no rows named an edit")
+	}
+}
+
+// An edit of an answer drops its ETag: the bytes the caller receives are not
+// the ones that validator named.
+func TestValidateEdits_AnAnswerEditDropsItsETag(t *testing.T) {
+	row := Edit{ID: EditPASPendReturnRekey, Direction: DirectionResponse}
+	if err := ValidateEdits([]Edit{row}); err == nil || !strings.Contains(err.Error(), "ETag") {
+		t.Fatalf("got %v", err)
+	}
+	row.DropsAnswerHeaders = []string{ETagHeader}
+	if err := ValidateEdits([]Edit{row}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateEdits([]Edit{{ID: EditPASPendReturnRekey, Direction: DirectionRequest}}); err != nil {
+		t.Fatalf("an edit of a request: %v", err)
+	}
+	if got := EditDropsAnswerHeaders([]Edit{row}, row.ID); !slices.Equal(got, []string{ETagHeader}) {
+		t.Fatalf("EditDropsAnswerHeaders %v", got)
 	}
 }

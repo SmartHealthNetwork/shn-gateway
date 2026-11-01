@@ -193,7 +193,8 @@ func bearerMatches(header string, want [sha256.Size]byte) bool {
 // Prometheus exporter: a test seam, nil in every build.
 var pullExporterRefusal error
 
-// listen is net.Listen; a test replaces it.
+// listen is net.Listen; a test replaces it. In a test build, listen_fortest.go
+// wraps it to serve a listener a test bound (HandListenerForTest).
 var listen = net.Listen
 
 // ServePull serves the Prometheus pull listener until ctx is done, then

@@ -114,11 +114,18 @@ func (g *Gateway) admit(p relay.Payload, k relay.Key) ([]byte, error) {
 // transmit k and writes it with status and contentType ("" sets no header).
 // A refused payload writes a 500 local fault instead.
 func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType string, p relay.Payload, k relay.Key) {
+	g.writeAnswer(w, status, contentType, nil, p, k)
+}
+
+// writeAnswer is writePayload with the answer's own headers, set only once
+// the payload passes its check: a local fault states none of them. It reports
+// whether it wrote the payload.
+func (g *Gateway) writeAnswer(w http.ResponseWriter, status int, contentType string, headers map[string]string, p relay.Payload, k relay.Key) bool {
 	b, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
 		writeOwnershipFault(w)
-		return
+		return false
 	}
 	exchangeOfWriter(w).answered(p)
 	if k.Role == relay.RoleRecipient && k.Direction == relay.DirectionResponse {
@@ -129,11 +136,15 @@ func (g *Gateway) writePayload(w http.ResponseWriter, status int, contentType st
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
+	for name, value := range headers {
+		w.Header().Set(name, value)
+	}
 	if k.Role == relay.RoleRequester && k.Direction == relay.DirectionResponse {
 		setEditedHeader(w.Header(), p)
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+	return true
 }
 
 // writeJSON writes a JSON answer the gateway builds itself. A FHIR operation

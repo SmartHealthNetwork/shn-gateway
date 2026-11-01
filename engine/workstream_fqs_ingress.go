@@ -101,8 +101,8 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 	ex := g.exchanges.Begin(workstreamFQS)
 	content := Content{WorkstreamType: workstreamFQS, Payload: request, Carried: true, OnBehalf: builder != ""}
 	var answerType string
-	var answerStatus int
-	answer, err := g.OriginateLeg(withAnswerStatusSink(withAnswerMediaTypeSink(r.Context(), &answerType), &answerStatus), r, facility, legType, pci, child, facility, content)
+	var stated statedAnswer
+	answer, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, facility, legType, pci, child, facility, content)
 	spec, _ := legSpecFor(legType)
 	leg := Leg{Type: legType, Physics: spec.Physics, Content: content, Subjects: subjectsOf(pci)}
 	if err != nil {
@@ -171,7 +171,7 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 	if ct == "" {
 		ct = mediaFHIRJSON
 	}
-	g.writePayload(w, relayedAnswerStatus(answerStatus), ct, relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
+	g.writeRelayedAnswer(w, stated, ct, relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

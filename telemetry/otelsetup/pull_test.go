@@ -295,6 +295,7 @@ func TestPullHandler_BadTokenGets401_MON_R7_R42(t *testing.T) {
 func servePull(t *testing.T, tel *Telemetry) string {
 	t.Helper()
 	bound := make(chan string, 1)
+	prevListen := listen
 	listen = func(network, _ string) (net.Listener, error) {
 		ln, err := net.Listen(network, "127.0.0.1:0")
 		if err == nil {
@@ -302,7 +303,7 @@ func servePull(t *testing.T, tel *Telemetry) string {
 		}
 		return ln, err
 	}
-	t.Cleanup(func() { listen = net.Listen })
+	t.Cleanup(func() { listen = prevListen })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); tel.ServePull(ctx) }()
@@ -419,10 +420,11 @@ func TestServePull_BindFailureTurnsPullOff_MON_R44(t *testing.T) {
 	defer tel.Shutdown(context.Background())
 	var lines []string
 	tel.logf = func(f string, a ...any) { lines = append(lines, f) }
+	prevListen := listen
 	listen = func(string, string) (net.Listener, error) {
 		return nil, errors.New("listen tcp localhost:19464: bind: address already in use")
 	}
-	t.Cleanup(func() { listen = net.Listen })
+	t.Cleanup(func() { listen = prevListen })
 	if st := tel.ConfigCheck(); !st.OK {
 		t.Fatalf("before the bind: %+v", st)
 	}
@@ -471,12 +473,13 @@ func TestServePull_LocalhostBoundOffLoopbackServesNothing_MON_R7_R42(t *testing.
 	var lines []string
 	tel.logf = func(f string, a ...any) { lines = append(lines, f) }
 	var real net.Listener
+	prevListen := listen
 	listen = func(network, _ string) (net.Listener, error) {
 		ln, err := net.Listen(network, "127.0.0.1:0")
 		real = ln
 		return fakeAddrListener{ln, &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 9464}}, err
 	}
-	t.Cleanup(func() { listen = net.Listen })
+	t.Cleanup(func() { listen = prevListen })
 	tel.ServePull(t.Context()) // returns at once: nothing served
 	if _, err := real.Accept(); err == nil {
 		t.Fatal("the listener is still open")

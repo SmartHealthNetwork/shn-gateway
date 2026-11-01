@@ -189,6 +189,17 @@ func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fallback})
 }
 
+// pasSubmitBuildFailure answers a PAS submit's build failure to recipient: a
+// payer no record names is the fidelity of SHN's own build (errNoPayerRecord),
+// and anything else is pasBuildFailure's.
+func (g *Gateway) pasSubmitBuildFailure(w http.ResponseWriter, r *http.Request, recipient string, err error, fallback string) {
+	if errors.Is(err, errNoPayerRecord) {
+		g.refuseOwnBuild(w, recipient, "pas-claim", msgNoPayerRecord)
+		return
+	}
+	pasBuildFailure(w, r, err, fallback)
+}
+
 // pasSubmissionRecord is what an amendment needs of the submission it
 // continues, read off the bytes that submission's leg sent
 // (shnsdk.PASPriorClaimOf): the submitted Claim as sent, which the amendment
@@ -361,6 +372,53 @@ func routeSendsAmendment(r *http.Request) *http.Request {
 func sendsAmendment(r *http.Request) bool {
 	v, _ := r.Context().Value(sendsAmendmentKey{}).(bool)
 	return v
+}
+
+type amendsItsOwnClaimKey struct{}
+
+// routeAmendsItsOwnClaim marks an origination request whose route, once the
+// payer pends the claim it submits, sends the amendment of that claim in the
+// same request with no new statement between them: the UC-04 demo lane's
+// in-flow amendment and the single-call UC-06 and UC-07. Such an amendment
+// carries the submitted claim whole (PAS 2.1 and later), so the route checks,
+// just before the claim is sent, what of it the amendment certainly cannot
+// carry (amendedClaimCarriesItsFacts). UC-05 is not marked: its consented
+// branch can still end before any amendment (consentDenied), so a claim it
+// sends can succeed without one. /complete is not marked either: its pend was
+// made by an earlier request.
+func routeAmendsItsOwnClaim(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), amendsItsOwnClaimKey{}, true))
+}
+
+func amendsItsOwnClaim(r *http.Request) bool {
+	v, _ := r.Context().Value(amendsItsOwnClaimKey{}).(bool)
+	return v
+}
+
+// amendedClaimCarriesItsFacts is the check a route that amends its own claim
+// runs just before that claim's pas-claim leg, at the line it is built at: an
+// amendment carries the submitted claim whole, so a reference the request
+// stated in a claim fact must resolve in the amendment's bundle. It refuses
+// the references CheckPASSubmittedFactsCarriedAtLine can rule out before any
+// build: one to a resource type the amendment's bundle has no entry of, an
+// absolute one under another base, and one that is not a type and an id. Past
+// this point the payer would hold a pend no amendment of this request could
+// answer. Such a reference is refused as the amendment's build would refuse it
+// (pasBuildFailure: 422, the fidelity of SHN's own build at the build stage),
+// with no claim sent. A reference to a type the bundle does hold, or a local
+// one, is still decided at the amendment's build, after the claim. It runs
+// here, not before the first leg, because a request that can still end
+// without a claim (a CRD not-covered answer) is carried. A request no route
+// marks passes. On a refusal it writes the response and returns false.
+func amendedClaimCarriesItsFacts(w http.ResponseWriter, r *http.Request, line string, facts shnsdk.PASClaimFacts) bool {
+	if !amendsItsOwnClaim(r) {
+		return true
+	}
+	if err := shnsdk.CheckPASSubmittedFactsCarriedAtLine(line, facts); err != nil {
+		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		return false
+	}
+	return true
 }
 
 // claimFactsBeforeAnyLeg refuses, before the first leg of an origination is

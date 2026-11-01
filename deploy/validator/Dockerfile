@@ -128,7 +128,9 @@ RUN igfetch() { if [ -f "/igcache/$1" ]; then cp "/igcache/$1" "$1"; elif [ "$IG
  && igfetch hl7.fhir.us.davinci-hrex-1.2.0.tgz https://packages.simplifier.net/hl7.fhir.us.davinci-hrex/1.2.0 \
  && echo "f28749c04bed6c791aa8aa594dbaffcdbabd4605d650860389dc2c2c61173c44  hl7.fhir.us.davinci-hrex-1.2.0.tgz" | sha256sum -c \
  && igfetch hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz https://packages.simplifier.net/hl7.fhir.uv.extensions.r4/5.3.0-ballot-tc1 \
- && echo "5f5d1e88052d615453e6b7a1eb4f885df36590f14b52974e5860485d16819bd9  hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz" | sha256sum -c
+ && echo "5f5d1e88052d615453e6b7a1eb4f885df36590f14b52974e5860485d16819bd9  hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz" | sha256sum -c \
+ && igfetch hl7.fhir.uv.cpg-1.0.0.tgz https://packages.simplifier.net/hl7.fhir.uv.cpg/1.0.0 \
+ && echo "ef5aa60d6d5a6537db0365a4e2ee6dca008b7d56057ce96b0f07c4a7a6f28311  hl7.fhir.uv.cpg-1.0.0.tgz" | sha256sum -c
 COPY shnig/shn.fhir.carry-1.0.0.tgz /packages/shn.fhir.carry-1.0.0.tgz
 COPY support/shn.fhir.validation-support-1.5.0.tgz /packages/shn.fhir.validation-support-1.5.0.tgz
 
@@ -276,6 +278,9 @@ ENV SHN_IG_LINE=2.2 \
     hapi.fhir.implementationguides.extensions.packageUrl=file:///packages/hl7.fhir.uv.extensions.r4-5.3.0-ballot-tc1.tgz \
     hapi.fhir.implementationguides.extensions.name=hl7.fhir.uv.extensions.r4 \
     hapi.fhir.implementationguides.extensions.version=5.3.0-ballot-tc1 \
+    hapi.fhir.implementationguides.cpg.packageUrl=file:///packages/hl7.fhir.uv.cpg-1.0.0.tgz \
+    hapi.fhir.implementationguides.cpg.name=hl7.fhir.uv.cpg \
+    hapi.fhir.implementationguides.cpg.version=1.0.0 \
     hapi.fhir.implementationguides.shnig.packageUrl=file:///packages/shn.fhir.carry-1.0.0.tgz \
     hapi.fhir.implementationguides.shnig.name=shn.fhir.carry \
     hapi.fhir.implementationguides.shnig.version=1.0.0 \

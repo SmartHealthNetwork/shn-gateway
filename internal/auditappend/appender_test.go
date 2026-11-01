@@ -863,24 +863,39 @@ func TestSendCutAtStopIsNotARetry(t *testing.T) {
 	}
 }
 
+// roundTripFunc is an http.RoundTripper that answers in process.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // TestOverflowDuringASendCountsTheRecordOnce: a record overflow takes while
 // it is being sent is counted under overflow only, not also as sent.
+//
+// The Plane is an in-process transport, not a server: it fills the queue
+// while the POST is in flight and then answers 200, so the row does not
+// depend on the Bound appends finishing inside sendTimeout's wall-clock
+// deadline (on a loaded host they did not, and the POST timed out).
 func TestOverflowDuringASendCountsTheRecordOnce(t *testing.T) {
 	var a *Appender
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	posts := 0
+	plane := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		posts++
+		if r.Method != http.MethodPost || r.URL.Path != "/append" {
+			t.Errorf("%s %s, want POST /append", r.Method, r.URL.Path)
+		}
 		for i := 0; i < Bound; i++ {
 			a.Append(fresh())
 		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+	})
 	m := newCounts()
-	a = newAppender(t, srv.URL, NewMemStore(), m)
+	a = newAppender(t, "http://plane.test", NewMemStore(), m)
+	a.cfg.Client = &http.Client{Transport: plane}
 	a.Append(fresh())
 	a.sendOne(context.Background(), 1)
-	sent, _, d := m.snapshot()
-	if sent != 0 || d[DropOverflow] != 1 {
-		t.Fatalf("sent %d, dropped %v: want the record counted once, as overflow", sent, d)
+	sent, r, d := m.snapshot()
+	if posts != 1 || sent != 0 || len(r) != 0 || d[DropOverflow] != 1 {
+		t.Fatalf("%d posts, sent %d, retried %v, dropped %v: want one post and the record counted once, as overflow", posts, sent, r, d)
 	}
 }
 

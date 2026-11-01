@@ -96,8 +96,8 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.handlePASInquireInbound":      {kind: sealsVia, via: "Gateway.buildResponseLeg"},
 	// Answers to the participant's own system (the ingress writers, the
 	// relayed application errors) and every refusal.
-	"Gateway.writePayload": {kind: transmits, body: sendsAnswer},
-	"writeJSON":            {kind: transmits, body: sendsAnswer},
+	"Gateway.writeAnswer": {kind: transmits, body: sendsAnswer},
+	"writeJSON":           {kind: transmits, body: sendsAnswer},
 	// The engine's own reads of a payload before its transmit.
 	"Gateway.admit": {kind: transmits, noSink: true, body: readsOnly},
 

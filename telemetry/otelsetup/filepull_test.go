@@ -388,10 +388,11 @@ func TestFilePull_BindFailureNamesTheFile_MON_R44(t *testing.T) {
 	defer tel.Shutdown(context.Background())
 	var lines []string
 	tel.logf = func(f string, a ...any) { lines = append(lines, f) }
+	prevListen := listen
 	listen = func(string, string) (net.Listener, error) {
 		return nil, errors.New("listen tcp localhost:19464: bind: address already in use")
 	}
-	t.Cleanup(func() { listen = net.Listen })
+	t.Cleanup(func() { listen = prevListen })
 	tel.ServePull(t.Context())
 	if len(lines) != 1 || !strings.Contains(lines[0], pullBlock+".port") || strings.Contains(lines[0], "OTEL_EXPORTER_PROMETHEUS") {
 		t.Fatalf("lines %q", lines)

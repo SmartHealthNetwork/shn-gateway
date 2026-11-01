@@ -64,7 +64,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if ct == "" {
 		ct = "application/json"
 	}
-	return LegResult{Response: relay.Exact(up.body, ct), AnswerStatus: up.status}, nil
+	return LegResult{Response: relay.Exact(up.body, ct), AnswerStatus: up.status, AnswerHeaders: up.headers}, nil
 }
 
 // certifyCDSHooksAnswer applies the CDS Hooks response rules (and, at a CRD

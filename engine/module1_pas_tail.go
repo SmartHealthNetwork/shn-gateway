@@ -136,6 +136,12 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	facts := claimIn.facts()
 	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts, requester)
 	if err != nil {
+		if errors.Is(err, errNoPayerRecord) {
+			// The refusal pasSubmitBuildFailure answers.
+			g.observeOwnBuildRefused(recipient, "pas-claim", msgNoPayerRecord)
+			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+			return out, http.StatusUnprocessableEntity, msgNoPayerRecord, nil
+		}
 		if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
 			// The fidelity refusal pasBuildFailure answers, at the build stage.
 			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)

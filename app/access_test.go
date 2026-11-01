@@ -88,12 +88,13 @@ func TestAccessLineFor(t *testing.T) {
 	// A default edit the gateway could not make is named after the bodies'
 	// edits, with why.
 	notMade := refusedRecord()
+	notMade.AnswerHeadersNotCarried = []string{"ETag:" + engine.AnswerHeaderValueNotCarriable}
 	notMade.AnswerEdits, notMade.EditsNotMade = []string{"E-10"}, []string{engine.EditNotMadeNoStructuralPayerURL}
 	b, err = json.Marshal(accessLineFor(notMade))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wantNotMade := strings.TrimSuffix(want, "}") + `,"answerEdits":["E-10"],"editsNotMade":["E-10:no-structural-payer-url"]}`; string(b) != wantNotMade {
+	if wantNotMade := strings.TrimSuffix(want, "}") + `,"answerEdits":["E-10"],"editsNotMade":["E-10:no-structural-payer-url"],"answerHeadersNotCarried":["ETag:value-not-carriable"]}`; string(b) != wantNotMade {
 		t.Fatalf("access line with an edit not made\n got %s\nwant %s", b, wantNotMade)
 	}
 	refusal := refusedRecord()

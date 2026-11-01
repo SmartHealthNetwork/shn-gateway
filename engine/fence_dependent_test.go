@@ -311,6 +311,41 @@ func TestCarriedMembersSkipACoveragesParty(t *testing.T) {
 	}
 }
 
+// What a Coverage's party names is read like the rest of the request: the
+// party's own identity names no member, but another patient it links to, or
+// names in any other element, is involved, on every leg. Only the party is
+// passed over, never the patients it names.
+func TestCarriedMembersReadWhatACoveragesPartyNames(t *testing.T) {
+	parent := func(members string) string {
+		return `{"resourceType":"Coverage","id":"c","contained":[{"resourceType":"Patient","id":"parent",` + members +
+			`"name":[{"family":"Parent"}]}],"subscriber":{"reference":"#parent"},"beneficiary":{"reference":"Patient/m1"}}`
+	}
+	bundle := func(coverage string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"urn:uuid:c1","resource":` + coverage + `}]}`)
+	}
+	for name, members := range map[string]string{
+		"a link to another patient":            `"link":[{"other":{"reference":"Patient/other"},"type":"seealso"}],`,
+		"another patient in any other element": `"generalPractitioner":[{"reference":"Patient/other"}],`,
+		"a versioned reference":                `"link":[{"other":{"reference":"Patient/other/_history/2"},"type":"seealso"}],`,
+	} {
+		for _, leg := range []string{"crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"} {
+			got := carriedMembers(bundle(parent(members)), leg)
+			if !slices.Contains(got, "other") || !slices.Contains(got, "m1") {
+				t.Fatalf("%s, %s: members %v, want the beneficiary and the patient the party names", name, leg, got)
+			}
+			for _, m := range got {
+				if m == "parent" || m == "#parent" {
+					t.Fatalf("%s, %s: the party itself is named a member: %v", name, leg, got)
+				}
+			}
+		}
+	}
+	// A party that names no one adds no one.
+	if got := carriedMembers(bundle(parent("")), "pas-claim"); !slices.Equal(got, []string{"m1"}) {
+		t.Fatalf("a party naming no one: members %v, want only the beneficiary", got)
+	}
+}
+
 // When the system of record names the patient by an id other than the
 // request's, its Coverage read only routes, fenced to the system's own id
 // alone, with the opt-in on or off. A dependent's Coverage there still

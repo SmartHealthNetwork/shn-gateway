@@ -210,7 +210,7 @@ func TestBoundaryAnswerToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 			g.cfg.Observer = refused.observe
 			rec := httptest.NewRecorder()
 			g.respondLeg(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
-				"corr-1", row.payload, http.StatusOK, "pci-1", requester.ID, "", "")
+				"corr-1", row.payload, builtAnswer, "pci-1", requester.ID, "", "")
 			assertLocalFault(t, rec)
 			if refused.count() == 0 {
 				t.Fatal("the refusal was not observed")
@@ -266,7 +266,7 @@ func TestBoundaryAnswerToNetworkRefusesUnpermittedPayloads(t *testing.T) {
 		g, requester := newInboundTestGateway(t, true)
 		rec := httptest.NewRecorder()
 		g.respondLeg(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch",
-			"corr-1", relayedResponse([]byte(`{"resourceType":"Bundle"}`)), http.StatusOK, "pci-1", requester.ID, "", "")
+			"corr-1", relayedResponse([]byte(`{"resourceType":"Bundle"}`)), builtAnswer, "pci-1", requester.ID, "", "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 		}

@@ -31,7 +31,7 @@ set -euo pipefail
 # this script's own directory. Nothing above it is read, so the gate runs
 # unchanged from a bare clone of this repository.
 DIR="$(cd "$(dirname "$0")" && pwd)"
-CURL="curlimages/curl:8.11.1"
+CURL="curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/validator-verify.XXXXXXXX")"
 PREFIX="validator-verify-$(basename "${RUN_DIR}" | tr '[:upper:].' '[:lower:]-')"
 NET="${PREFIX}-net"

@@ -91,11 +91,17 @@ func (g *Gateway) requireStatedAnswer(w http.ResponseWriter, answer, recipient s
 // or the participant's own records): 422, recorded as the leg it would have
 // sent failing and as a fidelity refusal at the build stage (refuseBuilder).
 func (g *Gateway) refuseOwnBuild(w http.ResponseWriter, recipient, legType, msg string) {
+	g.observeOwnBuildRefused(recipient, legType, msg)
+	refuseBuilder(w, msg)
+}
+
+// observeOwnBuildRefused records the leg a fidelity refusal at the build stage
+// did not send, for a caller that answers the refusal itself.
+func (g *Gateway) observeOwnBuildRefused(recipient, legType, msg string) {
 	g.observe(ObserverEvent{
 		Kind: "leg.failed", Direction: "originate", LegType: legType,
 		Counterpart: recipient, Detail: msg,
 	})
-	refuseBuilder(w, msg)
 }
 
 // refuseBuildFailure answers a request this gateway could not build for the

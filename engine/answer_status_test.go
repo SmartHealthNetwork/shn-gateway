@@ -4,8 +4,10 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,7 +29,7 @@ func TestRespondLeg_FramesTheParticipantsStatus(t *testing.T) {
 			g, requester := newInboundTestGateway(t, framed)
 			rec := httptest.NewRecorder()
 			g.respondLeg(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "crd-cards", "crd-order-select",
-				"corr-1", relayedResponse(body), status, "pci-1", requester.ID, "", "")
+				"corr-1", relayedResponse(body), statedAnswer{status: status}, "pci-1", requester.ID, "", "")
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%d framed=%v: to-Hub status %d, want 200", status, framed, rec.Code)
 			}
@@ -74,6 +76,16 @@ func TestRespondLegError_2xxKeepsTheAnswersStatus(t *testing.T) {
 		if hdr.Status != row.want || !bytes.Equal(got, answer) {
 			t.Fatalf("%s: framed %d %q, want %d and the answer exactly", row.name, hdr.Status, got, row.want)
 		}
+	}
+	// The misuse path frames what the answer states, its headers with it.
+	g, requester := newInboundTestGateway(t, true)
+	rec := httptest.NewRecorder()
+	g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), "payer-coverage", "crd-cards", "crd-order-select", "corr-1",
+		LegResult{Status: http.StatusCreated, AnswerStatus: http.StatusCreated, AnswerHeaders: map[string]string{shnsdk.FrameHeaderETag: `"v1"`}, Response: relayedResponse(answer)},
+		"pci-1", requester.ID, "", "")
+	hdr, _, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
+	if err != nil || hdr.Headers[shnsdk.FrameHeaderETag] != `"v1"` {
+		t.Fatalf("framed %+v, %v", hdr, err)
 	}
 }
 
@@ -159,4 +171,153 @@ func TestCRDIngress_NoContentWithABodyIsRefused(t *testing.T) {
 			t.Fatalf("EHR got %d %q, want 204 and no body", rec.Code, rec.Body.Bytes())
 		}
 	})
+}
+
+// Every registered edit of an answer drops its ETag, by the row that discloses
+// the edit, and leaves what still describes the answer. An unedited answer
+// keeps all of it.
+func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
+	stated := statedAnswer{status: http.StatusOK, headers: map[string]string{
+		shnsdk.FrameHeaderETag: `"v1"`, shnsdk.FrameHeaderLastModified: "yesterday", shnsdk.FrameHeaderRetryAfter: "1",
+	}}
+	if got := stated.about(relayedResponse([]byte(`{}`))); len(got) != 3 {
+		t.Fatalf("unedited: %v", got)
+	}
+	body := relay.NewBody([]byte(`{"a":"b"}`), relay.OriginUpstreamResponse)
+	doc, err := relay.Doc(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, ok := doc.Member(doc.Root(), "a")
+	if !ok {
+		t.Fatal("no member")
+	}
+	var edits int
+	for _, e := range relayEdits {
+		if e.Direction != relay.DirectionResponse {
+			continue
+		}
+		edits++
+		if !slices.Contains(relay.EditDropsAnswerHeaders(relayEdits, e.ID), relay.ETagHeader) {
+			t.Errorf("%s leaves the ETag standing", e.ID)
+		}
+		if !strings.Contains(e.Disclosure, "ETag") {
+			t.Errorf("%s does not disclose the drop", e.ID)
+		}
+		edited, err := relay.Apply(body, "application/json", e.ID, doc.Replace(member, []byte(`"c"`)))
+		if err != nil {
+			t.Fatalf("%s: %v", e.ID, err)
+		}
+		got := stated.about(edited)
+		if _, kept := got[shnsdk.FrameHeaderETag]; kept || len(got) != 2 {
+			t.Errorf("%s: %v", e.ID, got)
+		}
+	}
+	if edits == 0 {
+		t.Fatal("no edit of an answer: this row proves nothing")
+	}
+}
+
+// An answer states its headers only as a 2xx relayed from the system: never one
+// this gateway built, and never a refusal.
+func TestLegResult_StatedHeaders(t *testing.T) {
+	headers := map[string]string{shnsdk.FrameHeaderETag: `"v1"`}
+	relayed := relayedResponse([]byte(`{}`))
+	built, err := relay.Authored(relay.BuilderGatewayRefusal, []byte(`{}`), "application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		result LegResult
+		want   int
+	}{
+		"relayed 2xx":   {LegResult{Response: relayed, AnswerStatus: 201, AnswerHeaders: headers}, 1},
+		"built":         {LegResult{Response: built, AnswerStatus: 201, AnswerHeaders: headers}, 0},
+		"not a 2xx":     {LegResult{Response: relayed, AnswerStatus: 503, AnswerHeaders: headers}, 0},
+		"no status set": {LegResult{Response: relayed, AnswerHeaders: headers}, 0},
+	} {
+		if got := len(c.result.stated().headers); got != c.want {
+			t.Errorf("%s: %d headers, want %d", name, got, c.want)
+		}
+	}
+}
+
+// Only a framed 2xx is read for what it states, and a frame's named headers
+// alone: a peer's other keys are not, and its value is read as it came, so the
+// write decides what can be carried.
+func TestNoteStatedAnswer(t *testing.T) {
+	var got statedAnswer
+	ctx := withStatedAnswerSink(context.Background(), &got)
+	noteStatedAnswer(ctx, shnsdk.HTTPFrameHeader{Status: 202, Headers: map[string]string{
+		shnsdk.FrameHeaderETag: "a\r\nSet-Cookie: x", shnsdk.FrameHeaderRetryAfter: "1", "Content-Type": "x", "Location": "y",
+	}})
+	if got.status != 202 || len(got.headers) != 2 {
+		t.Fatalf("%+v", got)
+	}
+	carried, notCarried := writableAnswerHeaders(got.headers)
+	if _, ok := carried[shnsdk.FrameHeaderETag]; ok || carried[shnsdk.FrameHeaderRetryAfter] != "1" {
+		t.Fatalf("carried %v", carried)
+	}
+	if !slices.Equal(notCarried, []string{"ETag:" + AnswerHeaderValueNotCarriable}) {
+		t.Fatalf("not carried %v", notCarried)
+	}
+}
+
+func TestAnswerHeaderNotCarriedValues_Closed(t *testing.T) {
+	for _, reason := range []string{AnswerHeaderValueNotCarriable, AnswerHeaderOverFrameLimit, AnswerHeaderOverAnswerLimit} {
+		for _, name := range answerHeaderNames {
+			if !slices.Contains(AnswerHeaderNotCarriedValues, name+":"+reason) {
+				t.Errorf("%s:%s is not on the closed list", name, reason)
+			}
+		}
+	}
+	if !slices.Contains(AnswerHeaderNotCarriedValues, "ETag:"+AnswerHeaderDecodedFromGzip) || len(AnswerHeaderNotCarriedValues) != 3*len(answerHeaderNames)+1 {
+		t.Fatalf("%v", AnswerHeaderNotCarriedValues)
+	}
+}
+
+// What a peer's frame states is written to the participant only if it can be:
+// a decoder keeps a value as it came, and a value with a line break in it would
+// otherwise reach the participant's system. The answer goes through, recorded.
+func TestWriteRelayedAnswer_LeavesOutWhatCannotBeCarried(t *testing.T) {
+	x := &exchangeRecorder{}
+	rec := httptest.NewRecorder()
+	k := relay.Key{Leg: "crd-order-select", Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered}
+	(&Gateway{}).writeRelayedAnswer(&exchangeWriter{ResponseWriter: rec, x: x}, statedAnswer{status: http.StatusAccepted, headers: map[string]string{
+		shnsdk.FrameHeaderETag: "a\r\nSet-Cookie: x", shnsdk.FrameHeaderRetryAfter: "1",
+	}}, "application/json", relayedResponse([]byte(`{}`)), k)
+	if rec.Code != http.StatusAccepted || rec.Header().Get("ETag") != "" || rec.Header().Get("Set-Cookie") != "" || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("%d %v", rec.Code, rec.Header())
+	}
+	if !slices.Equal(x.rec.AnswerHeadersNotCarried, []string{"ETag:" + AnswerHeaderValueNotCarriable}) {
+		t.Fatalf("recorded %v", x.rec.AnswerHeadersNotCarried)
+	}
+}
+
+// An answer relayed unread for this gateway's records is still the payer's, and
+// keeps what it states.
+func TestRelayUnread_KeepsWhatTheAnswerStates(t *testing.T) {
+	up := upstreamReply{body: relay.NewBody([]byte(`{}`), relay.OriginUpstreamResponse), contentType: "application/fhir+json",
+		status: http.StatusCreated, headers: map[string]string{shnsdk.FrameHeaderETag: `"v1"`}}
+	got := relayUnread(context.Background(), up, RuleEOBDecision, nil).stated()
+	if got.status != http.StatusCreated || got.headers[shnsdk.FrameHeaderETag] != `"v1"` {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A local fault is the gateway's own answer, and states nothing of the payer's.
+func TestWriteRelayedAnswer_AFaultStatesNoHeader(t *testing.T) {
+	edited := newBoundaryPayloads(t, relay.BuilderGatewayRefusal, `{}`).edited
+	rec := httptest.NewRecorder()
+	x := &exchangeRecorder{}
+	(&Gateway{}).writeRelayedAnswer(&exchangeWriter{ResponseWriter: rec, x: x},
+		statedAnswer{status: http.StatusAccepted, headers: map[string]string{shnsdk.FrameHeaderRetryAfter: "1", shnsdk.FrameHeaderETag: "a\x00b"}},
+		"application/json", edited, answerKey("crd-order-select", relay.OutcomeAnswered))
+	if rec.Code != http.StatusInternalServerError || rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("%d %v", rec.Code, rec.Header())
+	}
+	// No answer went through, so none went through without a header.
+	if len(x.rec.AnswerHeadersNotCarried) != 0 {
+		t.Fatalf("recorded %v", x.rec.AnswerHeadersNotCarried)
+	}
 }

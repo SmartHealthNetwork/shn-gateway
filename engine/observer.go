@@ -82,6 +82,16 @@ import (
 //	                  Op = the prefetch key, Detail = metadata-only JSON: key, source,
 //	                  query, outcome, reason, count, pages, retrievedAt — never a value,
 //	                  a resource or a host)
+//	dtr.referenced    a $questionnaire-package request this gateway built left out the
+//	                  payer Organization a carried Coverage names by reference, because
+//	                  no record the participant's system supplied answers the reference
+//	                  or several different Organizations do (ReferencedLeftOutEvent;
+//	                  LegType = "dtr-questionnaire-fetch", Direction = "originate",
+//	                  Detail = metadata-only JSON: outcome "left-out", reason
+//	                  "none-answers" or "several-answer", type the reference's
+//	                  resource type; never a reference, an identifier or a record).
+//	                  Recorded at every conformance level, once the request is built;
+//	                  leaving the record out refuses nothing
 //	pa.local-write-skipped
 //	                  a provider ingress relayed a payer's PAS answer below strict
 //	                  that it could not read (answer.shape) or whose subjects do not

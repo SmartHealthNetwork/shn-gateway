@@ -81,5 +81,5 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusInternalServerError, "marshal response failed", nil)
 		return
 	}
-	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, http.StatusOK, tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "patient-authorship", "patient-dtr-response", "patient-dtr", env.Metadata.CorrelationID, answer, builtAnswer, tok.Subject, env.Metadata.Sender, "", answerTok)
 }

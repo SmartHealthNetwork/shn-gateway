@@ -145,7 +145,7 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	}
 	// Stamp honesty: a verbatim foreign package is relayed UNSTAMPED (the same rule as the PAS
 	// relay); an SHN-produced package is stamped at the line it was built at.
-	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // packagePatientsRefused is a questionnaire request whose patients cannot be

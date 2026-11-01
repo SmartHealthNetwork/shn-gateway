@@ -263,7 +263,7 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 // perfectly well — is not refused here: eligibility and coverage-check legs do
 // not carry a payer organization, and only the prior-authorization leg does, so
 // that absence surfaces where it matters, at the request builder, with its own
-// named reason. Nothing is minted either way.
+// named reason (errNoPayerRecord). Nothing is minted either way.
 func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) ([]byte, int, string) {
 	payorRef := coveragePayorRef(coverage)
 	if payorRef == "" {

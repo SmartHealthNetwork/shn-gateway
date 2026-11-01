@@ -129,6 +129,9 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		return pendState{}, false
 	}
 	claimFacts := claimIn.facts()
+	if !amendedClaimCarriesItsFacts(w, r, route.BuildLine, claimFacts) {
+		return pendState{}, false
+	}
 	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
@@ -139,7 +142,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return pendState{}, false
 	}
 	// pasReports is the pended leg's own loss record: its Carried entries are
@@ -309,7 +312,7 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 		LegType: "pas-claim", Seam: "originate", Whose: "own",
 	}))
 	// The single call resumes its own pend with an amendment in this request.
-	r = routeSendsAmendment(r)
+	r = routeAmendsItsOwnClaim(routeSendsAmendment(r))
 	st, ok := g.scenarioToPend(w, r, "uc06", member)
 	if !ok {
 		return
@@ -579,7 +582,7 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 		LegType: "pas-claim", Seam: "originate", Whose: "own",
 	}))
 	// The single call resumes its own pend with an amendment in this request.
-	r = routeSendsAmendment(r)
+	r = routeAmendsItsOwnClaim(routeSendsAmendment(r))
 	st, ok := g.scenarioToPend(w, r, "uc07", member)
 	if !ok {
 		return

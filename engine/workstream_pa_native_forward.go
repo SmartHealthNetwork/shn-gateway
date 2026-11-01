@@ -42,7 +42,7 @@ func (n *nativeResponder) forwardEligibility(ctx context.Context, request []byte
 	if bad.Status != 0 {
 		return bad, nil
 	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers}, nil
 }
 
 // eligibilityForwarder is the occupant that carries coverage-eligibility to
@@ -292,5 +292,5 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 	if bad.Status != 0 {
 		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
 	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers}, nil
 }

@@ -238,7 +238,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // validateEligibilityRequest ingress-validates a coverage-eligibility request,
@@ -366,7 +366,7 @@ func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Reque
 		}
 		return
 	}
-	g.respondLeg(w, r, "payer-coverage", "eligibility-response", leg, env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "eligibility-response", leg, env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // fenceEligibilityAnswer fences a payer's own coverage-eligibility answer to

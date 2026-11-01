@@ -110,5 +110,5 @@ func answerFromResponder(g *Gateway, w http.ResponseWriter, r *http.Request, env
 		g.respondLegError(w, r, leg.frame, leg.op, leg.tx, env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, "", answerTok)
 		return
 	}
-	g.respondLeg(w, r, leg.frame, leg.op, leg.tx, env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, leg.frame, leg.op, leg.tx, env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }

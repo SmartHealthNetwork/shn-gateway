@@ -791,3 +791,71 @@ func TestInvolvedList_SlowAuthorizationStopsAtTheBudget(t *testing.T) {
 		t.Fatalf("%d token requests at once, want at most %d", authz.maxInFlight, involvedConcurrency)
 	}
 }
+
+// partyNamingRequest is a dependent's request whose Coverage's contained party,
+// the parent, links to another member the system of record holds (MBR-OX).
+func partyNamingRequest() []byte {
+	return []byte(`{"resourceType":"Bundle","entry":[
+	 {"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"},"insurance":[{"coverage":{"reference":"urn:uuid:cov"}}]}},
+	 {"resource":{"resourceType":"Patient","id":"MBR-COVERED"}},
+	 {"fullUrl":"urn:uuid:cov","resource":{"resourceType":"Coverage","id":"cov","contained":[{"resourceType":"Patient","id":"parent","name":[{"family":"Parent"}],
+	   "link":[{"other":{"reference":"Patient/MBR-OX"},"type":"seealso"}]}],
+	  "subscriber":{"reference":"#parent"},"beneficiary":{"reference":"Patient/MBR-COVERED"}}}
+	]}`)
+}
+
+// A patient that only a Coverage's party names is involved in the leg like any
+// other patient the request names: it is listed, with a token bound to the
+// leg, and the party itself is not. When the Authorization Framework refuses
+// that patient's token, the patient is left out with the refusal recorded and
+// the list still goes, as for any involved patient: the list is recording
+// only. (The rows at each conformance level are
+// TestLevelPASIngress_APatientAPartyNamesIsInvolved.)
+func TestInvolvedList_APatientACoveragesPartyNamesIsInvolved(t *testing.T) {
+	other := heldPCI(t, "MBR-OX")
+	t.Run("listed", func(t *testing.T) {
+		g, _, _, omitted := involvedGateway(t, true)
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		encoded := g.involvedForRequest(context.Background(), r, "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", partyNamingRequest(), heldPCI(t, "MBR-COVERED"))
+		if got := involvedSubjects(t, encoded); !slices.Equal(got, []string{other}) {
+			t.Fatalf("listed %v, want only the patient the party names (%s)", got, other)
+		}
+		if len(*omitted) != 0 {
+			t.Fatalf("omitted %v, want none", *omitted)
+		}
+	})
+	t.Run("refused", func(t *testing.T) {
+		g, authz, _, omitted := involvedGateway(t, true)
+		authz.refuse[other] = true
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		encoded := g.involvedForRequest(context.Background(), r, "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", partyNamingRequest(), heldPCI(t, "MBR-COVERED"))
+		if got := involvedSubjects(t, encoded); len(got) != 0 {
+			t.Fatalf("listed %v, want the refused patient left out", got)
+		}
+		if !slices.Equal(*omitted, []string{involvedOmitRefused}) {
+			t.Fatalf("omitted %v, want the refusal recorded", *omitted)
+		}
+		if !slices.ContainsFunc(authz.calls(), func(c authorizeReq) bool { return c.SubjectPCI == other }) {
+			t.Fatal("the Authorization Framework was never asked about the patient the party names")
+		}
+	})
+}
+
+// involvedSubjects is the subject of each token an encoded involved list
+// carries, in order; none for an empty list.
+func involvedSubjects(t *testing.T, encoded string) []string {
+	t.Helper()
+	list, err := shnsdk.DecodeInvolved(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subjects []string
+	for _, e := range list {
+		var tok shnsdk.Token
+		if err := json.Unmarshal([]byte(e.Token), &tok); err != nil {
+			t.Fatal(err)
+		}
+		subjects = append(subjects, tok.Subject)
+	}
+	return subjects
+}

@@ -6,6 +6,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -186,6 +190,69 @@ func TestLevelPASIngress_AnotherPatientCarried(t *testing.T) {
 				wantLegLevelOutcome(t, "pas-claim", level, env, rec, ev.findings, RulePatientMixed, http.StatusForbidden, "inconsistent patient in PAS bundle")
 				if !refusesAt(level, RulePatientMixed) {
 					wantCarriedExactly(t, env, body)
+				}
+			})
+		}
+	}
+}
+
+// A patient that only the member's Coverage's party names is involved in the
+// leg where the request is carried: with the Hub reading the involved list, at
+// none, observe and structural the request is carried and its envelope names
+// that patient (and not the party), and when the Authorization Framework
+// refuses that patient's token the leg is still sent, the patient left out
+// with the refusal counted. At strict, patient.mixed refuses the request
+// before it is sent, so no list goes.
+func TestLevelPASIngress_APatientAPartyNamesIsInvolved(t *testing.T) {
+	t.Parallel()
+	body := string(withCoverageCarrying(t, []byte(pasIngressBundle("00001", "")), pasAnotherPatientCarried["a party naming another patient"]))
+	other := heldPCI(t, "MBR-NOTCOVERED")
+	for _, refused := range []bool{false, true} {
+		for _, level := range allLevels {
+			name := level.String()
+			if refused {
+				name += "/refused"
+			}
+			t.Run(name, func(t *testing.T) {
+				env := newInProcessExchange(t)
+				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.HubAcceptsInvolved = true
+				var omitted []string
+				var mu sync.Mutex
+				env.originator.cfg.InvolvedMetric = func(reason string) {
+					mu.Lock()
+					defer mu.Unlock()
+					omitted = append(omitted, reason)
+				}
+				if refused {
+					env.substrate.refuseInvolved = map[string]bool{other: true}
+				}
+				env.payerReturns(LegResult{Response: testResponse(levelPASPayerAnswer)})
+				rec := httptest.NewRecorder()
+				env.originator.handlePASIngress(rec, httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(body)))
+				env.substrate.mu.Lock()
+				sent := append([]string(nil), env.substrate.involved...)
+				env.substrate.mu.Unlock()
+				if level == EnforcementStrict {
+					if rec.Code != http.StatusForbidden || len(sent) != 0 {
+						t.Fatalf("strict: status %d, %d envelopes sent; want 403 and none", rec.Code, len(sent))
+					}
+					return
+				}
+				if rec.Code >= 300 || len(sent) != 1 {
+					t.Fatalf("status %d, %d envelopes sent; want the request carried once", rec.Code, len(sent))
+				}
+				got := involvedSubjects(t, sent[0])
+				mu.Lock()
+				defer mu.Unlock()
+				if refused {
+					if len(got) != 0 || !slices.Equal(omitted, []string{involvedOmitRefused}) {
+						t.Fatalf("listed %v, omitted %v; want the refused patient left out and the refusal counted", got, omitted)
+					}
+					return
+				}
+				if !slices.Equal(got, []string{other}) || len(omitted) != 0 {
+					t.Fatalf("listed %v, omitted %v; want only the patient the party names (%s)", got, omitted, other)
 				}
 			})
 		}

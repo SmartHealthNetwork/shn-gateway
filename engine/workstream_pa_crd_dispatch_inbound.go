@@ -230,5 +230,5 @@ func (g *Gateway) handleCRDDispatchInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	g.observeCRDEmbedded(ctx, "crd-order-dispatch", env.Metadata.CorrelationID, result.Response)
-	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+	g.respondLeg(w, r, "payer-coverage", "crd-dispatch-cards", "crd-order-dispatch", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }

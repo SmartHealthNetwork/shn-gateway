@@ -511,7 +511,7 @@ func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract s
 	// The payer answers in its OWN patient namespace, as it does on every other
 	// relayed leg, so the response member-fence stands down and only the answer's
 	// internal consistency is checked.
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, ResponseSubjectForeign: true}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers, ResponseSubjectForeign: true}, nil
 }
 
 // ---- the payer gateway's inbound handler ----
@@ -645,7 +645,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	stampTok := stampForBuiltAnswer(result, answerTok)
 	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-inquire-response", "pas-claim-inquire", env.Metadata.CorrelationID,
 		result.Response, answerKey("pas-claim-inquire", relay.OutcomeAnswered),
-		g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), result.ResponseContentType(), stampTok),
+		g.successFrame(r.Context(), env.Metadata.Sender, result.stated(), result.ResponseContentType(), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeResponseLegFailure(w, status, msg)
@@ -939,8 +939,8 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
-	var answerStatus int
-	answer, err := g.OriginateLeg(withAnswerStatusSink(observationContext, &answerStatus), r, recipient, leg, pci, child, "", content)
+	var stated statedAnswer
+	answer, err := g.OriginateLeg(withStatedAnswerSink(observationContext, &stated), r, recipient, leg, pci, child, "", content)
 	responseObservation = append([]byte(nil), answer...)
 	var relayed *RelayError
 	if errors.As(err, &relayed) {
@@ -1011,7 +1011,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json", carried,
+	g.writeRelayedAnswer(w, stated, "application/fhir+json", carried,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

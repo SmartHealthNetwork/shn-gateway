@@ -605,7 +605,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// omission is the honest answer. An SHN-produced answer is stamped at its BUILT line.
 	stampTok := stampForBuiltAnswer(result, answerTok)
 	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-response", "pas-claim", env.Metadata.CorrelationID,
-		result.Response, answerKey("pas-claim", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), successMediaType(result.Response), stampTok),
+		result.Response, answerKey("pas-claim", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.stated(), successMediaType(result.Response), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeResponseLegFailure(w, status, msg)
@@ -754,7 +754,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// describes bytes THIS build produced); an SHN-produced answer is stamped at its BUILT line.
 	stampTok := stampForBuiltAnswer(result, answerTok)
 	respBytes, status, msg := g.buildResponseLeg(r, "payer-coverage", "pas-update-response", "pas-claim-update", env.Metadata.CorrelationID,
-		result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.answerStatus(), successMediaType(result.Response), stampTok),
+		result.Response, answerKey("pas-claim-update", relay.OutcomeAnswered), g.successFrame(r.Context(), env.Metadata.Sender, result.stated(), successMediaType(result.Response), stampTok),
 		tok.Subject, env.Metadata.Sender, "")
 	if status != 0 {
 		writeResponseLegFailure(w, status, msg)

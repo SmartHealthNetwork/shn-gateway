@@ -358,6 +358,10 @@ type upstreamReply struct {
 	declared string
 	// status is the HTTP status the system answered with.
 	status int
+	// headers are the headers the network carries of a 2xx answer, and
+	// notCarried the record of one it does not.
+	headers    map[string]string
+	notCarried []string
 }
 
 // post forwards the request p on leg to base+path, after checking p against
@@ -496,7 +500,11 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
 	}
 	x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
-	return upstreamAnswer(resp, rb, label)
+	reply, result, err := upstreamAnswer(resp, rb, label)
+	for _, value := range reply.notCarried {
+		x.answerHeaderNotCarried(value)
+	}
+	return reply, result, err
 }
 
 // now is the responder's clock; a responder built without the constructor
@@ -604,6 +612,7 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 		// sealed (buildResponseLeg), as a 2xx answer's is.
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
+	reply.headers, reply.notCarried = answerHeadersOf(resp)
 	return reply, LegResult{}, nil
 }
 

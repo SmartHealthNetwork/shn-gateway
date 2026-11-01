@@ -29,7 +29,7 @@ modules the binary links.
 | `github.com/prometheus/otlptranslator` | v1.0.0 | Apache-2.0 | https://pkg.go.dev/github.com/prometheus/otlptranslator@v1.0.0?tab=licenses |
 | `github.com/prometheus/procfs` | v0.22.0 | Apache-2.0 | https://pkg.go.dev/github.com/prometheus/procfs@v0.22.0?tab=licenses |
 | `github.com/samply/golang-fhir-models/fhir-models` | v0.3.2 | Apache-2.0 | https://pkg.go.dev/github.com/samply/golang-fhir-models/fhir-models@v0.3.2?tab=licenses |
-| `github.com/SmartHealthNetwork/shn-sdk` | v1.2.0 | Apache-2.0 | https://pkg.go.dev/github.com/SmartHealthNetwork/shn-sdk@v1.2.0?tab=licenses |
+| `github.com/SmartHealthNetwork/shn-sdk` | v1.3.0 | Apache-2.0 | https://pkg.go.dev/github.com/SmartHealthNetwork/shn-sdk@v1.3.0?tab=licenses |
 | `go.opentelemetry.io/auto/sdk` | v1.2.1 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/auto/sdk@v1.2.1?tab=licenses |
 | `go.opentelemetry.io/contrib/instrumentation/runtime` | v0.72.0 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime@v0.72.0?tab=licenses |
 | `go.opentelemetry.io/contrib/otelconf` | v0.27.0 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/contrib/otelconf@v0.27.0?tab=licenses |
@@ -2112,7 +2112,7 @@ LICENSE:
    limitations under the License.
 ```
 
-### `github.com/SmartHealthNetwork/shn-sdk` v1.2.0
+### `github.com/SmartHealthNetwork/shn-sdk` v1.3.0
 
 LICENSE:
 

@@ -122,6 +122,17 @@ claims that identity) **fails closed with 422**, and an ambiguous identity claim
 holder also fails closed (`AI-G12`). Set `PAYER_DIRECTORY` only to override this default with a
 static map.
 
+**A request your gateway builds names your payer record.** When your gateway builds a
+prior-authorization request for you, the Claim names the payer's own Organization record, read
+from your system through the Coverage's `payor` reference, and a Coverage that names its payer by
+identifier alone leads to no such record. The gateway still routes on that identifier, and carries
+the coverage check and any questionnaire, so the no-PA coverage check, and a route that stops at the
+payer's not-covered answer, answer as usual. When an order goes on to prior authorization, the
+gateway sends no `pas-claim` leg and refuses `422` with `the member's Coverage names its payer by
+identifier alone, so your system of record supplies no payer Organization for a prior-authorization
+request to name`, recorded as `fidelity` at stage `build`, at every conformance level. It never
+mints the record. Point the Coverage's `payor` at an Organization your system holds.
+
 **A PAS Bundle's payor.** On `Claim/$submit` and `Claim/$inquire`, the gateway routes by the first
 Coverage's first `payor`: an identifier it carries routes first; otherwise its reference resolves
 among the Bundle's own entries, and the gateway never reads the payor from outside the Bundle. An
@@ -440,6 +451,15 @@ There is nothing to configure:
   its line has no place for one, its build is bridged to another line, or the
   pend ties the answer to no item. That one is your own statement, not an edit.
   Absent when empty. Evolving.
+- `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
+  `Retry-After` of a participant's 2xx answer that was not carried, and why, never its
+  value: `<header>:value-not-carriable` (not an HTTP field value, or not UTF-8, which a
+  frame cannot carry exactly), `<header>:over-frame-limit` (no room in the message frame's
+  64 KiB header segment), `<header>:over-answer-limit` (with it, the answer
+  would leave less than the 64 KiB its authorization takes under the network's limit, so
+  it is sealed without its headers before that is minted) or `ETag:decoded-from-gzip` (a strong `ETag` on an answer the transport
+  decoded from gzip). The answer goes through without it. A value that is merely odd, such
+  as an unquoted `ETag`, is carried as sent. Absent when empty. Evolving.
 - With diagnostic collection configured, the captured request names the ids it
   was built with, as its `Detail`, before it is sent: `leg.sealed` once the
   request is sealed, before the network's authorization is asked, and
@@ -1473,8 +1493,9 @@ the payer answers in the other DTR line's parameter names, the gateway renames t
 line's (registered edit E-08): `PackageBundle` (DTR 2.0.1 and 2.1.0) and `packagebundle`
 (2.2.0) for the package, and toward 2.2.0, `operationOutcome` to `outcome`, and carries
 the package's QuestionnaireResponse across the lines through the registered DTR steps (the
-Coverage context's place and the intended-use code system). Every other byte is the payer's.
-It does so only when the answer is valid at its own line; otherwise the answer is
+Coverage context's place and the intended-use code system). Every other byte is the payer's,
+and from v1.3.0 the payer's `ETag` is left out of the answer so changed, since it named the
+payer's bytes. It does so only when the answer is valid at its own line; otherwise the answer is
 returned as sent (and judged as a payer's answer at your conformance level). From v1.2.0, when
 that check could not run, or the lane for that line is still qualifying (or, at `none`, the lane for
 your own line), whether to rename is unknown, so the answer is returned as sent and the access line's `editsNotMade` says
@@ -1556,7 +1577,8 @@ before it reaches your EHR (registered edit E-10, `pas-pend-return-rekey`): the 
 `payer-url` `valueUrl` becomes your gateway's documentation return path for the payer that
 answered, `PROVIDER_DAVINCI_INGRESS_BASE_URL` + `/cdex/payer/` + that payer's participant
 id. Documentation your EHR sends there with `$submit-attachment` reaches that payer through
-the network. Nothing else in the answer changes. A `payer-url` in another form than a
+the network. Nothing else in the answer's body changes, and from v1.3.0 the payer's `ETag`
+is left out of that answer, since it named the payer's bytes. A `payer-url` in another form than a
 `valueUrl` is carried as the payer sent it, and the exchange record's `EditsNotMade` says
 so (`E-10:no-structural-payer-url`). So is the `payer-url` of a payer not known to take the
 documentation submission (`E-10:payer-does-not-take`): one whose registry entry lacks the
@@ -1923,9 +1945,20 @@ is your system of record's order, with its own status — the gateway never chan
 above): no draft order is `502 no draft order for member in system of record`, several are
 `422 several draft orders for member in system of record`, and a connector that cannot search
 is `422`. `order-sign` (a signed order going to prior authorization) and `order-dispatch`
-carry your member's **active** order as your system holds it. CRD 2.1 and 2.2 accept an active
-order on those hooks; the CRD 2.0 profiles for them require `draft`, so a CRD 2.0 payer that
-enforces that profile refuses such a request (a known limitation).
+carry your member's **active** order as your system holds it, at every CRD line; the network
+never changes its status. CRD 2.1.0 and 2.2.1's order profiles fix no status. CRD 2.0.1's
+`profile-devicerequest` and `profile-servicerequest` fix `status` to `draft`, so at CRD 2.0
+an active order does not conform to them, and a CRD 2.0 payer that enforces those profiles
+may refuse the request. That refusal is the payer's, returned to you as it answers. Your
+gateway's conformance check does not check the routed line's CRD order profile today. At
+`observe`, `structural` and `strict`, it checks the order it originates for `order-sign` and
+`order-select` against base FHIR R4 and the profiles the order declares in its own
+`meta.profile` (at `none` it checks nothing). So an order that declares US Core, or no
+profile, draws no finding for its status at `observe`; an order that itself declares one of
+those CRD profiles is checked against it at the CRD version your gateway's canonical
+validator (`FHIR_VALIDATE_URL`) loads,
+whatever line the request is routed at. The `order-dispatch` order is not checked before the
+`order-dispatch` request is sent.
 
 When your order's `requester` names the clinician who placed it, every prior-authorization
 request the gateway builds about that order (the submission and each amendment) carries that
@@ -1959,7 +1992,19 @@ After the payer's CDS Hooks answer, the gateway's own `$questionnaire-package` r
 the Coverages it chose to route by (the active ones your system of record holds for the
 member, else the others; each record exactly), the order as the payer returned it, the
 payer's `coverage-assertion-id` as `context` when the answer gives one, and **one**
-questionnaire: the first the payer's answer names, exactly as stated (a `|version` kept). A
+questionnaire: the first the payer's answer names, exactly as stated (a `|version` kept).
+When a Coverage it carries names its payer (its first `payor` reference, the one routing
+reads) by a reference to a record outside itself, the request also carries that payer
+Organization as a `referenced` parameter, each record your system supplied once, exactly as
+your system of record holds it: the record your Coverage search included for a relative
+reference (`Organization/<id>`), else the record your system supplied, for the same reference,
+when the gateway read the payer of the Coverage it routes by. A payer
+that resolves the Coverage's payor from the request can then do so. A Coverage that contains
+its payer Organization, or names its payer by identifier alone, adds nothing. A reference
+that no record your system supplied answers, or that several different Organizations answer,
+adds nothing either, and refuses nothing. Once the request is built, it is recorded, at every
+conformance level, as a `dtr.referenced` event with outcome `left-out`, reason
+`none-answers` or `several-answer`, and the reference's resource type only. Nothing is minted. A
 payer answer naming several questionnaires for the order has only the first requested (a
 known limitation). At DTR 2.2, where `coverage` is 1..1, a choice of several Coverages (several
 active ones, or, when none is active, several others) refuses the request (422).

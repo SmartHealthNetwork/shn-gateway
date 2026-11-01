@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -179,6 +180,28 @@ func appendIdentifier(p, ident map[string]any, replace bool) {
 		out = append(out, i)
 	}
 	p["identifier"] = append(out, ident)
+}
+
+// candidatePatientID is the id of r's candidate when it is a Patient with a
+// non-empty string id that no other contained resource shares, else "": only
+// then does the involved list name the candidate, and nothing else, by it.
+func candidatePatientID(t *testing.T, r coveragePartyRow) string {
+	t.Helper()
+	_, list := r.decode(t)
+	cr, ok := list[r.Contained].(map[string]any)
+	if !ok || cr["resourceType"] != "Patient" {
+		return ""
+	}
+	id, ok := cr["id"].(string)
+	if !ok || id == "" {
+		return ""
+	}
+	for j, c := range list {
+		if o, ok := c.(map[string]any); ok && j != r.Contained && o["id"] == id {
+			return ""
+		}
+	}
+	return id
 }
 
 // walkerVariant is the row's Coverage with a probe Patient nested inside the
@@ -369,11 +392,11 @@ func foldedDuplicateMember(v any) bool {
 	return false
 }
 
-// The two walks that skip a party (the involved list's and the subject
-// derivation's) skip exactly the resource the rule names, the Coverage alone
-// or as a Bundle entry, on every leg: they reach the probe inside every
-// other resource. A resource the rule names no party is walked by the
-// involved list's walk, which can only add to what it finds. The subject
+// The involved list's walk passes over only a party's own identity, so it
+// reaches the probe inside every resource, the party included, on every leg:
+// what a party names is read like the rest of the request. The subject
+// derivation skips exactly the resource the rule names, the Coverage alone or
+// as a Bundle entry: it reaches the probe inside every other resource. The subject
 // derivation reads a member-bearing Patient only when the walk can decide it
 // is the member: once a Coverage's party slot may name a Patient (its
 // undecided, pinned by the derivation rows), only a Patient that Coverage's
@@ -388,13 +411,26 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 				"entry":    mustJSON(t, map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{map[string]any{"fullUrl": "urn:uuid:c1", "resource": cov}}}),
 			} {
 				wantWalked := !r.Party
-				for _, leg := range []string{"crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"} {
-					walked := false
-					for _, m := range carriedMembers(payload, leg) {
-						walked = walked || m == "zz-probe"
+				// The involved list's own party decision, held to the rule on
+				// every row: the candidate, when it is a Patient with an id no
+				// other contained resource shares, is named a member exactly
+				// when the rule names it no party. The PAS submit and update
+				// legs name a contained Patient "#<id>", the others its id.
+				id := candidatePatientID(t, r)
+				for _, leg := range []string{"crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"} {
+					members := carriedMembers(payload, leg)
+					if !slices.Contains(members, "zz-probe") {
+						t.Fatalf("%s, carriedMembers on %s: the probe was not reached (party %v)", shape, leg, r.Party)
 					}
-					if walked != wantWalked {
-						t.Fatalf("%s, carriedMembers on %s: walked %v, want %v", shape, leg, walked, wantWalked)
+					if id == "" {
+						continue
+					}
+					name := id
+					if leg == "pas-claim" || leg == "pas-claim-update" {
+						name = "#" + id
+					}
+					if named := slices.Contains(members, name); named != !r.Party {
+						t.Fatalf("%s, carriedMembers on %s: the candidate %s named %v, want %v (party %v)", shape, leg, name, named, !r.Party, r.Party)
 					}
 				}
 				walked := false

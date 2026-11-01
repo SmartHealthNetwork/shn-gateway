@@ -250,7 +250,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 		writeJSON(w, status, map[string]string{"error": msg})
 		return dispatchResult{}, false
 	}
-	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID)
+	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID, realCov, realPayerOrg, g.referencedLeftOut(dtrCorr, recipient))
 	if err != nil {
 		g.refuseBuildFailure(r.Context(), w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 		return dispatchResult{}, false

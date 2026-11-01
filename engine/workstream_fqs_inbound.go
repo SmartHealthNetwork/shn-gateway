@@ -114,7 +114,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, http.StatusOK, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
+	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, builtAnswer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
 }
 
 // sealCDexFulfillment fulfills the payer's CDex request Task with the

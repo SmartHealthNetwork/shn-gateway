@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -2116,7 +2117,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		// The answer's stated media type and status, for a caller that
 		// relays it on.
 		noteAnswerMediaType(ctx, hdr.Headers["Content-Type"])
-		noteAnswerStatus(ctx, hdr.Status)
+		noteStatedAnswer(ctx, hdr)
 		return body, nil
 	}
 	if shnsdk.SupportsMessageFrameV1(recipientHolder.MessageFrames) {
@@ -3652,7 +3653,11 @@ func answerLineOr(ctx context.Context, contract string) string {
 // p is the answer and k the transmit it is checked against (the recipient's
 // response to the network); a refused payload is a 500 local fault. frame
 // wraps the checked bytes for the requester (nil sends them bare); a framing
-// error is a 502 "invalid application status".
+// error is a 502 "invalid application status", and a frame over its header
+// limit is the refusal of an answer no route carries whole (errResponseTooLarge).
+// An answer over the sealed limit with its own headers is sealed again without
+// them, since a header never costs an answer (AnswerHeaderOverAnswerLimit); one
+// over it without them is refused.
 //
 // respFrame is the authority frame for the response: payer responses use
 // "payer-coverage"; facility responses use "facility-disclosure". Passing it
@@ -3668,17 +3673,73 @@ func answerLineOr(ctx context.Context, contract string) string {
 // initiated this leg — rather than a hardcoded holder id. This means a future
 // payer-originated push needs no retrofit: buildResponseLeg already replies to
 // whoever sent the inbound envelope.
-func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, k relay.Key, frame func([]byte) ([]byte, error), subjectPCI, requester, consentRef string) (out []byte, status int, msg string) {
+func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, k relay.Key, frame legFrame, subjectPCI, requester, consentRef string) ([]byte, int, string) {
 	defer exchangeOf(r.Context()).stage(func(s *LegStages, d time.Duration) { s.Seal += d })()
-	payload, err := relay.Transmit(p, relay.Check(k))
+	checked, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		g.ownershipRefused(k, err)
 		exchangeOf(r.Context()).refusingFidelity(vocab.RefusalStageVerify)
 		return nil, http.StatusInternalServerError, errOwnershipFault
 	}
+	// An answer whose headers leave it no room under the limit is sealed again
+	// without them, before any token is minted: a header never costs an answer,
+	// and an answer is authorized once. Its framed headers are then recorded as
+	// not carried, once it is sealed.
+	out, framed, status, msg := g.sealResponseLeg(r, respFrame, respOp, txType, inboundCorrID, checked, frame, true, subjectPCI, requester, consentRef)
+	if msg == errAnswerOverSealedLimit && len(framed) > 0 {
+		out, _, status, msg = g.sealResponseLeg(r, respFrame, respOp, txType, inboundCorrID, checked, frame, false, subjectPCI, requester, consentRef)
+		if status == 0 {
+			for _, name := range framed {
+				exchangeOf(r.Context()).answerHeaderNotCarried(name + ":" + AnswerHeaderOverAnswerLimit)
+			}
+		}
+	}
+	if msg == errAnswerOverSealedLimit || msg == errAnswerOverSealedLimitMinted {
+		exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
+		return nil, http.StatusBadGateway, errResponseTooLarge
+	}
+	if status != 0 {
+		return nil, status, msg
+	}
+	x := exchangeOf(r.Context())
+	x.decided(answerOutcome(k.Outcome), "", "")
+	x.answered(p)
+	return out, 0, ""
+}
+
+// legFrame wraps an answer's checked bytes for its requester, and names the
+// answer's own headers it framed. Without carryHeaders it frames none.
+type legFrame func(payload []byte, carryHeaders bool) ([]byte, []string, error)
+
+// errAnswerOverSealedLimit is sealResponseLeg's report of an envelope over the
+// limit the Hub reads before its token is minted, which buildResponseLeg
+// settles: again without its headers, when it framed any.
+const errAnswerOverSealedLimit = "answer over the sealed limit"
+
+// errAnswerOverSealedLimitMinted is an envelope its token and involved list
+// took over the limit. Its token is minted, so it is not sealed again: an
+// answer is authorized once. With answerHeaderMintMargin kept free for them,
+// only an answer that framed no headers can reach it.
+const errAnswerOverSealedLimitMinted = "answer over the sealed limit after its token"
+
+// answerHeaderMintMargin is the room an answer that frames its own headers
+// keeps under the sealed limit for its token and involved list, which are
+// minted after the size is checked: well above a leg token and a full involved
+// list (TestAnswerHeaderMintMarginHoldsTheTokens). An answer within it of the
+// limit is sealed without its headers before any token is minted.
+const answerHeaderMintMargin = 64 << 10
+
+// sealResponseLeg is one attempt at sealing payload, the checked answer, with
+// the answer's own headers or without them.
+func (g *Gateway) sealResponseLeg(r *http.Request, respFrame, respOp, txType, inboundCorrID string, payload []byte, frame legFrame, carryHeaders bool, subjectPCI, requester, consentRef string) (out []byte, framed []string, status int, msg string) {
+	var err error
 	if frame != nil {
-		if payload, err = frame(payload); err != nil {
-			return nil, http.StatusBadGateway, "invalid application status"
+		if payload, framed, err = frame(payload, carryHeaders); err != nil {
+			if errors.Is(err, shnsdk.ErrFrameHeaderTooLarge) {
+				exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
+				return nil, nil, http.StatusBadGateway, errResponseTooLarge
+			}
+			return nil, nil, http.StatusBadGateway, "invalid application status"
 		}
 	}
 	requesterHolder, ok := g.cfg.Reg.Lookup(requester)
@@ -3686,7 +3747,7 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 		// The inbound route resolves the requester before a leg is opened
 		// (requester.go), so a miss here is the registry dropping it mid-leg:
 		// this gateway's fault, not a requester not known yet.
-		return nil, http.StatusInternalServerError, "requester not in registry"
+		return nil, framed, http.StatusInternalServerError, "requester not in registry"
 	}
 	// AI-2 (seal-then-authorize): seal the response payload FIRST, then authorize
 	// against sha256hex(ciphertext) so the response token binds THIS payload. The
@@ -3703,13 +3764,18 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 	g.diagnosticStage(r.Context(), "recipient.response", txType, payload, 0, "")
 	respEnv, err := shnsdk.Seal(respMeta, payload, requesterHolder.EncPub)
 	if err != nil {
-		return nil, http.StatusInternalServerError, "seal failed"
+		return nil, framed, http.StatusInternalServerError, "seal failed"
 	}
 	// An answer already over the Hub's limit as sealed is refused before its
 	// token is minted, as delivered (writeResponseLegFailure).
-	if pre, err := shnsdk.EncodeEnvelope(respEnv); err == nil && len(pre) > shnsdk.MaxResponseBytes {
-		exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
-		return nil, http.StatusBadGateway, errResponseTooLarge
+	// One that frames its own headers keeps room for its token and involved
+	// list, so that leaving the headers out is decided before its token is.
+	limit := shnsdk.MaxResponseBytes
+	if len(framed) > 0 {
+		limit -= answerHeaderMintMargin
+	}
+	if pre, err := shnsdk.EncodeEnvelope(respEnv); err == nil && len(pre) > limit {
+		return nil, framed, http.StatusBadGateway, errAnswerOverSealedLimit
 	}
 	// C2: bind the response token to the SAME correlationID as the inbound leg so
 	// the requester can verify the response leg is authorized for this exchange.
@@ -3727,18 +3793,18 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 			// requester that left is listening for no attestation. Nothing
 			// settles here either: a refusal this gateway already made keeps
 			// its rule, and the rest is settled by its caller, or other.
-			return nil, http.StatusBadGateway, "authorization failed"
+			return nil, framed, http.StatusBadGateway, "authorization failed"
 		}
 		// The system answered (it may have acted): the refusal is attested
 		// delivered, on its rule (answerRefusalRules). The record takes the
 		// attestation's own rule and is final, so the two cannot differ.
 		reason, by := answerAuthorizationRefusal(err)
 		x.refusedAttested(by, answerRefusalRules[reason])
-		return nil, http.StatusBadGateway, reason
+		return nil, framed, http.StatusBadGateway, reason
 	}
 	respTokStr, err := tokenJSON(respTok)
 	if err != nil {
-		return nil, http.StatusInternalServerError, "token marshal failed"
+		return nil, framed, http.StatusInternalServerError, "token marshal failed"
 	}
 	respEnv.Metadata.AuthzToken = respTokStr
 	// The payer's own binding of the member, when it differs from the leg
@@ -3749,22 +3815,19 @@ func (g *Gateway) buildResponseLeg(r *http.Request, respFrame, respOp, txType, i
 
 	out, err = shnsdk.EncodeEnvelope(respEnv)
 	if err != nil {
-		return nil, http.StatusInternalServerError, "encode failed"
+		return nil, framed, http.StatusInternalServerError, "encode failed"
 	}
 	// An answer whose sealed envelope is over the limit the Hub reads is
 	// refused, never sent to be cut short: the participant's system answered,
 	// so it is refused as delivered (writeResponseLegFailure). One that only
-	// its token and involved list take over is refused here; one already over
-	// as sealed was refused before its token was minted (above).
+	// its token and involved list take over is refused here, and never sealed
+	// again; one already over as sealed was refused before its token was
+	// minted (above).
 	if len(out) > shnsdk.MaxResponseBytes {
-		exchangeOf(r.Context()).refused(answerRefusalRules[errResponseTooLarge])
-		return nil, http.StatusBadGateway, errResponseTooLarge
+		return nil, framed, http.StatusBadGateway, errAnswerOverSealedLimitMinted
 	}
-	x := exchangeOf(r.Context())
-	x.responseHash(sha256hex(respEnv.Ciphertext))
-	x.decided(answerOutcome(k.Outcome), "", "")
-	x.answered(p)
-	return out, 0, ""
+	exchangeOf(r.Context()).responseHash(sha256hex(respEnv.Ciphertext))
+	return out, framed, 0, ""
 }
 
 // answerKey is the transmit a recipient's answer on leg is checked against.
@@ -3790,44 +3853,62 @@ func (g *Gateway) frameNegotiated(requester string) bool {
 	return ok && shnsdk.SupportsMessageFrameV1(h.MessageFrames)
 }
 
-// framePayload wraps an application answer in the v1 HTTP frame when requester
-// negotiates it; legacy requesters get the payload bare (pre-v0.27.0 contract).
-// contractToken, when non-empty, is stamped as the frame's contractVersion
-// header — SUCCESS frames only; respondLegError's non-2xx
-// frames are relayed verbatim and deliberately unstamped. An encode error
-// means an out-of-range status literal (caller bug) — fall back to bare so the
-// exchange still answers.
-func (g *Gateway) framePayload(requester string, status int, contentType, contractToken string, payload []byte) []byte {
-	out, _ := g.frameAnswer(requester, status, contentType, contractToken, payload)
-	return out
-}
-
-// frameAnswer is framePayload, reporting whether the answer was framed.
-func (g *Gateway) frameAnswer(requester string, status int, contentType, contractToken string, payload []byte) ([]byte, bool) {
+// frameAnswer wraps an application answer in the v1 HTTP frame when requester
+// negotiates it, for its status and headers; legacy requesters get the payload
+// bare (pre-v0.27.0 contract). contractToken, when non-empty, is stamped as the
+// frame's contractVersion header — SUCCESS frames only; respondLegError's
+// non-2xx frames are relayed verbatim and deliberately unstamped. It reports
+// whether the answer was framed and which of its headers were not carried. An
+// encode error means an out-of-range status literal (caller bug): it falls
+// back to bare so the exchange still answers. An answer whose own media type
+// or contract token is over the frame's header limit never does: bare it would
+// lose what it states, so it is shnsdk.ErrFrameHeaderTooLarge, and no route
+// carries it whole.
+func (g *Gateway) frameAnswer(requester string, answer statedAnswer, contentType, contractToken string, payload []byte) ([]byte, bool, []string, []string, error) {
 	if !g.frameNegotiated(requester) {
-		return payload, false
+		return payload, false, nil, nil, nil
 	}
-	framed, err := shnsdk.EncodeHTTPFrameHeaders(status, map[string]string{
+	headers, notCarried := writableAnswerHeaders(answer.headers)
+	framed, tooLarge, err := encodeAnswerFrame(answer.status, map[string]string{
 		"Content-Type":                    contentType,
 		shnsdk.FrameHeaderContractVersion: contractToken, // "" is omitted by the encoder
-	}, payload)
-	if err != nil {
-		return payload, false
+	}, headers, payload)
+	notCarried = append(notCarried, tooLarge...)
+	if errors.Is(err, shnsdk.ErrFrameHeaderTooLarge) {
+		return nil, false, nil, notCarried, err
 	}
-	return framed, true
+	if err != nil {
+		return payload, false, nil, notCarried, nil
+	}
+	carried := slices.Sorted(maps.Keys(headers))
+	carried = slices.DeleteFunc(carried, func(name string) bool {
+		return slices.Contains(tooLarge, name+":"+AnswerHeaderOverFrameLimit)
+	})
+	return framed, true, carried, notCarried, nil
 }
 
-// successFrame is the buildResponseLeg frame for a 2xx answer (framePayload),
-// framed with status (LegResult.answerStatus), which the leg's record keeps.
+// successFrame is the buildResponseLeg frame for a 2xx answer (frameAnswer),
+// framed with what it states (LegResult.stated); the leg's record keeps the
+// status, and any of its headers that could not be carried.
 // A requester that negotiated no frame gets the answer bare, which it reads
 // as the 200 the leg is answered to the Hub with, and the record keeps that.
-func (g *Gateway) successFrame(ctx context.Context, requester string, status int, contentType, contractToken string) func([]byte) ([]byte, error) {
-	return func(payload []byte) ([]byte, error) {
-		out, framed := g.frameAnswer(requester, status, contentType, contractToken, payload)
-		if framed {
-			exchangeOf(ctx).answer(status)
+func (g *Gateway) successFrame(ctx context.Context, requester string, answer statedAnswer, contentType, contractToken string) legFrame {
+	return func(payload []byte, carryHeaders bool) ([]byte, []string, error) {
+		answer := answer
+		if !carryHeaders {
+			answer.headers = nil
 		}
-		return out, nil
+		out, framed, carried, notCarried, err := g.frameAnswer(requester, answer, contentType, contractToken, payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		if framed {
+			exchangeOf(ctx).answer(answer.status)
+		}
+		for _, value := range notCarried {
+			exchangeOf(ctx).answerHeaderNotCarried(value)
+		}
+		return out, carried, nil
 	}
 }
 
@@ -3861,7 +3942,7 @@ func successMediaType(p relay.Payload) string {
 // an answer is left UNSTAMPED — the stamp is content-descriptive, and SHN cannot
 // vouch for the contract line of a partner's bytes; absence is tolerated by
 // design, a wrong claim is not.
-func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, answerStatus int, subjectPCI, requester, consentRef, builtToken string) {
+func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, inboundCorrID string, p relay.Payload, answer statedAnswer, subjectPCI, requester, consentRef, builtToken string) {
 	ct := successMediaType(p)
 	stamp, terr := g.contractTokenForLeg(txType, builtToken)
 	if terr != nil {
@@ -3872,7 +3953,7 @@ func (g *Gateway) respondLeg(w http.ResponseWriter, r *http.Request, respFrame, 
 		stamp = "" // stamp honesty: never stamp bytes this build did not produce (the encoder omits "")
 	}
 	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, inboundCorrID, p, answerKey(txType, relay.OutcomeAnswered),
-		g.successFrame(r.Context(), requester, answerStatus, ct, stamp), subjectPCI, requester, consentRef)
+		g.successFrame(r.Context(), requester, answer, ct, stamp), subjectPCI, requester, consentRef)
 	if status != 0 {
 		writeResponseLegFailure(w, status, msg)
 		return
@@ -3918,7 +3999,7 @@ func legibleLegErrorMessage(txType string, status int, msg string) string {
 // parameter by stamping error frames.
 func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFrame, respOp, txType, corrID string, result LegResult, subjectPCI, requester, consentRef, builtToken string) {
 	if result.Status/100 == 2 { // connector misuse guard: a 2xx belongs on the success seal
-		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.Response, result.answerStatus(), subjectPCI, requester, consentRef, builtToken)
+		g.respondLeg(w, r, respFrame, respOp, txType, corrID, result.Response, result.stated(), subjectPCI, requester, consentRef, builtToken)
 		return
 	}
 	// A connector/responder can answer non-2xx with NO body and NO LegResult.Message at
@@ -3987,8 +4068,9 @@ func (g *Gateway) respondLegError(w http.ResponseWriter, r *http.Request, respFr
 	}
 	appStatus := result.Status
 	exchangeOf(r.Context()).answer(appStatus)
-	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, p, k, func(b []byte) ([]byte, error) {
-		return shnsdk.EncodeHTTPFrame(appStatus, ct, b)
+	out, status, msg := g.buildResponseLeg(r, respFrame, respOp, txType, corrID, p, k, func(b []byte, _ bool) ([]byte, []string, error) {
+		framed, err := shnsdk.EncodeHTTPFrame(appStatus, ct, b)
+		return framed, nil, err
 	}, subjectPCI, requester, consentRef)
 	if status != 0 { // refused payload, bad app status, or seal/authz BUILD failure → gateway fault
 		writeResponseLegFailure(w, status, msg)

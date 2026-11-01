@@ -254,7 +254,7 @@ func TestBuildFault_BuildersClassTheirFailures(t *testing.T) {
 		fault(t, err, false, "the system of record's device history does not hold the dispatched order DeviceRequest/dr-1 at a status the device history selects (active, on-hold, completed)")
 	})
 	t.Run("the Coverage searchset it assembled, unreadable", func(t *testing.T) {
-		_, _, err := originatedPackageRequest("2.0", crdOriginRecords{coverage: []byte(`{`)}, []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`), "http://q", "")
+		_, _, err := originatedPackageRequest("2.0", crdOriginRecords{coverage: []byte(`{`)}, []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`), "http://q", "", nil, nil, nil)
 		if err == nil || !strings.HasPrefix(err.Error(), "read the coverage search result: ") {
 			t.Fatalf("err %v, want the coverage search result refusal", err)
 		}

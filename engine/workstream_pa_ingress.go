@@ -309,8 +309,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	request := prepared.request
 	// The media type the payer stated for its answer, relayed to the EHR with it.
 	var answerType string
-	var answerStatus int
-	respJSON, err := g.OriginateLeg(withAnswerStatusSink(withAnswerMediaTypeSink(r.Context(), &answerType), &answerStatus), r, recipient, legType, pci, child, "",
+	var stated statedAnswer
+	respJSON, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, recipient, legType, pci, child, "",
 		Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true, OnBehalf: builder != ""})
 	leg := Leg{Type: legType, Physics: legPhysics(legType),
 		Content: Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route), Payload: request, Carried: true, OnBehalf: builder != ""}, Subjects: []string{pci}}
@@ -336,7 +336,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	g.recordLeg(ex.ID, leg.Project(child, outcome))
 	ct := cdsAnswerMediaType(answerType)
-	g.writePayload(w, relayedAnswerStatus(answerStatus), ct, relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), ct),
+	g.writeRelayedAnswer(w, stated, ct, relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
@@ -445,8 +445,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	content := Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
 		Payload: prepared.request, Carried: true, OnBehalf: builder != "", Operation: shnsdk.FrameOperationQuestionnairePackage,
 		MediaType: carriedFHIRMediaType(r.Header.Get("Content-Type"))}
-	var answerStatus int
-	pkgJSON, err := g.OriginateLeg(withAnswerStatusSink(r.Context(), &answerStatus), r, recipient, legType, prepared.pci, child, "", content)
+	var stated statedAnswer
+	pkgJSON, err := g.OriginateLeg(withStatedAnswerSink(r.Context(), &stated), r, recipient, legType, prepared.pci, child, "", content)
 	leg := Leg{Type: legType, Physics: legPhysics(legType), Content: content, Subjects: subjectsOf(prepared.pci)}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
@@ -479,7 +479,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json", answer, dtrAnswerKey)
+	g.writeRelayedAnswer(w, stated, "application/fhir+json", answer, dtrAnswerKey)
 	// The line the answer is written in, as adaptAnswer wrote it: the routed
 	// one, or this gateway's own when E-08 carried it across, so evidence judges
 	// the answer at its own line.
@@ -620,8 +620,8 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var answerStatus int
-	crJSON, err := g.OriginateLeg(withAnswerStatusSink(observationContext, &answerStatus), r, recipient, leg, pci, child, "",
+	var stated statedAnswer
+	crJSON, err := g.OriginateLeg(withStatedAnswerSink(observationContext, &stated), r, recipient, leg, pci, child, "",
 		Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""})
 	responseObservation = append([]byte(nil), crJSON...)
 	var relayed *RelayError
@@ -711,7 +711,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	g.writePayload(w, relayedAnswerStatus(answerStatus), "application/fhir+json", answer,
+	g.writeRelayedAnswer(w, stated, "application/fhir+json", answer,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

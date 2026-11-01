@@ -221,6 +221,12 @@ type ExchangeRecord struct {
 	// Empty when every such edit was made or had nothing to change.
 	// Content-free; not a metric dimension. Evolving.
 	EditsNotMade []string
+	// AnswerHeadersNotCarried names each header of a participant's 2xx answer
+	// that could not be carried, with why (AnswerHeaderNotCarriedValues, each
+	// at most once): never its value. The answer goes through without it,
+	// unless it is refused for its own size.
+	// Content-free; not a metric dimension. Evolving.
+	AnswerHeadersNotCarried []string
 	// HubDelivered is the Hub's own word on whether the recipient's gateway
 	// received an ingress call's leg, read from the HubDeliveredHeader of the
 	// Hub's error answer to the leg: "no", "yes" or "unknown". Empty when the
@@ -603,6 +609,16 @@ const (
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
 var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried}
+
+// answerHeaderNotCarried records a header of an answer that was left out, and
+// why (one of AnswerHeaderNotCarriedValues).
+func (x *exchangeRecorder) answerHeaderNotCarried(value string) {
+	x.with(func() {
+		if !slices.Contains(x.rec.AnswerHeadersNotCarried, value) {
+			x.rec.AnswerHeadersNotCarried = append(x.rec.AnswerHeadersNotCarried, value)
+		}
+	})
+}
 
 // editNotMade records that an edit was not made, and why (one of
 // EditNotMadeValues).

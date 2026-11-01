@@ -76,7 +76,8 @@ func (paWorkstream) requestMembers(leg string, payload []byte) []namedMember {
 //   - a urn:uuid: or #contained reference names a Patient only when the
 //     request carries it, and then names what that Patient names; a
 //     Coverage's party (a contained Patient its subscriber or policyHolder
-//     names, shnsdk.CoverageParty) is no member.
+//     names, shnsdk.CoverageParty) is no member, but a patient the party
+//     names is.
 //
 // A Patient's member identifier is never read: the subject is bound by the id
 // its request uses. An unreadable request names none.
@@ -138,8 +139,12 @@ func carriedMembers(payload []byte, leg string) []string {
 					// A Coverage's party (shnsdk.CoverageParty, which answers
 					// for a Coverage only) is another person the Coverage
 					// names, never a member of the request: neither it nor a
-					// reference to it names one. A contained that is not a
-					// list is walked whole.
+					// reference to it names one. Only its own identity is
+					// passed over: its elements are walked as any resource's
+					// are, so what the party names (another patient it links
+					// to, say) is read like the rest of the request, and that
+					// patient is involved too. A contained that is not a list
+					// is walked whole.
 					list, ok := child.([]any)
 					if !ok {
 						walk(child, "", true)
@@ -147,6 +152,9 @@ func carriedMembers(payload []byte, leg string) []string {
 					}
 					for _, c := range list {
 						if cr, ok := c.(map[string]any); ok && shnsdk.CoverageParty(v, cr) {
+							for _, member := range cr {
+								walk(member, "", false)
+							}
 							continue
 						}
 						walk(c, "", true)

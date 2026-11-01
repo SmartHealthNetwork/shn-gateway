@@ -4,6 +4,127 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A payer's 2xx answer reaches the provider's system with its ETag, Last-Modified and Retry-After (v1.3.0)
+
+- **Before you upgrade:** nothing to configure. The three headers reach a participant's system
+  only when both the payer's gateway and the provider's gateway run v1.3.0 or later; until both
+  do, answers arrive without them, as before. Once they do, your system receives a payer's
+  `ETag`, `Last-Modified` and `Retry-After` on a 2xx answer as it would on a direct call, so a
+  system that acts on them (a cache keyed on `ETag`, a client that honours `Retry-After`) starts
+  doing so.
+
+- **Added:** the gateway frames these three from its system's 2xx answer, and the
+  requesting gateway writes them to its own participant's system as sent, on every Da
+  Vinci ingress route, so they read as on a direct call. A value is never judged as a
+  validator or a date. A non-2xx answer and an answer the gateway built state none.
+  Locations are not carried: each is an address into the payer's system.
+- **Added (record, access line):** `engine.ExchangeRecord.AnswerHeadersNotCarried` and
+  the access line's `answerHeadersNotCarried` name a header that was not carried, and
+  why, never its value: `value-not-carriable` (not an HTTP field value, or not UTF-8),
+  `over-frame-limit`, `over-answer-limit` (with it, the answer
+  would leave less than 64 KiB under the network's limit for its authorization, so it is
+  sealed without its headers before that is minted) or `decoded-from-gzip`. The answer goes through without it: a header never
+  costs an answer.
+- **Changed:** an answer carrying a strong `ETag` is no longer gzip-coded for a caller
+  that accepts gzip, since coding would make the validator untrue. A weak `ETag` is coded.
+  A strong `ETag` on an answer the transport decoded from gzip is left out and recorded.
+- **Changed (edits):** registered edits E-08 and E-10 drop the payer's `ETag` from the
+  answer they change, under their own disclosure. `relay.ValidateEdits` refuses an edit
+  of an answer whose row does not drop it (`relay.Edit.DropsAnswerHeaders`).
+- **Fixed:** the limit on an answer also covers its frame header: an answer whose own
+  `Content-Type` is over the frame's 64 KiB header limit is refused `502 response body too
+  large`, delivered, recorded as `routing`. Before, the requesting gateway failed to read
+  the frame.
+
+## A questionnaire-package request your gateway builds carries the payer Organization your Coverage names (v1.3.0)
+
+- **Changed (requester):** when your gateway builds the `$questionnaire-package`
+  request itself, and a Coverage it carries names its payer (its first `payor`
+  reference, the one routing reads) by a reference to a record outside itself, the
+  request now also carries that payer Organization as a `referenced` parameter, each
+  record your system supplied once, exactly as your system of record holds it.
+  - It is the record your Coverage search included for a relative reference.
+  - Otherwise, it is the record your system supplied for the same reference when the
+    gateway read the payer of the Coverage it routes by.
+  - A payer that resolves the Coverage's payor from the request itself can now do so.
+    Before, the request carried the Coverage alone, and such a payer could refuse it.
+  - A Coverage that contains its payer Organization, or names its payer by identifier
+    alone, adds nothing.
+  - So does a reference that no record your system supplied answers, or that several
+    different Organizations answer. Leaving it out refuses nothing.
+  - Once the request is built, such a reference is recorded at every conformance level
+    as a `dtr.referenced` event: outcome `left-out`, reason `none-answers` or
+    `several-answer`, and the reference's resource type only. Nothing is minted.
+
+## A Coverage naming its payer by identifier alone is refused at the PAS build, not as an internal error (v1.3.0)
+
+- **Changed (requester):** when your gateway builds a prior-authorization request
+  from a Coverage that names its payer by identifier alone, with no reference to any
+  Organization, it now answers `422 the member's Coverage names its
+  payer by identifier alone, so your system of record supplies no payer Organization
+  for a prior-authorization request to name`, recorded as `fidelity` at stage `build`.
+  Before, it answered `500 build bundle failed`, recorded as the gateway's own failure.
+  No `pas-claim` leg is sent, at every conformance level. A coverage check that ends
+  the exchange is carried as before, so the refusal comes only when a
+  prior-authorization request would be next, after any coverage and questionnaire legs.
+
+## A route that amends its own claim refuses, before the claim, a reference the amendment certainly cannot carry (v1.3.0)
+
+- **Changed (module 1, the UC-04 demo lane and the single-call UC-06 and UC-07):** from PAS 2.1 an amendment carries the submitted claim whole, so a reference your request states inside a claim fact must resolve in the amendment's bundle. On these routes, which amend in the same request, the gateway now checks just before the `pas-claim` leg, with shn-sdk v1.3.0's `CheckPASSubmittedFactsCarriedAtLine`, and refuses with no claim sent a reference to a resource type the amendment's bundle has no entry of, an absolute one under another base, and one that is not a type and an id: `422`, recorded as `fidelity` at stage `build`, the fidelity of the gateway's own build. Before, the claim went out first, the payer held a pend the amendment could not answer, and the request failed after it.
+  - On these routes, a request stating such a reference whose payer answer did not pend answered `502 expected pended response`. It now answers `422`, recorded as `fidelity` at stage `build`, before that leg, as does any other failure the request would have met past that point.
+  - A reference to a type the amendment's bundle does hold, or a local one, is still decided at the amendment's build, after the claim, as before.
+  - A request that can end without a claim is carried as before: a CRD not-covered answer, UC-05's consented branch, which can end at `consentDenied`, and a two-phase `/start`, which ends at the pend. `/complete` amends a pend an earlier request made and is unchanged.
+- **Changed:** the gateway pins shn-sdk v1.3.0.
+
+## A patient a Coverage's party names is recorded as involved (v1.3.0)
+
+- **Fix:** when the network lists `involved` in `hubAccepts`, a prior-authorization
+  request's `involved` list now names a patient that only a Coverage's party names.
+  The party is a `Patient` contained in the Coverage that its `subscriber` or
+  `policyHolder` names, such as a dependent's parent. A patient the party links to, or
+  names in any other element, is now listed.
+  - The parent itself is still no member of the request, and the slot's reference to
+    it still names no one.
+  - Gateways v0.61.0 to v1.2.0 left such a patient out of the list, so the network had
+    no record of the exchange under them and made no authorization decision about
+    their involvement. Upgrading records them.
+  - This holds wherever the request is carried, at `none`, `observe` and
+    `structural`. At `strict` the PAS legs refuse a request that names another patient
+    under `patient.mixed` before it is sent, as before.
+  - As for any involved patient, a refused token leaves the patient out, with the
+    refusal counted (`involvedOmitted`), and the leg is sent as usual. The list never
+    refuses a request.
+
+## Requests the gateway originates: what an active order means at CRD 2.0, and what your conformance check covers (v1.3.0)
+
+- **Documentation:** "Requests the gateway originates" in `docs/CONFIGURATION.md` now
+  states what each CRD line's order profile says about an active order, and what your
+  gateway's conformance check of an order it originates covers.
+  - CRD 2.0.1's `profile-devicerequest` and `profile-servicerequest` fix `status` to
+    `draft`. The `order-sign` and `order-dispatch` requests carry your active order as
+    your system holds it, so at CRD 2.0 the order does not conform to those profiles.
+    CRD 2.1.0 and 2.2.1 fix no status.
+  - The network carries the order as sent and never changes its status.
+  - At `observe`, `structural` and `strict`, your gateway checks the order it
+    originates for `order-sign` and `order-select` against base FHIR R4 and the
+    profiles the order declares in its own `meta.profile`, not against the routed
+    line's CRD order profile. An order that declares US Core, or no profile, draws no
+    finding for its status at `observe`. The `order-dispatch` order is not checked
+    before the `order-dispatch` request is sent.
+
+  No behaviour changes.
+
+## The validator check pulls its curl image by digest (v1.3.0)
+
+`deploy/validator/verify.sh` now names the curl image it probes each validator lane with by digest, `curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69`, so every run uses the same image, whatever a registry's tag serves that day. The validator images, and what the check proves, do not change.
+
+## The 2.2 validator loads Clinical Practice Guidelines, so a DTR package's Library profiles are checked (v1.3.0)
+
+- **Fixed (validator image, 2.2 line):** the image loads `hl7.fhir.uv.cpg` 1.0.0, the version `fhir.cqf.common` 4.0.1 depends on. A DTR package that carries the published FHIRHelpers or FHIR-ModelInfo Library declares CPG profiles. Without the package the validator answered an error for each, "has not been checked because it could not be found", having checked nothing, and your gateway recorded it at `observe` and refused it at `structural` and `strict`, unless you tolerate that payer. It now checks those profiles.
+  - A resource that uses nothing from CPG reads as before.
+  - The 2.0 and 2.1 lines do not change.
+  - The 2.2 lane indexes 1,170 StructureDefinitions at start, up from 1,030, and `verify.sh` expects that number.
+
 ## An amendment links its attached answer at PAS 2.2 on the report type the request states (v1.2.0)
 
 - **Additive (provider, amending routes):** a request may state `reportType`, one X12 755

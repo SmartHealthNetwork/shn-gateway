@@ -78,7 +78,11 @@ type relaySubstrate struct {
 	// authorizedSubjects is the subject of every token the stub signed, in
 	// order: the patient each leg was authorized for.
 	authorizedSubjects []string
-	authorizeHits      int
+	// involved is each request envelope's involved list, as the gateway sent
+	// it; refuseInvolved refuses a token for these patients with 403.
+	involved       []string
+	refuseInvolved map[string]bool
+	authorizeHits  int
 }
 
 // setResult configures what the NEXT (and subsequent, until changed) /route
@@ -123,11 +127,16 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 		SubjectPCI    string `json:"subjectPCI"`
 		CorrelationID string `json:"correlationId"`
 		PayloadHash   string `json:"payloadHash"`
+		Involvement   string `json:"involvement"`
 	}
 	_ = json.Unmarshal(body, &req)
 	s.mu.Lock()
 	s.authorizedSubjects = append(s.authorizedSubjects, req.SubjectPCI)
+	refused := req.Involvement != "" && s.refuseInvolved[req.SubjectPCI]
 	s.mu.Unlock()
+	if refused {
+		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"error":"forbidden"}`)), Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
+	}
 	tok := shnsdk.Token{
 		Operation:     req.Operation,
 		Scope:         "crd-context",
@@ -137,6 +146,7 @@ func (s *relaySubstrate) handleAuthorize(body []byte) (*http.Response, error) {
 		CorrelationID: req.CorrelationID,
 		Expiry:        s.clock().Add(time.Hour),
 		PayloadHash:   req.PayloadHash,
+		Involvement:   req.Involvement,
 	}
 	tok = signTestToken(tok, s.authzPriv)
 	b, _ := json.Marshal(map[string]any{"token": tok})
@@ -167,6 +177,7 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	s.mu.Lock()
 	s.lastCorr = env.Metadata.CorrelationID
 	s.sentNames = append(s.sentNames, env.Metadata.TransactionType)
+	s.involved = append(s.involved, env.Metadata.Involved)
 	s.mu.Unlock()
 	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
 		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {

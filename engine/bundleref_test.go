@@ -270,3 +270,88 @@ func TestPASInquirePayorReference_SameRule(t *testing.T) {
 		})
 	}
 }
+
+// TestCoveragePayorRecords: each Coverage's payor reference outside itself
+// resolves against the Bundle it came in by entryAnswers' rule, each
+// reference once, else against the record the caller holds for it; a
+// reference no record answers, or several different Organizations answer, is
+// left out and told with its reason and resource type; a contained or
+// identifier-only payor, and a record that is not an Organization, add
+// nothing and are not told.
+func TestCoveragePayorRecords(t *testing.T) {
+	org := `{"resourceType":"Organization","id":"o1","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}`
+	other := `{"resourceType":"Organization","id":"o1","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00002"}]}`
+	cov := func(id, payor, extra string) string {
+		return `{"resourceType":"Coverage","id":"` + id + `",` + extra + `"payor":[` + payor + `]}`
+	}
+	bundle := func(entries ...string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` + strings.Join(entries, ",") + `]}`)
+	}
+	entry := func(res string) string { return `{"resource":` + res + `}` }
+	byRef := cov("c1", `{"reference":"Organization/o1"}`, "")
+	for name, row := range map[string]struct {
+		bundle    []byte
+		coverages []string
+		knownRef  string
+		known     string
+		want      []string
+		told      []string
+	}{
+		"included in the bundle":              {bundle(entry(byRef), entry(org)), []string{byRef}, "", "", []string{org}, nil},
+		"the record the caller holds":         {bundle(entry(byRef)), []string{byRef}, "Organization/o1", org, []string{org}, nil},
+		"one reference, two Coverages":        {bundle(entry(byRef), entry(org)), []string{byRef, cov("c2", `{"reference":"Organization/o1"}`, "")}, "", "", []string{org}, nil},
+		"one record, two spellings":           {bundle(`{"fullUrl":"https://sor.example/fhir/Organization/o1","resource":` + org + `}`), []string{byRef, cov("c2", `{"reference":"https://sor.example/fhir/Organization/o1"}`, "")}, "", "", []string{org}, nil},
+		"an absolute reference by fullUrl":    {bundle(`{"fullUrl":"https://sor.example/fhir/Organization/o1","resource":` + org + `}`), []string{cov("c1", `{"reference":"https://sor.example/fhir/Organization/o1"}`, "")}, "", "", []string{org}, nil},
+		"no record answers":                   {bundle(entry(byRef)), []string{byRef}, "", "", nil, []string{"none-answers Organization"}},
+		"the caller holds another's":          {bundle(entry(byRef)), []string{byRef}, "Organization/o9", org, nil, []string{"none-answers Organization"}},
+		"several Organizations answer":        {bundle(entry(byRef), entry(org), entry(other)), []string{byRef}, "Organization/o1", org, nil, []string{"several-answer Organization"}},
+		"a URN no record answers":             {bundle(), []string{cov("c1", `{"reference":"urn:uuid:5f0c9a5e-0000-4000-8000-000000000001"}`, "")}, "", "", nil, []string{"none-answers "}},
+		"a contained payor":                   {bundle(entry(cov("c1", `{"reference":"#o1"}`, `"contained":[`+org+`],`))), []string{cov("c1", `{"reference":"#o1"}`, `"contained":[`+org+`],`)}, "#o1", org, nil, nil},
+		"a payor named by identifier alone":   {bundle(), []string{cov("c1", `{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}`, "")}, "", "", nil, nil},
+		"a payor that is not an Organization": {bundle(entry(cov("c1", `{"reference":"Patient/p1"}`, "")), entry(`{"resourceType":"Patient","id":"p1"}`)), []string{cov("c1", `{"reference":"Patient/p1"}`, "")}, "", "", nil, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			coverages := make([][]byte, len(row.coverages))
+			for i, c := range row.coverages {
+				coverages[i] = []byte(c)
+			}
+			var told []string
+			got := coveragePayorRecords(row.bundle, coverages, row.knownRef, []byte(row.known), func(reason, typ string) {
+				told = append(told, reason+" "+typ)
+			})
+			if len(got) != len(row.want) {
+				t.Fatalf("got %d records %q, want %q", len(got), got, row.want)
+			}
+			for i := range got {
+				if !bytes.Equal(got[i], []byte(row.want[i])) {
+					t.Fatalf("record %d = %s, want %s", i, got[i], row.want[i])
+				}
+			}
+			if strings.Join(told, "|") != strings.Join(row.told, "|") {
+				t.Fatalf("told %q, want %q", told, row.told)
+			}
+			// No one listening is no fault.
+			coveragePayorRecords(row.bundle, coverages, row.knownRef, []byte(row.known), nil)
+		})
+	}
+}
+
+// TestReferenceResourceType: the resource type a reference names, and
+// nothing else of it.
+func TestReferenceResourceType(t *testing.T) {
+	for ref, want := range map[string]string{
+		"Organization/o1":                                     "Organization",
+		"https://sor.example/fhir/Organization/o1":            "Organization",
+		"https://sor.example/fhir/Organization/o1/_history/2": "Organization",
+		"urn:uuid:5f0c9a5e-0000-4000-8000-000000000001":       "",
+		"o1":                            "",
+		"organization/o1":               "",
+		"Org-anization/o1":              "",
+		"https://h/x/Patient/":          "",
+		"https://sor.example/JaneDoe/1": "",
+	} {
+		if got := referenceResourceType(ref); got != want {
+			t.Errorf("referenceResourceType(%q) = %q, want %q", ref, got, want)
+		}
+	}
+}

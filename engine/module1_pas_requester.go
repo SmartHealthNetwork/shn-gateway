@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -338,11 +339,24 @@ func rewriteReferences(v any, rewrite func(string) (string, bool)) bool {
 	return changed
 }
 
+// msgNoPayerRecord is the refusal of a prior-authorization request whose payer
+// the participant's own system supplies no Organization record for.
+const msgNoPayerRecord = "the member's Coverage names its payer by identifier alone, so your system of record supplies no payer Organization for a prior-authorization request to name"
+
+// errNoPayerRecord is why a PAS submit has no insurer: a Coverage naming its
+// payer by identifier alone leads to no record (memberPayerOrganization). The
+// origination is carried up to the leg that needs the record, since the payer can
+// still end it at the coverage check, and a payer record is never minted.
+var errNoPayerRecord = errors.New(msgNoPayerRecord)
+
 // buildModuleOnePASSubmit is module 1's PAS submit: the authored submit
 // (buildAuthoredPASSubmit), carrying the records the order's requester leads
 // to (carryOrderRequester) before the authored attachment is completed, so a
 // questionnaire response naming the clinician resolves to the same entry.
 func buildModuleOnePASSubmit(line string, in shnsdk.ConformantClaimInputs, requester [][]byte) ([]byte, error) {
+	if len(in.Insurer) == 0 {
+		return nil, errNoPayerRecord
+	}
 	return buildAuthoredPASSubmit(line, in, func(body []byte) ([]byte, error) {
 		return carryOrderRequester(body, requester, in.AbsoluteRefs)
 	})

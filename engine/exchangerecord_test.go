@@ -1333,7 +1333,7 @@ func TestExchangeRecord_InboundOwnershipFaults(t *testing.T) {
 		return got.only(t)
 	}
 	rec := run(func(w http.ResponseWriter, r *http.Request) {
-		p.g.respondLeg(w, r, spec.RespFrame, spec.RespOp, "crd-order-select", env.Metadata.CorrelationID, LegResult{}.Response, http.StatusOK, tok.Subject, p.requester.ID, "", "")
+		p.g.respondLeg(w, r, spec.RespFrame, spec.RespOp, "crd-order-select", env.Metadata.CorrelationID, LegResult{}.Response, builtAnswer, tok.Subject, p.requester.ID, "", "")
 	})
 	if rec.Outcome != ExchangeRefused || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageVerify {
 		t.Fatalf("answer build: %s %s/%s at %q", rec.Outcome, rec.RefusedBy, rec.Rule, rec.RefusalStage)

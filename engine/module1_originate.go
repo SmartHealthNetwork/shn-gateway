@@ -862,7 +862,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			writeJSON(w, status, map[string]string{"error": msg})
 			return crdDtrResult{}, false
 		}
-		dtrReq, dtrPayload, err := originatedPackageRequest(res.dtrLine, recs, res.dtrOrder(), cov.Questionnaires[0], res.crdAssertionID)
+		dtrReq, dtrPayload, err := originatedPackageRequest(res.dtrLine, recs, res.dtrOrder(), cov.Questionnaires[0], res.crdAssertionID, res.coverage, res.insurer, g.referencedLeftOut(dtrCorr, recipient))
 		if err != nil {
 			g.refuseBuildFailure(ctx, w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 			return crdDtrResult{}, false
@@ -1583,7 +1583,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return
 	}
 	// An APPLY-time refusal (a *SemanticChangeError) is reshaped like the selection-time
@@ -1732,7 +1732,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -1819,7 +1819,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	if g.cfg.OriginationProfile != "provider-data" {
 		// The demo lane's in-flow amendment follows the submission in this
 		// request (provider-data's single-shot tail sends none).
-		r = routeSendsAmendment(r)
+		r = routeAmendsItsOwnClaim(routeSendsAmendment(r))
 	}
 	res, ok := g.runCRDThenDTROrder(w, r, member, o.system, o.code, o.display, o.dx, false)
 	if !ok {
@@ -1935,6 +1935,9 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimFacts := claimIn.facts()
+	if !amendedClaimCarriesItsFacts(w, r, route.BuildLine, claimFacts) {
+		return
+	}
 	bundleJSON, err := buildModuleOnePASSubmit(route.BuildLine, shnsdk.ConformantClaimInputs{
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
@@ -1945,7 +1948,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -2321,7 +2324,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -2650,7 +2653,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		PASClaimFacts:    claimFacts,
 	}, res.requester)
 	if err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
+		g.pasSubmitBuildFailure(w, r, res.recipient, err, "build bundle failed: "+err.Error())
 		return
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))

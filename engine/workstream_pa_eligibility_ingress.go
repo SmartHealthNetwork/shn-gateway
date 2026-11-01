@@ -124,8 +124,8 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 	ex := g.exchanges.Begin(workstreamPA)
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
 	var answerType string
-	var answerStatus int
-	answer, err := g.OriginateLeg(withAnswerStatusSink(withAnswerMediaTypeSink(r.Context(), &answerType), &answerStatus), r, recipient, legType, pci, child, "", content)
+	var stated statedAnswer
+	answer, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, recipient, legType, pci, child, "", content)
 	spec, _ := legSpecFor(legType)
 	leg := Leg{Type: legType, Physics: spec.Physics, Content: content, Subjects: pcis}
 	if err != nil {
@@ -182,7 +182,7 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 	if ct == "" {
 		ct = mediaFHIRJSON
 	}
-	g.writePayload(w, relayedAnswerStatus(answerStatus), ct, relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
+	g.writeRelayedAnswer(w, stated, ct, relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

@@ -90,8 +90,8 @@ func (p *originPayer) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // originGateway is a provider gateway on profile over sor, reaching a payer that
-// answers with answer.
-func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populator, answer func(tx string, request []byte) (int, []byte)) (*Gateway, *originPayer) {
+// answers with answer. Each opt adjusts the Config before the gateway is built.
+func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populator, answer func(tx string, request []byte) (int, []byte), opts ...func(*Config)) (*Gateway, *originPayer) {
 	t.Helper()
 	authzPub, authzPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
@@ -105,7 +105,7 @@ func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populat
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub, MessageFrames: shnsdk.SupportedMessageFrames()})
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, MessageFrames: shnsdk.SupportedMessageFrames(), RequestFrames: dtrOperationFrames})
 	n := 0
-	g := mustNew(t, Config{
+	cfg := Config{
 		Role:               "provider",
 		HolderID:           "provider",
 		PayerRouter:        payerRouterFor(t, "payer"),
@@ -126,7 +126,11 @@ func originGateway(t *testing.T, profile string, sor SystemOfRecord, pop Populat
 			return strings.Repeat("0", 31) + string(rune('0'+n%10))
 		},
 		Client: &http.Client{Transport: payer},
-	}, WithPopulator(pop))
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	g := mustNew(t, cfg, WithPopulator(pop))
 	return g, payer
 }
 
@@ -559,4 +563,128 @@ func TestNamePatientByMember(t *testing.T) {
 			t.Error("a change at an undeclared place accepted")
 		}
 	})
+}
+
+// profileRecordingValidator answers every call valid and records the
+// profile each call asserted.
+type profileRecordingValidator struct {
+	mu       sync.Mutex
+	profiles []string
+	bodies   [][]byte
+}
+
+func (v *profileRecordingValidator) Validate(_ context.Context, resourceJSON []byte, profile string) (shnsdk.Result, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.profiles = append(v.profiles, profile)
+	v.bodies = append(v.bodies, bytes.Clone(resourceJSON))
+	return shnsdk.Result{Valid: true}, nil
+}
+
+// TestOriginatedOrderSign_CarriesTheActiveOrderAsSent: a provider gateway
+// whose payer declares only CRD 2.0 originates order-sign with the order its
+// system of record holds, active, carried as sent: the one draftOrders entry
+// is the order with status active, though CRD 2.0.1's order profiles fix
+// status to draft. The status is the participant's own value, never
+// rewritten, and a profile conflict is payload conformance, the
+// participant's opt-in at its own gateway, never a network refusal. So at
+// none and at observe, where the participant
+// has not opted into refusing, the request is sent at CRD 2.0. Today's one
+// check of the order is base R4 and the order's own meta.profile, not the
+// routed line's CRD order profile: at none the validator is not called, and
+// at observe it is asked for no profile, so an order that declares no CRD
+// profile draws no finding for its status. Checking the routed line's order profile would change this row.
+func TestOriginatedOrderSign_CarriesTheActiveOrderAsSent(t *testing.T) {
+	t.Parallel()
+	sor, _ := originSystem(t, prefetchMember)
+	_, _, order := originRecords(prefetchMember)
+	line20 := []string{shnsdk.ContractPACRD20, shnsdk.ContractPADTR20, shnsdk.ContractPAPAS20}
+	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve} {
+		t.Run(level.String(), func(t *testing.T) {
+			t.Parallel()
+			v := &profileRecordingValidator{}
+			var mu sync.Mutex
+			var events []ObserverEvent
+			g, payer := originGateway(t, "provider-data", sor, nil, func(string, []byte) (int, []byte) {
+				return 0, payerAnswerFor(t, order, shnsdk.CoveredNotCovered, "", "")
+			}, func(c *Config) {
+				c.Validator = v
+				c.ConformanceEnforcement = level
+				c.DeclaredContractVersions = line20
+				for _, id := range []string{"provider", "payer"} {
+					e, ok := c.Reg.Lookup(id)
+					if !ok {
+						t.Fatalf("no registry entry %s", id)
+					}
+					e.ContractVersions = line20
+					c.Reg.Set(id, e)
+				}
+				c.Observer = func(e ObserverEvent) {
+					mu.Lock()
+					defer mu.Unlock()
+					events = append(events, e)
+				}
+			})
+			rec := httptest.NewRecorder()
+			g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
+			g.drainObserveChecks()
+			if rec.Code != http.StatusOK {
+				t.Fatalf("got %d %s", rec.Code, rec.Body)
+			}
+			reqs := payer.sent("crd-order-select")
+			if len(reqs) != 1 {
+				t.Fatalf("%d CRD requests sent, want 1", len(reqs))
+			}
+			sent := decodeSent(t, reqs[0])
+			if sent.Hook != "order-sign" {
+				t.Fatalf("hook %q, want order-sign", sent.Hook)
+			}
+			var drafts struct {
+				Entry []struct {
+					Resource json.RawMessage `json:"resource"`
+				} `json:"entry"`
+			}
+			if err := json.Unmarshal(sent.Context.DraftOrders, &drafts); err != nil || len(drafts.Entry) != 1 {
+				t.Fatalf("draftOrders %s: %v", sent.Context.DraftOrders, err)
+			}
+			if !sameJSONResource(drafts.Entry[0].Resource, order) {
+				t.Fatalf("draftOrders carries\n%s\nnot the system of record's order\n%s", drafts.Entry[0].Resource, order)
+			}
+			var status struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(drafts.Entry[0].Resource, &status); err != nil || status.Status != "active" {
+				t.Fatalf("draftOrders' order status %q, want the system of record's active: %v", status.Status, err)
+			}
+			mu.Lock()
+			var token string
+			for _, e := range events {
+				if e.Kind == "leg.originated" && e.LegType == "crd-order-select" && e.Route != nil {
+					token = e.Route.Token
+				}
+			}
+			mu.Unlock()
+			if token != shnsdk.ContractPACRD20 {
+				t.Fatalf("the CRD leg was sent at %q, want %s", token, shnsdk.ContractPACRD20)
+			}
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			var orderChecks int
+			for i, b := range v.bodies {
+				if !sameJSONResource(b, order) {
+					continue
+				}
+				orderChecks++
+				if v.profiles[i] != "" {
+					t.Fatalf("the order was checked against %q; today's check asserts no profile", v.profiles[i])
+				}
+			}
+			switch {
+			case level == EnforcementNone && len(v.bodies) != 0:
+				t.Fatalf("at none the validator was called %d times", len(v.bodies))
+			case level == EnforcementObserve && orderChecks != 1:
+				t.Fatalf("at observe the order was checked %d times, want 1 (calls: %d)", orderChecks, len(v.bodies))
+			}
+		})
+	}
 }

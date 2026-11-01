@@ -119,21 +119,31 @@ func noteAnswerMediaType(ctx context.Context, ct string) {
 	}
 }
 
-// answerStatusKey carries a sink for the 2xx status a recipient's framed
-// answer states, for a caller that relays that answer to its own participant.
-type answerStatusKey struct{}
+// statedAnswerKey carries a sink for what a recipient's framed answer states,
+// for a caller that relays that answer to its own participant.
+type statedAnswerKey struct{}
 
-// withAnswerStatusSink returns ctx carrying sink: the origination that
-// decodes a framed 2xx answer stores the answer's status in it. A bare
-// answer leaves it unset.
-func withAnswerStatusSink(ctx context.Context, sink *int) context.Context {
-	return context.WithValue(ctx, answerStatusKey{}, sink)
+// withStatedAnswerSink returns ctx carrying sink: the origination that decodes
+// a framed 2xx answer stores what the answer states in it. A bare answer
+// leaves it unset.
+func withStatedAnswerSink(ctx context.Context, sink *statedAnswer) context.Context {
+	return context.WithValue(ctx, statedAnswerKey{}, sink)
 }
 
-// noteAnswerStatus stores status in ctx's answer status sink, if any.
-func noteAnswerStatus(ctx context.Context, status int) {
-	if sink, ok := ctx.Value(answerStatusKey{}).(*int); ok && sink != nil {
-		*sink = status
+// noteStatedAnswer stores what a framed answer states in ctx's sink, if any.
+func noteStatedAnswer(ctx context.Context, hdr shnsdk.HTTPFrameHeader) {
+	sink, ok := ctx.Value(statedAnswerKey{}).(*statedAnswer)
+	if !ok || sink == nil {
+		return
+	}
+	sink.status, sink.headers = hdr.Status, nil
+	for _, name := range answerHeaderNames {
+		if v := hdr.Headers[name]; v != "" {
+			if sink.headers == nil {
+				sink.headers = map[string]string{}
+			}
+			sink.headers[name] = v
+		}
 	}
 }
 

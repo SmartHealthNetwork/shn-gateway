@@ -293,6 +293,12 @@ func (a *answerWriter) FlushError() error {
 	return errors.Join(err, http.NewResponseController(a.ResponseWriter).Flush())
 }
 
+// StrongETag reports an ETag that names exact bytes: coding the answer would
+// make it untrue, so the answer stays as it is. Uncoded is always legal.
+func StrongETag(v string) bool {
+	return v != "" && !strings.HasPrefix(strings.TrimSpace(v), "W/")
+}
+
 // decide writes the held head and bytes, coded when code is set and the
 // answer can be coded.
 func (a *answerWriter) decide(code bool) error {
@@ -301,7 +307,7 @@ func (a *answerWriter) decide(code bool) error {
 	if !varies(h) {
 		h.Add("Vary", "Accept-Encoding")
 	}
-	if code && a.accepts && h.Get("Content-Encoding") == "" &&
+	if code && a.accepts && h.Get("Content-Encoding") == "" && !StrongETag(h.Get("ETag")) &&
 		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(h.Get("Content-Type"))), "text/event-stream") {
 		if h.Get("Content-Type") == "" {
 			h.Set("Content-Type", http.DetectContentType(a.held))

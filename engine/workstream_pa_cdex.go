@@ -215,9 +215,9 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
-	var answerStatus int
+	var stated statedAnswer
 	var answerType string
-	answer, err := g.OriginateLeg(withAnswerStatusSink(withAnswerMediaTypeSink(r.Context(), &answerType), &answerStatus), r, recipient, leg, pci, child, "", content)
+	answer, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, recipient, leg, pci, child, "", content)
 	spec, _ := legSpecFor(leg)
 	legProj := Leg{Type: leg, Physics: spec.Physics, Content: content, Subjects: []string{pci}}
 	if err != nil {
@@ -240,7 +240,7 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 	if ct == "" {
 		ct = mediaFHIRJSON
 	}
-	g.writePayload(w, relayedAnswerStatus(answerStatus), ct,
+	g.writeRelayedAnswer(w, stated, ct,
 		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
@@ -367,7 +367,7 @@ func (g *Gateway) handleCDexSubmitInbound(w http.ResponseWriter, r *http.Request
 		return
 	}
 	g.respondLeg(w, r, "payer-coverage", "cdex-attachment-submit-response", legCDexSubmit, env.Metadata.CorrelationID,
-		result.Response, result.answerStatus(), tok.Subject, env.Metadata.Sender, "", answerTok)
+		result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 
 // cdexSubmitURL resolves the payer's $submit-attachment: under the CDex base
@@ -399,5 +399,5 @@ func (n *nativeResponder) forwardCDexSubmit(ctx context.Context, in relay.Body) 
 	if bad.Status != 0 {
 		return bad, nil
 	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, ResponseSubjectForeign: true}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers, ResponseSubjectForeign: true}, nil
 }

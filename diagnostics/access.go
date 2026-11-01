@@ -113,6 +113,10 @@ type AccessLine struct {
 	// statement the requester made for an amendment this gateway built that
 	// the amendment does not carry. Absent when empty. Evolving.
 	EditsNotMade []string `json:"editsNotMade,omitempty"`
+	// AnswerHeadersNotCarried names each header of a participant's 2xx answer
+	// that could not be carried, with why
+	// (engine.ExchangeRecord.AnswerHeadersNotCarried), never its value.
+	AnswerHeadersNotCarried []string `json:"answerHeadersNotCarried,omitempty"`
 	// HubDelivered is the Hub's own word, on its error answer to an ingress
 	// call's leg, on whether the recipient's gateway received the request
 	// (engine.ExchangeRecord.HubDelivered): "no", "yes" or "unknown". Absent
