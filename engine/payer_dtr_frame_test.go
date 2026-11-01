@@ -258,6 +258,7 @@ func TestPayerDTR_LegacyEnvelopeRefused400(t *testing.T) {
 // names must be the authorized subject. Each rejection row changes one thing
 // in a request the control answers.
 func TestPayerDTR_PackageSubjectBound(t *testing.T) {
+	t.Parallel()
 	d := newDTRPayer(t)
 	pkg := func(params ...string) []byte {
 		return dtrParams(append(params, questionnaireParam)...)
@@ -324,6 +325,7 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 // payer identity mapping on, with only the payer identifier tokens of every
 // coverage changed.
 func TestPayerDTR_FramedParametersPostedExactly(t *testing.T) {
+	t.Parallel()
 	backend := shnsdk.PayerIdentifier{System: "urn:example:payer-backend", Value: "BACKEND-7"}
 	for _, tc := range []struct {
 		fixture string

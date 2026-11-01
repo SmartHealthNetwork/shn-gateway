@@ -124,6 +124,7 @@ func inquire(gw *Gateway, continuation string) (*httptest.ResponseRecorder, []Ob
 // certified at the pinned line (certifiedBuilds), so it is built natively
 // there instead (TestResumeBuildsACertifiedInquiryAtThePinUnlanedAtNone).
 func TestResumeCarriesWhenThePinnedLineHasNoReach(t *testing.T) {
+	t.Parallel()
 	for _, trigger := range pinTriggers {
 		for _, level := range allLevels {
 			if !payloadChecksConsumeLanes(level) {
@@ -166,6 +167,7 @@ func TestResumeCarriesWhenThePinnedLineHasNoReach(t *testing.T) {
 // lane. Nothing is carried and nothing is recorded as a carry, with or without
 // REQUIRE_SHARED_LINE, since the pinned line is reached.
 func TestResumeBuildsACertifiedInquiryAtThePinUnlanedAtNone(t *testing.T) {
+	t.Parallel()
 	for _, trigger := range pinTriggers {
 		for _, requireShared := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/requireShared=%v", trigger.name, requireShared), func(t *testing.T) {
@@ -198,6 +200,7 @@ func TestResumeBuildsACertifiedInquiryAtThePinUnlanedAtNone(t *testing.T) {
 // checks consume lanes. At none the certified inquiry reaches its pinned line,
 // so there is nothing to refuse.
 func TestResumeRefusesUnderRequireSharedLine(t *testing.T) {
+	t.Parallel()
 	for _, trigger := range pinTriggers {
 		for _, level := range allLevels {
 			if !payloadChecksConsumeLanes(level) {
@@ -223,6 +226,7 @@ func TestResumeRefusesUnderRequireSharedLine(t *testing.T) {
 // cannot be resolved: a continuation this gateway does not hold, and a payer
 // the registry no longer resolves. Neither is carried.
 func TestResumeStillRefusesAnUnresolvablePendOrPeer(t *testing.T) {
+	t.Parallel()
 	trigger := pinTriggers[0]
 	for _, level := range allLevels {
 		t.Run("unknown continuation/"+level.String(), func(t *testing.T) {
@@ -364,6 +368,7 @@ func TestAmendmentDTRLineFollowsTheCarry(t *testing.T) {
 // so they never reach this selection and are never rebuilt at another line. A
 // new caller here must show it carries no participant's bytes.
 func TestResumeCarryServesOnlyFollowUpsTheGatewayBuilds(t *testing.T) {
+	t.Parallel()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

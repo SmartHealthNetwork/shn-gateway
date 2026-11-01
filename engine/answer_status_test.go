@@ -134,6 +134,7 @@ func TestCRDIngress_WritesTheAnswersStatus(t *testing.T) {
 // provider's system could be written the status or the bytes, not both. The
 // answer is not read, at every level, and the refusal is integrity.
 func TestCRDIngress_NoContentWithABodyIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env := newInProcessExchange(t)

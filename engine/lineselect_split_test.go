@@ -71,6 +71,7 @@ var chainRunners = map[string]bool{
 //   - lineselect.go declares arm (1), the carry or refusal after it, the
 //     resume pin's own arm and relayOriginationError.
 func TestLineSelection_ArmsOneAndTwoAreCoreTheChainIsModuleTwo(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {

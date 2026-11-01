@@ -265,6 +265,7 @@ func referenceAt(t *testing.T, resource json.RawMessage, path ...string) string 
 // every other reference to an entry is); and a request about an order naming
 // no clinician is byte for byte what the authored builder makes.
 func TestModuleOnePAS_CarriesTheOrdersRequester(t *testing.T) {
+	t.Parallel()
 	sor := requesterSoR(nil)
 	g := &Gateway{cfg: Config{SoR: sor}}
 	for _, absolute := range []bool{false, true} {
@@ -404,6 +405,7 @@ func TestModuleOnePAS_CarryRefusesWhatTheOrderDoesNotName(t *testing.T) {
 // clinician, because the reference resolves, and refuses the same request
 // without the carry: the guard is not relaxed, the reference is resolved.
 func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
+	t.Parallel()
 	sor := requesterSoR(nil)
 	g := &Gateway{cfg: Config{SoR: sor, OriginationProfile: "provider-data"}}
 	// A request the guard closes today (as its own rows build it), whose
@@ -510,6 +512,7 @@ func guardInputs(t *testing.T, qr string) shnsdk.ConformantClaimInputs {
 // entry are, and the evidence guard closes the request, for the submission and
 // for the amendment.
 func TestModuleOnePAS_AuthorNamingTheCarriedClinician(t *testing.T) {
+	t.Parallel()
 	sor := requesterSoR(nil)
 	g := &Gateway{cfg: Config{SoR: sor, OriginationProfile: "provider-data"}}
 	qr := strings.Replace(contextQR, `"status":"in-progress",`, `"status":"in-progress","author":{"reference":"Practitioner/prac-2"},`, 1)

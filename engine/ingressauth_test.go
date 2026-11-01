@@ -254,6 +254,7 @@ func newTestRSAClientKey(t *testing.T) (*rsa.PrivateKey, []byte) {
 // (ParseRSAPublicKeyFromPEM + RS384 alg-pinning) that .well-known/smart-configuration
 // advertises as supported.
 func TestIngressTokenEndpoint_RS384Client(t *testing.T) {
+	t.Parallel()
 	key, pub := newTestRSAClientKey(t)
 	s := newTestAuthServer(t, "rs-client", pub, "RS384")
 	now := ingressFixedClock()()
@@ -578,6 +579,7 @@ func TestIngressToken_SameJTIDifferentClientsBothFirstUse(t *testing.T) {
 }
 
 func TestIngressBearer_KidPreChecksNeverReachStore(t *testing.T) {
+	t.Parallel()
 	_, pub := newTestClientKey(t)
 	eph, err := newEphemeralKeyStore()
 	if err != nil {
@@ -658,9 +660,9 @@ func TestIngressToken_KeyStoreDown_503NoStore_DirectBearerStillWorks(t *testing.
 // in this process only — and must NOT be told that when a shared key store was
 // supplied or the ingress is off.
 //
-// It captures the process-global logger. That is safe here only because no test in
-// gateway/engine calls t.Parallel(), so nothing else writes to the logger while the
-// capture is installed.
+// It captures the process-global logger. That is safe here only because this test is
+// serial and serial tests finish before any parallel test starts, so nothing else
+// writes to the logger while the capture is installed.
 func TestIngressEphemeralKeyBootLine(t *testing.T) {
 	const want = "ingress bearer key is ephemeral (no SHN_STORE_DATABASE_URL): run a single reachable instance"
 	capture := func(build func()) string {

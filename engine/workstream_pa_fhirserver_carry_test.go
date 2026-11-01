@@ -222,6 +222,7 @@ func wantOnlyTheDeclaredEdits(t *testing.T, ehr, sent []byte) {
 // Organization the search included resolves the payor, so it is not read
 // again. Everything else in the request is the EHR's, byte for byte.
 func TestCRDIngressCarriesTheCoverageReadThroughFHIRServer(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			e := newEHRServer(t, nil)
@@ -255,6 +256,7 @@ func TestCRDIngressCarriesTheCoverageReadThroughFHIRServer(t *testing.T) {
 // read is carried as an include entry, byte for byte as the server answered
 // the read, at every level.
 func TestCRDIngressCarriesThePayorOrganizationItRead(t *testing.T) {
+	t.Parallel()
 	org := `{ "resourceType" : "Organization", "id" : "o1", "identifier" : [ { "system" : "urn:oid:2.16.840.1.113883.6.300", "value" : "00001" } ], "name" : "Payer é" }`
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -394,6 +396,7 @@ func TestCRDIngressCarriesNothingWithoutTheRead(t *testing.T) {
 // is not filled (the request is refused as it always was, and nothing is read
 // or sent).
 func TestCRDIngressNeverReplacesTheEHRsCoverage(t *testing.T) {
+	t.Parallel()
 	sentCoverage := `{"resourceType":"Coverage","id":"ehr-c","beneficiary":{"reference":"Patient/` + strangerMember + `"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}`
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -630,6 +633,7 @@ func TestWithFHIRServerTrustForTest(t *testing.T) {
 // slash); a reference on another base, and a relative one, keep a urn:uuid.
 // Every other entry is a urn:uuid, and nothing else names the server.
 func TestCRDIngressCarriesAnAbsolutePayorReferenceOnTheFHIRServer(t *testing.T) {
+	t.Parallel()
 	const base = "https://example.com:8443/fhir"
 	org := payorOrganization("o1", "00001")
 	searchWith := func(ref, orgFullURL string) string {
@@ -812,6 +816,7 @@ func TestFHIRServerCarriedEntriesFollowRouting(t *testing.T) {
 // patient's record (or opaque content), so the value the carry writes is
 // refused by the fill fence, 502 at every level, and nothing is sent.
 func TestCRDIngressCarryFenceRefusesTheOrganizationRead(t *testing.T) {
+	t.Parallel()
 	ident := `"identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]`
 	for name, row := range map[string]struct {
 		org string
@@ -844,6 +849,7 @@ func TestCRDIngressCarryFenceRefusesTheOrganizationRead(t *testing.T) {
 // no Organization, even one its payor also references and the answer holds
 // (routing never read it), at every level.
 func TestCRDIngressCarriesNoOrganizationRoutingDidNotResolve(t *testing.T) {
+	t.Parallel()
 	search := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"c0","status":"active","beneficiary":{"reference":"Patient/` + strangerMember + `"},` +
 		`"payor":[{"reference":"Organization/o9","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}},{"reference":"Organization/o2"}]}},` +
 		`{"resource":{"resourceType":"Organization","id":"o9","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"OTHER"}]}},` +
@@ -872,6 +878,7 @@ func TestCRDIngressCarriesNoOrganizationRoutingDidNotResolve(t *testing.T) {
 // resolves to (routing drops it, then reads the Organization), so the
 // Organization routing read is carried, under that reference as its fullUrl.
 func TestCRDIngressCarriesThePayorAnUnchosenCoverageShadows(t *testing.T) {
+	t.Parallel()
 	const base = "https://example.com:8443/fhir"
 	ref := base + "/Organization/o1"
 	search := `{"resourceType":"Bundle","type":"searchset","entry":[` +

@@ -99,6 +99,7 @@ func codedIngressPost(env *inProcessExchange, route, coding string, body []byte)
 // nothing. It is a network rule: the bytes cannot be read as their sender
 // declared them.
 func TestIngress_AnUnsupportedCodingIs415(t *testing.T) {
+	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
 		for _, level := range allLevels {
 			for _, coding := range []string{"br", "gzip, gzip"} {
@@ -167,6 +168,7 @@ var codedLimitBodies = func() func(*testing.T, []byte) ([]byte, []byte) {
 // read whole. A body that is not a whole gzip stream is the 400 any body that
 // cannot be read is.
 func TestIngress_AGzipBodyIsReadDecodedUpToTheLimit(t *testing.T) {
+	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
 		t.Run(route, func(t *testing.T) {
 			body := ingressLimitBody(route)
@@ -202,6 +204,7 @@ func TestIngress_AGzipBodyIsReadDecodedUpToTheLimit(t *testing.T) {
 // and calls nothing; the same envelope gzip-coded is carried, answered as
 // the uncoded one is.
 func TestInbound_ContentCoding(t *testing.T) {
+	t.Parallel()
 	answer := eligResponses(t, "Patient/"+dtrFrameMember)
 	for _, level := range allLevels {
 		t.Run("unsupported/"+level.String(), func(t *testing.T) {

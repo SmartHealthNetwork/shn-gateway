@@ -17,6 +17,7 @@ import (
 // Hub reaches the caller as what it was, not one
 // generic 502 "hub routing failed".
 func TestIngressReportsTheRealOutcomeBehindTheHub(t *testing.T) {
+	t.Parallel()
 	notDelivered := map[string]string{HubDeliveredHeader: "no"}
 	type answer struct {
 		status int
@@ -235,6 +236,7 @@ func TestIngressReadsANotActedValueItDoesNotKnowSafely(t *testing.T) {
 // condition (another status, another delivery value, another header value) is
 // reported as it was before.
 func TestIngressReportsTheRecipientsNotActedRefusal(t *testing.T) {
+	t.Parallel()
 	const reason = `{"error":"forward to recipient failed: the recipient does not know the sender yet and took no action; resend with a freshly sealed envelope"}`
 	notActed := func(status int, delivered, value, retryAfter string) http.Header {
 		h := http.Header{}

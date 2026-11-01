@@ -106,6 +106,7 @@ func (r e08Result) wantRefused(t *testing.T, answer []byte) {
 // with no finding when module 3 is absent or at none, carried and recorded at
 // observe, and refused at structural (its defect is structural) and strict.
 func TestDTRIngress_APackageThatIsNotABundleIsJudgedAtItsNamesLines(t *testing.T) {
+	t.Parallel()
 	for _, fam := range []struct {
 		name   string
 		answer []byte
@@ -159,6 +160,7 @@ func TestDTRIngress_APackageThatIsNotABundleIsJudgedAtItsNamesLines(t *testing.T
 // it is recorded at observe and refused at structural and strict, the finding
 // naming that family's lines.
 func TestDTRIngress_AnswerNamingBothFamiliesIsJudgedAtEach(t *testing.T) {
+	t.Parallel()
 	q, qr := "Questionnaire", "QuestionnaireResponse"
 	notBundle20, notBundle22 := e08Answer("PackageBundle", nil, true), e08Answer("packagebundle", nil, true)
 	ok20, ok22 := e08Answer("PackageBundle", []string{q}, false), e08Answer("packagebundle", []string{q, qr}, false)
@@ -205,6 +207,7 @@ func TestDTRIngress_AnswerNamingBothFamiliesIsJudgedAtEach(t *testing.T) {
 // carried; routed at 2.0, where it fails, it is carried with a finding naming
 // 2.0 and the line it passed.
 func TestDTRIngress_AnswerNamingNoFamilyIsJudgedAtEveryLine(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("", nil, false, "outcome")
 	for _, c := range dtrAnswerCheckLevels() {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,6 +232,7 @@ func TestDTRIngress_AnswerNamingNoFamilyIsJudgedAtEveryLine(t *testing.T) {
 // With module 2 on it is renamed into the 2.2 provider's names, as E-08 renames an
 // answer valid at either line of its family, and carried at every level.
 func TestDTRIngress_AnswerValidAtTwoPointOneAloneIsCarried(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("", nil, false, "operationOutcome")
 	for _, c := range dtrAnswerCheckLevels() {
 		t.Run(c.name, func(t *testing.T) {
@@ -251,6 +255,7 @@ func TestDTRIngress_AnswerValidAtTwoPointOneAloneIsCarried(t *testing.T) {
 // An answer valid at the routed line is carried at every level with no finding,
 // whether or not module 2 is on: the ingress's check asks nothing more of it.
 func TestDTRIngress_AnswerValidAtTheRoutedLineIsCarriedUnremarked(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("packagebundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
 	for _, module2 := range []bool{true, false} {
 		for _, level := range allLevels {

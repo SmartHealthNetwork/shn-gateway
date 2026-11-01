@@ -143,6 +143,7 @@ func TestOriginatedCRD_RoutingReadRecorded(t *testing.T) {
 }
 
 func TestOriginatedCRD_RoutesAndCarriesTheRoutingChoice(t *testing.T) {
+	t.Parallel()
 	cancelled := originCoverage("cov-0", "cancelled", "pay-1")
 	active := originCoverage("cov-1", "active", "pay-1")
 	staleOther := originCoverage("cov-2", "cancelled", "pay-2")
@@ -240,6 +241,7 @@ func TestOriginatedCRD_RoutesAndCarriesTheRoutingChoice(t *testing.T) {
 // originated request however that Coverage writes the reference: relatively,
 // by an absolute URL ending in it, or with a version.
 func TestOriginatedCRD_DropsAStalePayorHoweverReferenced(t *testing.T) {
+	t.Parallel()
 	active := originCoverage("cov-1", "active", "pay-1")
 	for name, ref := range map[string]string{
 		"absolute":           "https://ehr.example/fhir/Organization/pay-2",

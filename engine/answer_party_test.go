@@ -254,6 +254,7 @@ func answerBase(t *testing.T, doc map[string]any) string {
 }
 
 func TestDependentSubmitAnswer_PartyIsNoSecondPatient(t *testing.T) {
+	t.Parallel()
 	if pasResponseSubjectMismatch([]byte(assemblyRealPending)) != nil {
 		t.Fatal("fixture: the base answer must bind")
 	}
@@ -296,6 +297,7 @@ func TestDependentSubmitAnswer_PartyIsNoSecondPatient(t *testing.T) {
 // a Coverage; a $submit answer's graph closure refuses it whether or not the
 // Coverage has a party.
 func TestDependentAnswer_OnlyThePartysIDMustBeUnique(t *testing.T) {
+	t.Parallel()
 	for name, extra := range map[string][]any{
 		"another contained resource without an id": {map[string]any{"resourceType": "Organization", "name": "Employer"}},
 		"two other contained resources sharing an id": {
@@ -384,6 +386,7 @@ func TestDependentSubmitAnswer_RefusalNamesTheContainedPatient(t *testing.T) {
 }
 
 func TestDependentInquiryAnswer_PartyIsNoSecondPatient(t *testing.T) {
+	t.Parallel()
 	for _, fixture := range []string{"pas-inquiry-response-2.0.json", "pas-inquiry-response-2.2.json"} {
 		base := inquiryFixture(t, fixture)
 		if validatePASInquiryAnswer(base).Status != 0 || !consistentPASInquiryAnswerSubjects(base) {

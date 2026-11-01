@@ -255,6 +255,7 @@ func TestPASResultCertification(t *testing.T) {
 // pre-commit exit rolls back. It drives an answer the gateway PRODUCED (a test
 // payload), because that is the arm where certification can still refuse.
 func TestPASInboundCommitOrdering(t *testing.T) {
+	t.Parallel()
 	assembled := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
 		for _, mode := range []string{"valid", "validator reject", "validator unavailable", "cancelled", "seal failure", "store failure", "responder error", "bare operation"} {

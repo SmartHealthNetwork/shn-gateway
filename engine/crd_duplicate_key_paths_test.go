@@ -27,6 +27,7 @@ import (
 // refusal the exchange records is the integrity rule, with no finding, and
 // the answer goes no further.
 func TestCRDAnswerRepeatedMemberRefusesOnEveryPathAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	const member = `the JSON member "cards" in the top-level object`
 	paths := []struct {
 		name string
@@ -189,6 +190,7 @@ func certifyCDSHooksAnswerReferrers(t *testing.T, files []*ast.File, info *types
 }
 
 func TestCRDAnswerCertifiersAreTheThreePaths(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	files := parsePackageSources(t, fset, ".", nil)
 	if got := certifyCDSHooksAnswerReferrers(t, files, typedPackage(t, fset, files)); !slices.Equal(got, crdAnswerCertifiers) {

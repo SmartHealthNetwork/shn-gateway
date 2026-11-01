@@ -15,6 +15,7 @@ import (
 // submission says the payer answered, so the requester does not submit twice;
 // a refusal made before anything was forwarded does not.
 func TestPASRefusalAfterThePayerAnsweredSaysSo(t *testing.T) {
+	t.Parallel()
 	t.Run("the payer's answer refused at strict", func(t *testing.T) {
 		p := newLevelPayer(t, EnforcementStrict)
 		p.partner.respByPath[pasSubmitPath] = []byte(`{"resourceType":"ClaimResponse"}`)

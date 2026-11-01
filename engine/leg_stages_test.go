@@ -348,6 +348,7 @@ func (l timedClaim) ReleaseClaimUpdate(subjectPCI, related string) error {
 // A PAS update's ledger stage is the claim it takes on the authorization it
 // amends: exactly the claim's time.
 func TestExchangeRecord_LegStagesUpdateClaimExactly(t *testing.T) {
+	t.Parallel()
 	const claim = 17 * time.Millisecond
 	p, got := legStagesPayer(t, 0, 0, 0)
 	clock := &testClock{now: p.g.cfg.Clock()}
@@ -371,6 +372,7 @@ func TestExchangeRecord_LegStagesUpdateClaimExactly(t *testing.T) {
 // release is the ledger's write, so the ledger stage is exactly the claim and
 // the release.
 func TestExchangeRecord_LegStagesUpdateReleaseExactly(t *testing.T) {
+	t.Parallel()
 	const claim, release = 17 * time.Millisecond, 19 * time.Millisecond
 	p, got := legStagesPayer(t, 0, 0, 0)
 	clock := &testClock{now: p.g.cfg.Clock()}
@@ -626,6 +628,7 @@ func TestExchangeRecord_LegStagesInquiryExactly(t *testing.T) {
 // that came back after the request ended is cancelled: the requester had
 // gone, whatever the call answered.
 func TestExchangeRecord_AnswerErrorClassPrecedence(t *testing.T) {
+	t.Parallel()
 	t.Run("a client timeout", func(t *testing.T) {
 		p, got := newRecordingLevelPayer(t, EnforcementObserve)
 		p.g.cfg.Client = &http.Client{Timeout: 30 * time.Millisecond, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -59,6 +59,7 @@ func (p *levelPayer) wantSkippedWhen(t *testing.T, leg, corr, rule string, refus
 // The bundle's own shape and consistency. The subject is
 // Claim.patient.
 func TestLevelPayerPASSubmit_RequestContent(t *testing.T) {
+	t.Parallel()
 	base := pasIngressBundle("00001", "")
 	rows := map[string]struct {
 		body   string
@@ -118,6 +119,7 @@ func unattestedItems(t *testing.T) map[string]struct{ qr, msg string } {
 // content (qr.attestation): not checked at none, recorded and carried at
 // observe and structural, refused at strict.
 func TestLevelPayerPAS_UnattestedItem(t *testing.T) {
+	t.Parallel()
 	for kind, item := range unattestedItems(t) {
 		rows := map[string]struct {
 			leg, path string
@@ -141,6 +143,7 @@ func TestLevelPayerPAS_UnattestedItem(t *testing.T) {
 // The same fence on the amended re-POST: an amendment carrying an item
 // without its attestation is carried below strict and refused at strict.
 func TestLevelPayerPASUpdate_UnattestedItem(t *testing.T) {
+	t.Parallel()
 	for kind, item := range unattestedItems(t) {
 		base, related := updateBundle(t)
 		body := bytes.Replace(base, []byte(`"entry":[`), []byte(`"entry":[`+item.qr+`,`), 1)
@@ -208,6 +211,7 @@ func (p *levelPayer) seedPend(t *testing.T, corr string) {
 
 // The FR-32 attribution of the amendment's supplemental evidence.
 func TestLevelPayerPASUpdate_Provenance(t *testing.T) {
+	t.Parallel()
 	missing, related := updateBundle(t, "Provenance")
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -243,6 +247,7 @@ func updateBundleSetting(t *testing.T, rt, key string, value any) []byte {
 // shape: below strict it is forwarded as sent and the FR-32 check reads what
 // fit; strict refuses with the status and body it has always given.
 func TestLevelPayerPASUpdate_WrongTypedContent(t *testing.T) {
+	t.Parallel()
 	_, related := updateBundle(t)
 	rows := map[string]struct {
 		body []byte
@@ -268,6 +273,7 @@ func TestLevelPayerPASUpdate_WrongTypedContent(t *testing.T) {
 // payer side too; a Patient entry's own id is a patient identity and must
 // read at every level.
 func TestLevelPayerPASInquire_WrongTypedEntryID(t *testing.T) {
+	t.Parallel()
 	base := inquiryBundle("MBR-COVERED", "", "TRN-1", "72148")
 	coverageID := bytes.Replace(base, []byte(`"resourceType":"Coverage",`), []byte(`"resourceType":"Coverage","id":7,`), 1)
 	if bytes.Equal(coverageID, base) {
@@ -326,6 +332,7 @@ func pasAnswerRows(t *testing.T) map[string]struct {
 // On $submit: below strict the payer's answer is
 // relayed exactly and nothing is written from it; strict refuses as before.
 func TestLevelPayerPASSubmit_AnswerContent(t *testing.T) {
+	t.Parallel()
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	for name, row := range pasAnswerRows(t) {
 		for _, level := range allLevels {
@@ -350,6 +357,7 @@ func TestLevelPayerPASSubmit_AnswerContent(t *testing.T) {
 // (A note typed outside NoteType is recorded like any decision:
 // TestPASDecision_NoteOutsideNoteTypeIsRecorded.)
 func TestLevelPayerPAS_DecisionTheLedgerCannotHold(t *testing.T) {
+	t.Parallel()
 	// Still open (the decision reader): the reference payer's own denial shape (A2
 	// "Not Certified" on its submitted entry, testdata/brpayer-current/
 	// known-member-graph2/repeat-submission.response.json) with a top-level
@@ -394,6 +402,7 @@ func TestLevelPayerPAS_DecisionTheLedgerCannotHold(t *testing.T) {
 // the observer feed carries one pend.amendment-unbound on the update leg with
 // the reason as its detail, at every level.
 func TestLevelPayerPASUpdate_UnboundAmendmentOnTheFeed(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	updateReq, _ := updateBundle(t)
 	for _, level := range allLevels {
@@ -426,6 +435,7 @@ func (p *levelPayer) wantSideRecord(t *testing.T, leg, kind, detail string) {
 // On the amended re-POST: the amendment's claim is released,
 // so the prior authorization stays pended exactly as before the amendment.
 func TestLevelPayerPASUpdate_AnswerContent(t *testing.T) {
+	t.Parallel()
 	request, related := updateBundle(t)
 	rows := pasAnswerRows(t)
 	for _, name := range []string{"graph", "patient linkage"} {
@@ -459,6 +469,7 @@ func TestLevelPayerPASUpdate_AnswerContent(t *testing.T) {
 // answer was relayed unread finds no pend, since none was written, and reaches
 // the payer all the same: the ledger records and never gates.
 func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	foreign := bytes.Replace(approved, []byte(`"entry":[`), []byte(`"entry":[{"fullUrl":"http://localhost:8081/fhir/Patient/Other","resource":{"resourceType":"Patient","id":"Other"}},`), 1)
 	if bytes.Equal(foreign, approved) {
@@ -508,6 +519,7 @@ func TestLevelPayerPAS_DecidedAnswerRelayedUnreadWritesNothing(t *testing.T) {
 // A readable, bound answer is written as before at every level, and nothing
 // is skipped: the rows above are not vacuous.
 func TestLevelPayerPAS_ReadableAnswerIsWritten(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	for _, level := range allLevels {
 		t.Run("submit pended/"+level.String(), func(t *testing.T) {
@@ -582,6 +594,7 @@ func inquiryWith(t *testing.T, old, new string) []byte {
 // The inquiry's own shape and consistency. The subject is
 // Claim.patient.
 func TestLevelPayerInquire_RequestContent(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		body   []byte
 		rule   string
@@ -617,6 +630,7 @@ func (p *levelPayer) seedInquiryPend(t *testing.T, corr string) {
 // Each answer decides the seeded authorization if read, so an unchanged ledger
 // below strict is the skip, not an answer that decided nothing.
 func TestLevelPayerInquire_AnswerContent(t *testing.T) {
+	t.Parallel()
 	decided := decidedAnswer(t)
 	var b map[string]any
 	if err := json.Unmarshal(decided, &b); err != nil {
@@ -657,6 +671,7 @@ func TestLevelPayerInquire_AnswerContent(t *testing.T) {
 // A readable inquiry answer decides the seeded authorization at every level:
 // the rows above are not vacuous.
 func TestLevelPayerInquire_ReadableAnswerIsWritten(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := newLevelPayer(t, level)
@@ -678,6 +693,7 @@ func TestLevelPayerInquire_ReadableAnswerIsWritten(t *testing.T) {
 // inquiry's. The control shows the same inquiry deciding the authorization
 // when the $submit answer was read.
 func TestLevelPayerInquire_AfterSkippedSubmit(t *testing.T) {
+	t.Parallel()
 	// The payer's inquiry answer decides the authorization its pended $submit
 	// answer named: the same ClaimResponse identifier.
 	// The pended answer's ClaimResponse identifier, read from the fixture.
@@ -819,6 +835,7 @@ func submittedItemTrace(t *testing.T, submitted []byte) (system, value string) {
 // the routed line. On a payer with a validator for each line the answer is
 // carried at every level, and the line it was read at is recorded.
 func TestLevelPayerInquire_AnswerNamesNoClaim(t *testing.T) {
+	t.Parallel()
 	var b map[string]any
 	if err := json.Unmarshal(decidedAnswer(t), &b); err != nil {
 		t.Fatal(err)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -70,6 +71,7 @@ func eligBatchOf(t *testing.T, n int, member string) []byte {
 // provider's ingress before it is routed, and at the payer's gateway on the
 // records and forward paths before its system is called.
 func TestEligibilityBatch_OneMoreThanTheBoundIsRefused(t *testing.T) {
+	t.Parallel()
 	over := eligibilityBatchTooLarge(maxEligibilityBatch + 1)
 	if want := "the batch carries " + strconv.Itoa(maxEligibilityBatch+1) + " coverage eligibility requests; a gateway reads at most " +
 		strconv.Itoa(maxEligibilityBatch) + " in one batch, so send them in batches of at most " + strconv.Itoa(maxEligibilityBatch); over != want {
@@ -135,6 +137,7 @@ func TestEligibilityBatch_OneMoreThanTheBoundIsRefused(t *testing.T) {
 // maxEligibilityBatch requests in a Parameters, or with one of them in a FAIS
 // Bundle of its own, is read; one more in either is refused.
 func TestEligibilityBatch_TheBoundCountsRequestsInEveryForm(t *testing.T) {
+	t.Parallel()
 	requests := func(n int) [][]byte {
 		out := make([][]byte, n)
 		for i := range out {
@@ -165,13 +168,27 @@ func TestEligibilityBatch_TheBoundCountsRequestsInEveryForm(t *testing.T) {
 // The gateway's published documents state the bound the code enforces.
 func TestEligibilityBatch_TheDocsStateTheBound(t *testing.T) {
 	want := "reads at most " + strconv.Itoa(maxEligibilityBatch) + " in one batch"
-	for _, doc := range []string{"../docs/CONFIGURATION.md", "../CHANGELOG.md"} {
+	config, err := os.ReadFile("../docs/CONFIGURATION.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(config), want) {
+		t.Errorf("CONFIGURATION.md does not state %q", want)
+	}
+	// A change to the bound is recorded in a fragment until the release assembles it.
+	changelog, err := filepath.Glob("../changelog.d/*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stated bool
+	for _, doc := range append(changelog, "../CHANGELOG.md") {
 		b, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(b), want) {
-			t.Errorf("%s does not state %q", doc, want)
-		}
+		stated = stated || strings.Contains(string(b), want)
+	}
+	if !stated {
+		t.Errorf("neither CHANGELOG.md nor changelog.d states %q", want)
 	}
 }

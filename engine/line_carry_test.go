@@ -137,6 +137,7 @@ func runRequesterIngress(t *testing.T, row requesterIngress, level ConformanceEn
 // the payer's side receives exactly what it would from a pair that shares
 // that line, the answer is relayed, and the carry is recorded.
 func TestLineCarry_RequesterCarriesAPairWithNoSharedLine(t *testing.T) {
+	t.Parallel()
 	for name, row := range requesterIngresses() {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -195,6 +196,7 @@ func TestLineCarry_RequesterRefusesAPairWithNoSharedLineWhenRequired(t *testing.
 // The setting never changes a pair that shares a line: it routes exactly as
 // without it.
 func TestLineCarry_SettingLeavesASharedLineAlone(t *testing.T) {
+	t.Parallel()
 	for name, row := range requesterIngresses() {
 		t.Run(name, func(t *testing.T) {
 			off, offRec, _, _ := runRequesterIngress(t, row, EnforcementObserve, false, []string{row.contract + "@2.0"})
@@ -556,6 +558,7 @@ func TestLineCarry_BuiltInquiryAWalkWouldChange(t *testing.T) {
 // An answer stamped with another line than the leg routed is relayed by
 // default, at every level and on every provider ingress, and recorded.
 func TestLevelProviderIngress_AnswerStampedWithAnotherLineIsRelayedAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	for name, row := range providerIngressStampRows() {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -628,6 +631,7 @@ func TestExchangeRecord_AnswerStampedWithAnotherLine(t *testing.T) {
 // validate at is carried to its participant by default, exactly as a bare
 // request, at every level, and recorded; the setting refuses it as routing.
 func TestLineCarry_ResponderCarriesAClaimItCannotAnswerAt(t *testing.T) {
+	t.Parallel()
 	body := conformantCRD("MBR-COVERED", "72148")
 	for _, level := range allLevels {
 		for _, require := range []bool{false, true} {
@@ -739,6 +743,7 @@ func TestLineCarry_RecordNamesEachPlaceOnce(t *testing.T) {
 // none with its own forwards the request as sent by default, at every level,
 // exactly as to a partner that declares nothing, and records it.
 func TestLineCarry_NativeForwardCarriesAPartnerWithNoSharedLine(t *testing.T) {
+	t.Parallel()
 	body := conformantCRD("MBR-COVERED", "72148")
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {

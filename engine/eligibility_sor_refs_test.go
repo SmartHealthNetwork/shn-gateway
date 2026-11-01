@@ -98,6 +98,7 @@ func (s *prefetchSoR) readsOf() []string {
 // the request's patient, only to route. The request is carried byte-identical
 // and the payer's answer relayed, at every level.
 func TestEligibilityIngress_RoutesByReferencesTheSystemOfRecordHolds(t *testing.T) {
+	t.Parallel()
 	cms := eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)
 	payer := eligibilitySoRPayer(shnsdk.CMSPayerIdentity.Value)
 	byOrg := map[string]any{"reference": "Organization/payer-org"}
@@ -186,6 +187,7 @@ func TestEligibilityIngress_RoutesByReferencesTheSystemOfRecordHolds(t *testing.
 // that, read from the system of record or carried, name different payers are
 // refused, never picked. At every level, before anything is sent.
 func TestEligibilityIngress_ReferencesTheSystemOfRecordDoesNotResolve(t *testing.T) {
+	t.Parallel()
 	cms := eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)
 	byOrg := map[string]any{"reference": "Organization/payer-org"}
 	display := map[string]any{"display": "the plan"}

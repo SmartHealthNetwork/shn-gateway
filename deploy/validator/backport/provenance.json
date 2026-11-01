@@ -1,8 +1,9 @@
 {
-  "behavior": "Explicit profile absence always produces a canonical-specific error; resolver execution failures propagate unchanged. In-band profile policy is unchanged.",
+  "behavior": "Explicit profile absence always produces a canonical-specific error; resolver execution failures propagate unchanged. In-band profile policy is unchanged. The validator's regex guard runs on the calling thread and answers most of the spec's primitive regexes without the regex engine, verbatim from org.hl7.fhir.core 7.0.3; its 500 ms limit is unchanged.",
   "changed_class": "org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.class",
+  "changed_utilities_classes": "org/hl7/fhir/utilities/regex/",
   "compiler_image": "eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7",
-  "format": "explicit-profile-backport-v1",
+  "format": "validator-backport-v2",
   "hapi_sources": {
     "linux/amd64": {
       "hapi_source_child": "sha256:88489ad986f38d35ec0e216a0660db42cb55329275efdc5913dfe1d2f2afbe53",
@@ -22,15 +23,25 @@
     "linux/amd64": {
       "output_class_sha256": "51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5",
       "output_jar_sha256": "4e4404a651dd94da633c51aeef875bc555f6c1826e865f5a940cb022447b81b8",
-      "output_war_sha256": "33e6177c0a014cdaa0b9198aaa7633a76eb8a2dbaed07a13480242706fb6927e"
+      "output_regex_classes_sha256": "f4c175e9785c74f4f3cd99e6affffb022436d730687c9faab4d52312fadcd12b",
+      "output_utilities_jar_sha256": "0ab4627fa225da1afc9f5534866102a5faed57d1716419fefc92aefd041919f0",
+      "output_war_sha256": "b64dedc124ae04907b50e938825031f0620d525ce11a1d07e9505a4108662b4d"
     },
     "linux/arm64": {
       "output_class_sha256": "51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5",
       "output_jar_sha256": "4e4404a651dd94da633c51aeef875bc555f6c1826e865f5a940cb022447b81b8",
-      "output_war_sha256": "1d99e7b7eb22d7f2664eb192553ddb4c7a62ab6df0909c754ad57cb96f824c69"
+      "output_regex_classes_sha256": "f4c175e9785c74f4f3cd99e6affffb022436d730687c9faab4d52312fadcd12b",
+      "output_utilities_jar_sha256": "0ab4627fa225da1afc9f5534866102a5faed57d1716419fefc92aefd041919f0",
+      "output_war_sha256": "10c2d50e2bb630a744f0f068ed1b1055a4c6d5b361c922ea8777d1026e02cbfd"
     }
   },
   "patched_source_sha256": "d8914aa341cd9ebe2414ec8a06b48fe975780b0fc9c1355d1451f3fc1f7fccd9",
+  "primitive_regexes_source_sha256": "b0e595bf1ced4bc14fee48fa58bc4af8c3446b60c8a4d951a2ce3d93876b82c7",
+  "regex_timeout_source_sha256": "8372619facf152c831901c50ec3fe165e66047634bee039415ebcb7fb9cb43a0",
+  "regex_upstream_commit": "28e9fac6d79dd535a7d9ec4620bfa4543652aabf",
+  "regex_upstream_path": "org.hl7.fhir.utilities/src/main/java/org/hl7/fhir/utilities/regex/",
+  "regex_upstream_repository": "https://github.com/hapifhir/org.hl7.fhir.core",
+  "regex_upstream_tag": "7.0.3",
   "upstream_commit": "7ab4c7c7c49281496faa1b3c2498a652457669ae",
   "upstream_path": "hapi-fhir-validation/src/main/java/org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.java",
   "upstream_repository": "https://github.com/hapifhir/hapi-fhir",

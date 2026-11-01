@@ -98,6 +98,7 @@ func TestCatalogFromTaxonomy_RefusesAWrongWireName(t *testing.T) {
 // same, the answer goes out under the prefixed name, and the leg is recorded
 // on the observer feed under its flat name.
 func TestInbound_EitherLegNameIsTheSameLeg(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	updateReq, _ := updateBundle(t)
 	for _, level := range allLevels {

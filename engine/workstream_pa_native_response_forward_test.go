@@ -26,6 +26,7 @@ func errText(err error) string {
 // at every line, each returns exactly what the pasanswer reader returns, and
 // the constants and the cause list are pasanswer's.
 func TestDeprecatedReadersForwardToPasanswer(t *testing.T) {
+	t.Parallel()
 	encode := func(b map[string]any) []byte { raw, _ := json.Marshal(b); return raw }
 	open := assemblySmallGraph()
 	open["entry"] = open["entry"].([]any)[:1]

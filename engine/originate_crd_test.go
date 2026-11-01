@@ -361,6 +361,7 @@ func TestOriginatedCRD_NoCallbackFields(t *testing.T) {
 }
 
 func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
+	t.Parallel()
 	sor, _ := originSystem(t, prefetchMember)
 	_, _, order := originRecords(prefetchMember)
 	dsor, dorder := dispatchSystem(t)
@@ -412,7 +413,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 		})
 		rec := httptest.NewRecorder()
 		g.originateDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
-		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("the system of record's device history does not hold the dispatched order DeviceRequest/dr-5")) {
+		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("the system of record's device history does not hold the dispatched order DeviceRequest/dr-5 at a status the device history selects (active, on-hold, completed)")) {
 			t.Fatalf("got %d %s", rec.Code, rec.Body)
 		}
 		if n := len(payer.sent("crd-order-dispatch")); n != 0 {

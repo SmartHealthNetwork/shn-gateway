@@ -420,6 +420,7 @@ func crdIngressWithFindings(t *testing.T, level ConformanceEnforcement, body []b
 // own shape: strict refuses as it always has; below strict the request is
 // carried with the value as sent, recorded once at observe.
 func TestLevelCRDIngress_ValueOfWrongTypeOffTheSubjectPath(t *testing.T) {
+	t.Parallel()
 	base := conformantCRDRequest("MBR-COVERED")
 	for name, row := range map[string]struct{ old, new string }{
 		"hookInstance": {`"hookInstance":"hi-1"`, `"hookInstance":7`},

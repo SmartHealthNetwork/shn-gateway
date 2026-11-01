@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -18,7 +19,7 @@ import (
 // that matches its type's regex: it gave up on the regex in time. The text is
 // what the lane reported; the reading uses only the message id.
 func regexTimeoutIssue(expr string) shnsdk.Issue {
-	return regexErr(regexCheckCouldNotRun, expr, `Exception evaluating regex '\S*' on type uri: Regex evaluation timed out after `)
+	return regexErr(validatorissue.RegexException, expr, `Exception evaluating regex '\S*' on type uri: Regex evaluation timed out after `)
 }
 
 const regexTimeoutURL = "Bundle.entry[0].resource/*ClaimResponse/1764*/.item[0].adjudication[0].extension[0].extension[0].url"
@@ -46,6 +47,7 @@ func regexResult(issues ...shnsdk.Issue) shnsdk.Result {
 func TestClassifyFHIRRegexCheckCouldNotRun(t *testing.T) {
 	bundle := []byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}},{"resource":{"resourceType":"Patient"}}]}`)
 	timeout := regexTimeoutIssue(regexTimeoutURL)
+	profileTimeout := regexErr(validatorissue.RegexTimedOut, regexTimeoutURL, "The regex '[0-9]+' could not be executed")
 	structural := regexErr("Validation_VAL_Profile_Minimum", "Bundle.entry[1].resource", "Patient.name: minimum required = 1, but only found 0")
 	deeper := regexErr("Terminology_TX_NoValid_1_CC", "Bundle.entry[1].resource.maritalStatus", "x")
 	summary := regexErr(summaryProfileNoMatch, "Bundle.entry[0].resource", "did not match")
@@ -56,13 +58,17 @@ func TestClassifyFHIRRegexCheckCouldNotRun(t *testing.T) {
 	}{
 		{"the timeout alone", regexResult(timeout), "unavailable"},
 		{"the timeout twice", regexResult(timeout, regexTimeoutIssue("Bundle.entry[1].resource.id")), "unavailable"},
+		{"a profile regex that timed out", regexResult(profileTimeout), "unavailable"},
+		{"a profile regex that timed out beside a deeper error", regexResult(profileTimeout, deeper), "unavailable"},
+		{"a profile regex that timed out beside a structural error", regexResult(profileTimeout, structural), "structural"},
+		{"a fatal profile regex time-out", regexResult(shnsdk.Issue{Severity: "fatal", MessageID: validatorissue.RegexTimedOut, Expression: []string{regexTimeoutURL}}), "structural"},
 		{"the timeout beside a deeper error", regexResult(timeout, deeper), "unavailable"},
 		{"the timeout beside a structural error", regexResult(timeout, structural), "structural"},
 		{"the timeout beside a deeper and a structural error", regexResult(deeper, timeout, structural), "structural"},
 		{"a summary over the timed-out entry", regexResult(summary, timeout), "unavailable"},
 		{"a summary over an entry with the timeout and a structural error", regexResult(summary, timeout, regexErr("Validation_VAL_Profile_Minimum", "Bundle.entry[0].resource", "x")), "structural"},
 		{"a summary on another entry than the timeout", regexResult(regexErr(summaryProfileNoMatch, "Bundle.entry[1].resource", "did not match"), timeout), "structural"},
-		{"a fatal issue with the id", regexResult(shnsdk.Issue{Severity: "fatal", Code: "processing", MessageID: regexCheckCouldNotRun, Expression: []string{regexTimeoutURL}}), "structural"},
+		{"a fatal issue with the id", regexResult(shnsdk.Issue{Severity: "fatal", Code: "processing", MessageID: validatorissue.RegexException, Expression: []string{regexTimeoutURL}}), "structural"},
 		{"the text without the id", regexResult(regexErr("", regexTimeoutURL, timeout.Diagnostics)), "structural"},
 	} {
 		for _, line := range []string{"2.0", "2.1", "2.2"} {
@@ -88,9 +94,10 @@ func TestCertificationRegexCheckCouldNotRun(t *testing.T) {
 		reason    string
 	}{
 		{"the timeout alone", regexResult(timeout), true, "a primitive regex check could not run"},
+		{"a profile regex that timed out", regexResult(regexErr(validatorissue.RegexTimedOut, regexTimeoutURL, "x")), true, "a primitive regex check could not run"},
 		{"the timeout and its entry's summary", regexResult(regexErr(summaryProfileNoMatch, "Bundle.entry[0].resource", "did not match"), timeout), true, "a primitive regex check could not run"},
 		{"the timeout beside a structural error", regexResult(timeout, structural), false, ""},
-		{"a fatal issue with the id", regexResult(shnsdk.Issue{Severity: "fatal", MessageID: regexCheckCouldNotRun, Expression: []string{regexTimeoutURL}}), false, ""},
+		{"a fatal issue with the id", regexResult(shnsdk.Issue{Severity: "fatal", MessageID: validatorissue.RegexException, Expression: []string{regexTimeoutURL}}), false, ""},
 	} {
 		systems, regex, ok := certificationUnchecked(tc.res, bundle, "2.1", "")
 		if ok != tc.unchecked {

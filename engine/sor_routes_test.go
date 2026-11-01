@@ -373,6 +373,7 @@ func TestSoRNativeHandlersStopBeforeResponder(t *testing.T) {
 // requester's FHIR ingress relays that answer as sent
 // (TestFHIRIngressPreservesFramedUpstreamFailure).
 func TestSoRFailureFramedToRequester(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []SoRFailureKind{SoRAuthenticationFailed, SoRUnavailable} {
 		for _, route := range sorFailureRoutes {
 			t.Run(string(kind)+"/"+route, func(t *testing.T) {

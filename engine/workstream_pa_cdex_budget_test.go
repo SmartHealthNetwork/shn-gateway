@@ -35,6 +35,7 @@ func holdingAllBut(t *testing.T, g *Gateway, room int64) {
 }
 
 func TestCDexIngress_TheBudgetRefusesASubmissionThatDoesNotFit(t *testing.T) {
+	t.Parallel()
 	body := cdexSubmissionBody("MBR-COVERED", cdexPayerCMS)
 	size := int64(len(body))
 	unstated := func(r *http.Request) { r.ContentLength = -1 }
@@ -163,6 +164,7 @@ func TestCDexIngress_NoCredentialNeverReachesTheBudget(t *testing.T) {
 // Every way a submission ends gives its bytes back: refused for its content or
 // its size, and failed at the Hub.
 func TestCDexIngress_EveryPathReleasesTheBudget(t *testing.T) {
+	t.Parallel()
 	for name, body := range map[string][]byte{
 		"not a submission": []byte("{"),
 		"over the ceiling": cdexSubmissionOf(t, shnsdk.MaxAttachmentBytes+1),
@@ -209,6 +211,7 @@ func TestInbound_NoAssertionNeverReachesTheBudget(t *testing.T) {
 // The line is exact: an envelope of exactly the network's limit for other legs
 // is never counted, and one byte more is, with a stated length or without one.
 func TestInbound_TheBudgetsLineIsExact(t *testing.T) {
+	t.Parallel()
 	padTo := func(n int) func([]byte) []byte {
 		return func(raw []byte) []byte { return append(raw, bytes.Repeat([]byte(" "), n-len(raw))...) }
 	}
@@ -249,6 +252,7 @@ func TestInbound_TheBudgetsLineIsExact(t *testing.T) {
 // payer gateway's routing refusal, the payer's system not called. An envelope
 // at or under that line is never counted.
 func TestInbound_TheBudgetRefusesALargeEnvelopeThatDoesNotFit(t *testing.T) {
+	t.Parallel()
 	// A large envelope here is a small one padded past the line: the budget
 	// reads only its length, and sealing a large one at every level is dear.
 	const large = 9 << 20

@@ -33,7 +33,7 @@ func ScenarioRouteInput(p shnsdk.DiscoveryScenarioPersona, amend bool, extra map
 	for k, v := range extra {
 		body[k] = v
 	}
-	for _, k := range []string{"member", "order", "claimFacts", "certificationType"} {
+	for _, k := range []string{"member", "order", "claimFacts", "certificationType", "reportType"} {
 		if _, clash := extra[k]; clash {
 			return nil, fmt.Errorf("scenariodriver: route input key %q is the persona's statement, not the caller's", k)
 		}
@@ -59,6 +59,9 @@ func ScenarioRouteInput(p shnsdk.DiscoveryScenarioPersona, amend bool, extra map
 			return nil, fmt.Errorf("%w: %s/%s persona %s states no certificationType for its amendment", ErrNoScenarioPersona, p.Scenario, p.Lane, p.MemberID)
 		}
 		body["certificationType"] = p.Amendment.CertificationType
+		if p.Amendment.ReportType != nil {
+			body["reportType"] = p.Amendment.ReportType
+		}
 	}
 	return body, nil
 }

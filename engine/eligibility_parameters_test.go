@@ -24,6 +24,7 @@ func eligibilityWithOtherParameter(cer []byte) []byte {
 // the patient, so only its members, and every parameter's name, are read by
 // their exact names (TestEligibilityIngress_RefusesWhatIsNoEligibilityRequest).
 func TestEligibilityParameters_OtherParametersAreCarried(t *testing.T) {
+	t.Parallel()
 	payerBody := eligibilityWithOtherParameter(eligibilityRequest(t, dtrFrameMember))
 	for _, level := range eligibilityLevels {
 		t.Run("records/"+level.String(), func(t *testing.T) {
@@ -61,6 +62,7 @@ func TestEligibilityParameters_OtherParametersAreCarried(t *testing.T) {
 // on the records and forward paths, before the payer's system, at every
 // level.
 func TestEligibilityParameters_NamesAndTheResourceAreReadExactly(t *testing.T) {
+	t.Parallel()
 	cer := string(eligibilityRequest(t, dtrFrameMember))
 	const noBind = `: member names are case-sensitive, so the request names no patient to bind`
 	for name, row := range map[string]struct{ body, want string }{

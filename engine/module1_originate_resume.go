@@ -455,12 +455,14 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			PriorClaim:        st.submitted.prior,
 			// The payer's own pend: the amended QR is linked to the items it
 			// asks the QR for, and to no other.
-			Pend: st.submitted.pendFor(targetLine),
+			Pend:       st.submitted.pendFor(route),
+			ReportType: reportTypeFor(route, amend.reportType),
 		}, st.requester)
 		if err != nil {
 			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
+		recordReportTypeNotCarried(ctx, amend.reportType, updateBundle)
 		// Carry-intact guard: BEFORE the chain runs (pasStep2122Up's restore cannot itself tell
 		// "never carried" from "carried, then stripped"), refuse a payload that no
 		// longer bears content THIS pend's own loss record declares carried.
@@ -743,12 +745,14 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			PriorClaim:        st.submitted.prior,
 			// The payer's own pend: the amended QR is linked to the items it
 			// asks the QR for, and to no other.
-			Pend: st.submitted.pendFor(targetLine),
+			Pend:       st.submitted.pendFor(route),
+			ReportType: reportTypeFor(route, amend.reportType),
 		}, st.requester)
 		if err != nil {
 			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
+		recordReportTypeNotCarried(ctx, amend.reportType, updateBundle)
 		// The same pre-chain carry-intact guard completeClinician's sibling
 		// leg runs — both resume sites, or the guard is only half wired.
 		pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}

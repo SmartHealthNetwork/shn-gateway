@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -117,6 +118,9 @@ func PutGlobalArtifact(ctx context.Context, base string, v shnsdk.Validator, rty
 	res, verr := v.Validate(ctx, body, "")
 	if verr != nil {
 		return fmt.Errorf("$validate %s/%s: %w", rtype, id, verr)
+	}
+	if validatorissue.OnlyCouldNotRun(res) {
+		return fmt.Errorf("$validate %s/%s: the check could not run: %v", rtype, id, res.Issues)
 	}
 	if !res.Valid {
 		return fmt.Errorf("%s/%s failed validation: %v", rtype, id, res.Issues)

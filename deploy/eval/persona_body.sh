@@ -30,7 +30,8 @@ jq -ce --arg s "$scenario" --arg l "$lane" --argjson amend "$amend" --argjson ke
           + (if $amend == 1 then
                (if (($p.amendment.certificationType.code // "") == "")
                  then error("the descriptor persona \($p.memberId) states no certificationType for its amendment")
-                 else {certificationType: $p.amendment.certificationType} end)
+                 else {certificationType: $p.amendment.certificationType}
+                      + ({reportType: $p.amendment.reportType} | with_entries(select(.value != null))) end)
              else {} end)
         end)
     end)

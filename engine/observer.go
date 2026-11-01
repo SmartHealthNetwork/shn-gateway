@@ -257,7 +257,10 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	switch {
 	case err != nil:
 		detail = "validator unavailable"
-	case !res.Valid:
+	case res.Valid:
+	case classifyFHIR(res, resourceJSON, "", profile) == VerdictUnavailable:
+		detail = "validator unavailable"
+	default:
 		detail = "invalid"
 	}
 	v.g.observe(ObserverEvent{Kind: "validate.result", Direction: "validate", Payload: json.RawMessage(resourceJSON), Detail: detail})

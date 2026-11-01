@@ -29,6 +29,7 @@ func TestPayloadChecksConsumeLanes(t *testing.T) {
 // decisions that depend on the level asks that predicate, so the lane registry
 // can be separated from conformance by changing that one predicate.
 func TestLaneDecisionsAskWhetherPayloadChecksConsumeLanes(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t, ".", "../app")
 	// asks are the lane decisions that depend on the level, by package and
 	// function: each must call the predicate.

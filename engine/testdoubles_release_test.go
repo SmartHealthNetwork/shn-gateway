@@ -19,6 +19,7 @@ var testDoubleFiles = []string{"conformance_testdouble.go", "fhirserver_fortest.
 // package, as every release is, leaves their files out and does not compile
 // against what they declare; a shn_testdouble build does.
 func TestTestDoublesOnlyInATestBuild(t *testing.T) {
+	t.Parallel()
 	gobin, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatal("go tool not available: the build check cannot run")

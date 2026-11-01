@@ -517,6 +517,7 @@ func parsePackageSources(t *testing.T, fset *token.FileSet, dir string, extra ma
 }
 
 func TestEveryTransmitBoundaryChecksOwnership(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	files := parsePackageSources(t, fset, ".", nil)
 	if len(files) < 50 {

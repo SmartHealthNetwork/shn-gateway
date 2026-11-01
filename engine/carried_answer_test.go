@@ -80,6 +80,7 @@ func carriedAnswerRun(t *testing.T, leg carriedAnswerLeg, level ConformanceEnfor
 // and relayed) and at strict. An answer that conforms to no line is therefore not
 // carried silently where the participant asked for checking.
 func TestPASIngress_CarriedAnswerIsValidatedAtTheLevel(t *testing.T) {
+	t.Parallel()
 	structural := &shnsdk.Issue{Severity: "error", Code: "structure", MessageID: "Extension_EXTP_Context_Wrong"}
 	deeper := &shnsdk.Issue{Severity: "error", Code: "processing", MessageID: "Terminology_TX_NoValid_1_CC"}
 	for _, leg := range carriedAnswerLegs() {
@@ -129,6 +130,7 @@ func TestPASIngress_CarriedAnswerIsValidatedAtTheLevel(t *testing.T) {
 
 // A conformant answer is carried exactly at every level, and recorded at no level.
 func TestPASIngress_CarriedConformantAnswerIsCarriedAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	for _, leg := range carriedAnswerLegs() {
 		for _, level := range allLevels {
 			t.Run(leg.leg+"/"+level.String(), func(t *testing.T) {
@@ -151,6 +153,7 @@ func TestPASIngress_CarriedConformantAnswerIsCarriedAtEveryLevel(t *testing.T) {
 // asks its gateway to judge what it receives has every answer judged, unless it
 // lists the payer. The submit names payer 00001, a reference payer identity.
 func TestPASIngress_CarriedAnswerSkipsNoReferencePayer(t *testing.T) {
+	t.Parallel()
 	if !slices.Contains(ReferencePayerIdentities(), shnsdk.PayerIdentifier{System: referencePayerSystem, Value: "00001"}) || !relaysReferencePayerBytes("demo") {
 		t.Fatal("fixture: 00001 must be a reference payer and demo a lane that relays its bytes")
 	}
@@ -168,6 +171,7 @@ func TestPASIngress_CarriedAnswerSkipsNoReferencePayer(t *testing.T) {
 // A check that could not run is the gateway's own failure at strict (500), never
 // the payer's; below strict the answer is relayed.
 func TestPASIngress_CarriedAnswerCheckUnavailable(t *testing.T) {
+	t.Parallel()
 	for _, leg := range carriedAnswerLegs() {
 		for _, level := range []ConformanceEnforcement{EnforcementObserve, EnforcementStrict} {
 			t.Run(leg.leg+"/"+level.String(), func(t *testing.T) {

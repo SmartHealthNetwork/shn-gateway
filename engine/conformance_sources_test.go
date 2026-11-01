@@ -65,6 +65,7 @@ func engineFiles(t *testing.T, dirs ...string) (*token.FileSet, map[string]*ast.
 }
 
 func TestEveryLegHandlerSetsTheFindingContext(t *testing.T) {
+	t.Parallel()
 	_, files := engineFiles(t)
 	setsContext := map[string]bool{}
 	seen := map[string]bool{}
@@ -176,7 +177,7 @@ var validateCallSites = map[string]string{
 	// E-08's source evidence: an answer valid at its own DTR line is renamed,
 	// any other is carried as sent; the renamed answer's check and a carried
 	// answer's report both go through judgeLines.
-	"workstream_pa_dtr_answer_bridge.go:dtrAnswerValidAt": "edit-evidence",
+	"workstream_pa_dtr_answer_bridge.go:dtrAnswerAt": "edit-evidence",
 }
 
 // validateFHIREntryPoints are the wrappers that reach the choke point, keyed
@@ -211,6 +212,7 @@ var validateFHIREntryPoints = []string{
 // this test tells you to update the number deliberately, having classified the new
 // site in TestEveryValidateCallIsClassified.
 func TestValidateFHIRCallSiteFloor(t *testing.T) {
+	t.Parallel()
 	const (
 		wantTotal       = 36
 		wantDelegations = 1 // the wrappers' own internal delegation, in gateway.go (validateFHIRPayerIngress's candidate check calls the choke point directly, through the participant's module 3)
@@ -251,6 +253,7 @@ func TestValidateFHIRCallSiteFloor(t *testing.T) {
 }
 
 func TestEveryValidateCallIsClassified(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t, ".", "../app")
 	var unclassified []string
 	inspectForValidateCalls := func(key string, node ast.Node) {
@@ -319,6 +322,7 @@ func TestEveryValidateCallIsClassified(t *testing.T) {
 // called a Validator directly would be caught by the census above; one that
 // simply forgot to go through validateGoverned is caught here.
 func TestEveryValidateFHIREntryPointReachesTheChokePoint(t *testing.T) {
+	t.Parallel()
 	_, files := engineFiles(t)
 	// Keyed file:name, like validateFHIREntryPoints itself — not by bare
 	// function name, which would let two same-named functions in different
@@ -386,6 +390,7 @@ var moduleBuildSites = map[string]struct{ sites, checked int }{
 //   - only the LegClient (sendLeg) calls egressBuild, and the module 1 sites
 //     reach their legs through it as listed.
 func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t)
 	passOn := map[string]bool{"validateGoverned": true, "validateGovernedLines": true, "validateGovernedLinesBy": true}
 	certifyCallers := map[string]int{}
@@ -537,6 +542,7 @@ var payerAnswerIngressSites = map[string]int{
 // would judge, or tolerate, a payer's answer by a rule no one chose, so it must be
 // added here deliberately.
 func TestPayerAnswerUnskippedCallers(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t)
 	want := map[string]bool{"gateway.go:validateFHIRPayerIngress": true, "workstream_pa_ingress.go:carriedAnswerRefused": true}
 	got := map[string]bool{}
@@ -576,6 +582,7 @@ func TestPayerAnswerUnskippedCallers(t *testing.T) {
 // shnsdk.CMSPayerIdentity, so the participant's tolerance is decided by the payer
 // the leg was actually routed by.
 func TestPayerAnswerIngressNamesTheRoutedPayer(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t)
 	counts := map[string]int{}
 	for name, f := range files {

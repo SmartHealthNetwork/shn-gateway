@@ -264,6 +264,7 @@ func pendFor(t *testing.T, gw *Gateway, scenario, member string) pendState {
 // the Hub's 409 and its reason (relayOriginationError), never a generic 502,
 // and the gateway observes leg.failed for that leg with the refusal.
 func TestModuleOneSendSitesAnswerALegTheHubRefused(t *testing.T) {
+	t.Parallel()
 	sites := map[string]int{}
 	for _, row := range legSiteRows {
 		sites[row.site+":"+strconv.Quote(row.leg)]++

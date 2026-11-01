@@ -260,6 +260,7 @@ func wantPartyBinding(t *testing.T, side string, pci string, status int, msg, wa
 // the Coverage's own beneficiary is the member; a request naming no party, and
 // a member the system of record holds, are bound as before.
 func TestPartyBesideCoverage_Derivation(t *testing.T) {
+	t.Parallel()
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	childs := derivedPCI(strangerMember, "2015-06-01", "Childname")
 	child := map[string]any{"resourceType": "Patient", "id": strangerMember, "name": []any{map[string]any{"family": "Childname"}}, "birthDate": "2015-06-01"}
@@ -876,6 +877,7 @@ func withMembersOwnPatient(t *testing.T, body []byte, add func(map[string]any, m
 // own patient-consistency check, which it opted into, may refuse a request
 // naming a second patient first.)
 func TestPartyBesideCoverage_EveryLegBothGateways(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	if derivedPCI(strangerMember, "2015-06-01", "Childname") != pinnedChildIdentity || parentIdentity() != pinnedParentIdentity {
@@ -948,6 +950,7 @@ func TestPartyBesideCoverage_EveryLegBothGateways(t *testing.T) {
 // binds of the other legs run before any level's check, on both gateways:
 // TestPartyBesideCoverage_EveryLegBothGateways.)
 func TestPartyBesideCoverage_IngressRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	inquiry := withParentParty(t, inquiryBundle(strangerMember, "", "TRN-1", "72148"), "Patient/"+partyParentID, reference,
 		asBundleEntry("http://ehr.example/fhir/Patient/"+partyParentID))
 	elig := decodeDoc(t, eligibilityRequest(t, strangerMember))
@@ -1002,6 +1005,7 @@ func TestPartyBesideCoverage_IngressRefusesAtEveryLevel(t *testing.T) {
 // payer's gateway, at every level. Members of a vendor's own in the CDS Hooks
 // extension are no FHIR names: whatever their case, the request is read alike.
 func TestPartyBesideCoverage_CRDPrefetchBindsTheMember(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	want := derivedPCI("example", "1960-01-01", "Test")

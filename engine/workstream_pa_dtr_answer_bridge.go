@@ -33,36 +33,64 @@ func dtrLines(declared []string) []string {
 	return lines
 }
 
-// dtrAnswerValidAt reports whether answer is valid at line against the DTR
-// output Parameters profile, read as SHN's own evidence for E-08, not as a
-// judgment of the payer's answer: it runs at every conformance level, records
-// no finding, and anything short of a valid result (an invalid one, a check
-// that could not run, no lane for the line) is no evidence.
-func (g *Gateway) dtrAnswerValidAt(ctx context.Context, answer []byte, line string) bool {
-	v := g.validatorForContractLine("pa.dtr", line)
+// dtrLineEvidence is what checking a questionnaire package answer at one line
+// says about its own line.
+type dtrLineEvidence int
+
+const (
+	// dtrNotAtLine: not valid at the line, or the gateway has no lane for it,
+	// so the line is never evidence.
+	dtrNotAtLine dtrLineEvidence = iota
+	// dtrAtLine: valid at the line.
+	dtrAtLine
+	// dtrLineUnchecked: the check could not run, or its lane is still
+	// qualifying, so whether the answer is at the line is unknown. It is not
+	// "not at the line".
+	dtrLineUnchecked
+)
+
+// dtrAnswerAt checks answer at line against the DTR output Parameters profile,
+// read as SHN's own evidence for E-08, not as a judgment of the payer's answer:
+// it runs at every conformance level and records no finding.
+func (g *Gateway) dtrAnswerAt(ctx context.Context, answer []byte, line string) dtrLineEvidence {
+	v, qualifying := g.candidateLaneAt("pa.dtr", line)
+	if qualifying {
+		return dtrLineUnchecked
+	}
 	if v == nil {
-		return false
+		return dtrNotAtLine
 	}
 	req, profile := validateRequest(answer, dtrOutputParametersProfile)
 	start := g.exchangeClock()
 	res, err := v.Validate(ctx, req, profile)
 	g.routingValidatorTook(line, g.exchangeClock().Sub(start))
-	return err == nil && res.Valid
+	switch {
+	case err != nil:
+		return dtrLineUnchecked
+	case res.Valid:
+		return dtrAtLine
+	case classifyFHIR(res, answer, line, dtrOutputParametersProfile) == VerdictUnavailable:
+		return dtrLineUnchecked
+	}
+	return dtrNotAtLine
 }
 
 // dtrAnswerSourceLine is the line of answer's own name family it validates at,
-// trying the line the payer was routed at first. "" when it validates at none.
-func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family dtrNameFamily, payerLine string) (string, bool) {
+// trying the line the payer was routed at first, with dtrAtLine. A line whose
+// check could not run ends the search with dtrLineUnchecked: the source line is
+// then unknown, and a later line that validates would be a guess at it.
+// dtrNotAtLine when it validates at none.
+func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family dtrNameFamily, payerLine string) (string, dtrLineEvidence) {
 	lines := dtrFamilyLines(family)
 	if i := slices.Index(lines, payerLine); i > 0 {
 		lines = append([]string{payerLine}, slices.Delete(slices.Clone(lines), i, i+1)...)
 	}
 	for _, line := range lines {
-		if g.dtrAnswerValidAt(ctx, answer, line) {
-			return line, true
+		if evidence := g.dtrAnswerAt(ctx, answer, line); evidence != dtrNotAtLine {
+			return line, evidence
 		}
 	}
-	return lines[0], false
+	return lines[0], dtrNotAtLine
 }
 
 // carryDTRAnswer is the payload the provider's gateway gives its participant's
@@ -79,6 +107,9 @@ func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family
 //     carried as sent. Whether the payer's answer conforms is the ingress's
 //     own check, run before this one at the gateway's level at the lines its
 //     names claim (carriedAnswerRefused), so nothing is judged twice.
+//   - When the check at its own line could not run, whether to rename is
+//     unknown. Nothing is renamed on a guess: the answer is carried as sent and
+//     the record says so (EditNotMadeDTRCheckCouldNotRun).
 //   - At none, with no lane for this gateway's DTR line (only none boots so),
 //     nothing is renamed: the answer is carried exactly as it arrived.
 //   - Every other answer is carried exactly as it arrived.
@@ -102,8 +133,12 @@ func (b chainBridge) carryDTRAnswer(ctx context.Context, answer []byte, routed s
 	// answer, so it never renames one: the answer is carried as sent. Where
 	// payload checks consume lanes, a declared line always has its lane, and one
 	// that has not yet qualified is renamed and then refused by Certify, which
-	// cannot run without it.
-	if !payloadChecksConsumeLanes(g.conformance().Level()) && g.validatorForContractLine("pa.dtr", target) == nil {
+	// cannot run without it. A lane still qualifying here is a check that could
+	// not run on an answer that would have been renamed, recorded as any is.
+	if lane, qualifying := g.candidateLaneAt("pa.dtr", target); !payloadChecksConsumeLanes(g.conformance().Level()) && lane == nil {
+		if qualifying && len(planDTRAnswerNames(answer, target).Renames) > 0 {
+			exchangeOf(ctx).editNotMade(EditNotMadeDTRCheckCouldNotRun)
+		}
 		return exact, routed, 0, ""
 	}
 	plan := planDTRAnswerNames(answer, target)
@@ -112,8 +147,11 @@ func (b chainBridge) carryDTRAnswer(ctx context.Context, answer []byte, routed s
 	}
 	fc := findingContextFrom(ctx)
 	fc.Whose = "peer"
-	source, valid := g.dtrAnswerSourceLine(ctx, answer, plan.Source, payerLine)
-	if !valid {
+	source, evidence := g.dtrAnswerSourceLine(ctx, answer, plan.Source, payerLine)
+	if evidence == dtrLineUnchecked {
+		exchangeOf(ctx).editNotMade(EditNotMadeDTRCheckCouldNotRun)
+	}
+	if evidence != dtrAtLine {
 		return exact, routed, 0, ""
 	}
 	// Each package's QuestionnaireResponse entries cross the lines through the

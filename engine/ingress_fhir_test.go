@@ -168,6 +168,7 @@ func TestNonFHIRIngressKeepsJSONErrors(t *testing.T) {
 }
 
 func TestFHIRIngressExchangeFailures(t *testing.T) {
+	t.Parallel()
 	const coverage = `{"resourceType":"Coverage","id":"cov1","beneficiary":{"reference":"Patient/MBR-COVERED"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}`
 	for _, protocol := range []string{"pas", "dtr"} {
 		body := `{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Patient","id":"MBR-COVERED"}},{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}}},{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},{"resource":` + coverage + `}]}`

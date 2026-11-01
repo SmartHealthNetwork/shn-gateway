@@ -178,6 +178,7 @@ func serve(g *Gateway, route, body string) *httptest.ResponseRecorder {
 // not serve. No module 1 handler runs: nothing is read, built or sent, and
 // nothing is recorded.
 func TestScenarioRoutes_NotMountedWithoutProfile(t *testing.T) {
+	t.Parallel()
 	notFound := httptest.NewRecorder()
 	http.NotFound(notFound, httptest.NewRequest(http.MethodGet, "/", nil))
 	paths := []string{"GET /scenario/uc06", "POST /scenario/unknown", "POST /scenario/uc07/pending", "GET /scenario"}
@@ -329,6 +330,7 @@ var otherRoleRoutes = map[string][]string{
 // so a route under a condition this test does not drive fails it. A new route, however
 // it is written, cannot join any of these sets silently.
 func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -1481,6 +1483,7 @@ func moduleStatesAfterOptionsFaults(fset *token.FileSet, files []*ast.File) []st
 // TestNew_BuildsModuleStateAfterOptions: the package's New builds module
 // state after its options, and the fence refuses every other placement.
 func TestNew_BuildsModuleStateAfterOptions(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {

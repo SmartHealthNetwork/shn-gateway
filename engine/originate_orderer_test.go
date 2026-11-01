@@ -120,6 +120,7 @@ func (noSearchOrigin) SearchPatientContext(context.Context, string, string, ...S
 // the order's requester, the configured NPI, an unverified caller's npi; with
 // none, the request is refused before anything is sent.
 func TestOriginatedCRD_UserIDIsTheOrderingClinician(t *testing.T) {
+	t.Parallel()
 	_, _, order := originRecords(prefetchMember)
 	withRequester := bytes.Replace(order, []byte(`"intent" : "order",`), []byte(`"intent" : "order", "requester" : { "reference" : "PractitionerRole/role-7" },`), 1)
 	for name, row := range map[string]struct {

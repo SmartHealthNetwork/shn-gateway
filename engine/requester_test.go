@@ -66,6 +66,7 @@ func wantRequesterUnknown(t *testing.T, got payerAnswer) {
 // and the gateway makes no call of its own. The control row is the same leg
 // from a known requester, which does all three, so the assertions can fail.
 func TestRequesterGuard_UnknownRequesterRefusedBeforeActing(t *testing.T) {
+	t.Parallel()
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -104,6 +105,7 @@ func TestRequesterGuard_UnknownRequesterRefusedBeforeActing(t *testing.T) {
 // A requester missing from the cached registry but present upstream is
 // answered with no refusal: the guard's one refresh reads it.
 func TestRequesterGuard_RefreshResolvesALaggingRequester(t *testing.T) {
+	t.Parallel()
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	p, _ := guardPayer(t, EnforcementObserve)
 	entry, _ := p.g.cfg.Reg.Lookup(p.requester.ID)
@@ -237,6 +239,7 @@ func TestNotActedFence(t *testing.T) {
 // served leg and a refusal before the guard (a bad Hub assertion) are both
 // stripped; the guard's own answer keeps it.
 func TestRequesterGuard_OnlyTheGuardAttests(t *testing.T) {
+	t.Parallel()
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	p, _ := guardPayer(t, EnforcementObserve)
 	presetHeader := func(rw http.ResponseWriter) { rw.Header().Set(NotActedHeader, NotActedRequesterUnknown) }
@@ -297,6 +300,7 @@ func (c guardValidations) Validate(ctx context.Context, b []byte, profile string
 // called, nothing is validated and the gateway makes no call of its own,
 // whatever the leg's body.
 func TestRequesterGuard_EveryLegRefusedBeforeItsHandler(t *testing.T) {
+	t.Parallel()
 	for _, leg := range networkLegs() {
 		t.Run(leg, func(t *testing.T) {
 			p, ct := guardPayer(t, EnforcementStrict)

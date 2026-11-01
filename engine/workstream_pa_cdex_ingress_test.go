@@ -101,6 +101,7 @@ func runCDexIngress(t *testing.T, level ConformanceEnforcement, body []byte, pay
 // answer relayed exactly, at every level: at the plain endpoint routed by its
 // PayerId, at a payer's return path to that payer with or without a PayerId.
 func TestCDexIngress_CarriesTheSubmissionAsSent(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		body  []byte
 		payer string
@@ -136,6 +137,7 @@ func TestCDexIngress_CarriesTheSubmissionAsSent(t *testing.T) {
 // values names the path's payer and the other does not. One whose PayerId
 // names that payer is not.
 func TestCDexIngress_ReturnPathPayerIdThatDiffersIsCarriedAndObserved(t *testing.T) {
+	t.Parallel()
 	other := &shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "99999"}
 	for name, row := range map[string]struct {
 		payer    *shnsdk.PayerIdentifier
@@ -185,6 +187,7 @@ func TestCDexIngress_ReturnPathPayerIdThatDiffersIsCarriedAndObserved(t *testing
 // no default payer), per-leg authority (no readable MemberId, D121), and
 // message integrity (a body that can be read two ways).
 func TestCDexIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
+	t.Parallel()
 	unregistered := &shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "99999"}
 	twoMembers := bytes.Replace(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), []byte(`{"name":"Attachment"`),
 		[]byte(`{"name":"MemberId","valueIdentifier":{"value":"MBR-OTHER"}},{"name":"Attachment"`), 1)
@@ -254,6 +257,7 @@ func TestCDexIngress_UnknownMemberRefusedOnlyWhenOptedIn(t *testing.T) {
 // it, and one that repeats a member name refused on message integrity, at
 // every level.
 func TestCDexIngress_RelaysThePayersAnswer(t *testing.T) {
+	t.Parallel()
 	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invalid","diagnostics":"TrackingId is required."}]}`)
 	repeated := []byte(`{"resourceType":"OperationOutcome","resourceType":"Bundle","issue":[]}`)
 	for _, level := range allLevels {
@@ -285,6 +289,7 @@ func TestCDexIngress_RelaysThePayersAnswer(t *testing.T) {
 // never cut short and read as another message, and recorded as routing, at
 // every level.
 func TestCDexIngress_OversizeSubmissionIsRefused413(t *testing.T) {
+	t.Parallel()
 	big := bytes.Replace(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), []byte(`"status":"completed"`),
 		[]byte(`"status":"completed","text":{"div":"`+strings.Repeat("a", int(shnsdk.MaxAttachmentBytes))+`"}`), 1)
 	for _, level := range allLevels {

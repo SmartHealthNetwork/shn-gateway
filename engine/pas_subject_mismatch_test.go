@@ -219,6 +219,7 @@ func TestPASAnswerSubjectMismatchAt21(t *testing.T) {
 // states (PAS 2.2.1 §spec-44) refuses only where every candidate line carries
 // it.
 func TestAnswerReadAtCandidateLines(t *testing.T) {
+	t.Parallel()
 	// The reference payer's real pended answer, its Patient returned as a
 	// reference only: incomplete at 2.0.1 and 2.2.1, complete at 2.1.0.
 	var b map[string]any

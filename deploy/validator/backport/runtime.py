@@ -70,13 +70,7 @@ def packaged(source, destination, script):
                 "stripped_war_sha256": cache.file_hash(destination / "main.war")}
     if stripping != expected:
         raise ValueError("packaged HAPI provenance or bytes changed")
-    with zipfile.ZipFile(destination / "main.war") as war:
-        nested = cache.zip_member(war, cache.JAR_ENTRY)
-        if war.getinfo(cache.JAR_ENTRY).compress_type != zipfile.ZIP_STORED or cache.digest(nested) != outputs["output_jar_sha256"]:
-            raise ValueError("packaged HAPI validation JAR changed")
-    with zipfile.ZipFile(io.BytesIO(nested)) as jar:
-        if cache.digest(cache.zip_member(jar, cache.CLASS_ENTRY)) != outputs["output_class_sha256"]:
-            raise ValueError("packaged HAPI class changed")
+    cache.verify_effective_war(destination / "main.war", outputs)
     return {"backport": build, "nativeStripping": stripping}
 
 

@@ -18,13 +18,17 @@ What the image contains, and under which terms
    Corresponding source: Debian at https://sources.debian.org and Temurin at
    https://adoptium.net.
 
-2. The HAPI FHIR JPA server (`/app/main.war`, Apache-2.0). One class is changed:
+2. The HAPI FHIR JPA server (`/app/main.war`, Apache-2.0). Two parts are changed.
    `org.hl7.fhir.common.hapi.validation.validator.ValidatorWrapper`, in the
    `hapi-fhir-validation` 8.12.0 jar inside the WAR, is rebuilt from its upstream
-   source with a change applied, under Apache-2.0 like the upstream class. The change,
-   its source and its build are in `deploy/validator/backport/` of the source
-   repository, and `/app/backport-provenance.json` records the upstream and rebuilt
-   artifacts' digests. `THIRD_PARTY_NOTICES.md` beside this file lists the third-party
+   source with a change applied, under Apache-2.0 like the upstream class. In the
+   `org.hl7.fhir.utilities` 6.9.12 jar inside the WAR,
+   `org.hl7.fhir.utilities.regex.RegexTimeout` is replaced by, and
+   `org.hl7.fhir.utilities.regex.PrimitiveRegexes` added from, the unmodified source
+   of `org.hl7.fhir.core` 7.0.3 (https://github.com/hapifhir/org.hl7.fhir.core,
+   Apache-2.0). The changes, their source and their build are in
+   `deploy/validator/backport/` of the source repository, and
+   `/app/backport-provenance.json` records the upstream and rebuilt artifacts' digests. `THIRD_PARTY_NOTICES.md` beside this file lists the third-party
    libraries inside the WAR that need a notice, and says which those are. HAPI's own
    jars carry HL7's terminology package (`hl7.terminology`, CC0-1.0) as HL7 publishes
    it, including a fragment of SNODENT (166 concepts; SNODENT is the American Dental

@@ -147,6 +147,7 @@ func levelPASBundleWithEntry(entry string) string {
 // pas-claim, as it always has. The payer's gateway judges the update, so the
 // provider ingress records nothing for it.
 func TestLevelPASIngress_AmendmentWithWrongTypedContentPicksTheUpdateLeg(t *testing.T) {
+	t.Parallel()
 	body := levelPASBundleWithEntry(`{"resource":{"resourceType":"Provenance","target":[{"reference":"QuestionnaireResponse/qr1"}],"agent":[{"who":{"reference":"Practitioner/p1"}}],"policy":"x"}}`)
 	body = strings.Replace(body, `{"resourceType":"Claim",`, `{"resourceType":"Claim","related":[{"claim":{"identifier":{"value":"PRIOR-1"}}}],`, 1)
 	for _, level := range allLevels {
@@ -176,6 +177,7 @@ func TestLevelPASIngress_AmendmentWithWrongTypedContentPicksTheUpdateLeg(t *test
 
 // No order.
 func TestLevelPASIngress_MissingOrder(t *testing.T) {
+	t.Parallel()
 	body := levelPASBundleWithout(t, `{"resource":{"resourceType":"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}}},`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -191,6 +193,7 @@ func TestLevelPASIngress_MissingOrder(t *testing.T) {
 // A Coverage with no beneficiary. The subject is Claim.patient and routing
 // reads Coverage.payor, so the beneficiary is the request's own shape.
 func TestLevelPASIngress_CoverageWithoutBeneficiary(t *testing.T) {
+	t.Parallel()
 	body := levelPASBundleWithout(t, `"beneficiary":{"reference":"Patient/MBR-COVERED"},`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -206,6 +209,7 @@ func TestLevelPASIngress_CoverageWithoutBeneficiary(t *testing.T) {
 // An order, Coverage, QuestionnaireResponse or DiagnosticReport naming
 // another patient.
 func TestLevelPASIngress_AnotherPatient(t *testing.T) {
+	t.Parallel()
 	rows := map[string]string{
 		"order":    strings.Replace(pasIngressBundle("00001", ""), `"ServiceRequest","subject":{"reference":"Patient/MBR-COVERED"}`, `"ServiceRequest","subject":{"reference":"Patient/MBR-NOTCOVERED"}`, 1),
 		"coverage": strings.Replace(pasIngressBundle("00001", ""), `"beneficiary":{"reference":"Patient/MBR-COVERED"}`, `"beneficiary":{"reference":"Patient/MBR-NOTCOVERED"}`, 1),
@@ -230,6 +234,7 @@ func TestLevelPASIngress_AnotherPatient(t *testing.T) {
 
 // A QuestionnaireResponse naming no patient beside the bound subject.
 func TestLevelPASIngress_QRWithoutSubject(t *testing.T) {
+	t.Parallel()
 	body := levelPASBundleWithEntry(`{"resource":{"resourceType":"QuestionnaireResponse","status":"completed"}}`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -244,6 +249,7 @@ func TestLevelPASIngress_QRWithoutSubject(t *testing.T) {
 
 // A clinician-sourced QR item without its FR-16/FR-17 attestation.
 func TestLevelPASIngress_UnattestedItem(t *testing.T) {
+	t.Parallel()
 	item, err := shnsdk.BuildManualAttestedItem("functional-status-oswestry", "42", shnsdk.Attestation{NPI: "1999999999", Text: "I attest these are my clinical findings.", When: "2026-06-04"})
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +268,7 @@ func TestLevelPASIngress_UnattestedItem(t *testing.T) {
 
 // An answer graph this gateway cannot read, and a decision it cannot read.
 func TestLevelPASIngress_UnreadableAnswer(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		answer []byte
 		msg    string
@@ -284,6 +291,7 @@ func TestLevelPASIngress_UnreadableAnswer(t *testing.T) {
 
 // An answer whose subjects do not bind to its ClaimResponse's patient.
 func TestLevelPASIngress_AnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	answer := []byte(strings.Replace(assemblyRealPending, `"entry":[`, `"entry":[{"fullUrl":"http://localhost:8081/fhir/Patient/Other","resource":{"resourceType":"Patient","id":"Other"}},`, 1))
 	if _, bad := validateNativePASResponse(answer); bad.Status != 0 {
 		t.Fatalf("fixture: the answer must be readable, got %+v", bad)
@@ -322,6 +330,7 @@ func wantAnswerRefusedAtEveryLevel(t *testing.T, env *inProcessExchange, rec *ht
 // A payer answer that repeats a member name is read one way only: refused at
 // every level with strict's refusal, never relayed.
 func TestLevelPASIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	answer := []byte(strings.Replace(assemblyRealPending, `"outcome":"queued"`, `"outcome":"queued","outcome":"queued"`, 1))
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -336,6 +345,7 @@ func TestLevelPASIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 // A readable, bound answer is recorded from its decision at every level, and
 // nothing is skipped.
 func TestLevelPASIngress_ReadableAnswerRecordsItsDecision(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, ev := levelPASRow(t, level, pasIngressBundle("00001", ""), levelPASPayerAnswer)
@@ -355,6 +365,7 @@ func TestLevelPASIngress_ReadableAnswerRecordsItsDecision(t *testing.T) {
 // Network rules and routing refuse at every level, before the network, with the
 // same status and body.
 func TestLevelPASIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	base := pasIngressBundle("00001", "")
 	rows := map[string]struct {
 		body   string

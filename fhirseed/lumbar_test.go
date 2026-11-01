@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -109,4 +110,45 @@ func TestPutGlobalArtifact_InvalidRejected(t *testing.T) {
 	if hits != 0 {
 		t.Fatalf("PUT reached the server %d time(s); validate gate did not block it", hits)
 	}
+}
+
+// A check that could not run blocks the PUT, as any check short of valid does,
+// and says it could not run: an unchecked artifact is not a valid one, and it
+// is not an invalid one either. A real error beside it is a failed validation.
+func TestPutGlobalArtifact_ACheckThatCouldNotRun(t *testing.T) {
+	timeout := shnsdk.Issue{Severity: "error", MessageID: validatorissue.RegexException}
+	structural := shnsdk.Issue{Severity: "error", MessageID: "Validation_VAL_Profile_Minimum"}
+	for _, tc := range []struct {
+		name    string
+		details []shnsdk.Issue
+		want    string
+	}{
+		{"alone", []shnsdk.Issue{timeout}, "the check could not run"},
+		{"beside a structural error", []shnsdk.Issue{timeout, structural}, "failed validation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			lib, _ := DemoLumbarLibrary()
+			v := resultValidator{shnsdk.Result{Issues: []string{"x"}, Details: tc.details}}
+			err := PutGlobalArtifact(context.Background(), srv.URL+"/fhir/DEFAULT", v, "Library", "LumbarMRICQL", lib)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want %q", err, tc.want)
+			}
+			if hits != 0 {
+				t.Fatalf("PUT reached the server %d time(s)", hits)
+			}
+		})
+	}
+}
+
+// resultValidator answers every check with its result.
+type resultValidator struct{ res shnsdk.Result }
+
+func (v resultValidator) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
+	return v.res, nil
 }

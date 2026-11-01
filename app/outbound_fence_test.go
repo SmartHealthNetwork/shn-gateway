@@ -97,7 +97,7 @@ type outboundSite struct {
 // outboundDirs are the gateway module's packages the fence checks: every
 // one but the tools and harnesses a deployed gateway never runs (fhirseed,
 // scenariodriver, deploy).
-var outboundDirs = []string{"app", "checks", "cmd", "connectors", "diagnostics", "engine", "internal", "observer", "pa", "recording", "scenarioauth", "seed", "telemetry"}
+var outboundDirs = []string{"app", "checks", "cmd", "connectors", "diagnostics", "engine", "internal", "observer", "pa", "recording", "scenarioauth", "seed", "telemetry", "validatorissue"}
 
 // gatewayModule is the gateway module's directory, from this package's.
 const gatewayModule = ".."

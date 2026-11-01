@@ -89,6 +89,7 @@ func TestPASSubmit_AnotherPatientsTokenFilesNothingUnderIt(t *testing.T) {
 // amendment's claim and ledger lookups run under the payer's binding of the
 // member the amendment names, not the token's.
 func TestPASUpdate_AnotherPatientsTokenHandsThePayerTheUpdatesOwnPatient(t *testing.T) {
+	t.Parallel()
 	g, requester := newInboundTestGateway(t, true)
 	answer := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	var subjects []string

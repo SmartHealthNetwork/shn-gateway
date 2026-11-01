@@ -67,6 +67,7 @@ func dtrOtherPatient(s string) string {
 // a coverage or order naming no patient beside one that names the
 // subject is patient mixing inside one request.
 func TestLevelDTRIngress_ParameterNamesNoPatient(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		body []byte
 		msg  string
@@ -92,6 +93,7 @@ func TestLevelDTRIngress_ParameterNamesNoPatient(t *testing.T) {
 
 // two patients named by the coverages and orders of one request.
 func TestLevelDTRIngress_InconsistentPatient(t *testing.T) {
+	t.Parallel()
 	for name, extra := range map[string]string{
 		"a second coverage": dtrOtherPatient(ehrCoverageParam(prefetchMember, "00001")),
 		"a second order":    dtrOtherPatient(ehrOrderParam("sr2", prefetchMember)),
@@ -125,6 +127,7 @@ func TestLevelDTRIngress_MixedRequestBindsTheCoverageSubject(t *testing.T) {
 
 // the compartment fence over the resources the request carries.
 func TestLevelDTRIngress_CarriedResourceFence(t *testing.T) {
+	t.Parallel()
 	valid := []string{ehrCoverageParam(prefetchMember, "00001"), ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire}
 	for name, row := range map[string]struct {
 		extra string
@@ -151,6 +154,7 @@ func TestLevelDTRIngress_CarriedResourceFence(t *testing.T) {
 // patient's record refuses at strict; below strict the request is carried as
 // the EHR sent it, with nothing obtained.
 func TestLevelDTRIngress_PatientFillFailsCarriesAsSent(t *testing.T) {
+	t.Parallel()
 	body := ehrParams(ehrOrderParam("sr1", prefetchMember), ehrCoverageParam(prefetchMember, "00001"), dtrQuestionnaire)
 	for name, row := range map[string]struct {
 		record []byte // the system's Patient read; nil: not held
@@ -250,6 +254,7 @@ func TestLevelDTRIngress_PatientFillFenceRefusesAtEveryLevel(t *testing.T) {
 // carries none, a payer that cannot take a framed operation and a coverage
 // that names no registered payer.
 func TestLevelDTRIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	noCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
 	coverage := ehrCoverageParam(prefetchMember, "00001")
 	duplicate := strings.Replace(coverage, `"resourceType":"Coverage",`, `"resourceType":"Coverage","resourceType":"Coverage",`, 1)

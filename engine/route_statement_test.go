@@ -20,7 +20,13 @@ import (
 
 func uc06RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate) {
 	t.Helper()
-	opts := pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status"}
+	return routeFixtureAtLine(t, pendFixtureOpts{member: "MBR-UC06", birthDate: "1969-07-21", familyName: "Reyes", pendedItem: "functional-status"}, line)
+}
+
+// routeFixtureAtLine is the pend/resume fixture with this gateway and the payer
+// declaring line, and a validator lane for it.
+func routeFixtureAtLine(t *testing.T, opts pendFixtureOpts, line string) (*Gateway, *pendResumeSubstrate) {
+	t.Helper()
 	switch line {
 	case "2.1":
 		opts.declared = []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21}
@@ -65,6 +71,7 @@ func startUC06(gw *Gateway, body string) *httptest.ResponseRecorder {
 }
 
 func TestOriginationRoute_NamesItsMemberAndOrder(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		edit   func(map[string]json.RawMessage)
@@ -268,20 +275,8 @@ func TestSingleCallAmendment_CertificationTypeRefusedBeforeAnyLeg(t *testing.T) 
 
 func uc07RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate) {
 	t.Helper()
-	opts := pendFixtureOpts{member: "MBR-UC07", birthDate: "1990-08-25", familyName: "Haddad", pendedItem: "patient-reported-functional-status",
-		extraRoles: map[string]string{"phg": "phg"}}
-	switch line {
-	case "2.1":
-		opts.declared = []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21}
-	case "2.2":
-		opts.declared = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
-	}
-	gw, stub := newPendResumeFixture(t, opts)
-	if line != "2.0" {
-		gw.cfg.Validator = NewLineFakeValidator("2.0")
-		gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
-	}
-	return gw, stub
+	return routeFixtureAtLine(t, pendFixtureOpts{member: "MBR-UC07", birthDate: "1990-08-25", familyName: "Haddad", pendedItem: "patient-reported-functional-status",
+		extraRoles: map[string]string{"phg": "phg"}}, line)
 }
 
 // TestUC07Complete_RefusesBeforeThePatientDTRLeg: /scenario/uc07/complete
@@ -307,6 +302,9 @@ func TestUC07Complete_RefusesBeforeThePatientDTRLeg(t *testing.T) {
 		}, 422, "Claim.priority"},
 		{"no certificationType at 2.1", "2.1", func(m map[string]json.RawMessage) { delete(m, "certificationType") }, 422, "certificationType"},
 		{"no certificationType at 2.2", "2.2", func(m map[string]json.RawMessage) { delete(m, "certificationType") }, 422, "certificationType"},
+		{"a report type stated malformed", "2.2", func(m map[string]json.RawMessage) {
+			m["reportType"] = json.RawMessage(`{"system":"http://loinc.org","code":"PY"}`)
+		}, 422, "ReportType"},
 		{"control", "2.2", func(map[string]json.RawMessage) {}, 200, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

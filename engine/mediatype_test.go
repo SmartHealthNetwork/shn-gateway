@@ -179,6 +179,7 @@ func TestDTRIngressFramesTheDeclaredMediaType(t *testing.T) {
 // on a FHIR leg, and never on a CDS Hooks leg, where an older sender's blanket
 // application/fhir+json frame must still go out as application/json.
 func TestPayerInboundSendsTheFramedMediaTypeOn(t *testing.T) {
+	t.Parallel()
 	declared := "application/fhir+json; fhirVersion=4.0"
 	t.Run("DTR package with a declared type", func(t *testing.T) {
 		p := newLevelPayer(t, EnforcementNone)

@@ -16,6 +16,7 @@ import (
 // gateway's own sets: the union of its compiled-in workstreams', and its own
 // refusal of the retired PDex token.
 func TestContractSets_OnlyThroughTheGatewaysOwn(t *testing.T) {
+	t.Parallel()
 	sdkSets := map[string]bool{"NativeContractVersions": true, "SupportedContractVersions": true, "ParseDeclaredContractVersions": true}
 	var found []string
 	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {

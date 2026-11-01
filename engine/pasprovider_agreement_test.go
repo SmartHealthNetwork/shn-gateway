@@ -101,6 +101,7 @@ func seededPASOrders(t *testing.T, byRef map[string][]byte) map[string][]byte {
 // Both are driven from the persona's OWN seeded records, through the shared
 // selection rule; nothing here chooses an identity.
 func TestSeededPersona_SubmitAndInquiryNameTheSameProvider(t *testing.T) {
+	t.Parallel()
 	byRef := seededRecords(t)
 	resolve := func(ref string) ([]byte, bool, error) {
 		raw, ok := byRef[ref]

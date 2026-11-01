@@ -41,6 +41,7 @@ func uc03ProviderDataFixture(t *testing.T) *dispatchFixture {
 }
 
 func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
+	t.Parallel()
 	type route struct {
 		name string
 		// drive runs the route with body edited by edit and returns the
@@ -117,6 +118,7 @@ func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
 //
 // A new route that builds a claim without passing the check fails here.
 func TestPASOriginationsCheckFactsBeforeAnyLeg(t *testing.T) {
+	t.Parallel()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

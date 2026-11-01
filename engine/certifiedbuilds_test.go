@@ -121,6 +121,7 @@ func originatedBuilders() map[string][]relay.BuilderID {
 // line it has no lane for; native ingress naming a builder would build-reach on
 // bytes it did not build.
 func TestEveryLineSelectionNamesItsBuilder(t *testing.T) {
+	t.Parallel()
 	const nativeIngress = "workstream_pa_ingress.go"
 	fset, files := engineFiles(t)
 	// leg is the position of each selection's leg-type argument (-1: it takes a

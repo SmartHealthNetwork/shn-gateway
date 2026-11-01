@@ -241,6 +241,7 @@ func TestGatedCertificationHonoursRoutingReadiness(t *testing.T) {
 // 2.1 lane's answer to the versioned approved ClaimResponse (warnings, no
 // error), asked with the request the lane recorded.
 func TestGatedCertificationCertifiesARealCleanAnswer(t *testing.T) {
+	t.Parallel()
 	rec, payload, profile, answers := recordedClaimResponseRow(t, "2.1")
 	if len(answers) == 0 || bytes.Contains(answers[0].Response.Body, []byte(`"severity":"error"`)) {
 		t.Fatal("the 2.1 lane's first recorded answer is no longer clean")
@@ -413,6 +414,7 @@ func slicingErrors(t *testing.T, answer []byte) outcomeIssues {
 // readiness corpus, which meets and absorbs the warming answer; afterwards the
 // collector meets the lane's settled answer and certifies the line.
 func TestQualifiedCertificationNeverRecordsAWarmingAnswer(t *testing.T) {
+	t.Parallel()
 	rec, payload, profile, answers := recordedClaimResponseRow(t, "2.2")
 	if len(answers) < 2 || len(slicingErrors(t, answers[0].Response.Body)) != 3 {
 		t.Fatal("the 2.2 lane's first recorded answer is no longer the warming one with three slicing errors")
@@ -464,6 +466,7 @@ func TestQualifiedCertificationNeverRecordsAWarmingAnswer(t *testing.T) {
 // approved ClaimResponse (warnings only: valid); the mutation adds the three
 // slicing errors the same lane answered while warming.
 func TestQualifiedCertificationRecordsASlicingAnswerInvalid(t *testing.T) {
+	t.Parallel()
 	_, payload, _, answers := recordedClaimResponseRow(t, "2.2")
 	var settled struct {
 		Issue outcomeIssues `json:"issue"`
@@ -647,6 +650,7 @@ func TestQualifiedCertificationRequalifiesAfterALaneFailure(t *testing.T) {
 // it stops answering at the connection; then routing's readiness no longer counts for this
 // client, which qualifies the lane again itself. Routing's lane is untouched.
 func TestGatedCertificationRequalifiesARoutingLaneAfterAFailure(t *testing.T) {
+	t.Parallel()
 	rec, payload, profile, _ := recordedClaimResponseRow(t, "2.1")
 	var hits, mode int32
 	lane := faultLane(t, rec, nil, &hits, &mode)
@@ -777,6 +781,7 @@ func TestQualifiedCertificationKeepsQualificationWhenTheLaneAnswers(t *testing.T
 // the lane is asked for its metadata, answers, and stays qualified, and the
 // next payload certifies.
 func TestQualifiedCertificationChecksALaneThatTimesOut(t *testing.T) {
+	t.Parallel()
 	v, payload, _, _, mode, attempts, _ := qualifiedFaultLane(t, NewCertificationOperationValidator, time.Hour)
 	g := certificationGatewayByLine(t, map[string]shnsdk.Validator{"2.1": v}, nil)
 	atomic.StoreInt32(mode, laneSlow)
@@ -804,6 +809,7 @@ func TestQualifiedCertificationChecksALaneThatTimesOut(t *testing.T) {
 // has stopped: the lane re-qualifies, and the next certification reads
 // "re-qualifying" without dialing.
 func TestQualifiedCertificationRequalifiesALaneThatTimesOutAndDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	v, payload, _, hits, mode, attempts, _ := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
 		v.probe = func(context.Context) error { return errors.New("i/o timeout") }
 	})
@@ -835,6 +841,7 @@ func candidateContext(d time.Duration) (context.Context, context.CancelFunc) {
 // A timeout is checked at most once per minRequalify: a second inside it asks
 // nothing more, and one after it asks again.
 func TestQualifiedCertificationChecksATimeoutAtMostOncePerInterval(t *testing.T) {
+	t.Parallel()
 	const interval = time.Hour
 	var probes atomic.Int32
 	answer := atomic.Pointer[error]{}
@@ -917,6 +924,7 @@ func TestQualifiedCertificationCheckDoesNotWaitBehindTheClient(t *testing.T) {
 // connection and re-qualifies, and the check, failing only after that, leaves
 // the qualified lane alone.
 func TestQualifiedCertificationIgnoresAnOvertakenCheck(t *testing.T) {
+	t.Parallel()
 	checking, proceed := make(chan struct{}), make(chan struct{})
 	v, payload, profile, _, mode, attempts, gate := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
 		v.probe = func(context.Context) error { close(checking); <-proceed; return errors.New("i/o timeout") }
@@ -948,6 +956,7 @@ func TestQualifiedCertificationIgnoresAnOvertakenCheck(t *testing.T) {
 // Closing the client during a check stops it, and a check cut short by the
 // close does not re-qualify the lane.
 func TestQualifiedCertificationCloseStopsACheck(t *testing.T) {
+	t.Parallel()
 	checking := make(chan struct{})
 	v, payload, profile, _, mode, _, _ := qualifiedFaultLaneWith(t, NewCertificationOperationValidator, time.Hour, func(v *GatedCertificationValidator) {
 		v.probe = func(ctx context.Context) error { close(checking); <-ctx.Done(); return ctx.Err() }

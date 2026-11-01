@@ -211,6 +211,7 @@ func findingsFor(events []ObserverEvent, leg string) []ConformanceFinding {
 // records and relays; structural refuses a structural defect and records a deeper
 // one; strict refuses a defect and a check that could not run.
 func TestPayerAnswerFlows_PartnerPayerIsGovernedAtItsLevel(t *testing.T) {
+	t.Parallel()
 	type want struct {
 		status   int
 		msg      string
@@ -275,6 +276,7 @@ func TestPayerAnswerFlows_PartnerPayerIsGovernedAtItsLevel(t *testing.T) {
 // validator that refuses everything, recorded at observe, unchecked at none. A
 // participant that tolerates them lists them (CONFORMANCE_TOLERATE_PEERS).
 func TestPayerAnswerFlows_ReferencePayersAreJudged(t *testing.T) {
+	t.Parallel()
 	for _, flow := range answerFlows {
 		for _, profile := range flow.profiles {
 			for _, payer := range ReferencePayerIdentities() {

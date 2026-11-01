@@ -707,6 +707,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 // update leg, that a refusal never consumes the pended claim (the guard runs BEFORE
 // BeginClaimUpdate, per workstream_pa_pas_forward.go's ordering comment).
 func TestNativeUpdate_PayorEdge_SeamOffAndRestamp(t *testing.T) {
+	t.Parallel()
 	approvedBody := []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`)
 	approvedBody = fixturePASResponse(t, approvedBody, true)
 	const pci = "PCI-PAYOREDGE-UPDATE"

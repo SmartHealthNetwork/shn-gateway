@@ -159,6 +159,7 @@ func sorCoverageStatus(id, payerValue, status string) string {
 // member whose coverage is no longer in force is still sent to its payer, which
 // answers that it does not cover the member.
 func TestDefaultRoutingReadRoutesOnActiveCoverageFirst(t *testing.T) {
+	t.Parallel()
 	const known, unknown = "00001", "99998" // the test router knows only 00001
 	for _, row := range []struct {
 		name   string
@@ -261,6 +262,7 @@ func includedPayer(org, value string) string {
 // read with that read's every answer at the default: fenced, resolved
 // through the system of record, or refused.
 func TestEnrichedRoutesAsTheDefault(t *testing.T) {
+	t.Parallel()
 	const known, unknown = "00001", "99998" // the test router knows only 00001
 	cancelledOnly := func(t *testing.T) *prefetchSoR {
 		s := newPrefetchSoR()
@@ -657,6 +659,7 @@ func TestRoutingReadFencedToTheSystemsOwnID(t *testing.T) {
 // TestRoutingReadFencedToTheSystemsOwnID), and carried with only the callback
 // removed: no coverage is filled, and no finding is recorded, at every level.
 func TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T) {
+	t.Parallel()
 	body := ehrRequest(patientOnly)
 	for _, enrich := range []bool{false, true} {
 		for _, level := range allLevels {
@@ -698,6 +701,7 @@ func TestCRDIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T
 // routing read under the system's own id, as without the opt-in, with nothing
 // added.
 func TestLevelCRDIngress_OptInPatientNamedByAnotherIDLeftOut(t *testing.T) {
+	t.Parallel()
 	for name, body := range map[string][]byte{"no prefetch": ehrRequest("-"), "an empty prefetch": ehrRequest("")} {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -725,6 +729,7 @@ func TestLevelCRDIngress_OptInPatientNamedByAnotherIDLeftOut(t *testing.T) {
 // with no finding: nothing is filled, and the system of record is read only
 // to route by, under its own id.
 func TestLevelCRDIngress_PatientNamedByAnotherIDRoutedWithoutTheOptIn(t *testing.T) {
+	t.Parallel()
 	for name, body := range map[string][]byte{"no prefetch": ehrRequest("-"), "an empty prefetch": ehrRequest("")} {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -755,6 +760,7 @@ func TestLevelCRDIngress_PatientNamedByAnotherIDRoutedWithoutTheOptIn(t *testing
 // alone: TestRoutingReadFencedToTheSystemsOwnID) and carried exactly as the
 // EHR sent it, at every level.
 func TestDTRIngress_OptInRoutesAPatientNamedByAnotherIDAsTheDefault(t *testing.T) {
+	t.Parallel()
 	body := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire)
 	sor := func(t *testing.T) *prefetchSoR {
 		s := newPrefetchSoR()

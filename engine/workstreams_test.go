@@ -291,6 +291,7 @@ func parseSources(t *testing.T, fset *token.FileSet, srcs map[string][]byte) map
 // package names the adapter, its rows, the registry, the derivation or the
 // taxonomy outside the files that own them.
 func TestWorkstreams_CatalogIsReadOnlyThroughTheLookups(t *testing.T) {
+	t.Parallel()
 	srcs := packageSources(t)
 	fset := token.NewFileSet()
 	if faults := catalogReadFaults(fset, parseSources(t, fset, srcs)); len(faults) != 0 {

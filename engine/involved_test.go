@@ -360,6 +360,7 @@ func TestRequestNamedPatients_OwnVersionedReferenceNamesNoOne(t *testing.T) {
 // A member that cannot be identified is left out, with the reason, and the
 // others are still named.
 func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
+	t.Parallel()
 	t.Run("system of record unavailable", func(t *testing.T) {
 		g, _, _, omitted := involvedGateway(t, true)
 		g.cfg.SoR = unreadableSoR{newPrefetchSoR()}
@@ -496,6 +497,7 @@ func TestInvolvedList_MintsBoundTokensAndLeavesOutWhatFails(t *testing.T) {
 // is caught only here. The leg's other patient stays listed: nothing here
 // refuses the leg.
 func TestInvolvedList_LeavesOutATokenThatDoesNotVerify(t *testing.T) {
+	t.Parallel()
 	other := ed25519.NewKeyFromSeed(append(make([]byte, ed25519.SeedSize-1), 1))
 	for _, row := range []struct {
 		name   string

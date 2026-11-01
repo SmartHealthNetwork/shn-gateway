@@ -207,6 +207,7 @@ func rekeyRunTaking(t *testing.T, leg carriedAnswerLeg, level ConformanceEnforce
 // and at every conformance level, by default (D127): one value changes, the
 // forward names the edit in X-SHN-Edited, and the exchange records E-10.
 func TestPASIngress_PendPayerURLIsRekeyed(t *testing.T) {
+	t.Parallel()
 	want, err := cdexroute.ReturnBase(pendRekeyBase, "payer")
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +250,7 @@ func TestPASIngress_PendPayerURLIsRekeyed(t *testing.T) {
 // A payer-url under a signature is re-keyed all the same (D127), and the
 // header names every signature that covered it.
 func TestPASIngress_SignedPendPayerURLIsRekeyedAndDisclosed(t *testing.T) {
+	t.Parallel()
 	for _, leg := range carriedAnswerLegs() {
 		base := leg.answer
 		leg.answer = func(t *testing.T) []byte {
@@ -275,6 +277,7 @@ func TestPASIngress_SignedPendPayerURLIsRekeyedAndDisclosed(t *testing.T) {
 // An answer with no payer-url, or one already naming the return path, is
 // relayed exactly: no header, no edit.
 func TestPASIngress_AnswerWithoutPayerURLToRekeyIsExact(t *testing.T) {
+	t.Parallel()
 	ret, _ := cdexroute.ReturnBase(pendRekeyBase, "payer")
 	for name, entry := range map[string]string{
 		"no Task":                     "",
@@ -304,6 +307,7 @@ func TestPASIngress_AnswerWithoutPayerURLToRekeyIsExact(t *testing.T) {
 // level, and the exchange records why it was not re-keyed: unknown is not
 // empty.
 func TestPASIngress_NonstructuralPayerURLIsCarriedAndRecorded(t *testing.T) {
+	t.Parallel()
 	for _, leg := range carriedAnswerLegs() {
 		leg := withoutPayerURL(t, leg)
 		base := leg.answer
@@ -367,6 +371,7 @@ func TestPASIngress_RekeyWithoutAReturnPathIsAFidelityRefusal(t *testing.T) {
 // sent and recorded, at every level. Unknown is not empty: a payer with no list
 // is not read as one that takes the leg.
 func TestPASIngress_PayerThatDoesNotTakeTheLegKeepsItsPayerURL(t *testing.T) {
+	t.Parallel()
 	const payerURL = `"valueUrl":"https://payer.example/fhir"`
 	for name, legs := range map[string][]string{
 		"a list without the leg": {"crd-order-select"},
@@ -423,6 +428,7 @@ func TestPASIngress_RekeyReadsTheRoutedPayer(t *testing.T) {
 // never called for, and a payer-url the gateway could not have re-keyed anyway
 // is recorded as that. A mixed answer states both.
 func TestPASIngress_NonTakerRecordsOnlyWhatTheAnswerCalledFor(t *testing.T) {
+	t.Parallel()
 	const structural, nonstructural = `"valueUrl":"https://payer.example/fhir"`, `"valueString":"https://payer.example/fhir"`
 	for name, row := range map[string]struct {
 		entries []string

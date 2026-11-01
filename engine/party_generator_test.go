@@ -110,6 +110,7 @@ func partyGenSettings(t *testing.T) (int64, int) {
 }
 
 func TestPartyGenerator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	seed, cases := partyGenSettings(t)

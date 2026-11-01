@@ -11,9 +11,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -272,6 +274,7 @@ func (r e08Result) wantAnswered(t *testing.T, want []byte, edited bool) {
 // Both directions, at every level: the names the requester's line gives the
 // package and the outcome, and nothing else changed.
 func TestDTRAnswerBridge_RenamesToTheRequestersLine(t *testing.T) {
+	t.Parallel()
 	q, qr := "Questionnaire", "QuestionnaireResponse"
 	for _, row := range []struct {
 		name     string
@@ -311,6 +314,7 @@ func TestDTRAnswerBridge_RenamesToTheRequestersLine(t *testing.T) {
 
 // No edit: the answer reaches the EHR exactly as the payer sent it.
 func TestDTRAnswerBridge_CarriesExactly(t *testing.T) {
+	t.Parallel()
 	q, qr := "Questionnaire", "QuestionnaireResponse"
 	for _, row := range []struct {
 		name     string
@@ -337,6 +341,7 @@ func TestDTRAnswerBridge_CarriesExactly(t *testing.T) {
 // fills. The refusal says the payer answered; the finding carries the hash of
 // the payer's answer and of the renamed one, and names E-08.
 func TestDTRAnswerBridge_RefusesWhatItCannotCarry(t *testing.T) {
+	t.Parallel()
 	q, qr := "Questionnaire", "QuestionnaireResponse"
 	for _, row := range []struct {
 		name   string
@@ -643,6 +648,7 @@ func TestDTRAnswerBridge_SplicesOnlyTheQuestionnaireResponse(t *testing.T) {
 // answer at every level, as that step refuses today: a 2.0.1 response whose
 // contexts name no Coverage has no honest source for 2.2's qr-coverage.
 func TestDTRAnswerBridge_AStepsRefusalRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	answer := bytes.Replace(e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false),
 		[]byte(`"reference" : "Coverage/c1"`), []byte(`"reference" : "Encounter/e1"`), 1)
 	for _, level := range allLevels {
@@ -674,6 +680,7 @@ func (v e08LineContent) Validate(ctx context.Context, body []byte, profile strin
 // differs by line fails the target line and the answer is refused at every
 // level: no step rewrites it, and the bridge never fills.
 func TestDTRAnswerBridge_AQuestionnaireOfAnotherLineIsRefused(t *testing.T) {
+	t.Parallel()
 	answer := bytes.Replace(e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false),
 		[]byte(`"status" : "active"`), []byte(`"status" : "active", "title" : "written-for-2.0.1-only"`), 1)
 	for _, level := range allLevels {
@@ -697,6 +704,7 @@ func TestDTRAnswerBridge_AQuestionnaireOfAnotherLineIsRefused(t *testing.T) {
 // payloadChecksConsumeLanes: a lane missing where checks consume lanes is
 // refused, not carried.
 func TestDTRAnswerBridge_AnUnjudgedTargetRefusesAndSaysSo(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -770,4 +778,215 @@ func TestDTRAnswerBridge_RecordsTheAnswersLine(t *testing.T) {
 			}
 		}
 	})
+}
+
+// e08Lane answers a lane's checks of the bridge's answer as res and err,
+// whatever the body.
+type e08Lane struct {
+	res shnsdk.Result
+	err error
+}
+
+func (v e08Lane) Validate(context.Context, []byte, string) (shnsdk.Result, error) {
+	return v.res, v.err
+}
+
+// e08Flipping is a lane whose regex check could not run while down is set, and
+// that answers as inner does otherwise.
+type e08Flipping struct {
+	inner shnsdk.Validator
+	down  *atomic.Bool
+}
+
+func (v e08Flipping) Validate(ctx context.Context, body []byte, profile string) (shnsdk.Result, error) {
+	if v.down.Load() {
+		return regexResult(regexTimeoutIssue("Parameters.parameter[0].resource.id")), nil
+	}
+	return v.inner.Validate(ctx, body, profile)
+}
+
+// notMade is what the ingress record says was not made.
+func (r e08Result) notMade() []string {
+	var why []string
+	for _, x := range r.records {
+		if x.Direction == DirectionIngress {
+			why = append(why, x.EditsNotMade...)
+		}
+	}
+	return why
+}
+
+// A check at the answer's own line that could not run is neither "valid" nor
+// "not valid at its line": whether to rename is unknown, so nothing is renamed
+// on a guess. The answer is carried as sent with the could-not-run recorded, at
+// every level, however a later line answers. refusedAt is the levels at which
+// the ingress's own check of the answer refuses it first, so the bridge is never
+// reached and records nothing; where another line validates, that check passes
+// and the bridge still does not guess.
+func TestDTRAnswerBridge_ACheckThatCouldNotRunRenamesNothing(t *testing.T) {
+	answer20 := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
+	answer22 := e08Answer("packagebundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
+	timeoutIssue := regexTimeoutIssue("Parameters.parameter[0].resource.id")
+	structuralIssue := regexErr("Validation_VAL_Profile_Minimum", "Parameters.parameter[0]", "x")
+	timeout := e08Lane{res: regexResult(timeoutIssue)}
+	profileTimeout := e08Lane{res: regexResult(regexErr(validatorissue.RegexTimedOut, "Parameters.parameter[0]", "could not be executed"))}
+	outage := e08Lane{err: context.DeadlineExceeded}
+	deeper := e08Lane{res: regexResult(timeoutIssue, regexErr("Terminology_TX_NoValid_1_CC", "Parameters.parameter[0]", "x"))}
+	mixed := e08Lane{res: regexResult(timeoutIssue, structuralIssue)}
+	invalidHere := e08Lane{res: regexResult(structuralIssue)}
+	notJudged := e08Lane{res: regexResult(regexErr("", "Parameters", hapi0992))}
+	qualifying := func(line string) shnsdk.Validator {
+		return NewDiscoveredLane(line, "http://validator-"+line+".invalid/fhir", shnsdk.NewFakeValidator())
+	}
+	const couldNotRun = EditNotMadeDTRCheckCouldNotRun
+	strict500 := map[ConformanceEnforcement]int{EnforcementStrict: http.StatusInternalServerError}
+	judged502 := map[ConformanceEnforcement]int{EnforcementStructural: http.StatusBadGateway, EnforcementStrict: http.StatusBadGateway}
+	for _, row := range []struct {
+		name        string
+		declared    []string
+		answer      []byte
+		from, to    string
+		payerLines  []string
+		lanes       map[string]shnsdk.Validator // a nil lane is deleted
+		wantNotMade []string
+		wantRenamed bool
+		refusedAt   map[ConformanceEnforcement]int
+	}{
+		{name: "the regex check at both lines", lanes: map[string]shnsdk.Validator{"2.0": timeout, "2.1": timeout}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "a profile regex at both lines", lanes: map[string]shnsdk.Validator{"2.0": profileTimeout, "2.1": profileTimeout}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "beside a deeper error", lanes: map[string]shnsdk.Validator{"2.0": deeper, "2.1": deeper}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "the validator did not judge", lanes: map[string]shnsdk.Validator{"2.0": notJudged, "2.1": notJudged}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "the validator did not answer", lanes: map[string]shnsdk.Validator{"2.0": outage, "2.1": outage}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "could not run, then valid: no guess", lanes: map[string]shnsdk.Validator{"2.0": timeout}, wantNotMade: []string{couldNotRun}},
+		{name: "invalid, then could not run: unknown", lanes: map[string]shnsdk.Validator{"2.0": invalidHere, "2.1": timeout}, wantNotMade: []string{couldNotRun}, refusedAt: judged502},
+		{name: "a lane still qualifying, then valid: no guess", lanes: map[string]shnsdk.Validator{"2.0": qualifying("2.0")}, wantNotMade: []string{couldNotRun}},
+		{name: "both lanes still qualifying", lanes: map[string]shnsdk.Validator{"2.0": qualifying("2.0"), "2.1": qualifying("2.1")}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "could not run at the routed line, which is tried first", payerLines: []string{"pa.dtr@2.1"}, lanes: map[string]shnsdk.Validator{"2.1": timeout}, wantNotMade: []string{couldNotRun}},
+		{name: "toward 2.0, from 2.2", declared: declares20, answer: answer22, lanes: map[string]shnsdk.Validator{"2.2": timeout}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		{name: "beside a structural error it is a verdict: not at the line", lanes: map[string]shnsdk.Validator{"2.0": mixed, "2.1": mixed}, refusedAt: judged502},
+		{name: "no lane, then valid: renamed as before", lanes: map[string]shnsdk.Validator{"2.0": nil}, wantRenamed: true},
+	} {
+		for _, level := range allLevels {
+			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
+				declared, answer := row.declared, row.answer
+				if declared == nil {
+					declared, answer = declares22, answer20
+				}
+				r := e08RowFull(t, level, declared, answer, func(lanes map[string]shnsdk.Validator) {
+					for line, v := range row.lanes {
+						if v == nil {
+							delete(lanes, line)
+							continue
+						}
+						lanes[line] = v
+					}
+				}, nil, row.payerLines)
+				if status, refused := row.refusedAt[level]; refused {
+					if r.rec.Code != status || len(r.notMade()) != 0 {
+						t.Fatalf("answer %d %s not made %v, want %d", r.rec.Code, r.rec.Body.String(), r.notMade(), status)
+					}
+					return
+				}
+				want := answer
+				if row.wantRenamed {
+					want = e08Bridged(t, answer, "2.0", "2.2")
+				}
+				r.wantAnswered(t, want, row.wantRenamed)
+				if !slices.Equal(r.notMade(), row.wantNotMade) {
+					t.Fatalf("not made %v, want %v", r.notMade(), row.wantNotMade)
+				}
+			})
+		}
+	}
+}
+
+// One gateway, one payer answer, the lane's check failing and recovering: each
+// attempt's outcome follows that attempt's check, and the record says which.
+// Without the record the two carried answers below read as a line the answer
+// is not at, on a gateway that renamed the same bytes a moment before.
+func TestDTRAnswerBridge_TheRecordFollowsEachAttempt(t *testing.T) {
+	answer := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
+	renamed := e08Bridged(t, answer, "2.0", "2.2")
+	var down atomic.Bool
+	down.Store(true)
+	r := e08RowWith(t, EnforcementObserve, declares22, answer, func(lanes map[string]shnsdk.Validator) {
+		lanes["2.0"] = e08Flipping{inner: lanes["2.0"], down: &down}
+	})
+	r.wantAnswered(t, answer, false)
+	if !slices.Equal(r.notMade(), []string{EditNotMadeDTRCheckCouldNotRun}) {
+		t.Fatalf("first attempt: not made %v", r.notMade())
+	}
+	for _, attempt := range []struct {
+		down    bool
+		want    []byte
+		notMade []string
+	}{
+		{false, renamed, nil},
+		{true, answer, []string{EditNotMadeDTRCheckCouldNotRun}},
+		{true, answer, []string{EditNotMadeDTRCheckCouldNotRun}},
+		{false, renamed, nil},
+	} {
+		down.Store(attempt.down)
+		var mu sync.Mutex
+		var notMade []string
+		r.env.originator.cfg.ExchangeObserved = func(x ExchangeRecord) {
+			mu.Lock()
+			defer mu.Unlock()
+			if x.Direction == DirectionIngress {
+				notMade = append(notMade, x.EditsNotMade...)
+			}
+		}
+		req := httptest.NewRequest(http.MethodPost, "/Questionnaire/$questionnaire-package", bytes.NewReader(dtrFixture(t, "dtr-package-params-2.0.json")))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		r.env.originator.ingressRoute(RouteDTR)(rec, req)
+		r.env.originator.drainObserveChecks()
+		mu.Lock()
+		got := slices.Clone(notMade)
+		mu.Unlock()
+		if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), attempt.want) || !slices.Equal(got, attempt.notMade) {
+			t.Fatalf("down=%v: answer %d, not made %v, want %v\n%s", attempt.down, rec.Code, got, attempt.notMade, rec.Body.Bytes())
+		}
+	}
+}
+
+// At none a gateway's own line may have no lane, or one still qualifying. With
+// none the answer is carried and nothing is recorded: the line is never
+// checked. With one still qualifying, the renamed answer could not be checked
+// yet, so an answer that would have been renamed is carried as sent and
+// recorded as any check that could not run; one with nothing to rename records
+// nothing. Once the lane has qualified, it is renamed.
+func TestDTRAnswerBridge_AtNoneTheOwnLineStillQualifying(t *testing.T) {
+	q, qr := "Questionnaire", "QuestionnaireResponse"
+	rename := e08Answer("PackageBundle", []string{q, qr}, false)
+	same := e08Answer("packagebundle", []string{q, qr}, false)
+	const couldNotRun = EditNotMadeDTRCheckCouldNotRun
+	lane22 := func() *DiscoveredLane {
+		return NewDiscoveredLane("2.2", "http://validator-2.2.invalid/fhir", NewLineFakeValidator("2.2"))
+	}
+	for _, row := range []struct {
+		name        string
+		answer      []byte
+		lane        func(map[string]shnsdk.Validator)
+		want        []byte
+		wantRenamed bool
+		wantNotMade []string
+	}{
+		{"still qualifying, would be renamed", rename, func(l map[string]shnsdk.Validator) { l["2.2"] = lane22() }, rename, false, []string{couldNotRun}},
+		{"still qualifying, nothing to rename", same, func(l map[string]shnsdk.Validator) { l["2.2"] = lane22() }, same, false, nil},
+		{"no lane at all", rename, func(l map[string]shnsdk.Validator) { delete(l, "2.2") }, rename, false, nil},
+		{"qualified", rename, func(l map[string]shnsdk.Validator) {
+			d := lane22()
+			d.ready.Store(true)
+			l["2.2"] = d
+		}, e08Bridged(t, rename, "2.0", "2.2"), true, nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			r := e08RowWith(t, EnforcementNone, declares22, row.answer, row.lane)
+			r.wantAnswered(t, row.want, row.wantRenamed)
+			if !slices.Equal(r.notMade(), row.wantNotMade) {
+				t.Fatalf("not made %v, want %v", r.notMade(), row.wantNotMade)
+			}
+		})
+	}
 }

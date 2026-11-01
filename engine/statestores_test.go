@@ -258,7 +258,7 @@ func TestMemReplayStore_RacersExactlyOneFirstUse(t *testing.T) {
 // a fixed (replay, err) pair. (false, err) is the adversarial shape the interface's
 // fail-closed rule exists for — a third-party store that could not tell but did not
 // claim a replay; every caller must reject on err whatever the bool says. Safe without
-// a lock: no test in gateway/engine calls t.Parallel().
+// a lock: each test builds its own.
 type stubReplayStore struct {
 	replay bool
 	err    error

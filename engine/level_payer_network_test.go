@@ -49,6 +49,7 @@ func runPayerNetworkRows(t *testing.T, rows map[string]payerNetworkRow) {
 }
 
 func TestLevelPayerCRD_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	sel := conformantCRD("MBR-COVERED", "72148")
 	runPayerNetworkRows(t, map[string]payerNetworkRow{
 		"order-select: duplicate key": {leg: "crd-order-select", body: bytes.Replace(sel, []byte(`"hook":"order-select",`), []byte(`"hook":"order-select","hook":"order-select",`), 1),
@@ -79,6 +80,7 @@ func TestLevelPayerCRD_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 }
 
 func TestLevelPayerDTR_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	own := resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember))
 	pkg := shnsdk.FrameOperationQuestionnairePackage
 	next := shnsdk.FrameOperationNextQuestion
@@ -107,6 +109,7 @@ func TestLevelPayerDTR_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 }
 
 func TestLevelPayerPAS_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	base := pasIngressBundle("00001", "")
 	// An amendment whose Claim.related is not a list: the subject binds, the
 	// prior authorization the amendment names cannot be read. (A value of the
@@ -143,6 +146,7 @@ func TestLevelPayerPAS_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 // at every level with the status and body strict has always given, and
 // nothing is written from it.
 func TestLevelPayer_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	dupPAS := []byte(strings.Replace(assemblyRealPending, `"type":"collection"`, `"type":"collection","type":"collection"`, 1))
 	dupInquiry := bytes.Replace(decidedAnswer(t), []byte(`"type": "collection"`), []byte(`"type": "collection", "Type": "collection"`), 1)
 	if bytes.Equal(dupInquiry, decidedAnswer(t)) {
@@ -195,6 +199,7 @@ func TestLevelPayer_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 // A token whose subject is another patient's reaches the payer's own system at
 // every level, and its answer is relayed, never refused at the payer's bind.
 func TestLevelPayer_TokenForAnotherPatientIsAccepted(t *testing.T) {
+	t.Parallel()
 	sel := conformantCRD("MBR-COVERED", "72148")
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {

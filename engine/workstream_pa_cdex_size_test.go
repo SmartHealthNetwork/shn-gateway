@@ -47,6 +47,7 @@ func cdexSubmissionOf(t *testing.T, n int) []byte {
 // limit for every other leg, and under the leg's own. At one level here, since
 // sealing it is dear: test/adversarial carries it at every level.
 func TestCDexIngress_ASubmissionAtTheCeilingIsCarriedWhole(t *testing.T) {
+	t.Parallel()
 	body := cdexSubmissionOf(t, shnsdk.MaxAttachmentBytes)
 	env, rec, x := runCDexIngress(t, EnforcementObserve, body, "", LegResult{Response: testResponse(cdexPayersAnswer)})
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), cdexPayersAnswer) {
@@ -65,6 +66,7 @@ func TestCDexIngress_ASubmissionAtTheCeilingIsCarriedWhole(t *testing.T) {
 // recorded as the provider gateway's routing refusal, never authorized or
 // sent, at every level.
 func TestCDexIngress_AConfiguredCeilingRefusesOneByteOver(t *testing.T) {
+	t.Parallel()
 	const ceiling = 1 << 20
 	for _, level := range allLevels {
 		t.Run("over/"+level.String(), func(t *testing.T) {
@@ -117,6 +119,7 @@ func TestAttachmentCeiling_NeverAboveTheNetworks(t *testing.T) {
 // (over the ceiling) seals over it and is refused naming that limit, never
 // authorized or sent. Every other leg keeps the network's limit.
 func TestOriginateLeg_TheAttachmentLegsEnvelopeHasItsOwnLimit(t *testing.T) {
+	t.Parallel()
 	// The submission is carried as the ingress carries it; the other leg's
 	// request is the test's own.
 	originate := func(env *inProcessExchange, leg string, body []byte) error {
@@ -200,6 +203,7 @@ func TestOriginateLeg_TheAttachmentLegsEnvelopeHasItsOwnLimit(t *testing.T) {
 // refused 413 as routing before the payer's system is called, and one at it
 // is carried, at every level.
 func TestCDexPayer_ItsOwnCeilingBoundsASubmission(t *testing.T) {
+	t.Parallel()
 	const ceiling = 1 << 20
 	t.Run("over the network's limit for other legs", func(t *testing.T) {
 		p, _ := newRecordingLevelPayer(t, EnforcementObserve)
@@ -256,6 +260,7 @@ func storedGzip(t *testing.T, b []byte) []byte {
 // largest of any leg. Only the routes that carry a documentation attachment
 // read past the network's limit.
 func TestCDex_ACodedSubmissionHasTheBoundsOfAnUncodedOne(t *testing.T) {
+	t.Parallel()
 	limits := func(g *Gateway) map[string]int64 {
 		out := map[string]int64{}
 		for _, rt := range append(g.paRoutes("provider"), g.coreRoutes("payer")...) {
@@ -357,6 +362,7 @@ func TestCDex_ACodedSubmissionHasTheBoundsOfAnUncodedOne(t *testing.T) {
 // payer's gateway, recorded as its routing refusal, and the payer's system is
 // not called; one exactly at it is read.
 func TestCDexPayer_AnEnvelopeOverTheLegsLimitIs413(t *testing.T) {
+	t.Parallel()
 	padTo := func(n int) func([]byte) []byte {
 		return func(raw []byte) []byte { return append(raw, bytes.Repeat([]byte(" "), n-len(raw))...) }
 	}
@@ -413,6 +419,7 @@ func readCDexFixture(t *testing.T, name string) []byte {
 // that is not well-formed base64 are carried, and so is every submission to a
 // payer that declares no limit.
 func TestCDexIngress_AFileOverThePayersDeclaredLimitIsRefused(t *testing.T) {
+	t.Parallel()
 	m := readCDexAttachmentFixtures(t)
 	for _, f := range m.Fixtures {
 		over := f.Measured && f.LargestInline > m.DeclaredLimit

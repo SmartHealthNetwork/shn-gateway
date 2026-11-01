@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -442,8 +443,8 @@ func missedCodingSystems(diagnostics string) (systems []string, ok bool) {
 //     (Terminology_TX_NoValid_1_CC), when for every code it names the
 //     validator said on that element that it could not expand the bound value
 //     set for want of that code's system (missedCodingSystems);
-//   - an error the validator gives because it could not run a primitive's
-//     regex check (regexCheckCouldNotRun);
+//   - an error the validator gives because it could not run a regex check
+//     (validatorissue.CouldNotRun);
 //   - a no-match summary or PAS slice-match consequence that follows from
 //     those alone, read exactly as the structural level reads them
 //     (allExcused), on an entry that carries such an issue itself.
@@ -459,7 +460,7 @@ func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string
 		return nil, false, false
 	}
 	for i, e := range errs {
-		if e.Severity == "error" && e.MessageID == regexCheckCouldNotRun {
+		if validatorissue.CouldNotRun(e.Issue) {
 			errs[i].excused, regex = true, true
 		}
 	}

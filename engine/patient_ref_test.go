@@ -157,6 +157,7 @@ func patientForms(member string) map[string]struct {
 // request's own member is answered about that member and binds to the token's
 // patient (nothing differs), at every level.
 func TestEligibility_EveryPatientReferenceFormNamesItsMember(t *testing.T) {
+	t.Parallel()
 	for name, form := range patientForms(dtrFrameMember) {
 		for _, level := range eligibilityLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -179,6 +180,7 @@ func TestEligibility_EveryPatientReferenceFormNamesItsMember(t *testing.T) {
 // Eligibility, forwarded to the payer's own endpoint: every form is carried
 // byte for byte and binds to the token's patient, at every level.
 func TestEligibility_ForwardedPatientReferenceFormsNameTheirMember(t *testing.T) {
+	t.Parallel()
 	for name, form := range patientForms(dtrFrameMember) {
 		for _, level := range eligibilityLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -205,6 +207,7 @@ func TestEligibility_ForwardedPatientReferenceFormsNameTheirMember(t *testing.T)
 // relative one is: answered about the patient it names, and the difference
 // observed.
 func TestEligibility_PatientReferenceFormsToAnotherPatientAreCarried(t *testing.T) {
+	t.Parallel()
 	for name, form := range patientForms(anotherHeldMember) {
 		t.Run(name, func(t *testing.T) {
 			p := eligibilityPayer(t, EnforcementStrict, false)
@@ -223,6 +226,7 @@ func TestEligibility_PatientReferenceFormsToAnotherPatientAreCarried(t *testing.
 // names no patient: refused before the payer's records are read, at every
 // level.
 func TestEligibility_UnresolvablePatientReferenceIsRefused(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		ref       string
 		contained []map[string]any
@@ -247,6 +251,7 @@ func TestEligibility_UnresolvablePatientReferenceIsRefused(t *testing.T) {
 // SDK's reader, which takes what follows "Patient/" as the member: a member
 // id is an identifier value, not limited to a FHIR id's shape. At every level.
 func TestEligibility_OtherReferencesAreReadAsBefore(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		ref      string
 		answered bool // the SDK's reader names a held member
@@ -308,6 +313,7 @@ func cdexTaskWithPatient(t *testing.T, member, forRef, queryRef string, containe
 // at every level. One naming another patient in any form is refused with the
 // relative form's answer.
 func TestFederatedQuery_PatientReferenceForms(t *testing.T) {
+	t.Parallel()
 	abs := func(m string) string { return "https://provider.example/fhir/Patient/" + m }
 	for name, form := range map[string]struct {
 		forRef, queryRef func(string) string
@@ -361,6 +367,7 @@ func TestFederatedQuery_PatientReferenceForms(t *testing.T) {
 // reference, or names no patient or more than one, is refused before any
 // record is read, at every level: never read as a narrower query.
 func TestFederatedQuery_MalformedPatientReferenceIsRefused(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		forRef, queryRef string
 		contained        []map[string]any
@@ -489,6 +496,7 @@ func eligibilityAmbiguous(t *testing.T, member, last string) []byte {
 // reading of the last one), as message integrity. A body that is no
 // CoverageEligibilityRequest names no member. At every level.
 func TestEligibility_AmbiguousOrWrongRequestIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			for _, last := range []string{"Patient/" + dtrFrameMember, "https://provider.example/fhir/Patient/" + dtrFrameMember} {
@@ -534,6 +542,7 @@ func TestEligibility_ContainedNonObjectIsReadPast(t *testing.T) {
 // as before: its relative patient names its member, at every level. The
 // strict reader's limits are not a new refusal.
 func TestEligibility_StrictlyUnreadableRequestIsReadAsBefore(t *testing.T) {
+	t.Parallel()
 	withField := func(name, raw string) []byte {
 		body := eligibilityRequest(t, dtrFrameMember)
 		return append(append(append([]byte{}, body[:len(body)-1]...), []byte(`,"`+name+`":`+raw)...), '}')
@@ -562,6 +571,7 @@ func TestEligibility_StrictlyUnreadableRequestIsReadAsBefore(t *testing.T) {
 // another case is refused, never bound (the patient-match rule), at every
 // level.
 func TestEligibility_StrictlyUnreadableRequestReadTwoWaysIsRefused(t *testing.T) {
+	t.Parallel()
 	const patient = `"patient":{"reference":"Patient/` + dtrFrameMember + `"}`
 	limits := map[string]string{
 		"invalid UTF-8 in another field": "\"\xff\"",
@@ -668,6 +678,7 @@ func TestRepeatsAName_PastTheStrictReadersLimits(t *testing.T) {
 // payer does not hold is its own unknown member, and the request is carried
 // to a payer's own endpoint. At every level.
 func TestEligibility_ContainedMemberOfAnyShapeIsRead(t *testing.T) {
+	t.Parallel()
 	body := func(t *testing.T) []byte {
 		return eligibilityWithPatient(t, dtrFrameMember, "#pat", containedMember("pat", "MBR_1"))
 	}

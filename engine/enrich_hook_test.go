@@ -201,6 +201,7 @@ func TestEnrichmentHook_DTRAsksOncePerRead(t *testing.T) {
 //     called or not, only in on-behalf building's own files: the hook's
 //     (module1_enrich_native.go) and module 1's other files (module1_*.go).
 func TestEnrichmentHook_TheCoreReachesEnrichmentOnlyThroughIt(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {

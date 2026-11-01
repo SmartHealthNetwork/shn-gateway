@@ -39,6 +39,7 @@ func (beginFailsStore) BeginClaimUpdate(string, string) (bool, error) {
 }
 
 func TestNativeUpdate_ReachesThePayerWhateverTheLedgerHolds(t *testing.T) {
+	t.Parallel()
 	const origCorr = "convergence-pas-submit-0001"
 	const pci = "PCI-CONF-UPD"
 	approved := fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`), true)
@@ -220,6 +221,7 @@ func TestNativeUpdate_NoPriorClaimNamedRecordsNothing(t *testing.T) {
 // holds, and never creates one for another patient under a correlation that
 // already names an authorization: the correlation keeps naming exactly one.
 func TestNativeUpdate_UnboundAmendmentRecordsOnlyOntoItsOwnAuthorization(t *testing.T) {
+	t.Parallel()
 	const origCorr = "convergence-pas-submit-0001"
 	approved := fixturePASResponse(t, []byte(`{"resourceType":"ClaimResponse","outcome":"complete","preAuthRef":"P-1","preAuthPeriod":{"end":"2030-01-01"}}`), true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

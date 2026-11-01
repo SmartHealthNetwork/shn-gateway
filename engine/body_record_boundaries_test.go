@@ -111,6 +111,7 @@ func checkBodyRecords(files []*ast.File, info *types.Info, rules map[string]boun
 // exchangeRecorder.sent, an answer, every refusal included, by
 // exchangeRecorder.answered. Only a listed transmit records one.
 func TestEveryAnswerTransmitRecordsTheAnswer(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	files := parsePackageSources(t, fset, ".", nil)
 	info := typedPackage(t, fset, files)

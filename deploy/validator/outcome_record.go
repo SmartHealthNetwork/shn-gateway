@@ -167,10 +167,9 @@ func digest(s string) string {
 }
 
 // regexTimeoutMessageID is the validator's message id for a primitive whose
-// type regex it could not evaluate. Under CPU starvation the validator gives up
-// on the regex after a fixed wall-clock limit and reports this id as an error
-// on a value that matches: the check could not run, which is not a verdict on
-// the value.
+// type regex it could not evaluate. A regex that overruns the validator's time
+// limit reports this id as an error on a value that matches: the check could
+// not run, which is not a verdict on the value.
 const regexTimeoutMessageID = "TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION"
 
 // onlyRegexTimeout reports whether a row rejected excerpt, its answer, for an

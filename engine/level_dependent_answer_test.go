@@ -60,6 +60,7 @@ func withCoverageEntry(t *testing.T, answer []byte) []byte {
 // ---- payer egress ----
 
 func TestLevelPayerPASSubmit_DependentAnswerRelayed(t *testing.T) {
+	t.Parallel()
 	answer := dependentAnswerOf(t, []byte(assemblyRealPending), nil)
 	approved := dependentAnswerOf(t, withCoverageEntry(t, fixturePASResponse(t, approvedClaimResponse(nil), true)), nil)
 	request := dependentRequestOf(t, originatorBuiltConformantBundle(t, "MBR-COVERED"))
@@ -99,6 +100,7 @@ func TestLevelPayerPASSubmit_DependentAnswerRelayed(t *testing.T) {
 }
 
 func TestLevelPayerPASSubmit_DependentAnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	request := dependentRequestOf(t, originatorBuiltConformantBundle(t, "MBR-COVERED"))
 	for _, name := range dependentRefusalNames(true) {
 		answer := dependentAnswerOf(t, []byte(assemblyRealPending), dependentAnswerRefusals[name].edit)
@@ -118,6 +120,7 @@ func TestLevelPayerPASSubmit_DependentAnswerPatientLinkage(t *testing.T) {
 }
 
 func TestLevelPayerInquire_DependentAnswerDecides(t *testing.T) {
+	t.Parallel()
 	answer := dependentAnswerOf(t, decidedAnswer(t), nil)
 	request := dependentRequestOf(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
 	for _, level := range allLevels {
@@ -137,6 +140,7 @@ func TestLevelPayerInquire_DependentAnswerDecides(t *testing.T) {
 }
 
 func TestLevelPayerInquire_DependentAnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	request := dependentRequestOf(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
 	for _, name := range dependentRefusalNames(false) {
 		answer := dependentAnswerOf(t, decidedAnswer(t), dependentAnswerRefusals[name].edit)
@@ -166,6 +170,7 @@ func levelPASDependentIngress(t *testing.T) string {
 }
 
 func TestLevelPASIngress_DependentAnswerRecordsItsDecision(t *testing.T) {
+	t.Parallel()
 	answer := dependentAnswerOf(t, []byte(assemblyRealPending), nil)
 	body := levelPASDependentIngress(t)
 	for _, level := range allLevels {
@@ -186,6 +191,7 @@ func TestLevelPASIngress_DependentAnswerRecordsItsDecision(t *testing.T) {
 }
 
 func TestLevelPASIngress_DependentAnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	body := levelPASDependentIngress(t)
 	for _, name := range dependentRefusalNames(true) {
 		answer := dependentAnswerOf(t, []byte(assemblyRealPending), dependentAnswerRefusals[name].edit)
@@ -206,6 +212,7 @@ func levelInquiryDependent(t *testing.T) string {
 }
 
 func TestLevelInquireIngress_DependentAnswerRecordedOK(t *testing.T) {
+	t.Parallel()
 	answer := dependentAnswerOf(t, levelInquiryPayerAnswer(t), nil)
 	body := levelInquiryDependent(t)
 	for _, level := range allLevels {
@@ -225,6 +232,7 @@ func TestLevelInquireIngress_DependentAnswerRecordedOK(t *testing.T) {
 }
 
 func TestLevelInquireIngress_DependentAnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	body := levelInquiryDependent(t)
 	for _, name := range dependentRefusalNames(false) {
 		answer := dependentAnswerOf(t, levelInquiryPayerAnswer(t), dependentAnswerRefusals[name].edit)

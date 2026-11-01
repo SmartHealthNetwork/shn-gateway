@@ -213,9 +213,11 @@ type ExchangeRecord struct {
 	// LineCarriedAnswer when the answer was stamped with another line than
 	// the leg routed. Empty when it was not. Not a metric dimension.
 	LineCarried []string
-	// EditsNotMade names each registered edit the gateway makes by default
-	// that it could not make on the call, with why (EditNotMadeValues, each
+	// EditsNotMade names each registered edit the gateway would make that it
+	// could not make on the call, with why (EditNotMadeValues, each
 	// at most once): the bytes it would have changed were carried as sent.
+	// It also names a statement the requester made for an amendment this
+	// gateway built that the amendment does not carry.
 	// Empty when every such edit was made or had nothing to change.
 	// Content-free; not a metric dimension. Evolving.
 	EditsNotMade []string
@@ -572,7 +574,7 @@ func (x *exchangeRecorder) sent(p relay.Payload) {
 	}
 }
 
-// Why a default edit was not made (ExchangeRecord.EditsNotMade).
+// Why an edit was not made (ExchangeRecord.EditsNotMade).
 const (
 	// EditNotMadeNoStructuralPayerURL: a PAS Task in the answer names a
 	// payer-url input that is not a string valueUrl, so the return-path
@@ -585,12 +587,24 @@ const (
 	// take the documentation submission, so a return path (E-10) to it would
 	// always refuse.
 	EditNotMadePayerDoesNotTake = "E-10:payer-does-not-take"
+	// EditNotMadeDTRCheckCouldNotRun: the check that a questionnaire package
+	// answer is valid at its own line could not run or that line's lane is
+	// still qualifying, or, at none, the lane for the provider's own line is
+	// still qualifying, so whether to rename its line-specific names is unknown
+	// and the answer was carried as sent.
+	EditNotMadeDTRCheckCouldNotRun = "E-08:check-could-not-run"
+	// EditNotMadeReportTypeNotCarried: the request to an amending route stated
+	// a report type and the amendment does not carry it: its line has no place
+	// for one, its build was bridged, or the pend ties the answer to no item.
+	// The amendment went on without it. Not a registered edit: the amendment is
+	// this gateway's own build.
+	EditNotMadeReportTypeNotCarried = "amendment:report-type-not-carried"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
-var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake}
+var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried}
 
-// editNotMade records that a default edit was not made, and why (one of
+// editNotMade records that an edit was not made, and why (one of
 // EditNotMadeValues).
 func (x *exchangeRecorder) editNotMade(why string) {
 	x.with(func() {

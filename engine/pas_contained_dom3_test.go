@@ -160,6 +160,7 @@ func payerOrgRidesAsEntry(t *testing.T, bundleJSON []byte, orgID string, payer s
 // payer identity did not. A future drop that narrows back to a fixed id fails the
 // bridging row; a future re-point that strands anything fails both.
 func TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded(t *testing.T) {
+	t.Parallel()
 	provider, ok := newCensusSoR().ResolveByReference(OrderingProviderRef)
 	if !ok {
 		t.Fatal("the participant's own requesting-provider record is required to author a submission")

@@ -1049,6 +1049,7 @@ func assertPendCarryRefusal(t *testing.T, stub *pendResumeSubstrate, rec *httpte
 // produce-iff — not because the wiring is missing; the wiring is
 // TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord's job.)
 func TestScenarioToPend_CarriesNothingWhenTheChainCarriesNothing(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		fixture func(*testing.T, pendFixtureOpts) (*Gateway, *pendResumeSubstrate)

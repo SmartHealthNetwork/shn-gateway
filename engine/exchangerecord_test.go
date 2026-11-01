@@ -276,6 +276,7 @@ func (h hubAnswers) RoundTrip(req *http.Request) (*http.Response, error) {
 // The Hub's own refusals name the Hub and the network rule; a forward the
 // recipient's gateway refused names that gateway; no answer is unreachable.
 func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
+	t.Parallel()
 	rows := []struct {
 		name              string
 		hub               hubAnswers
@@ -684,6 +685,7 @@ func inboundRequestWith(t *testing.T, p *levelPayer, leg string, inboundPayload 
 // member its system does not hold refuses on a check it opted into: the
 // record names conformance, at every level.
 func TestExchangeRecord_InboundUnknownMemberIsConformance(t *testing.T) {
+	t.Parallel()
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
@@ -901,6 +903,7 @@ func TestExchangeRecord_ValidationFinding(t *testing.T) {
 // Recording never changes an answer: the same calls with the hook set and
 // unset get the same status, headers and body.
 func TestExchangeRecord_ConformanceNeutral(t *testing.T) {
+	t.Parallel()
 	type answer struct {
 		status int
 		header http.Header
@@ -1864,6 +1867,7 @@ func (s *sorSpy) ResolveByReferenceContext(ctx context.Context, r string) ([]byt
 // through the recording reader, and each is counted: a read that bypassed it
 // would be a backend call the record never saw.
 func TestExchangeRecord_EveryInboundReadIsNoted(t *testing.T) {
+	t.Parallel()
 	type row struct {
 		leg, operation string
 		body           func(t *testing.T, p *levelPayer) []byte
@@ -2292,6 +2296,7 @@ func (s *repeatingSoR) SearchPatientContext(context.Context, string, string, ...
 // one stays an upstream failure: the patient bind's patient-match refusal,
 // and the records search's invalid response.
 func TestExchangeRecord_FederatedQuerySystemRepeatingAMember(t *testing.T) {
+	t.Parallel()
 	repeatedPatient := []byte(`{"resourceType":"Patient","id":"p","birthDate":"1961-02-03","birthDate":"1971-02-03"}`)
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -2354,6 +2359,7 @@ func TestBackendCorrelation_ConfiguredLowercaseIsNeverSent(t *testing.T) {
 // A repeated member name in the payer's eligibility answer is recorded as on
 // every other leg: refused on message integrity, the answer malformed.
 func TestExchangeRecord_EligibilityAnswerRepeatingAMember(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		p := eligibilityPayer(t, level, true)
 		var got exchangeRecords
@@ -2371,6 +2377,7 @@ func TestExchangeRecord_EligibilityAnswerRepeatingAMember(t *testing.T) {
 // (TestExchangeRecord_FederatedQuerySystemRepeatingAMember): refused on
 // message integrity, the answer malformed, at every level.
 func TestExchangeRecord_PASAnswerRepeatingAMember(t *testing.T) {
+	t.Parallel()
 	request := originatorBuiltConformantBundle(t, "MBR-COVERED")
 	for _, level := range allLevels {
 		p, got := newRecordingLevelPayer(t, level)
@@ -2391,6 +2398,7 @@ func TestExchangeRecord_PASAnswerRepeatingAMember(t *testing.T) {
 // the one the same read failing otherwise gets, byte for byte, and that one
 // stays an upstream failure.
 func TestExchangeRecord_EligibilitySystemRepeatingAMember(t *testing.T) {
+	t.Parallel()
 	repeatedPatient := []byte(`{"resourceType":"Patient","id":"p","birthDate":"1961-02-03","birthDate":"1971-02-03"}`)
 	repeatedCoverage := []byte(`{"resourceType":"Coverage","id":"c","status":"active","status":"cancelled"}`)
 	for _, level := range allLevels {
@@ -2468,6 +2476,7 @@ func TestExchangeRecord_IngressBindingRepeatingAMemberUnchanged(t *testing.T) {
 // answered as if clean; the federated query's patient bind and records search,
 // and coverage eligibility's member and coverage, are the rows above.
 func TestExchangeRecord_AnsweredReadsRepeatingAMember(t *testing.T) {
+	t.Parallel()
 	repeated := func() error { return SoRRepeatedMember() }
 	otherwise := func() error { return &SoRReadError{Kind: SoRInvalidResponse} }
 	for name, row := range map[string]struct {
@@ -2784,6 +2793,7 @@ func TestObserveCheckDroppedMetric_MONR24(t *testing.T) {
 // MON-R24: the conformance vocabularies a metric folds against are exactly
 // their types' names, each once.
 func TestConformanceVocabulariesAreTheirTypes(t *testing.T) {
+	t.Parallel()
 	levels := []string{EnforcementNone.String(), EnforcementObserve.String(), EnforcementStructural.String(), EnforcementStrict.String()}
 	if !slices.Equal(ConformanceLevels, levels) {
 		t.Errorf("ConformanceLevels %v, the levels' names %v", ConformanceLevels, levels)

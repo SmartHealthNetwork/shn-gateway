@@ -311,6 +311,12 @@ func newEHRServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Requ
 	return e
 }
 
+// noAnswer ends a handler whose client has gone, with no answer at all. A handler
+// that returned would send an empty 200: a TLS client's close reaches the server
+// while the client can still read, so that 200 can beat the close and read as the
+// server's answer, not as no answer in time.
+func noAnswer() { panic(http.ErrAbortHandler) }
+
 func (e *ehrServer) reader(mode string) fhirServerReader {
 	roots := x509.NewCertPool()
 	roots.AddCert(e.srv.Certificate())
@@ -407,7 +413,7 @@ func TestFHIRServerReadRefusesWhatTheServerDoes(t *testing.T) {
 		"403":  {handler: ehrAnswer(403, "", ""), roots: true, status: 412, msg: fhirServerRefusedToken},
 		"500":  {handler: ehrAnswer(500, "", ""), roots: true, status: 412, msg: fhirServerAnswered},
 		"404":  {handler: ehrAnswer(404, "", ""), roots: true, status: 412, msg: fhirServerAnswered},
-		"slow": {handler: func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }, roots: true, ctx: 200 * time.Millisecond, status: 412, msg: fhirServerTimedOut},
+		"slow": {handler: func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done(); noAnswer() }, roots: true, ctx: 200 * time.Millisecond, status: 412, msg: fhirServerTimedOut},
 		"too large": {handler: ehrAnswer(200, "application/fhir+json", `{"resourceType":"Bundle","type":"searchset","x":"`+strings.Repeat("a", fhirServerMaxBody)+`"}`),
 			roots: true, status: 412, msg: fhirServerTooLarge},
 		// Headers over the 64 KiB cap: the transport gives up on the answer, so
@@ -641,6 +647,7 @@ func payorOrganization(id, payerValue string) string {
 // that one read. Both reads' records are carried (E-07), the Organization
 // once; no token and no address on the server is.
 func TestCRDIngressRoutesByThePayorOrganizationReadThroughFHIRServer(t *testing.T) {
+	t.Parallel()
 	for name, search := range map[string]string{"one coverage": bareRefSearchset("o1"), "two naming the same": bareRefSearchset("o1", "o1")} {
 		t.Run(name, func(t *testing.T) {
 			var paths []string
@@ -692,7 +699,7 @@ func TestCRDIngressFHIRServerReadsShareOneBudget(t *testing.T) {
 			select {
 			case <-time.After(d):
 			case <-r.Context().Done():
-				return
+				noAnswer()
 			}
 			next(w, r)
 		}
@@ -731,6 +738,7 @@ func TestCRDIngressFHIRServerReadsShareOneBudget(t *testing.T) {
 // patient (never routed on), no Coverage at all, and the payor Organization
 // read's refusals.
 func TestCRDIngressFHIRServerRefusals(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		mode    string
 		handler func(http.ResponseWriter, *http.Request)
@@ -845,6 +853,7 @@ func TestCRDIngressPublicModeRefusesAPrivateServer(t *testing.T) {
 // a fhirServer read that could not get it, the EHR's own null coverage, and
 // no fhirServer at all.
 func TestExchangeRecord_CRDNoCoverageToRouteByIsARoutingRefusal(t *testing.T) {
+	t.Parallel()
 	e := newEHRServer(t, ehrAnswer(200, "application/fhir+json", `{"resourceType":"Bundle","type":"searchset","total":0}`))
 	for name, row := range map[string]struct {
 		mode string
@@ -912,6 +921,7 @@ func statusSearchset(coverages ...string) string {
 // never makes routing ambiguous), otherwise on the cancelled ones when they
 // name one payer: that payer answers that the member is not covered.
 func TestCRDIngressFHIRServerRoutesOnTheActiveCoverage(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		search string
 		status int
@@ -1041,6 +1051,7 @@ func TestFHIRServerReadDialsTheAddressItChecked(t *testing.T) {
 // transport of its own, so no credential or signer another client of the
 // gateway's process carries. Both reads, in every mode that reads.
 func TestFHIRServerReadPresentsNoCredentialOfItsOwn(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{FHIRServerReadPublic, FHIRServerReadPrivate} {
 		c := fhirServerReader{mode: mode}.client()
 		tr, ok := c.Transport.(*http.Transport)
@@ -1169,6 +1180,7 @@ func TestFHIRServerOutcome(t *testing.T) {
 
 // Through the ingress, each read's recorded outcome follows the read.
 func TestCRDIngressRecordsTheFHIRServerReadsOutcome(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		mode    string
 		handler func(http.ResponseWriter, *http.Request)

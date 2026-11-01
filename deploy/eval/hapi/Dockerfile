@@ -68,5 +68,6 @@ ENTRYPOINT ["java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WE
 COPY --from=backport /out/main.war /app/main.war
 COPY --from=backport /out/provenance.json /app/backport-provenance.json
 LABEL org.shn.validator.backport.class="51c76b59364b8927a40efb29232945289974ff540b53b623adc9031886bb47f5"
+LABEL org.shn.validator.backport.regex-classes="f4c175e9785c74f4f3cd99e6affffb022436d730687c9faab4d52312fadcd12b"
 COPY --from=igs /packages /packages
 COPY validator/support/shn.fhir.validation-support-1.5.0.tgz /packages/shn.fhir.validation-support-1.5.0.tgz

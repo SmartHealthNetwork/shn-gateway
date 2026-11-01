@@ -113,6 +113,7 @@ func lastOutcome(t *testing.T, g *Gateway) (string, string) {
 }
 
 func TestCRDIngress_RelaysExactly(t *testing.T) {
+	t.Parallel()
 	notCovered := bytes.Replace(realCRDAnswer(t), []byte(`"valueCode": "covered"`), []byte(`"valueCode": "not-covered"`), 1)
 	if bytes.Equal(notCovered, realCRDAnswer(t)) {
 		t.Fatal("fixture: the recorded answer's covered value was not found")

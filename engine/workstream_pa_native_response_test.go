@@ -94,6 +94,7 @@ func TestConsistentPASInquiryAnswerSubjectsIsTheLegRule(t *testing.T) {
 // below, at every line and at a line the rule does not know, it reads exactly
 // as validatePASInquiryAnswerAt does.
 func TestPASInquiryAnswerReadsAtIsTheGatewaysRule(t *testing.T) {
+	t.Parallel()
 	read := func(path string) []byte {
 		raw, err := os.ReadFile(path)
 		if err != nil {

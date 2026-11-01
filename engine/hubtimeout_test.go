@@ -21,6 +21,7 @@ import (
 // the caller reads 504 with the fact and the budget, and the leg outcome stays
 // "unreachable" (the leg did not complete).
 func TestHubLegTimeout_NamesTheBudget(t *testing.T) {
+	t.Parallel()
 	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	gw.cfg.Client = &http.Client{Transport: stub, Timeout: 50 * time.Millisecond}
@@ -50,6 +51,7 @@ func TestHubLegTimeout_NamesTheBudget(t *testing.T) {
 // it: the 504 still names the budget and says the recipient may have received
 // the request.
 func TestHubLegTimeout_AfterTheSendMayHaveBeenReceived(t *testing.T) {
+	t.Parallel()
 	gw, stub, _ := uc03HandlerSystem(t, uc03Coverage())
 	stub.routeDelay = 5 * time.Second
 	wrote := diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {

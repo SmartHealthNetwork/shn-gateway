@@ -146,6 +146,7 @@ func TestPASRequestRejectsOtherPatientContainedEvidence(t *testing.T) {
 }
 
 func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, orderType := range []string{"ServiceRequest", "DeviceRequest"} {
 			for _, optionalType := range []string{"ServiceRequest", "DeviceRequest"} {
@@ -450,6 +451,7 @@ func TestAuthoredPASOptionalContextNeedsActiveIdentities(t *testing.T) {
 }
 
 func TestAuthoredPASOptionalPolicyRejectsDotSegments(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, kind := range []string{"ServiceRequest", "DeviceRequest"} {
 			for _, id := range []string{".", "..", ".clinical", "..clinical", "a..b", "a-b"} {

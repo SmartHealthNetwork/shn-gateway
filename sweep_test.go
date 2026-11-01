@@ -154,6 +154,12 @@ var sweepAllowlist = map[string][]string{
 		"`cosign verify --certificate-identity https://github.com/SmartHealthNetwork/shn-platform/.github/workflows/publish-image.yml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/smarthealthnetwork/shn-gateway:<version>`.",
 	},
 
+	// Unmodified org.hl7.fhir.core source: its hash is pinned, and an ASCII uppercase range
+	// is Java syntax, not a decision label.
+	"deploy/validator/backport/upstream/PrimitiveRegexes.java": {
+		"if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.')) {",
+	},
+
 	// ASCII uppercase range is Go syntax, not a decision label.
 	"internal/pasgraph/graph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",

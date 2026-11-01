@@ -4,6 +4,9 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -76,20 +79,88 @@ public final class BuildBackportTest {
                 rejects(() -> BuildBackport.requireTuple(tuple.platform(), tuple.child(), swapped.warHash(), swapped.size()), "swapped WAR");
                 rejects(() -> BuildBackport.requireTuple("", tuple.child(), tuple.warHash(), tuple.size()), "missing tuple");
             }
+            rewrites(dir);
+            pins(dir, Path.of(args[0]), Path.of(args[1]));
             System.out.println("PASS packaging checks=" + checks);
         } finally {
             try (var files = Files.walk(dir)) { for (Path p : files.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(p); }
         }
     }
-    private static void archive(Path file, String a, String b) throws Exception {
+    private static void rewrites(Path dir) throws Exception {
+        Path original = dir.resolve("set.zip");
+        archive(original, "kept.txt", "replaced.txt", "removed.txt", "last.txt");
+        byte[] replacement = "new bytes".getBytes(java.nio.charset.StandardCharsets.UTF_8), addition = new byte[4096];
+        var delta = new BuildBackport.Delta(Map.of("replaced.txt", replacement),
+                new TreeMap<>(Map.of("z.class", addition, "a.class", replacement)), Set.of("removed.txt"));
+        Path first = dir.resolve("set-first.zip"), second = dir.resolve("set-second.zip");
+        BuildBackport.rewrite(original, first, delta, false);
+        BuildBackport.rewrite(original, second, delta, false);
+        check(Arrays.equals(Files.readAllBytes(first), Files.readAllBytes(second)), "repeat rewrite bytes differ");
+        BuildBackport.verifyDelta(original, first, delta);
+        try (ZipFile after = new ZipFile(first.toFile())) {
+            check(after.stream().map(ZipEntry::getName).toList().equals(List.of("kept.txt", "replaced.txt", "last.txt", "a.class", "z.class")), "entry order after a rewrite");
+            check(after.size() == 5, "entry count after a rewrite");
+            check(Arrays.equals(after.getInputStream(after.getEntry("z.class")).readAllBytes(), addition), "added bytes");
+            check(after.getEntry("z.class").getMethod() == ZipEntry.DEFLATED, "added entry not deflated");
+        }
+        check(Arrays.equals(centralMetadata(original, "last.txt"), centralMetadata(first, "last.txt")), "unchanged entry metadata changed in a rewrite");
+        BuildBackport.requireUnsigned(first);
+        rejects(() -> BuildBackport.rewrite(original, dir.resolve("r1.zip"), new BuildBackport.Delta(Map.of("absent.txt", replacement), Map.of(), Set.of()), false), "missing replacement");
+        rejects(() -> BuildBackport.rewrite(original, dir.resolve("r2.zip"), new BuildBackport.Delta(Map.of(), Map.of(), Set.of("absent.txt")), false), "missing removal");
+        rejects(() -> BuildBackport.rewrite(original, dir.resolve("r3.zip"), new BuildBackport.Delta(Map.of(), Map.of("kept.txt", addition), Set.of()), false), "addition over an entry");
+        rejects(() -> BuildBackport.verifyDelta(original, first, new BuildBackport.Delta(delta.replaced(), delta.added(), Set.of())), "an unexpected removal");
+        rejects(() -> BuildBackport.verifyDelta(original, first, new BuildBackport.Delta(delta.replaced(), Map.of("a.class", replacement), delta.removed())), "an unexpected addition");
+        rejects(() -> BuildBackport.verifyDelta(original, first, new BuildBackport.Delta(delta.replaced(), Map.of("a.class", replacement, "z.class", replacement), delta.removed())), "tampered addition");
+        rejects(() -> BuildBackport.verifyDelta(original, first, new BuildBackport.Delta(Map.of("replaced.txt", addition), delta.added(), delta.removed())), "tampered replacement");
+        Map<String, byte[]> outputs = new TreeMap<>();
+        for (String name : BuildBackport.REGEX_OUTPUT_CLASSES) outputs.put(name, replacement);
+        var regex = BuildBackport.regexDelta(outputs);
+        check(regex.replaced().keySet().equals(Set.of(BuildBackport.REGEX_PACKAGE + "RegexTimeout.class")), "regex replacement set");
+        check(regex.removed().equals(Set.of(BuildBackport.REGEX_PACKAGE + "RegexTimeout$InterruptibleCharSequence.class")), "regex removal set");
+        check(regex.added().size() == 4, "regex addition set");
+    }
+    /** A mutated pin, or mutated bytes under the true pin, fails: a HAPI bump stops here until someone looks. */
+    private static void pins(Path dir, Path utilities, Path source) throws Exception {
+        String wrong = "0".repeat(64);
+        BuildBackport.requireRegexInputs(utilities, BuildBackport.UTILITIES_JAR_SHA, BuildBackport.REGEX_INPUT_CLASSES);
+        rejects(() -> BuildBackport.requireRegexInputs(utilities, wrong, BuildBackport.REGEX_INPUT_CLASSES), "mutated jar pin");
+        for (String name : BuildBackport.REGEX_INPUT_CLASSES.keySet()) {
+            Map<String, String> mutated = new TreeMap<>(BuildBackport.REGEX_INPUT_CLASSES);
+            mutated.put(name, wrong);
+            rejects(() -> BuildBackport.requireRegexInputs(utilities, BuildBackport.UTILITIES_JAR_SHA, mutated), "mutated class pin");
+        }
+        Path tampered = dir.resolve("tampered-utilities.jar");
+        BuildBackport.replace(utilities, tampered, BuildBackport.REGEX_INPUT_CLASSES.keySet().iterator().next(), new byte[]{1}, false);
+        rejects(() -> BuildBackport.requireRegexInputs(tampered, BuildBackport.UTILITIES_JAR_SHA, BuildBackport.REGEX_INPUT_CLASSES), "mutated jar bytes");
+        rejects(() -> BuildBackport.requireRegexInputs(tampered, BuildBackport.hash(tampered), BuildBackport.REGEX_INPUT_CLASSES), "mutated class bytes under a matching jar pin");
+        BuildBackport.requireRegexSources(source, BuildBackport.REGEX_SOURCES);
+        for (var pin : BuildBackport.REGEX_SOURCES.entrySet()) {
+            Map<String, String> mutated = new TreeMap<>(BuildBackport.REGEX_SOURCES);
+            mutated.put(pin.getKey(), wrong);
+            rejects(() -> BuildBackport.requireRegexSources(source, mutated), "mutated source pin");
+            Path copy = dir.resolve("source-copy").resolve(pin.getKey());
+            Files.createDirectories(copy.getParent());
+            for (String name : BuildBackport.REGEX_SOURCES.keySet()) Files.copy(source.resolve(name), dir.resolve("source-copy").resolve(name), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.writeString(copy, "// changed\n", java.nio.file.StandardOpenOption.APPEND);
+            rejects(() -> BuildBackport.requireRegexSources(dir.resolve("source-copy"), BuildBackport.REGEX_SOURCES), "mutated source bytes");
+        }
+        Path libs = Files.createDirectory(dir.resolve("libs"));
+        String guard = BuildBackport.REGEX_PACKAGE + "RegexTimeout.class";
+        rejects(() -> BuildBackport.requireOneRegexGuard(libs), "no regex guard on the classpath");
+        archive(libs.resolve("org.hl7.fhir.utilities-6.9.12.jar"), guard, "other.txt");
+        BuildBackport.requireOneRegexGuard(libs);
+        archive(libs.resolve("shaded.jar"), guard, "other.txt");
+        rejects(() -> BuildBackport.requireOneRegexGuard(libs), "a second regex guard on the classpath");
+    }
+    private static void archive(Path file, String... names) throws Exception {
         try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(file))) {
-            for (String name : List.of(a, b)) {
+            for (String name : names) {
                 byte[] bytes = (name + " retained bytes").getBytes();
                 ZipEntry entry = new ZipEntry(name);
                 entry.setTimeLocal(LocalDateTime.of(2020, 2, 3, 4, 5, 6));
                 entry.setComment("retained comment");
                 entry.setExtra(new byte[]{(byte) 0xfe, (byte) 0xca, 2, 0, 1, 2});
-                if (name.equals(a)) { CRC32 crc = new CRC32(); crc.update(bytes); entry.setMethod(ZipEntry.STORED); entry.setSize(bytes.length); entry.setCrc(crc.getValue()); }
+                if (name.equals(names[0])) { CRC32 crc = new CRC32(); crc.update(bytes); entry.setMethod(ZipEntry.STORED); entry.setSize(bytes.length); entry.setCrc(crc.getValue()); }
                 out.putNextEntry(entry); out.write(bytes); out.closeEntry();
             }
         }

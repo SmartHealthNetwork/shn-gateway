@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -20,7 +21,7 @@ import (
 // at either severity (validatorDidNotJudge).
 //
 // An error the validator gives because it could not run a primitive's regex
-// check (regexCheckCouldNotRun) is no verdict on the payload. It never makes
+// check (validatorissue.CouldNotRun) is no verdict on the payload. It never makes
 // the result invalid: beside a structural error the result is invalid for that
 // error; otherwise, alone or beside deeper rules' errors only, the result is
 // unavailable, never deeper, since the primitive it could not check may be
@@ -51,7 +52,7 @@ func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict 
 	}
 	couldNotRun := false
 	for i := range errs {
-		if errs[i].Severity == "error" && errs[i].MessageID == regexCheckCouldNotRun {
+		if validatorissue.CouldNotRun(errs[i].Issue) {
 			errs[i].excused, couldNotRun = true, true
 			continue
 		}
@@ -65,16 +66,6 @@ func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict 
 	}
 	return VerdictDeeper
 }
-
-// regexCheckCouldNotRun is the message id HAPI's validator gives an error
-// when evaluating a primitive's type regex failed, which says nothing about
-// the value. The pinned validator gives it in two known cases, both on values
-// that match: it evaluates each regex under a fixed wall-clock limit and gives
-// up when its JVM is short of CPU; and a very long valid code or oid can
-// overflow the regex engine's stack. A malformed code, oid or base64 value is refused by
-// the validator's own checks before its regex runs. The id is read, never the
-// issue's text.
-const regexCheckCouldNotRun = "TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION"
 
 // fhirIssue is one error or fatal issue as a reading of a $validate result
 // sees it. entry is the one Bundle.entry index its expressions name, or -1.
@@ -263,10 +254,7 @@ func canonicalOf(ref string) string {
 // operation's own input, and HAPI answers HAPI-0992 without judging it; the
 // resource under test rides in the operation's resource parameter instead.
 // Every other resource is sent as it is. The wrap changes only the request to
-// this gateway's own validator, never a relayed byte. An observing validator
-// (the validate.result event) sees the wrapped request and the validator's
-// own verdict, so for a HAPI-0992 answer that event says invalid where the
-// conformance finding says unavailable.
+// this gateway's own validator, never a relayed byte.
 //
 // Temporary seam: shnsdk.OperationValidator should wrap it itself (tracked in
 // the SHN platform repository). Remove this once a released SDK does; the

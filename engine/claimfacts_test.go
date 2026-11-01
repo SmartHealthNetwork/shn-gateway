@@ -249,6 +249,7 @@ func TestOriginationRoute_EachRequiredFactAtEachLine(t *testing.T) {
 // the build refuses (422) when the request states none, and it is never read
 // off the submission.
 func TestOriginationAmendment_CertificationTypeIsTheRequests(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.1", "2.2"} {
 		for _, stated := range []bool{true, false} {
 			body := testClaimBody("")
@@ -301,6 +302,7 @@ func TestOriginationAmendment_CertificationTypeIsTheRequests(t *testing.T) {
 // prior-Claim entry is the submitted Claim as sent:
 // TestAmendment_ThePriorClaimOnTheWireIsTheSubmittedClaim pins it.
 func TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission(t *testing.T) {
+	t.Parallel()
 	const statedType = `{"system":"http://terminology.hl7.org/CodeSystem/claim-type","version":"4.0.1","code":"professional","userSelected":true}`
 	submittedAt := time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
 	for _, line := range []string{"2.0", "2.2"} {
@@ -510,8 +512,9 @@ func amendmentLinks(t *testing.T, bundle []byte) (refs []string, infoSeq map[int
 // builder links the attached report to the item the payer's own pend (kept
 // on the submission record) asks it for and marks that item "added". An answer the pend does not ask for,
 // and an amendment bridged up to PAS 2.2 (whose supportingInfo slice requires
-// a report type no source states), link and mark nothing.
+// a report type a lower build cannot state), link and mark nothing.
 func TestAmendment_LinksTheAnswerThePayerAskedFor(t *testing.T) {
+	t.Parallel()
 	const note = "11504-8"
 	for _, line := range []string{"2.0", "2.1"} {
 		for name, tc := range map[string]struct {
@@ -534,7 +537,7 @@ func TestAmendment_LinksTheAnswerThePayerAskedFor(t *testing.T) {
 			}
 			rec.pend = amendmentLinkPend(t, line, 1, tc.code)
 			in.PriorClaim = rec.prior
-			in.Pend = rec.pendFor(tc.target)
+			in.Pend = rec.pendFor(legRoute{Token: "pa.pas@" + tc.target, BuildLine: line})
 			body, err := buildAuthoredPASUpdate(line, in)
 			if err != nil {
 				t.Fatalf("%s %s: %v", line, name, err)

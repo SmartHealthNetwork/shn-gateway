@@ -72,6 +72,7 @@ func TestEligibility_UndeclaredAnswersFromThePayersRecords(t *testing.T) {
 }
 
 func TestEligibility_DeclaredForwardsAndRelaysExactly(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
@@ -148,6 +149,7 @@ func TestEligibility_DeclaredWithoutAnAnswerHasNoFallback(t *testing.T) {
 // relayed at none, observe and structural (recorded at observe and structural),
 // refused at strict.
 func TestEligibility_DeclaredAnswerAboutAnotherPatientFollowsTheLevel(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
@@ -302,6 +304,7 @@ func (v eligibilityAnswerOutage) Validate(ctx context.Context, b []byte, profile
 // and structural, refused with 500 at strict (as on the records path), never
 // reported as the payer's refused answer.
 func TestEligibility_DeclaredAnswerValidatorOutageFollowsTheLevel(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
@@ -370,6 +373,7 @@ func TestEligibility_DeclaredAnswerValidationFollowsTheLevel(t *testing.T) {
 // is the payer's content: relayed at none and observe (recorded at observe),
 // refused at structural (an answer the gateway cannot read) and strict (502).
 func TestEligibility_DeclaredUnreadableAnswerFollowsTheLevel(t *testing.T) {
+	t.Parallel()
 	own := payersEligibilityAnswer("Patient/" + dtrFrameMember)
 	patient := []byte(`"patient" : { "reference" : "Patient/` + dtrFrameMember + `" }, `)
 	if !bytes.Contains(own, patient) {
@@ -589,6 +593,7 @@ func TestEligibility_DeclaredOwnPatientReadFailureFollowsTheLevel(t *testing.T) 
 // An answer naming the request's own patient needs no read of the payer's
 // records: a records failure then cannot refuse it, at any level.
 func TestEligibility_DeclaredAnswerAboutTheRequestPatientReadsNoRecords(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)

@@ -106,11 +106,12 @@ type AccessLine struct {
 	AnswerOwnership string   `json:"answerOwnership,omitempty"`
 	AnswerBuilder   string   `json:"answerBuilder,omitempty"`
 	AnswerEdits     []string `json:"answerEdits,omitempty"`
-	// EditsNotMade names each registered edit the gateway makes by default
-	// that it could not make on the call, with why
+	// EditsNotMade names each registered edit the gateway would make that
+	// it could not make on the call, with why
 	// (engine.ExchangeRecord.EditsNotMade, engine.EditNotMadeValues): the
-	// bytes it would have changed were carried as sent. Absent when empty.
-	// Evolving.
+	// bytes it would have changed were carried as sent. It also names a
+	// statement the requester made for an amendment this gateway built that
+	// the amendment does not carry. Absent when empty. Evolving.
 	EditsNotMade []string `json:"editsNotMade,omitempty"`
 	// HubDelivered is the Hub's own word, on its error answer to an ingress
 	// call's leg, on whether the recipient's gateway received the request

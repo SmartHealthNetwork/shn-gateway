@@ -36,6 +36,7 @@ func (s *tagSpy) RoundTrip(r *http.Request) (*http.Response, error) {
 // Hooks base, DTR, PAS and eligibility for theirs. Unmarked requests go to
 // payer-davinci, the shared base.
 func TestMONR25PayerForwardsMarkTheirSettingsKind(t *testing.T) {
+	t.Parallel()
 	for _, r := range []struct {
 		leg, operation string
 		body           func(t *testing.T) []byte

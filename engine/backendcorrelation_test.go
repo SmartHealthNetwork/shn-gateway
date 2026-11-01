@@ -74,6 +74,7 @@ func TestBackendCorrelation_OffSendsNone(t *testing.T) {
 // Every operation forwarded to the payer's system carries the leg's id, and
 // none does when it is off.
 func TestBackendCorrelation_EveryForwardedLeg(t *testing.T) {
+	t.Parallel()
 	type row struct {
 		leg, operation string
 		body           func(t *testing.T, p *levelPayer) []byte

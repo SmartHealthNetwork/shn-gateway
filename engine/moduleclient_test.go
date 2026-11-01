@@ -181,6 +181,7 @@ func sentBody(t *testing.T, env *moduleClientEnv) []byte {
 // recorded so (ownership authored, the builder named), with the module's bytes
 // on the wire exactly as it built them, at every level.
 func TestModuleClient_RecordedAuthoredByItsBuilder(t *testing.T) {
+	t.Parallel()
 	for _, c := range moduleLegCases() {
 		for _, level := range allLevels {
 			t.Run(c.name+"/"+level.String(), func(t *testing.T) {
@@ -245,6 +246,7 @@ func TestModuleClient_NativeRequestStaysTheParticipants(t *testing.T) {
 // not build this leg's request, a module request the gateway would have to
 // edit, and any declaration under the test bypass, which verifies no client.
 func TestModuleClient_RefusesWhatItCannotVouchFor(t *testing.T) {
+	t.Parallel()
 	pas := func(t *testing.T) *http.Request {
 		return httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(pasIngressBundle("00001", "")))
 	}
@@ -300,6 +302,7 @@ func TestModuleClient_RefusesWhatItCannotVouchFor(t *testing.T) {
 // module client naming none, are refused there, at every level, with nothing
 // sent: the check sits in each route's handler, not only in the helper.
 func TestModuleClient_EveryRouteChecksTheDeclaration(t *testing.T) {
+	t.Parallel()
 	for _, c := range moduleLegCases() {
 		for _, row := range []struct {
 			name, client, builder, want string
@@ -373,6 +376,7 @@ func TestModuleClient_IssuedBearerIdentifiesTheModule(t *testing.T) {
 // every level, with nothing sent: a questionnaire-package request without the
 // coverage enrichment would obtain from the system of record (E-04).
 func TestModuleClient_RefusesARequestTheGatewayWouldEdit(t *testing.T) {
+	t.Parallel()
 	ownPatient := `{"name":"referenced","resource":{"resourceType":"Patient","id":"example"}}`
 	noCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, `{"name":"context","valueString":"ctx-1"}`, ownPatient)
 	for _, level := range allLevels {

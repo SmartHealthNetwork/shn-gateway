@@ -238,6 +238,7 @@ func TestSupplementalReport_CheckAdmitsOnlyE06(t *testing.T) {
 // provider's content rule rather than re-pointed: E-06 is made only to a
 // claim update this gateway builds.
 func TestSupplementalReport_NativeUpdateNeverRekeyed(t *testing.T) {
+	t.Parallel()
 	report := supplementalReportAsHeld("Patient/pat-covered")
 	body := levelPASBundleWithEntry(`{"resource":` + report + `}`)
 	body = strings.Replace(body, `{"resourceType":"Claim",`, `{"resourceType":"Claim","related":[{"claim":{"identifier":{"value":"PRIOR-1"}}}],`, 1)

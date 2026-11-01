@@ -16,6 +16,7 @@ import (
 // answers, each with its Claim, its insurer and its request in turn set
 // aside, as the IG lines close an answer differently.
 func TestOnePerLineAnswerDefinition(t *testing.T) {
+	t.Parallel()
 	var bodies [][]byte
 	for _, name := range []string{"pas-submit-response.json", "pas-submit-response-pended.json",
 		"pas-update-response-amend-before-resolution.json", "pas-update-response-amend-after-resolution.json"} {

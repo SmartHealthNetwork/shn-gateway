@@ -55,6 +55,7 @@ func (c *crdFindings) observe(e ObserverEvent) {
 // name is message integrity and refuses at every level, and with the module
 // absent.
 func TestOriginatedCRD_AnswerCertifiedAtTheProvidersLevel(t *testing.T) {
+	t.Parallel()
 	topic := map[string]any{"system": "http://hl7.org/fhir/us/davinci-crd/CodeSystem/temp", "code": "coverage-info"}
 	source := map[string]any{"label": "payer", "topic": topic}
 	structural := map[string]any{"summary": "Coverage note", "indicator": "bogus", "source": source}     // card.indicator

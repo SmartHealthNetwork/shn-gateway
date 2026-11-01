@@ -318,6 +318,7 @@ func withBundlePatient(t *testing.T, bundle []byte, patient string) []byte {
 // the same involved list (the payer-derived binding), and the same records
 // filed under that binding.
 func TestNoSystemOfRecord_PayerLegsAnswerAsAStoreHoldingNobody(t *testing.T) {
+	t.Parallel()
 	carried := requestPatient(strangerMember, nosorBirth, nosorFamily)
 	derived := derivedPCI(strangerMember, nosorBirth, nosorFamily)
 	byID := derivedPCI(strangerMember, "", "")
@@ -445,6 +446,7 @@ func containsSuffix(list []string, suffix string) bool {
 // recorded under the inquiry's key or the token's subject. The control, an inquiry carrying the same Patient, decides the
 // pend, so the row can fail.
 func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T) {
+	t.Parallel()
 	// The inquiry answer decides the authorization the pended $submit answer
 	// named: the same ClaimResponse identifier (as in
 	// TestLevelPayerInquire_AfterSkippedSubmit).
@@ -534,6 +536,7 @@ func TestNoSystemOfRecord_InquiryWithoutTheSubmitsPatientIsRelayed(t *testing.T)
 // and no Coverage read. A store that holds nobody still answers from its
 // records (the member is unknown there), and the census answers as before.
 func TestNoSystemOfRecord_EligibilityNotOffered(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run("no system of record/"+level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, false)

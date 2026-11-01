@@ -379,6 +379,7 @@ func foldedDuplicateMember(v any) bool {
 // undecided, pinned by the derivation rows), only a Patient that Coverage's
 // beneficiary names is read, and the probe is none.
 func TestCoverageParty_WalkersAgree(t *testing.T) {
+	t.Parallel()
 	for _, r := range sdkCoveragePartyRows(t) {
 		t.Run(r.Name, func(t *testing.T) {
 			cov := walkerVariant(t, r)

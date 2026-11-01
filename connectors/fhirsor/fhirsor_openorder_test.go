@@ -5,6 +5,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -55,6 +57,47 @@ func TestSoR_OpenOrder_DeviceRequest(t *testing.T) {
 	// connector's.
 	if !bytes.Contains(raw, []byte(`"reference":"Patient/p1"`)) {
 		t.Errorf("OpenOrder must keep the server's subject Patient/p1; got: %s", raw)
+	}
+}
+
+// TestOpenOrder_ReadsOnlyAnActiveOrder: the open order is an order at active. The
+// server here applies the search's status, as a FHIR server does, so a member
+// whose only order is at another status has no open order, whichever resource
+// type holds it. It reads as a gateway does, so a failed read is no empty answer.
+func TestOpenOrder_ReadsOnlyAnActiveOrder(t *testing.T) {
+	const patient = `{"resourceType":"Patient","id":"p1","identifier":[{"system":"urn:shn:member","value":"MBR-OX"}]}`
+	for _, rtype := range []string{"DeviceRequest", "ServiceRequest"} {
+		for _, row := range []struct {
+			status string
+			open   bool
+		}{{"draft", false}, {"revoked", false}, {"entered-in-error", false}, {"active", true}} {
+			t.Run(rtype+"/"+row.status, func(t *testing.T) {
+				order := `{"resourceType":"` + rtype + `","id":"o-1","status":"` + row.status + `"}`
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/fhir+json")
+					switch strings.TrimSuffix(r.URL.Path, "/") {
+					case "/Patient":
+						w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + patient + `}]}`))
+					case "/" + rtype:
+						if s := r.URL.Query().Get("status"); s == "" || slices.Contains(strings.Split(s, ","), row.status) {
+							w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + order + `}]}`))
+							return
+						}
+						fallthrough
+					default:
+						w.Write([]byte(`{"resourceType":"Bundle","type":"searchset"}`))
+					}
+				}))
+				t.Cleanup(srv.Close)
+				raw, ok, err := fhirsor.New(fhirclient.New(srv.URL, nil)).OpenOrderContext(context.Background(), "MBR-OX")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok != row.open {
+					t.Fatalf("open %v (%s), want %v", ok, raw, row.open)
+				}
+			})
+		}
 	}
 }
 

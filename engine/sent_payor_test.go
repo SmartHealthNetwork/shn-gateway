@@ -232,6 +232,7 @@ func sentPayorSoR(base, payer string) *prefetchSoR {
 // "Organization/<id>". Every row is routed and carries the EHR's coverage
 // exactly.
 func TestCRDIngressResolvesASentBarePayorWhereItsIDIs(t *testing.T) {
+	t.Parallel()
 	const fhirRead = "/fhir/Organization/o1 Bearer ehr-secret-token"
 	same := func(e *ehrServer) string { return e.base }
 	for name, row := range map[string]struct {
@@ -361,6 +362,7 @@ func TestSameFHIRBase(t *testing.T) {
 // entry (noPayerUnreadRef), and so does one on fhirServer itself with the
 // read off; any other only a payor identifier (noPayerIdentifierOnlyRef).
 func TestCRDIngressSentBarePayorUnreadableNamesTheRemedy(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		mode    string
 		member  string
@@ -575,6 +577,7 @@ const bareSoRCoverage = `{"resourceType":"Coverage","id":"sc1","status":"active"
 // the same failure for a coverage the gateway read itself from the system of
 // record (which reads its payor there); without the failure each row routes.
 func TestCRDIngressSentBarePayorSoRReadFails(t *testing.T) {
+	t.Parallel()
 	unavailable := &SoRReadError{Kind: SoRUnavailable}
 	for name, row := range map[string]struct {
 		named  bool // fhirServer at the system's own base
@@ -642,6 +645,7 @@ func TestCRDIngressSentBarePayorSoRReadFails(t *testing.T) {
 // patient counts as one that does not hold it, as on a CDS Hooks request. A
 // failed read of the Organization there is the system-of-record failure.
 func TestDTRIngressResolvesASentBarePayorThroughTheSystemOfRecord(t *testing.T) {
+	t.Parallel()
 	param := `{"name":"coverage","resource":` + sentBareCoverage(prefetchMember, "Organization/o1") + `}`
 	body := ehrParams(param, dtrQuestionnaire)
 	t.Run("held", func(t *testing.T) {
@@ -770,6 +774,7 @@ func TestDTRIngressResolvesASentBarePayorThroughTheSystemOfRecord(t *testing.T) 
 // patient's own Patient is appended (E-05) after the EHR's parameters. Nothing
 // the routing read returned is added.
 func TestSentBarePayorResolvesThroughTheSystemOfRecordUnderTheOptIn(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run("CDS Hooks/"+level.String(), func(t *testing.T) {
 			s := sentPayorSoR("", "00001")
@@ -866,6 +871,7 @@ func TestObservingSoRPassesTheFHIRBase(t *testing.T) {
 // refused with the bare text, on CDS Hooks and on $questionnaire-package, at
 // every level, with no read.
 func TestSentBarePayorOfAnotherKindKeepsTheBareRefusal(t *testing.T) {
+	t.Parallel()
 	for _, ref := range []string{"RelatedPerson/r1", "Patient/nobody", "https://Organization/fhir/RelatedPerson/r1"} {
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 			t.Run("CDS Hooks/"+ref+"/"+level.String(), func(t *testing.T) {
@@ -955,6 +961,7 @@ const (
 // $questionnaire-package and on CDS Hooks, at every level, before the
 // network.
 func TestIngressResolvedPayorWithoutIdentifierSaysWhy(t *testing.T) {
+	t.Parallel()
 	const urn = "urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77"
 	noID := `{"resourceType":"Organization","id":"o1","name":"Payer One"}`
 	practitioner := `{"resourceType":"Practitioner","id":"p1"}`
@@ -1029,6 +1036,7 @@ func TestIngressResolvedPayorUnnamedReasonKeepsTheBareRefusal(t *testing.T) {
 // an Organization, is refused with the reason, on CDS Hooks and
 // $questionnaire-package, at every level.
 func TestSystemCoveragePayorWithoutIdentifierSaysWhy(t *testing.T) {
+	t.Parallel()
 	cov := strings.Replace(refCoverage(prefetchSoRID, "Organization/pay-9"), `"id":"c1"`, `"id":"cov-9"`, 1)
 	for name, row := range map[string]struct{ res, msg string }{
 		"an Organization with no payer identifier": {`{"resourceType":"Organization","id":"pay-9","name":"Payer"}`, noPayerOrganizationNoIdentifier},
@@ -1063,6 +1071,7 @@ func TestSystemCoveragePayorWithoutIdentifierSaysWhy(t *testing.T) {
 // a Bundle the request carries. Sending it so routes the request. On
 // CDS Hooks and $questionnaire-package, at every level.
 func TestSentBarePayorURNNamesTheFullURLRemedy(t *testing.T) {
+	t.Parallel()
 	for _, ref := range []string{"urn:uuid:7c0e3b4a-1f0d-4b55-9a1e-3c2f1d0e9b77", "urn:oid:2.16.840.1.113883.3.9999"} {
 		org := `{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"` + ref + `","resource":` + payorOrganization("o1", "00001") + `}]}`
 		for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
@@ -1120,6 +1129,7 @@ func TestSentBarePayorURNNamesTheFullURLRemedy(t *testing.T) {
 // only. At every level, before the network, with no read:
 // never the remedy that sending the Organization would not satisfy.
 func TestSentBarePayorWithTheOrganizationBesideAnUnreadReference(t *testing.T) {
+	t.Parallel()
 	org := payorOrganization("o1", "00001")
 	for name, row := range map[string]struct {
 		mode string
@@ -1184,6 +1194,7 @@ func TestSentBarePayorWithTheOrganizationBesideAnUnreadReference(t *testing.T) {
 // another server or on fhirServer with the read off. The EHR's coverage is
 // carried exactly.
 func TestSentBarePayorRemediesRoute(t *testing.T) {
+	t.Parallel()
 	org := payorOrganization("o1", "00001")
 	withEntry := func(ref string) string {
 		return `{"resourceType":"Bundle","type":"searchset","entry":[{"fullUrl":"https://ehr.example/fhir/Coverage/c1","resource":` +

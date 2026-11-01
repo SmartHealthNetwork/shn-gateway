@@ -110,6 +110,7 @@ func runFQIngress(t *testing.T, level ConformanceEnforcement, body, answer []byt
 // consent is checked, and the facility's answer is relayed exactly, at every
 // level.
 func TestFederatedQueryIngress_CarriesTheTaskAsSent(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	answer := fqAnswer(t, task, fqRecords("Patient/MBR-UC05"))
 	for _, level := range allLevels {
@@ -152,6 +153,7 @@ func TestFederatedQueryIngress_CarriesTheTaskAsSent(t *testing.T) {
 // routing before anything is sent, at every level, and says what is missing.
 // There is no default facility.
 func TestFederatedQueryIngress_UnroutableTaskIsRefused(t *testing.T) {
+	t.Parallel()
 	holder := func(system, value string) map[string]any {
 		return map[string]any{"identifier": map[string]any{"system": system, "value": value}}
 	}
@@ -192,6 +194,7 @@ func TestFederatedQueryIngress_UnroutableTaskIsRefused(t *testing.T) {
 // it: the patient is read as the facility reads it. Member names are read
 // exactly.
 func TestFederatedQueryIngress_RefusesWhatIsNoDataRequest(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	var doc map[string]any
 	if err := json.Unmarshal(task, &doc); err != nil {
@@ -245,6 +248,7 @@ func TestFederatedQueryIngress_RefusesWhatIsNoDataRequest(t *testing.T) {
 // network's to check), refused only when the participant asks for known
 // members; a system of record that fails refuses as it does elsewhere.
 func TestFederatedQueryIngress_BindsThePatientAsTheOtherLegs(t *testing.T) {
+	t.Parallel()
 	unknown := fqTask(t, "MBR-NOBODY", "facility")
 	answer := fqAnswer(t, unknown, fqRecords("Patient/MBR-NOBODY"))
 	sorErr := &SoRReadError{Kind: SoRUnavailable}
@@ -292,6 +296,7 @@ func TestFederatedQueryIngress_RelaysTheFacilitysRefusal(t *testing.T) {
 // An answer repeating a member name, which could be read as two patients'
 // records, is refused at every level.
 func TestFederatedQueryIngress_AnswerRepeatingAMemberIsRefused(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	answer := bytes.Replace(fqAnswer(t, task, fqRecords("Patient/MBR-UC05")), []byte(`"status":"completed"`), []byte(`"status":"completed","status":"failed"`), 1)
 	if !bytes.Contains(answer, []byte(`"status":"failed"`)) {
@@ -314,6 +319,7 @@ func TestFederatedQueryIngress_AnswerRepeatingAMemberIsRefused(t *testing.T) {
 // strict (RulePatientAnswer), as for an eligibility answer. The check reads
 // the answer Task's own patient and every resource the answer contains.
 func TestFederatedQueryIngress_AnswerAboutAnotherPatient(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	good := fqAnswer(t, task, fqRecords("Patient/MBR-UC05"))
 	// with is the good answer with an output and a contained resource added.
@@ -433,6 +439,7 @@ func TestFederatedQueryIngress_AnswerThatIsNoFulfilledTask(t *testing.T) {
 // The answer is validated at this gateway's level: recorded at observe,
 // refused at structural for a structural issue, and at strict for any.
 func TestFederatedQueryIngress_AnswerIsValidatedAtTheLevel(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	answer := fqAnswer(t, task, fqRecords("Patient/MBR-UC05"))
 	structural := &shnsdk.Issue{Severity: "error", Code: "structure", MessageID: "Extension_EXTP_Context_Wrong"}
@@ -510,6 +517,7 @@ func TestFederatedQueryIngress_AnswerValidatorOutageIsTheGatewaysOwn(t *testing.
 // level refuses on it (strict): 500, never the facility's; below strict the
 // answer is relayed.
 func TestFederatedQueryIngress_AnswerWithNoValidatorLane(t *testing.T) {
+	t.Parallel()
 	task := fqTask(t, "MBR-UC05", "facility")
 	answer := fqAnswer(t, task, fqRecords("Patient/MBR-UC05"))
 	for _, level := range allLevels {

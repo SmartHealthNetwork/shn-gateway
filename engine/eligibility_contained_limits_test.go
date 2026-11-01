@@ -46,6 +46,7 @@ func withNoteMember(body []byte, raw string) []byte {
 // routes only a request the strict reader reads, so it refuses such a request
 // as routing, as before.)
 func TestEligibility_PatientReferenceFormsPastTheStrictReadersLimits(t *testing.T) {
+	t.Parallel()
 	for limit, raw := range pastTheStrictLimits {
 		for name, form := range patientForms(dtrFrameMember) {
 			for _, level := range eligibilityLevels {
@@ -100,6 +101,7 @@ func TestEligibility_PatientReferenceFormsPastTheStrictReadersLimits(t *testing.
 // are read one way by no reader: each is refused before anything is read for
 // the patient, at every level, by each gateway.
 func TestEligibility_UnresolvedContainedPatientPastTheStrictReadersLimitsIsRefused(t *testing.T) {
+	t.Parallel()
 	const parse = "parse member failed"
 	const named = "member names are case-sensitive, so the request names no patient to bind"
 	rows := []struct {
@@ -169,8 +171,10 @@ func TestEligibility_UnresolvedContainedPatientPastTheStrictReadersLimitsIsRefus
 // patient resolves through the contained resources, and one no contained
 // Patient answers is refused, at every level.
 func TestEligibility_ContainedPatientPastTheTokenBound(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run("resolved/"+level.String(), func(t *testing.T) {
+			t.Parallel()
 			p := eligibilityPayer(t, level, false)
 			body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#pat", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
 			run := runObserved(t, p, "coverage-eligibility", body, p.pci)
@@ -179,6 +183,7 @@ func TestEligibility_ContainedPatientPastTheTokenBound(t *testing.T) {
 			}
 		})
 		t.Run("unresolved/"+level.String(), func(t *testing.T) {
+			t.Parallel()
 			p := eligibilityPayer(t, level, false)
 			body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#nobody", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
 			ans := p.sendAs(t, "coverage-eligibility", "", body, p.pci)
@@ -201,6 +206,7 @@ const msgReplacedCharacter = "eligibility request names its patient by a value c
 // read. A member value carrying U+FFFD as sent, in a body past only the nesting bound, is
 // read as before.
 func TestEligibility_ReplacedCharacterInTheMemberPastTheStrictLimits(t *testing.T) {
+	t.Parallel()
 	const placeholder = "MBR-PLACEHOLDER-2581"
 	paths := map[string]func() []byte{
 		"literal": func() []byte {

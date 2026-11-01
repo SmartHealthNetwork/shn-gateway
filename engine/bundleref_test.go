@@ -62,6 +62,7 @@ const (
 // fullUrl, or a relative reference by type and id), and the request routes, at
 // every level.
 func TestPASIngressPayorReference_ResolvesInTheBundle(t *testing.T) {
+	t.Parallel()
 	rows := map[string]string{
 		"a relative reference to an entry": payorBundle(
 			payorCoverage("", payorRef("Organization/payer-org")),
@@ -115,6 +116,7 @@ func TestPASIngressPayorReference_ResolvesInTheBundle(t *testing.T) {
 // refused before the network at every level, and the refusal says which shape
 // failed without echoing what the request carried.
 func TestPASIngressPayorReference_RefusalSaysWhy(t *testing.T) {
+	t.Parallel()
 	const prefix = noPayerIdentifier + ": "
 	rows := map[string]struct{ body, why string }{
 		"a relative reference no entry answers": {payorBundle(
@@ -235,6 +237,7 @@ func TestPASIngressPayorReference_UnnamedReasonKeepsTheBareRefusal(t *testing.T)
 // equal to an entry's fullUrl routes, and one no entry answers is refused with
 // the reason, at every level.
 func TestPASInquirePayorReference_SameRule(t *testing.T) {
+	t.Parallel()
 	inline := `"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]`
 	withPayor := func(t *testing.T, ref string, org string) string {
 		t.Helper()

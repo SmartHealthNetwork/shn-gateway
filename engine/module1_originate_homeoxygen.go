@@ -174,9 +174,9 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member 
 	}
 	// The dispatched order is resolved by the payer from the request's device history;
 	// the supplier is named as the performer, and the system of record's device search
-	// includes it (DeviceRequest:performer). An order this gateway authored (the demo
-	// lane) is carried as a collection Bundle holding that one order: the system of
-	// record does not hold it, and no supplier record is added.
+	// includes it (DeviceRequest:performer). Where no history was searched, the order
+	// travels as a collection Bundle holding that one order (originatedDispatchRequest),
+	// and no supplier record is added.
 	crdReq, err := g.originatedDispatchRequest(crdCorr, recs, orderJSON, performerRef)
 	if err != nil {
 		g.refuseBuildFailure(r.Context(), w, recipient, "crd-order-dispatch", "build order-dispatch request failed: "+err.Error(), err)

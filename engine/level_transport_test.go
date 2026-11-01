@@ -94,6 +94,7 @@ func withReplaced(t *testing.T, body, old, new string) []byte {
 // content: below strict the insurer is left as sent and the Coverage is
 // mapped as usual; strict refuses it with the mapping's 422.
 func TestLevelPayerPAS_UnresolvedInsurer(t *testing.T) {
+	t.Parallel()
 	// The amendment fixture names its payer's own entry; one mutation points its
 	// operative Claim's insurer at Organization/payer, which no entry of the
 	// bundle is.
@@ -254,6 +255,7 @@ func providerIngressStampRows() map[string]stampRow {
 // (including those that relay the answer exactly), and records no content
 // finding.
 func TestLevelProviderIngress_AnswerStampedWithAnotherLineRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	rows := providerIngressStampRows()
 	for name, row := range rows {
 		for _, level := range allLevels {
@@ -357,6 +359,7 @@ func crdSelectWithoutPrefetch(t *testing.T) []byte {
 // byte for byte. order-dispatch reads no coverage it requires, so it is
 // carried as sent at every level.
 func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) {
+	t.Parallel()
 	sel := map[string][]byte{
 		"no prefetch.coverage":   crdSelectWith(t, levelCRDSelectCoverage, `"other":{}`),
 		"prefetch.coverage null": crdSelectWith(t, levelCRDSelectCoverage, `"coverage":null`),
@@ -409,6 +412,7 @@ func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) 
 // cannot read and one naming another payer: present, it addresses the
 // request.
 func TestLevelPayerCRD_CoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	foreign := `"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/MBR-COVERED"},` +
 		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"99999"}}]}`
 	runPayerNetworkRows(t, map[string]payerNetworkRow{
@@ -427,6 +431,7 @@ const levelPASCoverageEntry = `,{"resource":{"resourceType":"Coverage","id":"cov
 // A request routed to this payer is already addressed; without the payer
 // identity mapping a bundle with no Coverage is the request's own shape.
 func TestLevelPayerPAS_NoCoverage(t *testing.T) {
+	t.Parallel()
 	update, related := updateBundle(t, "Coverage")
 	rows := map[string]struct {
 		leg  string
@@ -453,6 +458,7 @@ func TestLevelPayerPAS_NoCoverage(t *testing.T) {
 // addressed by the Coverage's payor: a bundle with no Coverage refuses at
 // every level.
 func TestLevelPayerPAS_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	update, _ := updateBundle(t, "Coverage")
 	runPayerNetworkRows(t, map[string]payerNetworkRow{
 		"submit": {leg: "pas-claim", body: []byte(levelPASBundleWithout(t, levelPASCoverageEntry)), opts: withIdentityMapping(),
@@ -492,6 +498,7 @@ func TestLevelPayerPASResponder_NoCoverageWithIdentityMappingRefusesAtEveryLevel
 // The provider ingress routes a PAS request by its Coverage's payor: a bundle
 // with no Coverage refuses at every level, before the network.
 func TestLevelProviderPAS_NoCoverageRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	update, _ := updateBundle(t, "Coverage")
 	rows := map[string]struct {
 		path   string

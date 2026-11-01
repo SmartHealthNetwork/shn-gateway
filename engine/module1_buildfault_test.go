@@ -39,7 +39,7 @@ func (s historyWithoutOrder) SearchPatientContext(ctx context.Context, resourceT
 // a fidelity refusal at the build stage, before any leg, at every conformance
 // level, with its answer unchanged.
 func TestOriginationRecord_DispatchHistoryWithoutTheOrderIsBuildStage(t *testing.T) {
-	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox"}`
+	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed)"}`
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			fix := newMBROXDispatchFixture(t)
@@ -62,6 +62,70 @@ func TestOriginationRecord_DispatchHistoryWithoutTheOrderIsBuildStage(t *testing
 				t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
 			}
 		})
+	}
+}
+
+// activeOrderOnly is the dispatch member's system of record reading its open
+// order as the FHIR connector does: at active, or not at all.
+type activeOrderOnly struct{ *homeOxygenSoR }
+
+func (s activeOrderOnly) OpenOrder(member string) ([]byte, bool) {
+	raw, ok := s.homeOxygenSoR.OpenOrder(member)
+	var order struct{ Status string }
+	if !ok || json.Unmarshal(raw, &order) != nil || order.Status != "active" {
+		return nil, false
+	}
+	return raw, true
+}
+
+// With the FHIR connector, a member whose only order is at another status has
+// no open order, so the dispatch ends there: 502, before any search of the
+// device history, with no leg sent, at every level. The active row reaches the
+// payer.
+func TestOriginationRecord_DispatchOrderNotAtActive(t *testing.T) {
+	t.Parallel()
+	const want = `{"error":"no open order for member in SoR"}`
+	for _, row := range []struct {
+		status string
+		open   bool
+	}{{"draft", false}, {"revoked", false}, {"entered-in-error", false}, {"active", true}} {
+		for _, level := range allLevels {
+			t.Run(row.status+"/"+level.String(), func(t *testing.T) {
+				fix := newMBROXDispatchFixture(t)
+				mountOriginationRoutes(fix.gw)
+				fix.gw.cfg.ConformanceEnforcement = level
+				var order map[string]any
+				if err := json.Unmarshal(fix.sor.orderJSON, &order); err != nil {
+					t.Fatal(err)
+				}
+				order["status"] = row.status
+				orderJSON, err := json.Marshal(order)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fix.sor.orderJSON = orderJSON
+				body := testRouteBody(fix.gw, "/scenario/dispatch", `"member":"MBR-OX"`)
+				fix.gw.cfg.SoR = activeOrderOnly{fix.sor}
+				rec, recs := serveRecorded(t, fix.gw, "POST /scenario/dispatch", body)
+				if row.open {
+					if rec.Code != http.StatusOK || len(fix.stub.legTypes) == 0 {
+						t.Fatalf("an active order: %d %s, legs %v", rec.Code, rec.Body.String(), fix.stub.legTypes)
+					}
+					return
+				}
+				if rec.Code != http.StatusBadGateway || strings.TrimSpace(rec.Body.String()) != want {
+					t.Fatalf("%d %s, want 502 %s", rec.Code, rec.Body.String(), want)
+				}
+				if len(fix.stub.legTypes) != 0 {
+					t.Fatalf("legs %v sent", fix.stub.legTypes)
+				}
+				r := onlyRecord(t, recs)
+				wantOrigination(t, r, "POST /scenario/dispatch", http.StatusBadGateway)
+				if r.Outcome != ExchangeOther || r.RefusedBy != "" || r.Rule != "" {
+					t.Fatalf("recorded %s by %q on %q, want other: no refusal of the network's", r.Outcome, r.RefusedBy, r.Rule)
+				}
+			})
+		}
 	}
 }
 
@@ -99,9 +163,13 @@ func (s historyByStatus) SearchPatientContext(ctx context.Context, resourceType,
 // the published rule, so it is refused exactly as an order the history does
 // not hold at all (TestOriginationRecord_DispatchHistoryWithoutTheOrderIsBuildStage):
 // the same answer, a fidelity refusal at the build stage, at every level. An
-// order at a status the filter names is held, and is not refused.
+// order at a status the filter names is held, and is not refused. These rows run
+// on a system of record that returns its order at any status, as a participant's
+// own connector can; TestOriginationRecord_DispatchOrderNotAtActive is the FHIR
+// connector's answer, from a server that applies the search's status.
 func TestOriginationRecord_DispatchOrderOutsideTheHistoryStatusFilterIsBuildStage(t *testing.T) {
-	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox"}`
+	t.Parallel()
+	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed)"}`
 	wantFilter := []SearchDateRange{{Param: "status", AnyOf: prefetchStatus["DeviceRequest"]}}
 	for _, row := range []struct {
 		status string
@@ -183,7 +251,7 @@ func TestBuildFault_BuildersClassTheirFailures(t *testing.T) {
 	t.Run("a dispatch history without the order", func(t *testing.T) {
 		recs := crdOriginRecords{history: map[string][]byte{"deviceHistory": []byte(`{"resourceType":"Bundle","type":"searchset","entry":[]}`)}}
 		_, err := g.originatedDispatchRequest("corr-1", recs, []byte(`{"resourceType":"DeviceRequest","id":"dr-1"}`), "Organization/o")
-		fault(t, err, false, "the system of record's device history does not hold the dispatched order DeviceRequest/dr-1")
+		fault(t, err, false, "the system of record's device history does not hold the dispatched order DeviceRequest/dr-1 at a status the device history selects (active, on-hold, completed)")
 	})
 	t.Run("the Coverage searchset it assembled, unreadable", func(t *testing.T) {
 		_, _, err := originatedPackageRequest("2.0", crdOriginRecords{coverage: []byte(`{`)}, []byte(`{"resourceType":"ServiceRequest","id":"sr-1"}`), "http://q", "")

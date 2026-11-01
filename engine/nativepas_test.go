@@ -175,6 +175,7 @@ func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 // Commit + armed Rollback; partner-500-after-Begin → relayed + Rollback (no strand); no prior
 // pend → forwarded anyway, owning no row.
 func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
+	t.Parallel()
 	// The conformant update bundle's Claim.related[0].claim.identifier.value is the original
 	// submit's correlation id (convergence-pas-submit-0001), which is the BeginClaimUpdate key.
 	bundle := originatorBuiltConformantUpdateBundle(t)
@@ -286,6 +287,7 @@ func TestNativeUpdate_ApprovedFinalizes(t *testing.T) {
 // authorization returned to pended so a later amendment still binds. A decision
 // that lands afterwards reaches the requester through the inquiry it performs.
 func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
+	t.Parallel()
 	load := func(name string) []byte {
 		t.Helper()
 		b, err := os.ReadFile(filepath.Join("testdata", "br-payer", name))

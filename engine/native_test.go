@@ -234,6 +234,7 @@ func TestNativeForwardVersionFilter(t *testing.T) {
 // fails LOUDLY and both this test and TestNativeForwardStaysArm1 need a
 // deliberate update, not a silent pass.
 func TestNativeForward_NeverCallsEgressAdapt(t *testing.T) {
+	t.Parallel()
 	forbidden := []string{"egressAdapt", "legTransformedKind", "transformedObserverEvent"}
 	// The native responder's own files and the files the PA forwards moved to
 	// from native.go are read whole, as native.go was before they left it.

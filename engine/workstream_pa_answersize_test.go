@@ -24,6 +24,7 @@ const attestedSize = `{"error":"` + errResponseTooLarge + `","rule":"` + Refusal
 // "rule":"routing"}, attesting with X-SHN-Delivered yes that its system
 // answered, and records its own routing refusal. An answer of its own size is carried.
 func TestInbound_ASystemAnswerOverTheLimitIsRefusedDelivered(t *testing.T) {
+	t.Parallel()
 	over := bytes.Repeat([]byte(" "), maxPartnerBody+1)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -54,6 +55,7 @@ func TestInbound_ASystemAnswerOverTheLimitIsRefusedDelivered(t *testing.T) {
 // is refused the same way when it is sealed: nothing of it is sent, and no
 // token is minted for it.
 func TestInbound_ASystemAnswerTooLargeToSealIsRefusedDelivered(t *testing.T) {
+	t.Parallel()
 	p := eligibilityPayer(t, EnforcementNone, true)
 	var got exchangeRecords
 	p.g.cfg.ExchangeObserved = got.observe
@@ -85,6 +87,7 @@ func TestInbound_ASystemAnswerTooLargeToSealIsRefusedDelivered(t *testing.T) {
 // reason without its delivered mark is not answered as delivered. Every row
 // at every level.
 func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *testing.T) {
+	t.Parallel()
 	hub := func(body, delivered string) error {
 		return hubRefusal(http.StatusBadGateway, []byte(body), delivered)
 	}
@@ -170,6 +173,7 @@ func TestAnswerRefusalRules_RoutingIsTheSizeRefusalAlone(t *testing.T) {
 // one over it is refused for size, never decoded cut short; one at it is read
 // whole.
 func TestPostEnvelope_AHubAnswerOverTheLimitIsRefusedForSize(t *testing.T) {
+	t.Parallel()
 	for _, n := range []int{shnsdk.MaxResponseBytes, shnsdk.MaxResponseBytes + 1} {
 		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)

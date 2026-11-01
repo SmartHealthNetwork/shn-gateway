@@ -29,7 +29,7 @@ modules the binary links.
 | `github.com/prometheus/otlptranslator` | v1.0.0 | Apache-2.0 | https://pkg.go.dev/github.com/prometheus/otlptranslator@v1.0.0?tab=licenses |
 | `github.com/prometheus/procfs` | v0.22.0 | Apache-2.0 | https://pkg.go.dev/github.com/prometheus/procfs@v0.22.0?tab=licenses |
 | `github.com/samply/golang-fhir-models/fhir-models` | v0.3.2 | Apache-2.0 | https://pkg.go.dev/github.com/samply/golang-fhir-models/fhir-models@v0.3.2?tab=licenses |
-| `github.com/SmartHealthNetwork/shn-sdk` | v1.1.0 | Apache-2.0 | https://pkg.go.dev/github.com/SmartHealthNetwork/shn-sdk@v1.1.0?tab=licenses |
+| `github.com/SmartHealthNetwork/shn-sdk` | v1.2.0 | Apache-2.0 | https://pkg.go.dev/github.com/SmartHealthNetwork/shn-sdk@v1.2.0?tab=licenses |
 | `go.opentelemetry.io/auto/sdk` | v1.2.1 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/auto/sdk@v1.2.1?tab=licenses |
 | `go.opentelemetry.io/contrib/instrumentation/runtime` | v0.72.0 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/runtime@v0.72.0?tab=licenses |
 | `go.opentelemetry.io/contrib/otelconf` | v0.27.0 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/contrib/otelconf@v0.27.0?tab=licenses |
@@ -59,12 +59,12 @@ modules the binary links.
 | `go.opentelemetry.io/proto/otlp` | v1.11.1 | Apache-2.0 | https://pkg.go.dev/go.opentelemetry.io/proto/otlp@v1.11.1?tab=licenses |
 | `go.uber.org/multierr` | v1.11.0 | MIT | https://pkg.go.dev/go.uber.org/multierr@v1.11.0?tab=licenses |
 | `go.yaml.in/yaml/v3` | v3.0.5 | MIT AND Apache-2.0 | https://pkg.go.dev/go.yaml.in/yaml/v3@v3.0.5?tab=licenses |
-| `golang.org/x/crypto` | v0.57.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/crypto@v0.57.0?tab=licenses |
+| `golang.org/x/crypto` | v0.58.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/crypto@v0.58.0?tab=licenses |
 | `golang.org/x/exp` | v0.0.0-20260908205506-85c1c2202aba | BSD-3-Clause | https://pkg.go.dev/golang.org/x/exp@v0.0.0-20260908205506-85c1c2202aba?tab=licenses |
-| `golang.org/x/net` | v0.60.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/net@v0.60.0?tab=licenses |
-| `golang.org/x/sync` | v0.23.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/sync@v0.23.0?tab=licenses |
-| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/sys@v0.48.0?tab=licenses |
-| `golang.org/x/text` | v0.42.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/text@v0.42.0?tab=licenses |
+| `golang.org/x/net` | v0.62.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/net@v0.62.0?tab=licenses |
+| `golang.org/x/sync` | v0.24.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/sync@v0.24.0?tab=licenses |
+| `golang.org/x/sys` | v0.49.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/sys@v0.49.0?tab=licenses |
+| `golang.org/x/text` | v0.43.0 | BSD-3-Clause | https://pkg.go.dev/golang.org/x/text@v0.43.0?tab=licenses |
 | `google.golang.org/genproto/googleapis/api` | v0.0.0-20260928230214-8a89bd6388cc | Apache-2.0 | https://pkg.go.dev/google.golang.org/genproto/googleapis/api@v0.0.0-20260928230214-8a89bd6388cc?tab=licenses |
 | `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260928230214-8a89bd6388cc | Apache-2.0 | https://pkg.go.dev/google.golang.org/genproto/googleapis/rpc@v0.0.0-20260928230214-8a89bd6388cc?tab=licenses |
 | `google.golang.org/grpc` | v1.84.0 | Apache-2.0 | https://pkg.go.dev/google.golang.org/grpc@v1.84.0?tab=licenses |
@@ -2112,7 +2112,7 @@ LICENSE:
    limitations under the License.
 ```
 
-### `github.com/SmartHealthNetwork/shn-sdk` v1.1.0
+### `github.com/SmartHealthNetwork/shn-sdk` v1.2.0
 
 LICENSE:
 
@@ -8787,7 +8787,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-### `golang.org/x/crypto` v0.57.0
+### `golang.org/x/crypto` v0.58.0
 
 LICENSE:
 
@@ -8855,7 +8855,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### `golang.org/x/net` v0.60.0
+### `golang.org/x/net` v0.62.0
 
 LICENSE:
 
@@ -8889,7 +8889,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### `golang.org/x/sync` v0.23.0
+### `golang.org/x/sync` v0.24.0
 
 LICENSE:
 
@@ -8923,7 +8923,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### `golang.org/x/sys` v0.48.0
+### `golang.org/x/sys` v0.49.0
 
 LICENSE:
 
@@ -8957,7 +8957,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### `golang.org/x/text` v0.42.0
+### `golang.org/x/text` v0.43.0
 
 LICENSE:
 

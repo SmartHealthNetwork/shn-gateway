@@ -291,6 +291,7 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 // the check under test is validatePASResult's validateFHIRForContract call,
 // the one arm it has for an answer this gateway produced.
 func TestPinnedFindingContext_InboundUpdateEgress(t *testing.T) {
+	t.Parallel()
 	g, requester := newInboundTestGateway(t, true)
 	spy := &findingSpyValidator{}
 	g.cfg.Validator = spy

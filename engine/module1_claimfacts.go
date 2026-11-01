@@ -43,6 +43,7 @@ import (
 //	"claimFacts": {"claimType":{Coding},"priority":{Coding},"serviceCategory":{Coding},
 //	               "placeOfService":{Coding},"requestType":{Coding}}
 //	"certificationType": {Coding}   // X12 1322, routes that send an amendment
+//	"reportType": {Coding}          // X12 755, optional, routes that send an amendment
 //	"member": "<member id>"         // every origination route
 //	"order": {"system":..,"code":..} // routes that build a PAS claim
 //
@@ -54,6 +55,7 @@ import (
 type originationClaimInput struct {
 	ClaimFacts        *shnsdk.PASClaimFacts `json:"claimFacts"`
 	CertificationType json.RawMessage       `json:"certificationType"`
+	ReportType        json.RawMessage       `json:"reportType"`
 	Member            string                `json:"member"`
 	Order             *statedOrder          `json:"order"`
 }
@@ -199,16 +201,76 @@ type pasSubmissionRecord struct {
 	pend []byte
 }
 
-// pendFor is the pend an amendment that reaches the payer at targetLine links
-// its attached answer by: none where that line's supportingInfo slice requires
-// a report type no source states (PASDef.SupportingInfoDocumentInformationRequired,
-// PAS 2.2). A build at a lower line bridged up to such a line would otherwise
-// carry a link the line refuses; it links nothing instead.
-func (s pasSubmissionRecord) pendFor(targetLine string) []byte {
-	if def, ok := shnsdk.PASLineDef(targetLine); !ok || def.SupportingInfoDocumentInformationRequired {
+// pendFor is the pend an amendment sent on route links its attached answer by.
+// A line whose supportingInfo slice requires a report type
+// (PASDef.SupportingInfoDocumentInformationRequired, PAS 2.2) links only on the
+// requester's statement, which the builder holds it to. A build at a lower line
+// bridged up to such a line cannot state one and would carry a link the line
+// refuses, so it gets no pend and links nothing.
+func (s pasSubmissionRecord) pendFor(route legRoute) []byte {
+	target := shnsdk.LineOf(route.Token)
+	def, ok := shnsdk.PASLineDef(target)
+	if !ok || (def.SupportingInfoDocumentInformationRequired && route.BuildLine != target) {
 		return nil
 	}
 	return s.pend
+}
+
+// reportTypeFor is the report type an amendment sent on route is built with:
+// the requester's statement, on a build at the line the amendment reaches. A
+// bridged build takes none. The extension that carries it exists only at PAS
+// 2.2, so a lower build could not state it and a 2.2 build bridged down would
+// send it to a line that has no such extension.
+func reportTypeFor(route legRoute, stated json.RawMessage) json.RawMessage {
+	if route.BuildLine != shnsdk.LineOf(route.Token) {
+		return nil
+	}
+	return stated
+}
+
+// pasExtDocumentInformation is the PAS 2.2 extension whose reportTypeCode
+// carries a requester's stated report type on Claim.supportingInfo.
+const pasExtDocumentInformation = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-documentInformation"
+
+// recordReportTypeNotCarried records a report type the requester stated that
+// the built amendment does not carry: the amendment goes on without it, and the
+// statement does not vanish unrecorded. updateBundle is read as built: on any
+// line, whatever kept the link from being made.
+func recordReportTypeNotCarried(ctx context.Context, stated json.RawMessage, updateBundle []byte) {
+	if t := bytes.TrimSpace(stated); len(t) == 0 || bytes.Equal(t, []byte("null")) {
+		return
+	}
+	if !amendmentCarriesReportType(updateBundle) {
+		exchangeOf(ctx).editNotMade(EditNotMadeReportTypeNotCarried)
+	}
+}
+
+// amendmentCarriesReportType reports whether the amending Claim, the Bundle's
+// first entry (the prior Claim rides after it), has a supportingInfo entry
+// stating a report type.
+func amendmentCarriesReportType(bundle []byte) bool {
+	var b struct {
+		Entry []struct {
+			Resource struct {
+				SupportingInfo []struct {
+					Extension []struct {
+						URL string `json:"url"`
+					} `json:"extension"`
+				} `json:"supportingInfo"`
+			} `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil || len(b.Entry) == 0 {
+		return false
+	}
+	for _, si := range b.Entry[0].Resource.SupportingInfo {
+		for _, e := range si.Extension {
+			if e.URL == pasExtDocumentInformation {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // recordPASSubmission reads the submission record off a submitted PAS Bundle.
@@ -339,6 +401,10 @@ func (g *Gateway) claimFactsBeforeAnyLeg(w http.ResponseWriter, r *http.Request,
 			pasBuildFailure(w, r, err, "build update bundle failed")
 			return false
 		}
+		if err := shnsdk.CheckPASReportType(in.ReportType); err != nil {
+			pasBuildFailure(w, r, err, "build update bundle failed")
+			return false
+		}
 	}
 	return true
 }
@@ -390,11 +456,12 @@ func (g *Gateway) pasOriginationBeforeAnyLeg(w http.ResponseWriter, r *http.Requ
 
 // resumeAmendment is what a resume (/complete, or the single call's resume
 // half) amends with: the route its amendment is built at (the pend's pin), and
-// the facts and certificationType the resume request states.
+// the facts, certificationType and report type the resume request states.
 type resumeAmendment struct {
 	route             legRoute
 	facts             shnsdk.PASClaimFacts
 	certificationType json.RawMessage
+	reportType        json.RawMessage
 }
 
 // resumeAmendmentOrFail reads and checks, before the resume sends any leg (the
@@ -423,11 +490,15 @@ func (g *Gateway) resumeAmendmentOrFail(w http.ResponseWriter, r *http.Request, 
 		}
 		return resumeAmendment{}, false
 	}
-	a := resumeAmendment{route: route, facts: st.claimFacts, certificationType: in.CertificationType}
+	a := resumeAmendment{route: route, facts: st.claimFacts, certificationType: in.CertificationType, reportType: in.ReportType}
 	if in.ClaimFacts != nil {
 		a.facts = *in.ClaimFacts
 	}
 	if err := shnsdk.CheckPASUpdateFactsAtLine(route.BuildLine, a.facts, a.certificationType); err != nil {
+		pasBuildFailure(w, r, err, "build update bundle failed")
+		return resumeAmendment{}, false
+	}
+	if err := shnsdk.CheckPASReportType(a.reportType); err != nil {
 		pasBuildFailure(w, r, err, "build update bundle failed")
 		return resumeAmendment{}, false
 	}

@@ -133,6 +133,7 @@ func sentOperation(t *testing.T, env *inProcessExchange) (string, []byte) {
 }
 
 func TestDTRIngress_ParametersRelayedExactly(t *testing.T) {
+	t.Parallel()
 	reference := dtrFixture(t, "dtr-package-params-2.0.json")
 	for _, row := range []struct {
 		name string
@@ -180,6 +181,7 @@ func TestDTRIngress_ParametersRelayedExactly(t *testing.T) {
 // Patient, so the Patient append (E-05) has nothing to add and these rows pin
 // E-04 alone; TestDTRIngress_DefaultAppendsNothing pins the default.
 func TestDTRIngress_CoverageObtainedOnlyWhenAbsent(t *testing.T) {
+	t.Parallel()
 	ownPatient := `{"name":"referenced","resource":{"resourceType":"Patient","id":"example"}}`
 	noCoverage := ehrParams(ehrOrderParam("sr1", prefetchMember), dtrQuestionnaire, `{"name":"context","valueString":"ctx-1"}`, ownPatient)
 	sorCov := sorCoverage("cov-1", shnsdk.CMSPayerIdentity.Value)

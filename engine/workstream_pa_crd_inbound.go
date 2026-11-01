@@ -269,6 +269,8 @@ func (g *Gateway) validateCRDEmbedded(ctx context.Context, leg, corr, line strin
 				v.Outcome = "unavailable"
 			case res.Valid:
 				v.Outcome = "valid"
+			case classifyFHIR(res, e.resource, line, "") == VerdictUnavailable:
+				v.Outcome = "unavailable"
 			default:
 				v.Outcome = "invalid"
 			}

@@ -18,6 +18,7 @@ import (
 // once the caller has stated an assertion (an unstated one is refused on
 // authentication first) and the body is read to verify it.
 func TestScenarioRoutes_AnUnsupportedCodingIs415(t *testing.T) {
+	t.Parallel()
 	for _, authenticated := range []bool{false, true} {
 		for _, rt := range originationRouteTable {
 			t.Run(rt.pattern, func(t *testing.T) {

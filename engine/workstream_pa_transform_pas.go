@@ -197,10 +197,10 @@ func pasStep2021Down(payload []byte, x ExchangeIdentity) ([]byte, LossReport, er
 // category, certificationType, dischargeDate, requestType) and the
 // processNote/supportingInfo:AdditionalInformation additions. SHN never
 // builds ClaimResponse.addItem, and builds Claim.supportingInfo:
-// AdditionalInformation only on an amendment that reaches the payer at PAS
-// 2.0 or 2.1 (shnsdk linkPASAnswer; the gateway passes no pend to a build
-// that reaches 2.2, pasSubmissionRecord.pendFor), so no SHN build needs the
-// 2.2-only documentInformation extension bridged. Per produce-iff these have
+// AdditionalInformation at PAS 2.2 only on a build at 2.2 (shnsdk linkPASAnswer,
+// pasSubmissionRecord.pendFor and reportTypeFor give a bridged build neither a
+// pend to 2.2 nor a statement), so no SHN build needs the 2.2-only
+// documentInformation extension bridged. Per produce-iff these have
 // no current producer OR consumer — carrying them would be untested,
 // unverified-by-use scope creep. Re-add iff a real (native or forwarded)
 // payload exercises one.

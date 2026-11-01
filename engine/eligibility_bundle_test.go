@@ -125,6 +125,7 @@ func eligResponses(t *testing.T, patientRefs ...string) []byte {
 // payer its requests name, and the payer's answer relayed exactly, at every
 // level, with nothing edited.
 func TestEligibilityBundle_EachFormCarriedAsSent(t *testing.T) {
+	t.Parallel()
 	covered, other := eligibilityRequest(t, "MBR-COVERED"), eligibilityRequest(t, anotherHeldMember)
 	one := payersEligibilityAnswer("Patient/MBR-COVERED")
 	two := eligResponses(t, "Patient/MBR-COVERED", "Patient/"+anotherHeldMember)
@@ -195,6 +196,7 @@ func TestEligibilityBundle_RoutesByTheEntriesItsRequestReferences(t *testing.T) 
 // is refused as routing before anything is sent, at every level, and says
 // which requests: one leg has one recipient.
 func TestEligibilityBundle_UnroutableSubmissionIsRefused(t *testing.T) {
+	t.Parallel()
 	request, patient, coverage, _ := eligFAISParts("MBR-COVERED", "00001")
 	twoOrgs := eligFAISBundle(t, [2]any{"", map[string]any{"resourceType": "CoverageEligibilityRequest", "status": "active",
 		"patient": map[string]any{"reference": "urn:uuid:patient"}, "insurer": map[string]any{"reference": "Organization/payer-1"}}},
@@ -240,6 +242,7 @@ func jsonEscaped(s string) string {
 // cannot be read one way only, submits nothing to carry: refused before
 // anything is sent, at every level.
 func TestEligibilityBundle_RefusesWhatIsNeitherForm(t *testing.T) {
+	t.Parallel()
 	request, patient, coverage, payer := eligFAISParts("MBR-COVERED", "00001")
 	cer := eligibilityRequest(t, "MBR-COVERED")
 	const unread = "parse eligibility request failed: "
@@ -472,6 +475,7 @@ func TestEligibilityBundle_OtherPatientsAreOnTheInvolvedList(t *testing.T) {
 // A participant that checks members refuses a batch naming a member its
 // system does not hold, saying which request; by default it is carried.
 func TestEligibilityBundle_UnknownMemberInABatch(t *testing.T) {
+	t.Parallel()
 	batch := eligBatch(t, eligibilityRequest(t, "MBR-COVERED"), eligibilityRequest(t, "MBR-NOBODY"))
 	for _, level := range allLevels {
 		t.Run("checked/"+level.String(), func(t *testing.T) {
@@ -495,6 +499,7 @@ func TestEligibilityBundle_UnknownMemberInABatch(t *testing.T) {
 // eligibility answer, relayed at none and observe and refused at structural
 // and strict.
 func TestEligibilityBundle_AnswerBundleHoldingNoResponse(t *testing.T) {
+	t.Parallel()
 	answer := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"OperationOutcome","issue":[]}}]}`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -521,6 +526,7 @@ func TestEligibilityBundle_AnswerBundleHoldingNoResponse(t *testing.T) {
 // forward path, at every level, never bound to an identifier made from the
 // reference's text.
 func TestEligibilityBundle_PayerReadsBundledPatientsExactly(t *testing.T) {
+	t.Parallel()
 	request, patient, coverage, payer := eligFAISParts(dtrFrameMember, "00001")
 	fais := func(req map[string]any) []byte {
 		return eligFAISBundle(t, [2]any{"", req}, [2]any{"urn:uuid:patient", patient}, [2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer})
@@ -566,6 +572,7 @@ func TestEligibilityBundle_PayerReadsBundledPatientsExactly(t *testing.T) {
 // A payer gateway answering from the payer's records reads a FAIS Bundle as
 // its one request, and answers about that request's member, at every level.
 func TestEligibilityBundle_RecordsAnswerAFAISBundle(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, false)
@@ -581,6 +588,7 @@ func TestEligibilityBundle_RecordsAnswerAFAISBundle(t *testing.T) {
 // a time: a batch is its own 501, saying so as the payer's answer, at every
 // level, and recorded under no network rule.
 func TestEligibilityBundle_RecordsDoNotAnswerABatch(t *testing.T) {
+	t.Parallel()
 	const want = `{"error":"this payer answers coverage eligibility from its records one request at a time, so it does not answer a batch of requests: this is the payer's answer, not a network refusal"}`
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -602,6 +610,7 @@ func TestEligibilityBundle_RecordsDoNotAnswerABatch(t *testing.T) {
 // request's own binding is named on the answer's involved list, so nothing
 // about a request is filed under the token's patient in place of its own.
 func TestEligibilityBundle_ForwardedBatchFilesEachRequestUnderItsPatient(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
@@ -729,6 +738,7 @@ func TestEligibilityBundle_ProviderAnswerEntryNamedInAnotherCase(t *testing.T) {
 // cannot be read one way only: the answer is refused at structural and
 // relayed at observe, on both gateways, however good its other responses.
 func TestEligibilityBundle_AnswerEntryWithNoReadableResource(t *testing.T) {
+	t.Parallel()
 	batch := eligBatch(t, eligibilityRequest(t, dtrFrameMember), eligibilityRequest(t, anotherHeldMember))
 	good := []any{map[string]any{"resource": json.RawMessage(payersEligibilityAnswer("Patient/" + dtrFrameMember))},
 		map[string]any{"resource": json.RawMessage(payersEligibilityAnswer("Patient/" + anotherHeldMember))}}
@@ -759,6 +769,7 @@ func TestEligibilityBundle_AnswerEntryWithNoReadableResource(t *testing.T) {
 // patient none of the requests names is refused at strict and relayed below
 // it, and a Bundle holding no response is refused at structural and strict.
 func TestEligibilityBundle_ForwardedBundleAnswerIsFenced(t *testing.T) {
+	t.Parallel()
 	batch := eligBatch(t, eligibilityRequest(t, dtrFrameMember), eligibilityRequest(t, anotherHeldMember))
 	stranger := eligResponses(t, "Patient/"+dtrFrameMember, "Patient/MBR-SOMEONE-ELSE")
 	empty := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)

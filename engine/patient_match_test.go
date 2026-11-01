@@ -99,6 +99,7 @@ func TestEligibility_RecordsTokenSubjectDifferenceIsCarried(t *testing.T) {
 
 // The forward path names the payer's binding on the involved list too.
 func TestEligibility_DeclaredTokenSubjectDifferenceIsRecorded(t *testing.T) {
+	t.Parallel()
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
@@ -210,6 +211,7 @@ var bindLevels = []ConformanceEnforcement{EnforcementNone, EnforcementObserve, E
 // refused with exactly the same answer, so the refusal does not tell the
 // requester whether the facility holds the patient.
 func TestFederatedQuery_PatientNotTheConsentedOneIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
@@ -286,6 +288,7 @@ func (c *recordReadCounter) FacilityRecordsContext(ctx context.Context, m string
 // refused at every level, recorded as authority, and nothing is signed. A
 // patient the PHG does not hold is refused with exactly the same answer.
 func TestPatientDTR_PatientNotTheAuthorizedOneIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
@@ -354,6 +357,7 @@ func (a ambiguousMemberSoR) ResolvePatientContext(ctx context.Context, m string)
 // down for every member answers so, as before: that says nothing about any
 // one patient.
 func TestPatientMatch_UnreadableMemberRecordsAnswerAsNotHeld(t *testing.T) {
+	t.Parallel()
 	const ambiguous = "MBR-AMBIGUOUS"
 	for _, leg := range []struct {
 		name string

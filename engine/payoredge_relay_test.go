@@ -587,6 +587,7 @@ func TestPayorEdge_CRDBundlePrefetch(t *testing.T) {
 // mapping still refuses a Coverage whose payor it cannot read and one naming
 // another payer, and still maps one naming this payer.
 func TestPayorEdge_CRDWithoutCoverage(t *testing.T) {
+	t.Parallel()
 	body := unsignedCRDRequest(t)
 	carried := map[string][]byte{
 		"no prefetch.coverage":   withoutMember(t, body, "coverage", "prefetch"),

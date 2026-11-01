@@ -80,6 +80,7 @@ func dependentCoverage(t *testing.T, id, patient string, slots []string) string 
 // The read through the request's fhirServer routes a dependent's Coverage
 // and carries it, the contained parent byte for byte, at every level.
 func TestFHIRServerReadRoutesAndCarriesADependentsCoverage(t *testing.T) {
+	t.Parallel()
 	for name, slots := range dependentSlots {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -106,6 +107,7 @@ func TestFHIRServerReadRoutesAndCarriesADependentsCoverage(t *testing.T) {
 // anywhere but the party slots, a standalone entry for another Patient (412),
 // and a beneficiary naming another patient (502), at every level.
 func TestFHIRServerReadRefusesWhatIsNotADependentsCoverage(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		answer func(t *testing.T, base string) string
 		status int
@@ -145,6 +147,7 @@ func TestFHIRServerReadRefusesWhatIsNotADependentsCoverage(t *testing.T) {
 // under enrichment carries it with the parent byte for byte; a parent
 // referenced from another element is refused (502) at every level.
 func TestSystemOfRecordRoutesADependentsCoverage(t *testing.T) {
+	t.Parallel()
 	for name, slots := range dependentSlots {
 		for _, enrich := range []bool{false, true} {
 			for _, level := range allLevels {
@@ -180,6 +183,7 @@ func TestSystemOfRecordRoutesADependentsCoverage(t *testing.T) {
 // element is refused at strict (the request's own consistency) and carried as
 // sent below it.
 func TestSentPrefetchCoverageOfADependent(t *testing.T) {
+	t.Parallel()
 	for name, slots := range dependentSlots {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -211,6 +215,7 @@ func TestSentPrefetchCoverageOfADependent(t *testing.T) {
 // level; an obtained one whose parent is referenced from another element is
 // refused (502).
 func TestDTRIngressRoutesADependentsCoverage(t *testing.T) {
+	t.Parallel()
 	for name, slots := range dependentSlots {
 		for _, level := range allLevels {
 			t.Run("sent/"+name+"/"+level.String(), func(t *testing.T) {
@@ -314,6 +319,7 @@ func TestCarriedMembersSkipACoveragesParty(t *testing.T) {
 // dependent's Coverage whose beneficiary is the request's id (another patient
 // in that system) is still refused, at every level.
 func TestDependentCoverageRoutedWhenTheSystemNamesThePatientDifferently(t *testing.T) {
+	t.Parallel()
 	for name, slots := range dependentSlots {
 		for _, enrich := range []bool{false, true} {
 			for _, level := range allLevels {

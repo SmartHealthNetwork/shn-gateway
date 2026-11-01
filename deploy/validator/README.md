@@ -79,10 +79,13 @@ diagnostic and path); unrelated errors, unknown definitions and missing errors f
 PAS `extension-reviewAction` slicing diagnostics; later slicing diagnostics fail the
 incarnation.
 
-The unchanged HAPI image and package pins are distinct from the shared explicit-
-profile behavior correction in `backport/`. Its pinned build-only compiler replaces
-one validation class while preserving the other archive members. Each runtime
-image carries `/app/backport-provenance.json` with source, compiler/platform,
+The unchanged HAPI image and package pins are distinct from the shared behavior
+corrections in `backport/`: the explicit-profile correction, and the regex guard from
+`org.hl7.fhir.core` 7.0.3, verbatim, which stops a CPU-starved validator flipping a
+verdict on a valid primitive value under about 1,000 characters. Its pinned build-only compiler replaces those classes while preserving the
+other archive members; a pin on the JAR, the classes or the sources fails the build on
+any HAPI bump until someone looks, and core 7.0 or later deletes the regex part. Each
+runtime image carries `/app/backport-provenance.json` with source, compiler/platform,
 class, nested-JAR and platform-specific WAR identities. Runtime uses that WAR
 without an overlay or another Java process. Source and Apache license ship with
 the build context; compiler inputs and build caches do not enter runtime images.

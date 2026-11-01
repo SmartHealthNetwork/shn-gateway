@@ -106,3 +106,23 @@ func TestScenarioKey(t *testing.T) {
 		}
 	}
 }
+
+// A persona's report type is the route's input of the same name when the
+// persona states one, on an amending route only, and is the persona's to state.
+func TestScenarioRouteInput_ReportType(t *testing.T) {
+	p := routePersona()
+	if in, err := ScenarioRouteInput(p, true, nil); err != nil || in["reportType"] != nil {
+		t.Fatalf("no statement: reportType %v (%v)", in["reportType"], err)
+	}
+	p.Amendment.ReportType = &shnsdk.PASCoding{System: "https://codesystem.x12.org/005010/755", Code: "PY"}
+	in, err := ScenarioRouteInput(p, true, nil)
+	if err != nil || in["reportType"] != p.Amendment.ReportType {
+		t.Fatalf("stated: reportType %v (%v)", in["reportType"], err)
+	}
+	if in, err := ScenarioRouteInput(p, false, nil); err != nil || in["reportType"] != nil {
+		t.Fatalf("no amendment: reportType %v (%v)", in["reportType"], err)
+	}
+	if _, err := ScenarioRouteInput(p, true, map[string]any{"reportType": "x"}); err == nil {
+		t.Fatal("a caller's reportType was accepted over the persona's")
+	}
+}

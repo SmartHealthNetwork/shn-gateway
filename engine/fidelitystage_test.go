@@ -135,6 +135,7 @@ func fidelityStageFaults(fset *token.FileSet, files []*ast.File) []string {
 // records every test produces are held to the same rule as they are read
 // (wantClosed).
 func TestFidelityRefusals_EveryOneNamesItsStage(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {

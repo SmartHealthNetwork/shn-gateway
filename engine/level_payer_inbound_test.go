@@ -359,6 +359,7 @@ func crdSelectWith(t *testing.T, old, new string) []byte {
 // The order and the prefetch coverage are the request's own content;
 // the subject is context.patientId.
 func TestLevelPayerCRDSelect_RequestContent(t *testing.T) {
+	t.Parallel()
 	const sr = `{"fullUrl":"urn:uuid:sr1","resource":{"resourceType":"ServiceRequest","id":"sr1","status":"draft","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148"}]}}}`
 	rows := map[string]struct {
 		body   []byte
@@ -419,6 +420,7 @@ func crdDispatchWith(t *testing.T, old, new string) []byte {
 // request's own shape, refused at strict with the body strict has always
 // given.
 func TestLevelPayerCRDDispatch_RequestContent(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		body   []byte
 		rule   string
@@ -460,6 +462,7 @@ func dtrPackage(params ...string) []byte {
 // The package input's own shape and consistency. The subject is
 // the first coverage's beneficiary.
 func TestLevelPayerDTRPackage_RequestContent(t *testing.T) {
+	t.Parallel()
 	own := resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember))
 	rows := map[string]struct {
 		body   []byte
@@ -496,6 +499,7 @@ func TestLevelPayerDTRPackage_RequestContent(t *testing.T) {
 
 // The payer's DTR answer is its own content.
 func TestLevelPayerDTR_AnswerContent(t *testing.T) {
+	t.Parallel()
 	notQR := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 	otherPatient := nextQuestionAnswer(t, "Patient/"+dtrOtherMember, rawItems(t, adaptiveTree(t, "1")))
 	subjectQuestionnaire := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"q","status":"active","subject":{"reference":"Patient/X"}}}]}`)

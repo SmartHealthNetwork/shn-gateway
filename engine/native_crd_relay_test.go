@@ -201,6 +201,7 @@ func certifierRows() []certifierRow {
 var certifierRuleNotReachable = []string{"line"}
 
 func TestNativeCRD_MalformedEnvelopeRefused(t *testing.T) {
+	t.Parallel()
 	rows := certifierRows()
 	covered := map[string]bool{}
 	for _, r := range rows {
@@ -337,6 +338,18 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 			}
 			return shnsdk.Result{Valid: true}, nil
 		}, "unavailable"},
+		{"a regex check that could not run", func(b []byte) (shnsdk.Result, error) {
+			if bytes.Contains(b, []byte(covInfo)) {
+				return regexResult(regexTimeoutIssue("DeviceRequest.extension[0].url")), nil
+			}
+			return shnsdk.Result{Valid: true}, nil
+		}, "unavailable"},
+		{"could not run beside a structural error", func(b []byte) (shnsdk.Result, error) {
+			if bytes.Contains(b, []byte(covInfo)) {
+				return regexResult(regexTimeoutIssue("DeviceRequest.extension[0].url"), regexErr("Validation_VAL_Profile_Minimum", "DeviceRequest", "x")), nil
+			}
+			return shnsdk.Result{Valid: true}, nil
+		}, "invalid"},
 		{"valid", func([]byte) (shnsdk.Result, error) { return shnsdk.Result{Valid: true}, nil }, "valid"},
 	} {
 		for _, tail := range embeddedValidationTails {

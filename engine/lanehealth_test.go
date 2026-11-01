@@ -213,6 +213,7 @@ func TestExplicitLaneIsUnreachableFromItsFailureUntilItAnswers(t *testing.T) {
 // metadata once, and stays reachable when it answers; when it does not, it is
 // unreachable. A second timeout inside 30 s asks nothing more.
 func TestExplicitLaneThatTimedOutIsCheckedNotStopped(t *testing.T) {
+	t.Parallel()
 	var mode int32
 	srv := testLane(t, &mode)
 	op := shnsdk.NewOperationValidator(srv.URL)
@@ -431,6 +432,7 @@ func submitAcrossLines(t *testing.T, level ConformanceEnforcement, require bool,
 // under REQUIRE_SHARED_LINE it is refused as routing before anything is sent.
 // The control, with the lane answering, walks the chain.
 func TestAnUnreachableLane_TheSubmissionIsCarried(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			status, msg, err, kinds, hits, _ := submitAcrossLines(t, level, false, func(*explicitLane, *int32) {})
@@ -456,6 +458,7 @@ func TestAnUnreachableLane_TheSubmissionIsCarried(t *testing.T) {
 // is then unreachable, so later claims are carried
 // (TestAnUnreachableLane_TheSubmissionIsCarried).
 func TestALaneLostAfterTheWalk_TheExchangeThatFindsItIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			status, msg, _, kinds, hits, lane := submitAcrossLines(t, level, false, func(_ *explicitLane, mode *int32) { atomic.StoreInt32(mode, testLaneDrops) })

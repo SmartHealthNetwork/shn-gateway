@@ -76,6 +76,7 @@ const (
 )
 
 func TestCRDIngressPayorReference_ResolvesAmongPrefetch(t *testing.T) {
+	t.Parallel()
 	rows := map[string][]byte{
 		"an absolute reference equal to a prefetch Bundle entry's fullUrl": crdPayorRequest(refCoverage("example", payorAbs),
 			`"organizations":`+refCollection(refEntry(payorAbs, refOrg("pay-1", "00001")))),
@@ -123,6 +124,7 @@ func TestCRDIngressPayorReference_ResolvesAmongPrefetch(t *testing.T) {
 // payer are refused before the network, at every level, and no other source is
 // asked to pick one.
 func TestCRDIngressPayorReference_DisagreementRefused(t *testing.T) {
+	t.Parallel()
 	rows := map[string][]byte{
 		"two resources with different payer identifiers": crdPayorRequest(refCoverage("example", "Organization/pay-1"),
 			`"payer":`+refOrg("pay-1", "00001")+`,"organizations":`+refCollection(refEntry("", refOrg("pay-1", "00002")))),
@@ -161,6 +163,7 @@ func TestCRDIngressPayorReference_DisagreementRefused(t *testing.T) {
 // every payor reference resolves by the agreement rule: a member named in
 // another case never lets routing take an entry the rule did not check.
 func TestCRDIngressPayorReference_MemberNamesInAnotherCase(t *testing.T) {
+	t.Parallel()
 	inBundle := func(cov, org string) string {
 		return refCollection(refEntry("", cov), refEntry("", org))
 	}
@@ -335,6 +338,7 @@ func dtrPayorParams(coverage string, extra ...string) []byte {
 }
 
 func TestDTRIngressPayorReference_ResolvesAmongResources(t *testing.T) {
+	t.Parallel()
 	rows := map[string][]byte{
 		"an absolute reference equal to a referenced Bundle entry's fullUrl": dtrPayorParams(refCoverage(prefetchMember, payorAbs),
 			refCollection(refEntry(payorAbs, refOrg("pay-1", "00001")))),
@@ -363,6 +367,7 @@ func TestDTRIngressPayorReference_ResolvesAmongResources(t *testing.T) {
 }
 
 func TestDTRIngressPayorReference_DisagreementRefused(t *testing.T) {
+	t.Parallel()
 	rows := map[string][]byte{
 		"two resources with different payer identifiers": dtrPayorParams(refCoverage(prefetchMember, "Organization/pay-1"),
 			refOrg("pay-1", "00001"), refCollection(refEntry("", refOrg("pay-1", "00002")))),
@@ -396,6 +401,7 @@ func TestDTRIngressPayorReference_DisagreementRefused(t *testing.T) {
 // system, whether or not the participant opts in to appending it; included
 // records that disagree are refused, and the system is not asked to pick.
 func TestDTRIngressPayorReference_ObtainedCoverage(t *testing.T) {
+	t.Parallel()
 	noCoverage := dtrPayorParams("")
 	cov := strings.Replace(refCoverage(prefetchSoRID, "Organization/org-1"), `"id":"c1"`, `"id":"cov-1"`, 1)
 	for _, level := range allLevels {

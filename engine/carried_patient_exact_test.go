@@ -146,6 +146,7 @@ func TestPatientDemographics_ExactNames(t *testing.T) {
 // a patient the gateway cannot identify, at the provider's coverage
 // eligibility ingress and on the payer's forward path, at every level.
 func TestEligibility_PartyReadTwoWaysIsNeverTheMember(t *testing.T) {
+	t.Parallel()
 	coverages := map[string]string{"the party under Contained": partyCoverage(`"Contained":[` + exactParent + `]`)}
 	for name, coverage := range unclearPartyCoverages {
 		coverages[name] = coverage

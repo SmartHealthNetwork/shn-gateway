@@ -177,6 +177,7 @@ func noPatientMixed(t *testing.T, findings []ConformanceFinding) {
 
 // The provider's PAS ingress, POST /Claim/$submit.
 func TestLevelPASIngress_AnotherPatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasAnotherPatientCarried {
 		body := string(withCoverageCarrying(t, []byte(pasIngressBundle("00001", "")), c))
 		for _, level := range allLevels {
@@ -192,6 +193,7 @@ func TestLevelPASIngress_AnotherPatientCarried(t *testing.T) {
 }
 
 func TestLevelPASIngress_SamePatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasSamePatientCarried {
 		body := string(withCoverageCarrying(t, []byte(pasIngressBundle("00001", "")), c))
 		for _, level := range allLevels {
@@ -209,6 +211,7 @@ func TestLevelPASIngress_SamePatientCarried(t *testing.T) {
 
 // The payer's gateway, binding a $submit and an amendment from the network.
 func TestLevelPayerPAS_AnotherPatientCarried(t *testing.T) {
+	t.Parallel()
 	for _, leg := range []struct{ name, path string }{{"pas-claim", pasSubmitPath}, {"pas-claim-update", pasSubmitPath}} {
 		for name, c := range pasAnotherPatientCarried {
 			for _, level := range allLevels {
@@ -224,6 +227,7 @@ func TestLevelPayerPAS_AnotherPatientCarried(t *testing.T) {
 }
 
 func TestLevelPayerPAS_SamePatientCarried(t *testing.T) {
+	t.Parallel()
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
 		for name, c := range pasSamePatientCarried {
 			for _, level := range allLevels {
@@ -257,6 +261,7 @@ func pasPayerBody(t *testing.T, p *levelPayer, leg string, c pasCarried) []byte 
 // payer's system: what strict refuses there never reaches it, and below
 // strict the bundle is posted as it came.
 func TestNativeResponder_AnotherPatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasAnotherPatientCarried {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -287,6 +292,7 @@ func TestNativeResponder_AnotherPatientCarried(t *testing.T) {
 // same payer-native seam (TestLevelPayerPAS_AnotherPatientCarried,
 // wantRequestRow).
 func TestNativeResponder_SamePatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasSamePatientCarried {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -308,6 +314,7 @@ func TestNativeResponder_SamePatientCarried(t *testing.T) {
 // Another patient's Patient carried as an entry of its own is another
 // patient in the request too, the request's own Patient entry beside it.
 func TestLevelPASIngress_AnotherPatientEntry(t *testing.T) {
+	t.Parallel()
 	body := levelPASBundleWithEntry(`{"fullUrl":"http://localhost/fhir/Patient/MBR-NOTCOVERED","resource":{"resourceType":"Patient","id":"MBR-NOTCOVERED"}}`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -323,6 +330,7 @@ func TestLevelPASIngress_AnotherPatientEntry(t *testing.T) {
 // The inquiry, Claim/$inquire, is read the same way: at the provider's
 // ingress and at the payer's gateway.
 func TestLevelInquire_AnotherPatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasAnotherPatientCarried {
 		ingress := string(withCoverageCarrying(t, []byte(levelInquiry(t, "MBR-COVERED", "")), c))
 		payer := withCoverageCarrying(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), c)
@@ -344,6 +352,7 @@ func TestLevelInquire_AnotherPatientCarried(t *testing.T) {
 }
 
 func TestLevelInquire_SamePatientCarried(t *testing.T) {
+	t.Parallel()
 	for name, c := range pasSamePatientCarried {
 		ingress := string(withCoverageCarrying(t, []byte(levelInquiry(t, "MBR-COVERED", "")), c))
 		payer := withCoverageCarrying(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), c)

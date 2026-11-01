@@ -2059,12 +2059,14 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			PriorClaim:        submitted.prior,
 			// The payer's own pend: the attached report is linked to the
 			// items it asks the report for, and to no other.
-			Pend: submitted.pendFor(targetLine),
+			Pend:       submitted.pendFor(route),
+			ReportType: reportTypeFor(route, claimIn.ReportType),
 		}, res.requester)
 		if err != nil {
 			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
+		recordReportTypeNotCarried(ctx, claimIn.ReportType, updateBundle)
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})
@@ -2488,12 +2490,14 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			PriorClaim:        submitted.prior,
 			// The payer's own pend: the attached report is linked to the
 			// items it asks the report for, and to no other.
-			Pend: submitted.pendFor(targetLine),
+			Pend:       submitted.pendFor(route),
+			ReportType: reportTypeFor(route, claimIn.ReportType),
 		}, res.requester)
 		if err != nil {
 			pasBuildFailure(w, r, err, "build update bundle failed")
 			return nil, nil, true, nil
 		}
+		recordReportTypeNotCarried(ctx, claimIn.ReportType, updateBundle)
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "PAS evidence linkage failed"})

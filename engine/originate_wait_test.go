@@ -437,6 +437,7 @@ func TestContinuation_OrderChanged(t *testing.T) {
 // immediately: the payer's answer is reported and the continuation is handed
 // back. The wait's own bounds are proven on their own terms above.
 func TestOriginator_SubmitFollowReturnsPayerDecision(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		answer       string
@@ -680,6 +681,7 @@ func mustResetContinuations(t *testing.T, store ContinuationStore) {
 // the route could return an empty answer, or count its inquiries wrong, and every
 // other row in this package would still be green.
 func TestPAInquireRoute_ContinuesToTheDecision(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		answer string

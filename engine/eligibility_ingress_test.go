@@ -110,6 +110,7 @@ func runEligibilityIngress(t *testing.T, level ConformanceEnforcement, body, ans
 // relayed exactly, at every level. The Parameters form is read as the request
 // it holds: routed to the same payer as the resource form.
 func TestEligibilityIngress_CarriesEachFormAsSent(t *testing.T) {
+	t.Parallel()
 	cer := eligibilityRequest(t, "MBR-COVERED")
 	answer := payersEligibilityAnswer("Patient/MBR-COVERED")
 	for name, body := range map[string][]byte{"resource": cer, "parameters": eligibilityAsParameters(t, cer)} {
@@ -134,6 +135,7 @@ func TestEligibilityIngress_CarriesEachFormAsSent(t *testing.T) {
 // The request is routed by its insurer: an identifier, or an Organization it
 // contains; failing that, by the payor of a Coverage it contains.
 func TestEligibilityIngress_RoutesByThePayerTheRequestNames(t *testing.T) {
+	t.Parallel()
 	cms := eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)
 	org := map[string]any{"resourceType": "Organization", "id": "ins", "identifier": []any{cms}}
 	cov := eligibilityCoverage("cov", map[string]any{"identifier": cms})
@@ -178,6 +180,7 @@ func TestEligibilityIngress_RoutesByThePayerTheRequestNames(t *testing.T) {
 // as routing before anything is sent, at every level, and says what is
 // missing.
 func TestEligibilityIngress_UnroutableRequestIsRefused(t *testing.T) {
+	t.Parallel()
 	cms := eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)
 	org := func(identifier string) map[string]any {
 		return map[string]any{"resourceType": "Organization", "id": "ins", identifier: []any{cms}}
@@ -240,6 +243,7 @@ func TestEligibilityIngress_UnroutableRequestIsRefused(t *testing.T) {
 // way only, or a request that names no patient, is refused before anything
 // is sent, at every level.
 func TestEligibilityIngress_RefusesWhatIsNoEligibilityRequest(t *testing.T) {
+	t.Parallel()
 	cer := eligibilityRequest(t, "MBR-COVERED")
 	param := func(members string) []byte {
 		return []byte(`{"resourceType":"Parameters","parameter":[` + members + `]}`)
@@ -315,6 +319,7 @@ func TestEligibilityIngress_NoPayerRouterIsRefused(t *testing.T) {
 // unless the participant opted in to checking members; a system that cannot
 // answer is its own failure. At every level.
 func TestEligibilityIngress_BindsThePatientAsTheOtherLegs(t *testing.T) {
+	t.Parallel()
 	unknown := eligibilityRequest(t, "MBR-NOBODY")
 	answer := payersEligibilityAnswer("Patient/MBR-NOBODY")
 	sorErr := &SoRReadError{Kind: SoRUnavailable}
@@ -382,6 +387,7 @@ func TestEligibilityIngress_AnswerRepeatingAMemberIsRefused(t *testing.T) {
 // relayed and recorded at observe, refused at structural for a structural
 // issue (a deeper one is recorded and relayed) and at strict.
 func TestEligibilityIngress_AnswerIsValidatedAtTheLevel(t *testing.T) {
+	t.Parallel()
 	answer := payersEligibilityAnswer("Patient/MBR-COVERED")
 	structural := &shnsdk.Issue{Severity: "error", Code: "structure", MessageID: "Extension_EXTP_Context_Wrong"}
 	deeper := &shnsdk.Issue{Severity: "error", Code: "processing", MessageID: "Terminology_TX_NoValid_1_CC"}
@@ -536,6 +542,7 @@ func TestEligibilityIngress_AuthorityDeniedIsRefused(t *testing.T) {
 // payer's own endpoint, and a token for another patient carried and observed
 // (one patient-match rule), at every level.
 func TestEligibility_ParametersFormIsReadAsItsRequest(t *testing.T) {
+	t.Parallel()
 	body := eligibilityAsParameters(t, eligibilityRequest(t, dtrFrameMember))
 	for _, level := range eligibilityLevels {
 		t.Run("records/"+level.String(), func(t *testing.T) {

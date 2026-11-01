@@ -74,6 +74,7 @@ func TestBridgedDecisionIsModuleTwos(t *testing.T) {
 // by identifier or by value. Those refuse outside it, so module 3 can leave the
 // core without taking them along.
 func TestConformancePolicyNamesNoNetworkRuleOrBridgedEdit(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t)
 	forbidden := map[string]bool{
 		"networkRules": true, "networkRefusal": true, "KindNetwork": true,

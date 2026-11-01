@@ -15,6 +15,12 @@ ENGINE = "hapiproject/hapi@sha256:0ff86aac4c7bd13a1ee226444a70263bb46ed1c28ef543
 COMPILER = "eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7"
 JAR_ENTRY = "WEB-INF/lib/hapi-fhir-validation-8.12.0.jar"
 CLASS_ENTRY = "org/hl7/fhir/common/hapi/validation/validator/ValidatorWrapper.class"
+UTILITIES_JAR_ENTRY = "WEB-INF/lib/org.hl7.fhir.utilities-6.9.12.jar"
+REGEX_PACKAGE = "org/hl7/fhir/utilities/regex/"
+REGEX_CLASSES = tuple(REGEX_PACKAGE + name + ".class" for name in (
+    "PrimitiveRegexes", "PrimitiveRegexes$PrimitiveMatcher", "RegexTimeout",
+    "RegexTimeout$DeadlineCharSequence", "RegexTimeout$RegexTimeoutException"))
+REGEX_REMOVED_CLASS = REGEX_PACKAGE + "RegexTimeout$InterruptibleCharSequence.class"
 SOURCES = {
     "linux/arm64": ("sha256:4d59628d42b3556b2dcd274d26054a43ba53697ebdae0fd71e6a5475065ed22d", "d784462f9a5de7385c4f6b2fcfeec3d7d2316270d5bb2e6fb73cb6ed0c5de749", "388197072"),
     "linux/amd64": ("sha256:88489ad986f38d35ec0e216a0660db42cb55329275efdc5913dfe1d2f2afbe53", "a256639a442672571f948bb6502788ae5a93b2be92bf64cb7e97f7104ac3f678", "388197072"),
@@ -66,18 +72,23 @@ def expected_fields(source, platform, compiler_platform):
         raise ValueError("unsupported HAPI or compiler platform")
     child, war, size = SOURCES[platform]
     return {
-        "format": "explicit-profile-backport-v1", "upstream_image": ENGINE,
+        "format": "validator-backport-v2", "upstream_image": ENGINE,
         "hapi_source_platform": platform, "hapi_source_child": child,
         "input_war_sha256": war, "input_war_size": size,
         "input_jar_sha256": "d6ff8774a4de5dd2156d903e260ea3c1dc734f58b2bb759f3f249cb52bec7fd4",
         "input_class_sha256": "e7f50925b9703e25bf1ef1d461f22381ab8e1a3a28b990ab2ff0c6e83bdba4ce",
+        "input_utilities_jar_sha256": "f36f062e9cb561143691bf7908c6fb6ecbcefacda53e478fada82b1b534788eb",
+        "input_regex_classes_sha256": "0bb7df2948e66a78974e23d2a8bde0e79fbde77d3348afd1c3ad411f3a1b402f",
         "upstream_source_sha256": file_hash(source / "upstream/ValidatorWrapper.java"),
+        "regex_timeout_source_sha256": file_hash(source / "upstream/RegexTimeout.java"),
+        "primitive_regexes_source_sha256": file_hash(source / "upstream/PrimitiveRegexes.java"),
         "patched_source_sha256": file_hash(source / "src/ValidatorWrapper.java"),
         "source_manifest_sha256": file_hash(source / "provenance.json"),
         "builder_sha256": file_hash(source / "BuildBackport.java"),
         "compiler_image": COMPILER, "compiler_platform": compiler_platform,
         "compiler_platform_digest": COMPILERS[compiler_platform], "compiler_runtime": "21.0.11+10-LTS",
         "java_class_major": "61", "changed_jar_entry": CLASS_ENTRY, "changed_war_entry": JAR_ENTRY,
+        "changed_utilities_war_entry": UTILITIES_JAR_ENTRY,
     }
 
 
@@ -102,10 +113,33 @@ def zip_member(archive, name):
     return archive.read(name)
 
 
+def classes_identity(archive, names):
+    return digest("".join(f"{name}\t{digest(zip_member(archive, name))}\n" for name in sorted(names)).encode())
+
+
+def verify_effective_war(war, outputs):
+    """The WAR's two nested JARs, and the classes inside them, are the qualified ones."""
+    with zipfile.ZipFile(war) as archive:
+        nested = zip_member(archive, JAR_ENTRY)
+        utilities = zip_member(archive, UTILITIES_JAR_ENTRY)
+        if archive.getinfo(JAR_ENTRY).compress_type != zipfile.ZIP_STORED or digest(nested) != outputs["output_jar_sha256"]:
+            raise ValueError("effective nested JAR identity or compression changed")
+        if archive.getinfo(UTILITIES_JAR_ENTRY).compress_type != zipfile.ZIP_STORED or digest(utilities) != outputs["output_utilities_jar_sha256"]:
+            raise ValueError("effective utilities JAR identity or compression changed")
+    with zipfile.ZipFile(io.BytesIO(nested)) as archive:
+        if digest(zip_member(archive, CLASS_ENTRY)) != outputs["output_class_sha256"]:
+            raise ValueError("effective class identity changed")
+    with zipfile.ZipFile(io.BytesIO(utilities)) as archive:
+        if classes_identity(archive, REGEX_CLASSES) != outputs["output_regex_classes_sha256"]:
+            raise ValueError("effective regex class identity changed")
+        if REGEX_REMOVED_CLASS in archive.namelist():
+            raise ValueError("the replaced regex guard's class remains")
+
+
 def verify_provenance(source, recorded, platform, compiler_platform):
     expected = expected_fields(source, platform, compiler_platform)
     outputs = read_json(source / "provenance.json").get("outputs", {}).get(platform)
-    if not isinstance(outputs, dict) or set(outputs) != {"output_class_sha256", "output_jar_sha256", "output_war_sha256"}:
+    if not isinstance(outputs, dict) or set(outputs) != {"output_class_sha256", "output_jar_sha256", "output_regex_classes_sha256", "output_utilities_jar_sha256", "output_war_sha256"}:
         raise ValueError("source platform has no qualified output identities")
     if set(recorded) != set(expected) | set(outputs) | {"classpath_sha256", "build_key"}:
         raise ValueError("unexpected or missing build provenance fields")
@@ -130,15 +164,11 @@ def verify(source, output, platform, compiler_platform):
         raise ValueError("classpath inventory changed")
     war = output / "main.war"
     jar = output / "hapi-fhir-validation-8.12.0.jar"
-    if file_hash(war) != outputs["output_war_sha256"] or file_hash(jar) != outputs["output_jar_sha256"]:
+    utilities = output / "org.hl7.fhir.utilities-6.9.12.jar"
+    if (file_hash(war) != outputs["output_war_sha256"] or file_hash(jar) != outputs["output_jar_sha256"]
+            or file_hash(utilities) != outputs["output_utilities_jar_sha256"]):
         raise ValueError("cached output bytes changed")
-    with zipfile.ZipFile(war) as archive:
-        nested = zip_member(archive, JAR_ENTRY)
-        if archive.getinfo(JAR_ENTRY).compress_type != zipfile.ZIP_STORED or digest(nested) != outputs["output_jar_sha256"]:
-            raise ValueError("effective nested JAR identity or compression changed")
-    with zipfile.ZipFile(io.BytesIO(nested)) as archive:
-        if digest(zip_member(archive, CLASS_ENTRY)) != outputs["output_class_sha256"]:
-            raise ValueError("effective class identity changed")
+    verify_effective_war(war, outputs)
     return recorded
 
 

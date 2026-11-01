@@ -114,6 +114,7 @@ func TestDirectBearer_Disjoint(t *testing.T) {
 
 // The rejection table — every guard ships its rejection test.
 func TestDirectBearer_Rejections(t *testing.T) {
+	t.Parallel()
 	key, pub := newTestClientKey(t)
 	wrongKey, _ := newTestClientKey(t)
 	s := newTestAuthServer(t, "br-provider", pub, "ES384")

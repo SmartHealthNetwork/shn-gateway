@@ -4,7 +4,126 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
-## A responder verifies its answer token, and attests its system answered when it cannot send the answer (Unreleased)
+## An amendment links its attached answer at PAS 2.2 on the report type the request states (v1.2.0)
+
+- **Additive (provider, amending routes):** a request may state `reportType`, one X12 755
+  Coding: the X12 PWK01 report type of the answer the amendment attaches, the requester's
+  own statement. At PAS 2.2 the amendment's `supportingInfo` entry then carries it as
+  `extension-documentInformation`'s `reportTypeCode`, and the item the payer's pend ties the
+  answer to gets its `informationSequence` and an `infoChanged` marker: `added`, or `changed`
+  where the amendment changes that item otherwise. It is never read from the pend and never
+  defaulted. With no statement, nothing links at PAS 2.2, as before.
+- **Changed (provider, amendments, with `shn-sdk` v1.2.0):** a payer's pended
+  `CommunicationRequest` now ties an attached answer to the item line it names, as a pended
+  `Task` does: by a LOINC payload code the answer's `code` carries, or by the questionnaire
+  its `extension-requestedQuestionnaire` names. So an amendment below PAS 2.2 answering such
+  a pend now links with no statement, and that item carries the same `infoChanged` marker. A
+  payer may then re-evaluate the item instead of answering with the decision it holds.
+- **Changed:** a statement whose `system` is not X12 755, or that has no `code`, is refused
+  `422` before any leg, at every level, as the amendment's facts are. The code itself is not
+  checked: the list is licensed.
+- **Changed (Go API):** `scenariodriver.ScenarioRouteInput` sends the `reportType` an amending
+  persona states, and returns an error for a caller's `extra` naming `reportType`.
+- **Additive (record, access line):** `engine.EditNotMadeReportTypeNotCarried`, in
+  `engine.EditNotMadeValues`. A stated report type the amendment does not carry goes on
+  without it and `editsNotMade` names `amendment:report-type-not-carried`: its line has no
+  place for one, its build is bridged to another line, or the pend ties the answer to no
+  item. A bridged amendment links nothing at PAS 2.2, as before.
+
+## A check the validator could not run is reported as that, everywhere it is read (v1.2.0)
+
+- **Fixed:** the validator's `REGEX_MATCH_TIMED_OUT`, for a regex a profile sets,
+  is read as a check that could not run, by its message id, as
+  `TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION` is. Before, it read as a
+  structural defect.
+- **Changed (provider, `TRANSLATE_IG_LINES`):** a check that could not run at a
+  questionnaire package answer's own line, or a lane for that line still
+  qualifying, no longer reads as "not valid at that line". The answer is carried
+  as sent and the record names `E-08:check-could-not-run` (`editsNotMade` on the
+  access line), at every level, even if another line of its name family
+  validates: it is never renamed on a guess. Before, it could be renamed on one
+  attempt and carried unrenamed on the next, with nothing recorded. A line the
+  gateway has no lane for is unchanged: it is passed over. At `none`, the same
+  record is made while the lane for your own line is qualifying: the renamed
+  answer could not be checked, so it is carried as sent.
+  - At `structural` and `strict` the gateway's own check of the answer runs
+    first and can refuse it, as before, and then `editsNotMade` stays empty.
+    When the check could not run at the routed line, or at every line it judges
+    the answer at, that is `500` at `strict`, and at `structural` the answer is
+    carried and recorded. Otherwise, when no line is valid, a defect that level
+    refuses is `502`.
+- **Fixed:** the `crd.embedded.validated` observation's outcome and the
+  `validate.result` diagnostic event report a check that could not run as
+  `unavailable` and `validator unavailable`, not `invalid`. The event has no line
+  to read a PAS request Bundle's follow-on errors at, so on that Bundle it can
+  still say `invalid` where the finding says `unavailable`.
+- **Fixed:** `fhirseed.PutGlobalArtifact` says the check could not run, not that
+  the artifact failed validation. It still does not write it.
+- **Additive (Go API):** the `validatorissue` package (`CouldNotRun`,
+  `OnlyCouldNotRun`, `RegexException`, `RegexTimedOut`), and
+  `engine.EditNotMadeDTRCheckCouldNotRun` in `engine.EditNotMadeValues`.
+
+## The gateway image can build from a local module directory (v1.2.0)
+
+- **Additive:** `Dockerfile` reads Go modules from an optional `gomodules` build
+  context (`--build-context gomodules=<dir>`, or compose `additional_contexts`),
+  a directory laid out as a module proxy, when the build argument
+  `GO_MODULES_PROXY` points at it (`file:///gomodules,off`). `go.sum` checks what
+  it reads, as it checks a download, and a module the directory does not hold
+  fails the build. A build that passes neither reads Go's default proxy as before.
+
+## The image's runtime base is pinned by digest in the Dockerfile (v1.2.0)
+
+`Dockerfile` and `Dockerfile.evalseed` now name each base image by digest, so a build from source uses the base a release used, whatever a registry's tag serves that day. The image's contents do not change: the published image was already built on this digest. Each release's notes name the runtime base digest.
+
+## The order-dispatch refusal names the device history's statuses (v1.2.0)
+
+- **Changed (requester):** the `422 build order-dispatch request failed` refusal
+  for an order the device history does not hold now names the statuses that
+  history selects: `… does not hold the dispatched order DeviceRequest/<id> at a
+  status the device history selects (active, on-hold, completed)`. The history is
+  searched at the published Da Vinci prefetch template's statuses, so "does not
+  hold" alone read as if the order did not exist. The words are the same for an
+  absent order and for one at another status. With the FHIR connector the open
+  order is read at `active`, so an order at another status is answered
+  `502 no open order for member in SoR` first: it reaches this refusal from a
+  connector of your own, or if its status changes between the two reads. The
+  status, the rule and the stage are unchanged: `fidelity` at stage `build`.
+
+## The validator's primitive regex checks hold their verdict under load (v1.2.0)
+
+- **Fixed (validator image):** `deploy/validator/backport` replaces the
+  validator's regex guard with `org.hl7.fhir.core` 7.0.3's, verbatim, in every
+  image and lane built from it. The guard evaluates on the calling thread, where
+  it ran each regex in a new thread against a wall clock. It answers most of
+  the regexes the FHIR specification puts on primitives with hand matchers,
+  which use no regex engine and read no clock, and it reads the clock for any
+  other regex only once per 1,024 characters that regex reads. So a CPU-starved
+  validator gives a valid primitive value under about 1,000 characters the
+  verdict it gives with CPU to spare, and a very long valid `code` or `oid`
+  value, which overflowed the regex engine, validates clean.
+  - The limit stays 500 ms, and a runaway regex, which reads far more characters
+    than its value holds, still stops at it.
+  - Short of CPU, a longer value can still reach the limit where a regex stays
+    in the engine, and a regex that reads a value more than once can reach it on
+    a shorter one. A `decimal`, `dateTime` or `instant` that does reads as a
+    check that could not run, as before, and so does a regex a profile sets. A
+    regex in a FHIRPath constraint reports no such id, and reads as that
+    constraint failing.
+  - `/app/backport-provenance.json` is now format `validator-backport-v2`, and
+    records the utilities JAR and the regex classes beside the explicit-profile
+    class. The images also carry the label
+    `org.shn.validator.backport.regex-classes`.
+
+## golang.org/x/net v0.62.0 (v1.2.0)
+
+- **Changed:** `golang.org/x/net` moves to v0.62.0, the fix for GO-2026-6860 and
+  GO-2026-6866 in its `html` package. This gateway does not import that package,
+  so neither reached it, but a binary scan reads the module's version. Its
+  requirements move `golang.org/x/crypto` to v0.58.0, `x/sync` to v0.24.0,
+  `x/sys` to v0.49.0 and `x/text` to v0.43.0.
+
+## A responder verifies its answer token, and attests its system answered when it cannot send the answer (v1.1.0)
 
 - **Changed (responder):** the gateway verifies the token `POST /authorize`
   mints for each answer before sealing it in, as it does for a request leg:
@@ -52,7 +171,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
     an upstream error.
   - An answer the Framework authorized is sent as before.
 
-## A regex check the validator could not run is not a payload verdict (Unreleased)
+## A regex check the validator could not run is not a payload verdict (v1.1.0)
 
 - **Fixed:** an error the validator reports because it could not run a
   primitive's regex check (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`)
@@ -82,7 +201,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
     an answer from a payer it tolerates, which it carried before: a check that
     could not run is never tolerated.
 
-## The IG-loaded images can build from a local package directory (Unreleased)
+## The IG-loaded images can build from a local package directory (v1.1.0)
 
 - **Additive:** `deploy/validator/Dockerfile` and `deploy/eval/hapi/Dockerfile`
   read each IG package from an optional `igpackages` build context
@@ -95,7 +214,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   every package exactly as before. `deploy/validator/verify.sh` passes
   `IG_PACKAGES_DIR`, when set, as that context.
 
-## A requester records the Hub's large envelope refusal as routing (Unreleased)
+## A requester records the Hub's large envelope refusal as routing (v1.1.0)
 
 - **Changed (requester):** the Hub's `503 large envelope budget exhausted`, with
   `Retry-After`, is recorded as the Hub's `routing` refusal: transient, the
@@ -103,7 +222,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   with the Hub's `Retry-After`, a whole number of seconds from 1 to 60, or 5
   when the Hub's cannot be read.
 
-## Module 1's coverage and unstated-claim-fact refusals record their rule (Unreleased)
+## Module 1's coverage and unstated-claim-fact refusals record their rule (v1.1.0)
 
 - **Changed (monitoring):** three refusals on module 1's origination routes
   now record their rule instead of `other`. Their answers are unchanged.
@@ -126,7 +245,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   already been answered, it was recorded as this gateway's refusal on rule
   `other`.
 
-## A Hub transport key that is not an Ed25519 public key refuses to start (Unreleased)
+## A Hub transport key that is not an Ed25519 public key refuses to start (v1.1.0)
 
 - **Changed (Go API):** `engine.New` for a role that mounts the Hub-facing
   inbound (payer, facility, PHG) refuses to start when `HubTransportPub` is
@@ -136,7 +255,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   was dropped. A gateway that fetches the key from the network's discovery
   is unaffected: that fetch already checks its length.
 
-## Module 1's build refusals record what failed (Unreleased)
+## Module 1's build refusals record what failed (v1.1.0)
 
 - **Changed (monitoring):** the `422 build ... request failed` refusals on
   module 1's origination routes (the order-select, order-sign and
@@ -155,7 +274,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
     `other`: the SDK does not yet say whether the inputs or the call were at
     fault.
 
-## An involved patient's token is verified, and a patient left out is on the record (Unreleased)
+## An involved patient's token is verified, and a patient left out is on the record (v1.1.0)
 
 - **Changed (requester and responder):** this gateway now verifies each involved
   patient's token before putting it in the leg's involved list, with shn-sdk's
@@ -174,7 +293,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   reason, and are absent when no one was. Before, only the observer event and
   the metric said so.
 
-## An amendment carries the submitted Claim as sent, and one that cannot is refused (Unreleased)
+## An amendment carries the submitted Claim as sent, and one that cannot is refused (v1.1.0)
 
 - **Changed (requester):** from PAS 2.1, the amendment this gateway builds on
   module 1's routes carries the submitted Claim as sent as its prior-Claim entry,
@@ -189,7 +308,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   `500 build update bundle failed`, recorded `other`. The submission itself was
   already sent, so the payer's pended authorization stands.
 
-## A request leg with no authority is recorded as refused on authority (Unreleased)
+## A request leg with no authority is recorded as refused on authority (v1.1.0)
 
 - **Changed (requester):** when no authority could be obtained for a leg this
   gateway was sending, the exchange record, the access line and the refusal
@@ -204,7 +323,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
 - **Additive:** the record's `AuthorizeError`, and the access line's
   `authorizeError`, say why, with the classes `answerError` uses.
 
-## A gateway bounds the large bodies it holds at once (Unreleased)
+## A gateway bounds the large bodies it holds at once (v1.1.0)
 
 - **Added (requester and recipient):** a gateway holds a bounded number of
   bytes of documentation attachments and large envelopes at once. A submission
@@ -225,7 +344,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   and never below the attachment ceiling. The boot log states the value and
   where it came from.
 
-## A documentation attachment has its own size bounds, and a payer may declare the largest file it accepts (Unreleased)
+## A documentation attachment has its own size bounds, and a payer may declare the largest file it accepts (v1.1.0)
 
 - **Changed (requester and recipient):** a CDex documentation attachment
   submission (`cdex-attachment-submit`) is no longer held to the 8 MiB the
@@ -257,7 +376,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   carried.
   A payer that declares no limit has only the ceiling applied.
 
-## An answer over the network's limit is refused, never relayed cut short (Unreleased)
+## An answer over the network's limit is refused, never relayed cut short (v1.1.0)
 
 - **Fixed (responder):** an answer from the payer's system over what the
   network carries (the sealed answer is bounded by 8 MiB, so just under 6 MiB
@@ -290,7 +409,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   the rule the Hub relayed (`other` when it relayed none). A missing
   `X-SHN-Delivered` on a gateway's own answer means delivery is not stated.
 
-## Request bodies may be gzip-coded, and answers are gzip-coded on request (Unreleased)
+## Request bodies may be gzip-coded, and answers are gzip-coded on request (v1.1.0)
 
 - **Added:** the provider's ingress (its PA routes, coverage eligibility, the
   CDex `$submit-attachment` routes at the plain endpoint and at each payer's
@@ -335,7 +454,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   envelope carries are each bound to one leg and refused if replayed, so
   envelope answers are compressed.
 
-## A gateway declares what it takes, and a leg its recipient does not take is a 422 (Unreleased)
+## A gateway declares what it takes, and a leg its recipient does not take is a 422 (v1.1.0)
 
 - **Added (declaration):** at each start a gateway declares to the registrar the
   legs it compiles for its role (`PUT /register/{id}/capabilities`). A gateway that
@@ -359,7 +478,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   such a reason read `other`. Both changes read the status and the header, never the
   reason.
 
-## A pended PAS answer's payer-url is re-keyed to the network (Unreleased)
+## A pended PAS answer's payer-url is re-keyed to the network (v1.1.0)
 
 - **Changed (provider, default):** a provider's gateway relaying a payer's
   answer to a PAS submit, update or inquiry to its own system re-keys the
@@ -426,7 +545,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   `pas-claim-inquire` answers to the requester's system permit `edited` with
   `E-10`.
 
-## A provider's system sends CDex documentation to a payer through the network (Unreleased)
+## A provider's system sends CDex documentation to a payer through the network (v1.1.0)
 
 - **Added (requester, evolving):** the CDex 2.1.0 `$submit-attachment`, a new
   exchange leg, `cdex-attachment-submit` (staged `pa.cdex-attachment-submit`).
@@ -435,12 +554,18 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   registered payer it names, and at each registered payer's return path,
   `POST /cdex/payer/{payer}` and `POST /cdex/payer/{payer}/$submit-attachment`,
   routed to that payer. `GET /cdex/payers` lists the payers that take the leg with
-  their return paths. The submission and the payer's answer are carried as sent. It is
-  refused only with no registered payer to route to (422, `routing`), with no
-  readable `MemberId` to bind the patient by (400, `authority`), when it
-  repeats a member name (400, `integrity`) or above the request limit (413). A
-  `PayerId` that names another payer than the return path's is carried and
-  noted (`cdex.payer-id-differs`). The leg rides no declared contract line.
+  their return paths. The submission and the payer's answer are carried as sent.
+  Beside the size bounds, the content coding rule and the Hub's `422` for a payer
+  that does not take the leg, the gateway refuses it with no registered payer to route to (422, `routing`: at the
+  plain endpoint, no `PayerId`, two that differ, or one naming no registered
+  payer; at a return path, a path naming no registered payer), when it names
+  no one patient to bind (400, `authority`: a body that is not a
+  `Parameters`, no readable `MemberId`, or two that differ), when it
+  repeats a member name (400, `integrity`) or above the attachment ceiling (413),
+  and a payer answer that repeats a member name is refused 502 (`integrity`).
+  A `PayerId` that names another payer than the return path's, or one naming
+  no registered payer, is carried and noted (`cdex.payer-id-differs`). The leg
+  rides no declared contract line.
 - **Added (recipient, evolving):** a payer gateway carries the submission to
   the payer's own `$submit-attachment`, under the CDex base the payer
   publishes in its `.well-known/davinci-configuration`
@@ -461,7 +586,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   `scenariodriver.Driver.SubmitAttachment` (Evolving) posts a submission
   through the ingress.
 
-## A request body over the network's limit is refused 413 (Unreleased)
+## A request body over the network's limit is refused 413 (v1.1.0)
 
 - **Fixed:** a request body over the network's limit (8 MiB, as the
   participant protocol states) is refused `413` with the published reason,
@@ -489,7 +614,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   - Before, such a request was sent and cut at the Hub, and the caller got
     `502 hub refused the exchange: decode envelope failed`.
 
-## The FHIR connector refuses an answer that repeats a member name (Unreleased)
+## The FHIR connector refuses an answer that repeats a member name (v1.1.0)
 
 - **Changed (network rule, every level):** the bundled FHIR system-of-record
   connector read the participant's own FHIR server leniently: an answer that
@@ -547,7 +672,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
 - **Go API:** `engine.SoRRepeatedMember()` is the read error a connector
   returns for an answer that repeats a member name.
 
-## A request leg's token is verified before the leg is sent (Unreleased)
+## A request leg's token is verified before the leg is sent (v1.1.0)
 
 - **Changed (requester):** the gateway verifies the token `POST /authorize`
   mints for each request leg before sealing it in: signed by the
@@ -574,7 +699,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   carried its label was put in the list, and the Hub then refused the whole leg
   (`involved patients refused`).
 
-## The coverage refusals for a member the gateway names no patient for drop "system of record" (Unreleased)
+## The coverage refusals for a member the gateway names no patient for drop "system of record" (v1.1.0)
 
 - **Changed (refusal text):** the Da Vinci ingress's no-coverage refusals for a
   member the participant's system of record names no patient for (one it does
@@ -597,7 +722,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   match the new explanation; one that matches the documented beginning is
   unaffected.
 
-## A requester records the Authorization Framework's audit refusal by its rule (Unreleased)
+## A requester records the Authorization Framework's audit refusal by its rule (v1.1.0)
 
 - **Changed (records and metrics):** when the Authorization Framework cannot
   record its decision, it answers `POST /authorize` with 502
@@ -619,7 +744,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
     own authorization error class (`other`) and the involved-patient token
     omissions (`failed`) are unchanged.
 
-## A system of record's answer that repeats a member name is recorded as message integrity on every leg (Unreleased)
+## A system of record's answer that repeats a member name is recorded as message integrity on every leg (v1.1.0)
 
 - **Changed (exchange record):** a read or search of the participant's own
   system of record whose answer the gateway knows repeats a member name (a
@@ -645,7 +770,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   is the read error for an answer a connector could not read; it reports a
   repeated member name that way too.
 
-## Module 1's origination routes are recorded, and a fidelity refusal names its stage (Unreleased)
+## Module 1's origination routes are recorded, and a fidelity refusal names its stage (v1.1.0)
 
 - **Additive (monitoring):** each call a provider's gateway answers on one of
   module 1's `/scenario` routes that originates (builds and sends a request of
@@ -689,7 +814,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
 - `docs/MONITORING.md`, "Access lines"; `docs/CONFIGURATION.md`, "Access
   lines (always on)"; `STABILITY.md`, "Access lines".
 
-## The evaluation bundle's reference provider checks TLS certificate chains (Unreleased)
+## The evaluation bundle's reference provider checks TLS certificate chains (v1.1.0)
 
 - **Security (evaluation bundle):** the reference provider in `deploy/eval`
   (upstream `br-provider` at its pinned commit) skipped the TLS certificate
@@ -1215,7 +1340,7 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
 ## No payer is exempt from the answer checks; a participant tolerates the payers it lists (v1.0.0)
 
-- **Behaviour change:** the reference-payer exemption leaves the gateway (D122). Before, a
+- **Behaviour change:** the reference-payer exemption leaves the gateway. Before, a
   provider gateway on the `provider-data` or `demo` origination lane skipped the check of a
   reference payer's answer to a leg it originated (`validateFHIRPayerIngress`: no validator
   call, no finding, relayed at every level). Every payer's answer is now checked at the

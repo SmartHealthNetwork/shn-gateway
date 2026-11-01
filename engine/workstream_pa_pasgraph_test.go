@@ -152,6 +152,7 @@ func TestPASGraphRealPayerFixtureMutations(t *testing.T) {
 }
 
 func TestPASGraphReferenceScopes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		good   bool

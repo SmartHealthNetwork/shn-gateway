@@ -259,6 +259,7 @@ func TestScenarioRelaysFramedRecipientError(t *testing.T) {
 // audit is load-bearing here — submitClaimAndResolve must PROPAGATE the *RelayError (not collapse it
 // to err.Error()) so handleHomeOxygen can relay it verbatim.
 func TestPASTailRelaysFramedRecipientError(t *testing.T) {
+	t.Parallel()
 	fix := newMBROXDispatchFixture(t)
 	advertiseFixturePayerFrameV1(t, fix.gw)
 	status, ct, body := framedErrorFixture()

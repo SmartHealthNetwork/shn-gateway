@@ -182,6 +182,7 @@ func decisionFields(t *testing.T, body []byte) map[string]any {
 // its OWN fresh fixture (fixture state — spies, substrate leg log — is per-instance), so this
 // is a same-member, same-canned-substrate comparison, not a shared-state one.
 func TestHandleDispatch_Parity(t *testing.T) {
+	t.Parallel()
 	hoFix := newMBROXDispatchFixture(t)
 	hoReq := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(hoFix.gw, "/scenario/homeoxygen", "")))
 	hoRec := httptest.NewRecorder()
@@ -218,6 +219,7 @@ func TestHandleDispatch_Parity(t *testing.T) {
 // decision fields present. This is a DIFFERENT member + DIFFERENT order code (E1390, not E0431)
 // than the parity row — proving the handler is member-parameterized, not hardcoded to MBR-OX.
 func TestHandleDispatch_ArbitraryMember(t *testing.T) {
+	t.Parallel()
 	const member = "MBR-PD-UC03"
 	const performerRef = "Organization/org-dme-uc03"
 	demo := Demo{BirthDate: "1962-03-02", FamilyName: "Delgado-Dispatch"}
@@ -266,6 +268,7 @@ func dispatchBadRequestFixture(t *testing.T) *dispatchFixture {
 // required"; a body with unknown extra fields is still fine (lenient decode, like the sibling
 // handlers) — {"member":"MBR-OX","extra":"whatever"} succeeds (200).
 func TestHandleDispatch_BadRequest(t *testing.T) {
+	t.Parallel()
 	t.Run("nil body", func(t *testing.T) {
 		fix := dispatchBadRequestFixture(t)
 		req := httptest.NewRequest(http.MethodPost, "/scenario/dispatch", strings.NewReader(testRouteBody(fix.gw, "/scenario/dispatch", "")))
@@ -340,6 +343,7 @@ func TestHandleDispatch_UnknownMember(t *testing.T) {
 // cardinality, so at 2.2 (coverage 1..1) a system of record holding two
 // Coverages is refused before anything is sent, while at 2.0 both are carried.
 func TestDispatch_DTRPackageRequestFollowsSelectedLine(t *testing.T) {
+	t.Parallel()
 	const performerRef = "Organization/org-dme-ox"
 	orderJSON, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/MBR-OX", performerRef)
 	if err != nil {

@@ -587,6 +587,7 @@ func TestNativeUpdate_Transport500(t *testing.T) {
 // carries the media type the payer's system stated, on a decided submit, a
 // decided update and an answer relayed unread below strict.
 func TestNativePAS_PayerMediaTypeRelayed(t *testing.T) {
+	t.Parallel()
 	const stated = "application/json;charset=UTF-8"
 	t.Run("submit", func(t *testing.T) {
 		approved := relayDecidedAnswer(t, "cr-mt", "trace-mt", "AUTH-MT-1")

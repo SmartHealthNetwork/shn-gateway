@@ -85,6 +85,7 @@ func readTwinFenceCorpus(t *testing.T) []twinFenceVector {
 // loud: a vector added for a new fence family must not silently no-op here
 // while the SDK enforces it.
 func TestTwinFenceCorpus(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, v := range readTwinFenceCorpus(t) {
 		v := v

@@ -203,6 +203,7 @@ func TestEgressBuild_TheTransformRefuses(t *testing.T) {
 // variable the walk assigned; egressBuild seals the request as built (m.Body)
 // and the walked bytes only through sealTransformed.
 func TestNoWalkedByteIsSealedUnderABuilderAlone(t *testing.T) {
+	t.Parallel()
 	fset, files := engineFiles(t)
 	walks := 0
 	for _, f := range files {
@@ -279,6 +280,7 @@ func TestNoWalkedByteIsSealedUnderABuilderAlone(t *testing.T) {
 // walks change no byte (identity steps, an envelope leg), so they never reach
 // the verifier.
 func TestEgressBuild_TheRegisteredStepsAlwaysVerify(t *testing.T) {
+	t.Parallel()
 	lines := []string{"2.0", "2.1", "2.2"}
 	type build struct {
 		name    string

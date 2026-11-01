@@ -148,6 +148,7 @@ func askedIdentity(t *testing.T, r coveragePartyRow, owner string) string {
 }
 
 func TestCoverageParty_SubmitAnswerAgrees(t *testing.T) {
+	t.Parallel()
 	kinds := map[answerRowKind]int{}
 	for _, r := range sdkCoveragePartyRows(t) {
 		t.Run(r.Name, func(t *testing.T) {
@@ -177,6 +178,7 @@ func TestCoverageParty_SubmitAnswerAgrees(t *testing.T) {
 }
 
 func TestCoverageParty_InquiryAnswerAgrees(t *testing.T) {
+	t.Parallel()
 	for _, fixture := range []string{"pas-inquiry-response-2.0.json", "pas-inquiry-response-2.2.json"} {
 		base := inquiryFixture(t, fixture)
 		kinds := map[answerRowKind]int{}

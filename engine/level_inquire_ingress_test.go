@@ -58,6 +58,7 @@ func levelInquireRow(t *testing.T, level ConformanceEnforcement, body string, an
 // A Bundle that is not a collection, an entry
 // carrying a request, and a Claim that is not a preauthorization.
 func TestLevelInquireIngress_RequestShape(t *testing.T) {
+	t.Parallel()
 	rows := map[string]struct {
 		body string
 		msg  string
@@ -87,6 +88,7 @@ func TestLevelInquireIngress_RequestShape(t *testing.T) {
 
 // Another patient inside one inquiry.
 func TestLevelInquireIngress_AnotherPatient(t *testing.T) {
+	t.Parallel()
 	body := levelInquiry(t, "MBR-COVERED", "MBR-NOTCOVERED")
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -101,6 +103,7 @@ func TestLevelInquireIngress_AnotherPatient(t *testing.T) {
 
 // An answer this gateway cannot read.
 func TestLevelInquireIngress_UnreadableAnswer(t *testing.T) {
+	t.Parallel()
 	answer := []byte(`{"resourceType":"Patient","id":"x"}`)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -112,6 +115,7 @@ func TestLevelInquireIngress_UnreadableAnswer(t *testing.T) {
 
 // An answer naming more than one patient.
 func TestLevelInquireIngress_AnswerPatientLinkage(t *testing.T) {
+	t.Parallel()
 	answer := []byte(`{"resourceType":"Bundle","type":"collection","entry":[
 		{"resource":{"resourceType":"ClaimResponse","patient":{"reference":"Patient/A"}}},
 		{"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/B"}}}]}`)
@@ -129,6 +133,7 @@ func TestLevelInquireIngress_AnswerPatientLinkage(t *testing.T) {
 // An inquiry answer that repeats a member name is read one way only: refused
 // at every level with strict's refusal, never relayed.
 func TestLevelInquireIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	answer := []byte(strings.Replace(string(levelInquiryPayerAnswer(t)), `"language": "en"`, `"language": "en", "language": "en"`, 1))
 	if string(answer) == string(levelInquiryPayerAnswer(t)) {
 		t.Fatal("fixture: no member name repeated")
@@ -146,6 +151,7 @@ func TestLevelInquireIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T)
 // A readable, bound answer is recorded "ok" at every level, and nothing is
 // skipped.
 func TestLevelInquireIngress_ReadableAnswerRecordedOK(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			answer := levelInquiryPayerAnswer(t)
@@ -166,6 +172,7 @@ func TestLevelInquireIngress_ReadableAnswerRecordedOK(t *testing.T) {
 // Network rules and routing refuse at every level, before the network, with the
 // same status and body.
 func TestLevelInquireIngress_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	base := levelInquiry(t, "MBR-COVERED", "")
 	rows := map[string]struct {
 		body   string

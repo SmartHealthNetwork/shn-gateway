@@ -76,6 +76,7 @@ func hcpcsSubmitBundle(t *testing.T) []byte {
 // decision on the ledger (decided, with the payer's outcome), raising no
 // event about an ExplanationOfBenefit.
 func TestPASDecision_RecordedWithNoEOB(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	denied := fixturePASResponse(t, deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), true)
 	for _, row := range []struct {
@@ -125,6 +126,7 @@ func TestPASDecision_RecordedWithNoEOB(t *testing.T) {
 // note is typed outside NoteType is relayed exactly and recorded like any
 // other, and no leg reports a record it could not write.
 func TestPASDecision_NoteOutsideNoteTypeIsRecorded(t *testing.T) {
+	t.Parallel()
 	answer := fixturePASResponse(t, withNote(deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), "email", "Reply by email."), true)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -175,6 +177,7 @@ func TestPASInquire_UnattributableDecisionsRaiseNoEOBEvent(t *testing.T) {
 // outcome, and A's recorded decision is unchanged: two patients'
 // authorizations share no record.
 func TestPASSubmit_ReusedCorrelationAnotherPatientsDecisionIsRecorded(t *testing.T) {
+	t.Parallel()
 	approved := fixturePASResponse(t, approvedClaimResponse(nil), true)
 	denied := fixturePASResponse(t, deniedClaimResponse(reviewActionExt("A3", "Not Certified", "", ""), nil), true)
 	for _, level := range allLevels {

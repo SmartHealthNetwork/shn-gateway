@@ -171,6 +171,7 @@ func TestOriginationRecord_LatencyAndCorrelationAreTheFirstLegs(t *testing.T) {
 // The PHG's UC-07 completion, /scenario/uc07/complete, records its exchange:
 // the patient-DTR exchange it sends first, answered.
 func TestOriginationRecord_UC07CompletionRecords(t *testing.T) {
+	t.Parallel()
 	g, stub := uc07RouteFixture(t, "2.2")
 	mountOriginationRoutes(g)
 	start, recs := serveRecorded(t, g, "POST /scenario/uc07/start", testRouteBody(g, "/scenario/uc07/start", ""))
@@ -277,6 +278,7 @@ func TestExchangeRecord_BridgedRefusalIsVerifyStage(t *testing.T) {
 // unauthenticated caller's refusal included), and no route it declares local
 // is. Both sets are read from the table itself.
 func TestOriginationRecord_EveryOriginatingRouteAndNoLocalOne(t *testing.T) {
+	t.Parallel()
 	var originating, local []string
 	for _, rt := range originationRouteTable {
 		if rt.originates {
@@ -441,6 +443,7 @@ func TestOriginationRecord_NoCoverageOnFileIsRouting(t *testing.T) {
 // origination is refused on routing before any leg, at every conformance
 // level, as an unregistered payer is.
 func TestOriginationRecord_AmbiguousPayerIsRouting(t *testing.T) {
+	t.Parallel()
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		t.Run(level.String(), func(t *testing.T) {
 			g, stub, _ := crdTestSystem(t, uc03Coverage())
@@ -502,6 +505,7 @@ func withoutClaimFact(t *testing.T, body, fact string) string {
 // any leg (claimFactsBeforeAnyLeg, through pasBuildFailure); the waiting
 // tail's own build is TestSubmitPASClaim_UnstatedClaimFactIsBuildStage.
 func TestOriginationRecord_UnstatedClaimFactIsBuildStage(t *testing.T) {
+	t.Parallel()
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
 		for _, row := range []struct{ route, extra string }{
 			{"POST /scenario/uc03", ""},
@@ -541,6 +545,7 @@ func TestOriginationRecord_UnstatedClaimFactIsBuildStage(t *testing.T) {
 // no amendment sent. Each row breaks the record of a real pend, so the real
 // builder refuses it through the real route; the control completes.
 func TestOriginationRecord_APriorClaimThatCannotBeCarriedIsBuildStage(t *testing.T) {
+	t.Parallel()
 	editClaim := func(t *testing.T, claim []byte, edit func(map[string]json.RawMessage)) []byte {
 		t.Helper()
 		var m map[string]json.RawMessage
@@ -621,6 +626,7 @@ func TestOriginationRecord_APriorClaimThatCannotBeCarriedIsBuildStage(t *testing
 // statement is what cannot be carried: stage build, at every level, no
 // amendment sent, and the pend is kept.
 func TestOriginationRecord_AStatedReferenceTheAmendmentCannotCarryIsBuildStage(t *testing.T) {
+	t.Parallel()
 	stated := func(m map[string]json.RawMessage) {
 		var f map[string]json.RawMessage
 		_ = json.Unmarshal(m["claimFacts"], &f)
@@ -702,6 +708,7 @@ func claimEntries(t *testing.T, bundle []byte) []json.RawMessage {
 // gateway runs as well as with no profile, at every conformance level, for a
 // fact stated with characters JSON can encode more than one way.
 func TestAmendment_ThePriorClaimOnTheWireIsTheSubmittedClaim(t *testing.T) {
+	t.Parallel()
 	stated := func(m map[string]json.RawMessage) {
 		var f map[string]json.RawMessage
 		_ = json.Unmarshal(m["claimFacts"], &f)
@@ -782,6 +789,7 @@ func (s twoCoverageSoR) OpenCoverageContext(ctx context.Context, member string) 
 // each origination read: eligibility (uc01), the no-prior-authorization CRD
 // (uc02), the CRD dispatch (uc03) and the CRD-then-DTR order (uc04).
 func TestOriginationRecord_AmbiguousCoverageIsRouting(t *testing.T) {
+	t.Parallel()
 	const ambiguous = `{"error":"ambiguous coverage for routing: the member's Coverage records do not name one payer"}`
 	for _, level := range allLevels {
 		for _, extra := range []struct{ name, coverage string }{

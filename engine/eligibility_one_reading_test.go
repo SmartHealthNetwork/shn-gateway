@@ -20,6 +20,7 @@ import (
 // never a value. Each row changes one member of a request the control shows
 // is answered.
 func TestEligibility_EachGatewayReadsTheRequestOneWayOnly(t *testing.T) {
+	t.Parallel()
 	cer := string(eligibilityRequest(t, dtrFrameMember))
 	const (
 		patient = `"patient":{"reference":"Patient/` + dtrFrameMember + `"}`
@@ -158,6 +159,7 @@ func TestEligibility_EachGatewayReadsTheRequestOneWayOnly(t *testing.T) {
 // provider's gateway reads them to route the request and refuses it there,
 // as before, never routing it by another reading.
 func TestEligibility_ContainedNamedInAnotherCase(t *testing.T) {
+	t.Parallel()
 	const patient = `"patient":{"reference":"Patient/` + dtrFrameMember + `"}`
 	byID := strings.Replace(string(eligibilityWithPatient(t, dtrFrameMember, "#p", containedMember("p", dtrFrameMember))), `"contained":`, `"Contained":`, 1)
 	literal := strings.Replace(string(eligibilityRequest(t, dtrFrameMember)), patient, patient+`,"Contained":[{"resourceType":"Organization","id":"o"}]`, 1)

@@ -147,6 +147,7 @@ func TestModuleTwoOff_AChainedRouteFailsClosed(t *testing.T) {
 // line's names reaches the EHR exactly as it arrived, at every level: E-08 is
 // module 2's. The control renames it.
 func TestModuleTwoOff_TheDTRAnswerIsCarriedExactly(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false, "operationOutcome")
 	renamed := e08Bridged(t, answer, "2.0", "2.2")
 	if bytes.Equal(renamed, answer) {

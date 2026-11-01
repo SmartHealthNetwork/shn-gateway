@@ -250,6 +250,7 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 }
 
 func TestAuthoredPASSubmitPreservesAttachment(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, typ := range []string{"ServiceRequest", "DeviceRequest"} {
 			for _, absolute := range []bool{false, true} {
@@ -285,6 +286,7 @@ func updateClaimsAt(line string) int {
 }
 
 func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, absolute := range []bool{false, true} {
 			for _, diagnostic := range []bool{false, true} {
@@ -336,6 +338,7 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 }
 
 func TestAuthoredPASOptionalAttachmentParity(t *testing.T) {
+	t.Parallel()
 	for _, absolute := range []bool{false, true} {
 		for _, qr := range [][]byte{nil, []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","subject":{"reference":"Patient/MBR-OX"}}`)} {
 			in := attachmentInputs("ServiceRequest", "2.0", absolute)
@@ -396,6 +399,7 @@ func TestAuthoredPASFinalOutgoingPreservesPrecision(t *testing.T) {
 	testAuthoredPASFinalOutgoing(t, "")
 }
 func TestAuthoredPASProviderDataOptionalOrder(t *testing.T) {
+	t.Parallel()
 	for _, typ := range []string{"ServiceRequest", "DeviceRequest"} {
 		t.Run(typ, func(t *testing.T) { testAuthoredPASFinalOutgoing(t, typ) })
 	}
@@ -516,6 +520,7 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 }
 
 func TestAuthoredPASRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		mutate func(*shnsdk.ConformantClaimInputs)
@@ -567,6 +572,7 @@ func TestAuthoredPASRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
+	t.Parallel()
 	in := attachmentInputs("DeviceRequest", "2.2", true)
 	body, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.2", in)
 	if err != nil {
@@ -751,6 +757,7 @@ func TestAuthoredPASPairedSourceIsolation(t *testing.T) {
 }
 
 func TestAuthoredPASConstructionBoundary(t *testing.T) {
+	t.Parallel()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -863,6 +870,7 @@ func appendAuthoredTestContext(raw []byte, reference string) []byte {
 	return out
 }
 func TestAuthoredPASLogicalContext(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, typ := range []string{"ServiceRequest", "DeviceRequest"} {
 			for _, absolute := range []bool{false, true} {
@@ -915,6 +923,7 @@ func TestAuthoredPASLogicalContext(t *testing.T) {
 }
 
 func TestAuthoredPASLogicalContextRefusals(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, typ := range []string{"ServiceRequest", "DeviceRequest"} {
 			for _, value := range malformedDTRLogicalReferences() {

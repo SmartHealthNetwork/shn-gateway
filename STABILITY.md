@@ -1657,7 +1657,7 @@ classify is written as `other`.
   `engine.WithoutBackendCorrelation`) stops the header being sent, for a
   payer system that validates `X-Correlation-Id` its own way. Unset or `on`
   sends it; any other value refuses the boot.
-- **Additive (unreleased):** access lines, and the exchange record and its
+- **Additive (v1.1.0):** access lines, and the exchange record and its
   metrics (EMF and OpenTelemetry), also cover module 1's origination routes.
   Each call a provider's gateway answers on a `/scenario` route that
   originates (builds and sends a request of its own) is recorded with
@@ -1676,7 +1676,7 @@ classify is written as `other`.
   local `/scenario` routes (`uc06/cancel`, `uc07/cancel`, `uc07/pending`,
   `reset`) send nothing and are not recorded. In the Go API,
   `engine.ExchangeOriginationRoutes` (additive) names the recorded routes.
-- **Additive (unreleased):** a fidelity refusal's access line carries
+- **Additive (v1.1.0):** a fidelity refusal's access line carries
   `refusal.stage`, and its record `RefusalStage` (`recording.RefusalStages`):
   `build`, SHN refused to build the message the refusal is about, because of
   what the caller declared or did not state (earlier legs of the same call

@@ -56,20 +56,40 @@ func TestCDexPayer_RelaysThePayersError(t *testing.T) {
 	}
 }
 
-// The payer evaluates authority on its own leg: a submission it cannot read a
-// MemberId from is refused before its system is called, at every level, on
-// per-leg authority (D121). A member its system does not hold is carried
-// unless it opted into checking members, which it records as conformance.
+// The payer evaluates authority on its own leg: a submission it cannot read
+// one MemberId from (none, two that differ, or a body that is not a
+// Parameters) is refused before its system is called, at every level, on
+// per-leg authority (D121); one that repeats a member name is refused on
+// message integrity. A member its system does not hold is carried unless it
+// opted into checking members, which it records as conformance.
 func TestCDexPayer_BindsTheMemberItNames(t *testing.T) {
+	t.Parallel()
+	twoMembers := bytes.Replace(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), []byte(`{"name":"Attachment"`),
+		[]byte(`{"name":"MemberId","valueIdentifier":{"value":"MBR-OTHER"}},{"name":"Attachment"`), 1)
+	repeated := bytes.Replace(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), []byte(`"resourceType":"Parameters"`),
+		[]byte(`"resourceType":"Parameters","resourceType":"Bundle"`), 1)
 	for _, level := range allLevels {
-		t.Run("no MemberId/"+level.String(), func(t *testing.T) {
-			p, got := newRecordingLevelPayer(t, level)
-			ans := p.send(t, legCDexSubmit, "", cdexSubmissionBody("", cdexPayerCMS))
-			if ans.status != http.StatusBadRequest || p.partner.lastPath != "" {
-				t.Fatalf("answer %d %s (payer called at %q), want 400 before the payer's system", ans.status, ans.body, p.partner.lastPath)
-			}
-			wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, RefusalAuthority)
-		})
+		for name, row := range map[string]struct {
+			body []byte
+			rule string
+		}{
+			"no MemberId":               {cdexSubmissionBody("", cdexPayerCMS), RefusalAuthority},
+			"two MemberIds that differ": {twoMembers, RefusalAuthority},
+			"not a Parameters resource": {[]byte(`{"resourceType":"Bundle","type":"collection"}`), RefusalAuthority},
+			"a member name repeated":    {repeated, RefusalIntegrity},
+		} {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				if bytes.Equal(row.body, cdexSubmissionBody("MBR-COVERED", cdexPayerCMS)) {
+					t.Fatal("the mutation changed nothing")
+				}
+				p, got := newRecordingLevelPayer(t, level)
+				ans := p.send(t, legCDexSubmit, "", row.body)
+				if ans.status != http.StatusBadRequest || p.partner.lastPath != "" {
+					t.Fatalf("answer %d %s (payer called at %q), want 400 before the payer's system", ans.status, ans.body, p.partner.lastPath)
+				}
+				wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, row.rule)
+			})
+		}
 		t.Run("member not held/"+level.String(), func(t *testing.T) {
 			p := newLevelPayer(t, level)
 			p.partner.respByPath[cdexSubmitPath] = cdexPayersAnswer
@@ -96,6 +116,7 @@ func TestCDexPayer_BindsTheMemberItNames(t *testing.T) {
 // published base on another origin is never followed: the submission falls to
 // PAYER_DAVINCI_BASE_URL + /$submit-attachment.
 func TestCDexPayer_ResolvesTheSubmitAttachmentURL(t *testing.T) {
+	t.Parallel()
 	for name, row := range map[string]struct {
 		evidence map[string]string
 		wantPath string

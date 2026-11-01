@@ -40,6 +40,7 @@ func ingressLimitBody(route string) []byte {
 // whole (here it is only spaces, so it is refused as what it is, never 413).
 // A CDex route's limit is the attachment ceiling.
 func TestIngress_ABodyOverTheLimitIs413(t *testing.T) {
+	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
 		overTheCap := ingressLimitBody(route)
 		atTheCap := overTheCap[:len(overTheCap)-1]
@@ -101,6 +102,7 @@ func TestIngress_ABrokenStreamIsStill400(t *testing.T) {
 // the ciphertext is base64 in the envelope. A request that seals under it is
 // sent.
 func TestOriginateLeg_AnEnvelopeOverTheLimitIsNotSent(t *testing.T) {
+	t.Parallel()
 	// 6.5 MiB seals to over 8 MiB as base64.
 	big := []byte(`{"a":"` + strings.Repeat("a", 13<<19) + `"}`)
 	env := newInProcessExchange(t)
@@ -124,6 +126,7 @@ func TestOriginateLeg_AnEnvelopeOverTheLimitIsNotSent(t *testing.T) {
 // over the limit is refused 413 naming the envelope, recorded as the provider
 // gateway's routing refusal, never authorized or sent, at every level.
 func TestIngress_AnEnvelopeOverTheLimitIs413(t *testing.T) {
+	t.Parallel()
 	cer := eligibilityRequest(t, dtrFrameMember)
 	padded := append(append([]byte(nil), cer...), bytes.Repeat([]byte(" "), 7<<20)...)
 	for _, level := range allLevels {
@@ -172,6 +175,7 @@ func TestOriginateLeg_TheHubs413IsAnswered413(t *testing.T) {
 // recorded as its routing refusal, at every level, and calls nothing; an
 // envelope exactly at the limit is carried.
 func TestInbound_AnEnvelopeOverTheLimitIs413(t *testing.T) {
+	t.Parallel()
 	answer := eligResponses(t, "Patient/"+dtrFrameMember)
 	padTo := func(n int) func([]byte) []byte {
 		return func(raw []byte) []byte {

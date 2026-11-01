@@ -466,7 +466,10 @@ func (g *Gateway) originatedOrderingRequest(ctx context.Context, hook, correlati
 // There is no longer an "this gateway authored the order" arm: every
 // order-dispatch origination reads its order from the participant's own system,
 // so the "the history does not hold it" refusal now applies to all of them
-// rather than being skipped for the one lane that minted its order.
+// rather than being skipped for the one lane that minted its order. The history
+// is searched at the published template's statuses (prefetchStatus), and the
+// refusal names them: "does not hold" is about that search, which an order a
+// connector returned at another status also falls outside.
 func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOriginRecords, order []byte, performer string) ([]byte, error) {
 	rt, id, err := resourceTypeAndID(order)
 	if err != nil {
@@ -475,7 +478,8 @@ func (g *Gateway) originatedDispatchRequest(correlationID string, recs crdOrigin
 	prefetch := cloneValues(recs.history)
 	switch history, obtained := prefetch["deviceHistory"]; {
 	case obtained && !bundleHolds(history, rt, id):
-		return nil, recordFault(fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s", rt, id))
+		return nil, recordFault(fmt.Errorf("the system of record's device history does not hold the dispatched order %s/%s at a status the device history selects (%s)",
+			rt, id, strings.Join(prefetchStatus[prefetchSearchTypes["deviceHistory"]], ", ")))
 	case !obtained:
 		history, err := collectionBundle(hookInstanceFor(correlationID)+"/deviceHistory", order)
 		if err != nil {

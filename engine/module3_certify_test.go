@@ -468,6 +468,7 @@ func TestCertificationCooperativeObserver(t *testing.T) {
 // routing client reads a 5xx OperationOutcome as a verdict today; whether it
 // should read it as unavailable is an open question this row flips with.
 func TestCertificationHTTPExecutionClassification(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			rec := certifyRecording(t, "lane-"+line+"-certify-literal")
@@ -523,6 +524,7 @@ func TestCertificationHTTPExecutionClassification(t *testing.T) {
 // the first time it met this request) is asked for once first, so the
 // collector and then the client meet the lane's settled answer.
 func TestCertificationRealLaneValidAnswerCertifies(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			rec, payload, profile, answers := recordedClaimResponseRow(t, line)
@@ -618,6 +620,7 @@ const x12ServiceType = "https://codesystem.x12.org/005010/1365"
 // bundle at 2.2 and of the 2.2 bundle at 2.0 and 2.1), and codes the lane
 // checked and did not find: invalid. Nothing is certified.
 func TestCertificationRecordsWhatRealLanesAnswer(t *testing.T) {
+	t.Parallel()
 	validators := map[string]shnsdk.Validator{}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		rec := certifyRecording(t, "lane-"+line+"-certify-collect")

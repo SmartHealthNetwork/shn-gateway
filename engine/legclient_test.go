@@ -47,6 +47,7 @@ var moduleOneSends = map[string]int{
 // participant's own request on its behalf, and by nothing else. egressBuild
 // and egressAdapt have one caller each (TestBridgedCheckIsModuleTwosCertify).
 func TestModuleOneReachesItsLegsOnlyThroughTheLegClient(t *testing.T) {
+	t.Parallel()
 	_, files := engineFiles(t)
 	callers := map[string]int{}
 	sends := map[string]int{}

@@ -113,6 +113,7 @@ func recording(env *inProcessExchange) (*exchangeRecords, *capturedEvents) {
 // applies to the request it seals and sends is named on its record and its
 // leg.sealed event, in transmit order; a request carried exactly names none.
 func TestExchangeRecord_RequesterEdits(t *testing.T) {
+	t.Parallel()
 	t.Run("a CRD request with a callback: E-01", func(t *testing.T) {
 		env := newInProcessExchange(t)
 		got, events := recording(env)
@@ -325,6 +326,7 @@ func TestExchangeRecord_RequesterEdits(t *testing.T) {
 // is named on the payer's own inbound record and its native.request event;
 // with the mapping off the request is forwarded exactly and names none.
 func TestExchangeRecord_RecipientEdits(t *testing.T) {
+	t.Parallel()
 	for _, mapped := range []bool{true, false} {
 		var events capturedEvents
 		opts := []NativeOption{WithNativeDiagnostic(events.sink)}

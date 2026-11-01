@@ -124,6 +124,7 @@ func conformanceModuleBypasses(t *testing.T, fset *token.FileSet, files []*ast.F
 // (conformanceModule): the gateway's conformance, the native responder's
 // module. None reads a ConformancePolicy around it.
 func TestPayloadChecksAskModuleThree(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	files := parsePackageSources(t, fset, ".", nil)
 	if got := conformanceModuleBypasses(t, fset, files, typedPackage(t, fset, files)); len(got) != 0 {
@@ -177,6 +178,7 @@ func withoutConformanceModule() NativeOption {
 // this package does not compile against them, and a shn_testdouble build
 // does.
 func TestConformanceModuleOptOutsOnlyInATestBuild(t *testing.T) {
+	t.Parallel()
 	gobin, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatal("go tool not available: the build check cannot run")

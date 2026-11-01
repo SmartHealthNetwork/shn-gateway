@@ -41,6 +41,7 @@ func TestParseToleratePeers(t *testing.T) {
 // defect strict would refuse is recorded and carried, its finding marked
 // tolerated; unlisted, the same answer is refused.
 func TestCarriedAnswersTolerateListedPayers(t *testing.T) {
+	t.Parallel()
 	tolerate := func(g *Gateway) { g.cfg.ConformanceToleratePeers = ReferencePayerIdentities() }
 	t.Run("DTR", func(t *testing.T) {
 		answer := e08Answer("PackageBundle", nil, true)
@@ -83,6 +84,7 @@ func TestCarriedAnswersTolerateListedPayers(t *testing.T) {
 // check never receives the tolerant module today; this row guards that it never
 // does.
 func TestToleranceNeverReachesANetworkRule(t *testing.T) {
+	t.Parallel()
 	answer := e08Answer("PackageBundle", []string{"Questionnaire"}, false)
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
@@ -231,6 +233,7 @@ func (a regexAnswerValidator) Validate(_ context.Context, body []byte, _ string)
 // The timeout alone refuses the answer; beside a structural error the answer
 // is invalid for that error, which tolerance carries as before.
 func TestToleranceNeverCoversARegexCheckThatCouldNotRun(t *testing.T) {
+	t.Parallel()
 	tolerate := func(g *Gateway) { g.cfg.ConformanceToleratePeers = ReferencePayerIdentities() }
 	alone := regexAnswerValidator{invalid(regexTimeoutIssue("ClaimResponse.extension[0].url"))}
 	mixed := regexAnswerValidator{invalid(regexTimeoutIssue("ClaimResponse.extension[0].url"), errIssue("Validation_VAL_Profile_Minimum", []string{"ClaimResponse"}, "x"))}

@@ -253,9 +253,10 @@ func TestRecordLeg_StoreFailureIsLoggedCountedNotFatal(t *testing.T) {
 	cfg.StoreErrorMetric = func(store string) { metricStores = append(metricStores, store) }
 	gw2 := mustNew(t, cfg)
 
-	// Swaps the process-global logger: relies on gateway/engine having no t.Parallel()
-	// test (true today). The buffer is locked because the gateway's certification
-	// worker may log from its own goroutine while the test reads it.
+	// Swaps the process-global logger: relies on this test being serial, since serial
+	// tests finish before any parallel test starts. The buffer is locked because the
+	// gateway's certification worker may log from its own goroutine while the test
+	// reads it.
 	var logBuf lockedBuffer
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })

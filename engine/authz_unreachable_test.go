@@ -114,6 +114,7 @@ func TestAuthzUnreachable_Answers503NothingSent(t *testing.T) {
 // and its decision record carries no correlation id a reconciliation could
 // attribute a second one by, so that is not retried.
 func TestAuthzUnreachable_RetriesOnlyBeforeTheWrite(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name  string
 		fault func(*http.Request) (*http.Response, error)
@@ -222,6 +223,7 @@ func TestAuthzAnswered_NotRetriedAnswersAsBefore(t *testing.T) {
 // obtained, this gateway's refusal on authority, as for an authz that never
 // answered. Every caller's answer is unchanged.
 func TestAuthzAuditRefusal_RecordedOnlyFromTheStatedRule(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name    string
 		fault   func(*http.Request) (*http.Response, error)
@@ -482,6 +484,7 @@ func TestAuthzUnreachable_InvolvedTokenLeftOut(t *testing.T) {
 // the requester on authority, a network rule, at every conformance level:
 // answered with the opaque 502, and it never reaches the Hub.
 func TestAuthzToken_RequiredAndVerifiedBeforeTheLegIsSent(t *testing.T) {
+	t.Parallel()
 	_, strangerKey := genED25519(t)
 	// minted answers the token the env's fake Framework would mint for the
 	// request, with mutate applied before signing: by the Framework's own key,
@@ -628,6 +631,7 @@ func TestInvolvedToken_AnswerWithoutATokenIsLeftOutFailed(t *testing.T) {
 // is failed. The Framework's own token
 // for the answer is sent.
 func TestAnswerToken_VerifiedBeforeTheAnswerIsSent(t *testing.T) {
+	t.Parallel()
 	_, strangerKey := genED25519(t)
 	// minted answers the token a Framework would mint for the payer's
 	// authorize request, with mutate applied before signing: by the
@@ -729,6 +733,7 @@ func TestAnswerToken_VerifiedBeforeTheAnswerIsSent(t *testing.T) {
 // record's answer error class says which); the Framework's audit refusal is
 // audit. At every conformance level.
 func TestAnswerAuthorization_AttestedOnceTheSystemAnswered(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct {
 		name        string
 		answer      func(*http.Request) (*http.Response, error)
@@ -801,6 +806,7 @@ func wantNotAttested(t *testing.T, ans payerAnswer) {
 // nothing. At every conformance level, each through a recording gateway, since
 // the record is what decides.
 func TestAnswerAuthorization_NotAttestedBeforeTheSystemAnswered(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			// The CDS service listing is a read on the way to the forward, with a
@@ -886,6 +892,7 @@ func TestAnswerAuthorization_NotAttestedBeforeTheSystemAnswered(t *testing.T) {
 // leaving decides nothing about the answer. At every level, since a repeated
 // member name is a network rule.
 func TestAnswerAuthorization_ARefusalOfTheAnswerKeepsItsRuleWhenTheRequesterLeaves(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
@@ -1000,6 +1007,7 @@ func TestAnswerAuthorization_ARequesterThatLeftIsNotARefusal(t *testing.T) {
 // authority at every conformance level, whatever kept the authority away, and
 // the record says what did, while the caller's answer is what it was.
 func TestRequestLeg_NoAuthorityIsRefusedAtEveryLevel(t *testing.T) {
+	t.Parallel()
 	for _, level := range allLevels {
 		for _, row := range []struct {
 			name   string

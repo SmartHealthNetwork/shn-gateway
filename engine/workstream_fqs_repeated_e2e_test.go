@@ -23,6 +23,7 @@ import (
 // resource"). The same system answering cleanly passes both reads and answers
 // that no named records are held.
 func TestFederatedQuery_SystemRepeatingAMemberThroughTheConnector(t *testing.T) {
+	t.Parallel()
 	patient := e2ePatient(engine.RepeatedMemberE2EMember())
 	clean := e2eSearchset(patient)
 	for name, row := range map[string]struct {

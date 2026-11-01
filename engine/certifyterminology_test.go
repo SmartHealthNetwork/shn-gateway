@@ -17,6 +17,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/lanequalify"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/testrecord"
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -148,6 +149,7 @@ func certifyAt(t *testing.T, v shnsdk.Validator, line string, payload []byte) (L
 // said, and each turns the answer into a verdict the lane did reach: invalid.
 // The added issues are the lanes' own, taken from the same recordings.
 func TestCertificationTerminologyUnavailableIsOnlyTerminology(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			rec := certifyRecording(t, "lane-"+line+"-certify-collect")
@@ -473,6 +475,7 @@ func TestMissedCodingSystems(t *testing.T) {
 // the 2.0 bundle it was asked at this line). Attributed to both profiles, the
 // same miss is the Claim's own and keeps the answer invalid.
 func TestCertificationClaimExceptionScope(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
 			rec := certifyRecording(t, "lane-"+line+"-certify-collect")
@@ -520,8 +523,8 @@ func TestCertificationRunRegexCheckCouldNotRun(t *testing.T) {
 	}
 	g := certificationGatewayByLine(t, map[string]shnsdk.Validator{
 		"2.0": &shnsdk.FakeValidator{},
-		"2.1": serveOutcome(t, outcomeIssues{issue("error", regexCheckCouldNotRun)}),
-		"2.2": serveOutcome(t, outcomeIssues{issue("error", regexCheckCouldNotRun), issue("error", "Validation_VAL_Profile_Minimum")}),
+		"2.1": serveOutcome(t, outcomeIssues{issue("error", validatorissue.RegexException)}),
+		"2.2": serveOutcome(t, outcomeIssues{issue("error", validatorissue.RegexException), issue("error", "Validation_VAL_Profile_Minimum")}),
 	}, nil)
 	certificationSubmitPayload(g, "consumers", payload)
 	certificationFlush(t, g)

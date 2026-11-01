@@ -55,6 +55,7 @@ func inThisBuildFiles(t *testing.T, dir string) []string {
 // and for a probe package whose files combine the build profile tag with
 // operating system tags, negation, conjunction and disjunction.
 func TestInThisBuild_AgreesWithTheGoCommand(t *testing.T) {
+	t.Parallel()
 	if got, want := inThisBuildFiles(t, "."), goListFiles(t, "."); !slices.Equal(got, want) || len(want) < 50 {
 		t.Errorf("this package: inThisBuild selects %v, the go command compiles %v", got, want)
 	}
