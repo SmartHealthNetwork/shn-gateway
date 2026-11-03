@@ -250,7 +250,7 @@ func (g *Gateway) handleUC07Pending(w http.ResponseWriter, r *http.Request) {
 // there. The body names the store and nothing else — never the database's own error.
 func (g *Gateway) handleScenarioReset(w http.ResponseWriter, r *http.Request) {
 	if err := g.Reset(); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exchange store reset failed"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": afterLegs(r.Context(), "exchange store reset failed")})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

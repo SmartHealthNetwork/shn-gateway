@@ -88,9 +88,14 @@ func TestInbound_ASystemAnswerTooLargeToSealIsRefusedDelivered(t *testing.T) {
 // at every level.
 func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *testing.T) {
 	t.Parallel()
-	hub := func(body, delivered string) error {
-		return hubRefusal(http.StatusBadGateway, []byte(body), delivered)
+	// hubOn is the Hub's answer to a POST of leg; hub is a provider's PAS
+	// claim's, which a payer's gateway answers.
+	hubOn := func(leg, body, delivered string) error {
+		e := hubRefusal(http.StatusBadGateway, []byte(body), delivered)
+		e.leg = leg
+		return e
 	}
+	hub := func(body, delivered string) error { return hubOn("pas-claim", body, delivered) }
 	relayed := func(rule string) string {
 		if rule == "" {
 			return `{"error":"` + hubReasonRecipientRefusedAnswer + `"}`
@@ -109,8 +114,11 @@ func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *test
 		"payer gateway, no rule":          {hub(relayed(""), "yes"), RefusedByPayerGateway, ExchangeOther, refusedAnswer},
 		"payer gateway, rule outside set": {hub(relayed("size"), "yes"), RefusedByPayerGateway, ExchangeOther, refusedAnswer},
 		"payer gateway, fidelity":         {hub(relayed(RefusalFidelity), "yes"), RefusedByPayerGateway, ExchangeOther, refusedAnswer},
-		"hub":                             {hub(`{"error":"`+hubReasonAnswerTooLarge+`"}`, "yes"), RefusedByHub, RefusalRouting, sizeAnswer},
-		"this gateway":                    {&answerLostError{cause: errResponseTooLarge, rule: RefusalRouting, tooLarge: true}, RefusedByProviderGateway, RefusalRouting, sizeAnswer},
+		// The payer's attachment request is answered by a provider's gateway:
+		// the party is the leg row's recipient's, never the payer's.
+		"provider gateway, the payer's attachment request": {hubOn(legCDexRequest, relayed(RefusalAuthority), "yes"), RefusedByProviderGateway, RefusalAuthority, refusedAnswer},
+		"hub":          {hub(`{"error":"`+hubReasonAnswerTooLarge+`"}`, "yes"), RefusedByHub, RefusalRouting, sizeAnswer},
+		"this gateway": {&answerLostError{cause: errResponseTooLarge, rule: RefusalRouting, tooLarge: true}, RefusedByProviderGateway, RefusalRouting, sizeAnswer},
 	}
 	for _, level := range allLevels {
 		for name, row := range rows {
@@ -121,7 +129,7 @@ func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *test
 				// inferred: yes on its refusals, none on this gateway's own
 				// read of an answer the Hub delivered.
 				wantDelivered := "yes"
-				if row.by == RefusedByProviderGateway {
+				if name == "this gateway" {
 					wantDelivered = ""
 				}
 				if x.outcome != ExchangeRefused || x.party != row.by || x.rule != row.rule || x.rec.HubDelivered != wantDelivered {
@@ -148,6 +156,19 @@ func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *test
 			t.Fatalf("an unmarked reason answered %d delivered=%q %s", rec.Code, rec.Header().Get(HubDeliveredHeader), rec.Body.String())
 		}
 	})
+}
+
+// The answer over the limit this gateway reads is its own refusal, whichever
+// role sent the leg: a payer's gateway sending the payer's attachment request
+// records it as the payer gateway's.
+func TestOrigination_AnAnswerTooLargeIsTheSendersOwnRefusal(t *testing.T) {
+	for _, self := range []string{RefusedByProviderGateway, RefusedByPayerGateway} {
+		x := &exchangeRecorder{self: self}
+		x.legOutcome(&answerLostError{cause: errResponseTooLarge, rule: RefusalRouting, tooLarge: true})
+		if x.outcome != ExchangeRefused || x.party != self || x.rule != RefusalRouting {
+			t.Errorf("a %s: recorded %s by %q on %q, want refused by itself on routing", self, x.outcome, x.party, x.rule)
+		}
+	}
 }
 
 // The requester answers a relayed routing refusal of an answer as its size

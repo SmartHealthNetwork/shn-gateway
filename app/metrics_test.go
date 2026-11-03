@@ -454,7 +454,7 @@ func TestExchangeMetricBound(t *testing.T) {
 	}
 	// The count RUNNING.md states for today's lists, in a release build (a
 	// test profile's legs add their own series).
-	if !toyProfileBuild && exchangeSeriesBound != 694 {
+	if !toyProfileBuild && exchangeSeriesBound != 741 {
 		t.Fatalf("exchangeSeriesBound=%d; update the bound in the platform's running guide (\"Hosted tenant exchange metrics\") and this pin", exchangeSeriesBound)
 	}
 }
@@ -502,10 +502,10 @@ func TestConformanceMetricBound(t *testing.T) {
 		t.Fatalf("distinct series=%d, conformanceSeriesBound=%d", len(series), conformanceSeriesBound)
 	}
 	// The counts RUNNING.md states for today's lists, in a release build:
-	// this bound, and every series the additions add to the 342 before them.
-	if !toyProfileBuild && (conformanceSeriesBound != 225 || exchangeSeriesBound-342+conformanceSeriesBound != 577) {
+	// this bound, and every series the additions add to the 373 before them.
+	if !toyProfileBuild && (conformanceSeriesBound != 225 || exchangeSeriesBound-373+conformanceSeriesBound != 593) {
 		t.Fatalf("conformanceSeriesBound=%d, additions=%d; update the bounds in the platform's running guide (\"Hosted tenant exchange metrics\") and these pins",
-			conformanceSeriesBound, exchangeSeriesBound-342+conformanceSeriesBound)
+			conformanceSeriesBound, exchangeSeriesBound-373+conformanceSeriesBound)
 	}
 }
 

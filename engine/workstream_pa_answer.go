@@ -46,6 +46,8 @@ func (paWorkstream) answer(leg string) answerHandler {
 		return (*Gateway).handlePatientDTRInbound
 	case "cdex-attachment-submit":
 		return (*Gateway).handleCDexSubmitInbound
+	case "cdex-attachment-request":
+		return (*Gateway).handleCDexRequestInbound
 	}
 	return nil
 }

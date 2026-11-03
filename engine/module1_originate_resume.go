@@ -9,6 +9,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -60,7 +61,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 			return pendState{}, false
 		}
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 			return pendState{}, false
 		}
 		orderRef, ok := resourceRef(res.srJSON)
@@ -82,7 +83,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		}
 		qrForSubmit, status, msg = g.completeDTRContext(ctx, qrForSubmit, res.dtrLine, shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef})
 		if status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
+			writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 			return pendState{}, false
 		}
 		res.qrSource = newAutomaticDTRBuildSource(questionnaireJSON, answers, qc)
@@ -94,19 +95,19 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// one selection is contract-correct for both, and it is threaded verbatim to the
 	// resume pas-claim-update leg (completeClinician/completePatient) via
 	// pendState.pasToken. A resume leg never re-negotiates.
-	route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr, relay.BuilderSDKPASSubmit)
+	route, ok := g.selectLegLineOrFail(r.Context(), w, res.recipient, "pas-claim", pasCorr, relay.BuilderSDKPASSubmit)
 	if !ok {
 		return pendState{}, false
 	}
 	targetLine := shnsdk.LineOf(route.Token)
 	pasDTRLine, err := pairedDTRLine(targetLine)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return pendState{}, false
 	}
 	pasQR, err := buildPASAttachment(res.qrSource, targetLine)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return pendState{}, false
 	}
 	// What the claim's build needs of the request and the participant's
@@ -122,7 +123,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	}
 	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(res.memberSystem, res.member)
 	if pstatus != 0 {
-		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		writeJSON(w, pstatus, map[string]string{"error": afterLegs(r.Context(), pmsg)})
 		return pendState{}, false
 	}
 	claimFacts := claimIn.facts()
@@ -158,7 +159,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// as this Claim did.
 	submitted, err := recordPASSubmission(bundleJSON)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return pendState{}, false
 	}
 	// This helper owns the pas-claim submit leg wholesale, on the correlation it
@@ -177,7 +178,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		},
 	})
 	if failed != nil {
-		g.writeLegFailure(w, failed)
+		g.writeLegFailure(r.Context(), w, failed)
 		return pendState{}, false
 	}
 	bundleJSON = sent.Bytes
@@ -189,12 +190,12 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		LegType: "pas-claim", CorrelationID: pasCorr, Seam: "originate", Whose: "peer",
 	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, pendedResp, targetLine, "pa.pas", res.payer); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return pendState{}, false
 	}
 	pended, neededItems, err := shnsdk.ParsePendedResponse(pendedResp)
 	if err != nil || !pended {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "expected pended response"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "expected pended response")})
 		return pendState{}, false
 	}
 	submitted.pend = pendedResp
@@ -266,7 +267,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 // interpose on, which is the strip window this guard exists for. Extending it
 // there is additive, not load-bearing, and needs a real pended payload that
 // genuinely carries before it would assert anything.
-func (g *Gateway) guardPendCarry(w http.ResponseWriter, st pendState, route legRoute, payload []byte, x ExchangeIdentity) bool {
+func (g *Gateway) guardPendCarry(ctx context.Context, w http.ResponseWriter, st pendState, route legRoute, payload []byte, x ExchangeIdentity) bool {
 	err := verifyPendCarryIntact(st.carriedEntries, route, payload)
 	if err == nil {
 		return true
@@ -277,7 +278,7 @@ func (g *Gateway) guardPendCarry(w http.ResponseWriter, st pendState, route legR
 		Counterpart: x.Counterpart, Detail: err.Error(),
 		Route: routeInfoFor(route),
 	})
-	writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+	writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(ctx, err.Error())})
 	return false
 }
 
@@ -296,7 +297,7 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 	}
 	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "bad request")})
 		return
 	}
 	member, ok := g.scenarioMember(w, r, "uc06")
@@ -306,7 +307,7 @@ func (g *Gateway) handleUC06(w http.ResponseWriter, r *http.Request) {
 	// A stated NPI that is no NPI is the request malformed, refused before the
 	// first leg. The answer and the attesting clinician are the amendment's,
 	// checked at its build (completeClinician), after the legs before it.
-	if !requireValidStatedNPI(w, body.NPI) {
+	if !requireValidStatedNPI(r.Context(), w, body.NPI) {
 		return
 	}
 	r = withStatedClinician(r, body.NPI)
@@ -345,7 +346,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	// order no system held.
 	srRef, refOK := resourceRef(st.srJSON)
 	if !refOK {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "the member's open order carries no identity in the system of record")})
 		return false
 	}
 	// Everything the amendment's build needs from the resume request, read
@@ -386,7 +387,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	itemJSON, err := shnsdk.BuildManualAttestedItem(linkID, score,
 		shnsdk.Attestation{NPI: npi, Text: "I attest these are my clinical findings.", When: g.cfg.Clock().Format("2006-01-02")})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build manual item failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build manual item failed")})
 		return false
 	}
 	amendedSource := st.qrSource.withAmendment(itemJSON, "").withQRID(uc06QRID)
@@ -396,20 +397,20 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		// but it is LOGGED: a silent "amend qr failed" cost a CloudWatch dig to learn the
 		// amend had refused an undelivered adaptive-questionnaire item.
 		log.Printf("completeClinician: amend qr failed (linkId %s): %v", linkID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "amend qr failed")})
 		return false
 	}
 	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	provJSON, err := buildEvidenceProvenance("QuestionnaireResponse/"+uc06QRID, "http://hl7.org/fhir/sid/us-npi", npi, "", "", g.cfg.Clock())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build provenance failed")})
 		return false
 	}
 	if status, msg := g.validateFHIRForContract(ctx, provJSON, "egress", "pa.dtr", st.dtrLine, ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// UC-06: diagnosticReport=nil; the amended QR is the supplemental data.
@@ -418,12 +419,12 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	targetLine := shnsdk.LineOf(route.Token)
 	pasDTRLine, err := amendmentDTRLine(st, route)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	pasQR, err := amendedSource.buildAtLine(pasDTRLine)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, st.recipient, "pas-claim-update", st.srJSON, st.requester...)
@@ -432,7 +433,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(st.memberSystem, st.member)
 	if pstatus != 0 {
-		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		writeJSON(w, pstatus, map[string]string{"error": afterLegs(r.Context(), pmsg)})
 		return false
 	}
 	// The route the amendment was sent on, which what follows reads.
@@ -473,7 +474,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		// "never carried" from "carried, then stripped"), refuse a payload that no
 		// longer bears content THIS pend's own loss record declares carried.
 		pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
-		if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+		if !g.guardPendCarry(r.Context(), w, st, route, updateBundle, pasUpdateID) {
 			return nil, nil, true, nil
 		}
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -491,7 +492,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			},
 		})
 		if failed != nil && !failed.FromLeg {
-			writeJSON(w, failed.Status, map[string]string{"error": failed.Msg})
+			writeJSON(w, failed.Status, map[string]string{"error": afterLegs(r.Context(), failed.Msg)})
 			return nil, nil, true, nil
 		}
 		updateBundle = sent.Bytes
@@ -508,7 +509,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		if g.relayOriginationError(w, err) {
 			return false
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	route, targetLine = sentRoute, shnsdk.LineOf(sentRoute.Token)
@@ -516,7 +517,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", st.payer); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// The payer's answer to the amendment is reported as the payer gave it. UC-06's
@@ -534,7 +535,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	}
 	if decision.Decision == PASDecisionApproved {
 		if err := g.cfg.Store.StoreAuthNumber(srRef, decision.Parsed.PreAuthRef); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "holder write failed (auth number)")})
 			return false
 		}
 	}
@@ -563,10 +564,10 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 	r = ensureOriginationClaimInput(r)
 	if tooLarge, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		if tooLarge {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": afterLegs(r.Context(), "request body too large")})
 			return
 		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "bad request")})
 		return
 	}
 	member, ok := g.scenarioMember(w, r, "uc07")
@@ -608,7 +609,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	// order no system held.
 	srRef, refOK := resourceRef(st.srJSON)
 	if !refOK {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "the member's open order carries no identity in the system of record")})
 		return false
 	}
 	linkID := oswestryLinkID
@@ -644,7 +645,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	pdReq, err := json.Marshal(patientDTRRequest{LinkID: linkID, Answer: score, PatientRef: st.patientRef})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build patient-dtr request failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build patient-dtr request failed")})
 		return false
 	}
 	pdCorr := g.cfg.CorrelationGen()
@@ -658,12 +659,12 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		if g.relayOriginationError(w, err) {
 			return false
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "patient-dtr exchange failed: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "patient-dtr exchange failed: "+err.Error())})
 		return false
 	}
 	var pdResp patientDTRResponse
 	if err := json.Unmarshal(pdRespJSON, &pdResp); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "parse patient-dtr response failed"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "parse patient-dtr response failed")})
 		return false
 	}
 
@@ -672,21 +673,21 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	amendedQR, err := amendedSource.buildAtLine(st.dtrLine)
 	if err != nil {
 		log.Printf("completePatient: amend qr failed (linkId %s): %v", linkID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "amend qr failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "amend qr failed")})
 		return false
 	}
 	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// Provenance attributes the patient-authored QR to the PATIENT (FR-32, source=patient).
 	provJSON, err := shnsdk.BuildProvenance("QuestionnaireResponse/"+uc07QRID, st.patientRef, g.cfg.Clock())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "build provenance failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build provenance failed")})
 		return false
 	}
 	if status, msg := g.validateFHIRForContract(ctx, provJSON, "egress", "pa.dtr", st.dtrLine, ""); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// Everything the amendment's build needs from the resume request, read
@@ -701,12 +702,12 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	targetLine := shnsdk.LineOf(route.Token)
 	pasDTRLine, err := amendmentDTRLine(st, route)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	pasQR, err := amendedSource.buildAtLine(pasDTRLine)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	pasProviderJSON, providerOK := g.pasProviderOrFail(w, r, st.recipient, "pas-claim-update", st.srJSON, st.requester...)
@@ -715,7 +716,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	pasMemberSystem, pstatus, pmsg := g.pasMemberSystem(st.memberSystem, st.member)
 	if pstatus != 0 {
-		writeJSON(w, pstatus, map[string]string{"error": pmsg})
+		writeJSON(w, pstatus, map[string]string{"error": afterLegs(r.Context(), pmsg)})
 		return false
 	}
 	// The route the amendment was sent on, which what follows reads.
@@ -755,7 +756,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		// The same pre-chain carry-intact guard completeClinician's sibling
 		// leg runs — both resume sites, or the guard is only half wired.
 		pasUpdateID := ExchangeIdentity{CorrelationID: updateCorr, LegType: "pas-claim-update", Counterpart: st.recipient}
-		if !g.guardPendCarry(w, st, route, updateBundle, pasUpdateID) {
+		if !g.guardPendCarry(r.Context(), w, st, route, updateBundle, pasUpdateID) {
 			return nil, nil, true, nil
 		}
 		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
@@ -773,7 +774,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			},
 		})
 		if failed != nil && !failed.FromLeg {
-			writeJSON(w, failed.Status, map[string]string{"error": failed.Msg})
+			writeJSON(w, failed.Status, map[string]string{"error": afterLegs(r.Context(), failed.Msg)})
 			return nil, nil, true, nil
 		}
 		updateBundle = sent.Bytes
@@ -790,7 +791,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		if g.relayOriginationError(w, err) {
 			return false
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return false
 	}
 	route, targetLine = sentRoute, shnsdk.LineOf(sentRoute.Token)
@@ -798,7 +799,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		LegType: "pas-claim-update", CorrelationID: updateCorr, Seam: "originate", Whose: "peer",
 	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, updateResp, targetLine, "pa.pas", st.payer); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// UC-07 is patient attestation → Attested. Reference-payer UC-07 (L8000) → A1 approve
@@ -816,7 +817,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	}
 	if decision.Decision == PASDecisionApproved {
 		if err := g.cfg.Store.StoreAuthNumber(srRef, decision.Parsed.PreAuthRef); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "holder write failed (auth number)")})
 			return false
 		}
 	}
@@ -890,18 +891,18 @@ func (g *Gateway) handleUC06Complete(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
 	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "bad request")})
 		return
 	}
 	st, ok := g.loadPending(body.ResumeToken)
 	if !ok || st.scenario != "uc06" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such pending scenario"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": afterLegs(r.Context(), "no such pending scenario")})
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
 		LegType: "pas-claim-update", Seam: "originate", Whose: "own",
 	}))
-	if !requireValidStatedNPI(w, body.NPI) {
+	if !requireValidStatedNPI(r.Context(), w, body.NPI) {
 		return
 	}
 	if g.completeClinician(w, withStatedClinician(r, body.NPI), st, body.Answer) {
@@ -917,12 +918,12 @@ func (g *Gateway) handleUC07Complete(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
 	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "bad request")})
 		return
 	}
 	st, ok := g.loadPending(body.ResumeToken)
 	if !ok || st.scenario != "uc07" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such pending scenario"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": afterLegs(r.Context(), "no such pending scenario")})
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
@@ -939,7 +940,7 @@ func (g *Gateway) handleScenarioCancel(w http.ResponseWriter, r *http.Request) {
 	var body resumeReq
 	r = ensureOriginationClaimInput(r)
 	if _, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "bad request")})
 		return
 	}
 	g.dropPending(body.ResumeToken)

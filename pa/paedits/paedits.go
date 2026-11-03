@@ -231,5 +231,28 @@ func Rows() []relay.Edit {
 				"ETag is left out of that forward, since it named the payer's bytes.",
 			DropsAnswerHeaders: []string{relay.ETagHeader},
 		},
+		{
+			ID:        relay.EditCDexTaskReturnRekey,
+			Name:      "cdex-task-return-rekey",
+			Legs:      []string{"cdex-attachment-request"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"Task.input[i].valueUrl (the one input whose type is PASTempCodes#payer-url)"},
+			Kind:      relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a payer's attachment-request Task the provider's gateway carries to its " +
+				"own system, when the Task has exactly one payer-url input and it is written as a valueUrl, decided by " +
+				"structure (the input's type coding, never text), and the payer that sent it takes the documentation " +
+				"submission. Made even where an in-payload signature covers the payer-url; that signature then no longer " +
+				"verifies in the provider's copy, and the forward says so. A payer-url in any other form, several payer-url " +
+				"inputs, or a payer that does not take the submission, is carried as sent and the exchange records that it " +
+				"was not re-keyed.",
+			Authority: "The provider gateway's own network return path for the authenticated payer that sent the Task: a " +
+				"fixed address under its Da Vinci ingress base, rebuilt from that payer's network identity. Nothing is " +
+				"read from the Task and nothing is stored per request.",
+			Disclosure: "When a payer's attachment-request Task names, in its payer-url, where to send the documentation, the " +
+				"provider's gateway replaces that address with its own return path for the same payer, so the " +
+				"documentation the provider sends there reaches that payer through the network. The forward to the " +
+				"provider's system names the edit in a header, and names any signature that covered the address.",
+		},
 	}
 }

@@ -606,6 +606,8 @@ var signedExempt = map[EditID]func(m *model, n splice.NodeID) bool{
 	// D127: the return address of a pended PAS answer's Task is re-keyed
 	// to the network even when signed, and the forward discloses it.
 	EditPASPendReturnRekey: (*model).payerURLValue,
+	// D127: so is the return address of a payer's attachment-request Task.
+	EditCDexTaskReturnRekey: (*model).payerURLValue,
 }
 
 // pasTempCodes is the PAS code system that names a Task's payer-url input.

@@ -143,10 +143,12 @@ COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69
 COPY truststore/drop-emsign-roots.sh /truststore/drop-emsign-roots.sh
 RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacerts
 
-# Stage: the runtime every lane runs on — the pinned distroless Java 21 base upstream
-# builds hapiproject/hapi on (same JRE and env), without upstream's bundled extras
-# (an unused OpenTelemetry agent jar carries a CRITICAL advisory). Distroless
-# defaults differ from upstream's, so the user and directory are restated here once.
+# Stage: the runtime every lane runs on — the pinned distroless Java 21 base, a later
+# build of the one upstream builds hapiproject/hapi on: the same environment apart from
+# the JRE's version (newer here), which may differ only within the same feature release;
+# verify.sh checks that against the engine image. Upstream's bundled extras are left out
+# (an unused OpenTelemetry agent jar carries a CRITICAL advisory). Distroless defaults
+# differ from upstream's, so the user and directory are restated here once.
 FROM gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d AS hapi-runtime
 USER 65532:65532
 COPY --from=truststore /out/cacerts /etc/ssl/certs/java/cacerts

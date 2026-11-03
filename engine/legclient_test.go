@@ -4,6 +4,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/ast"
 	"net/http"
@@ -108,6 +109,8 @@ func TestModuleOneReachesItsLegsOnlyThroughTheLegClient(t *testing.T) {
 		"workstream_pa_ingress.go:handlePASIngress":                     1,
 		"workstream_pa_inquire.go:handlePASInquireIngress":              1,
 		"workstream_pa_cdex.go:handleCDexSubmitIngress":                 1,
+		// A payer's own ingress: its system's attachment-request Task.
+		"workstream_pa_cdex_request_ingress.go:handleCDexRequestIngress": 1,
 	}
 	if fmt.Sprint(callers) != fmt.Sprint(want) {
 		t.Errorf("OriginateLeg is called by %v, want %v: a module 1 site sends through sendLeg", callers, want)
@@ -210,7 +213,7 @@ func TestWriteLegFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			g.writeLegFailure(rec, &tc.f)
+			g.writeLegFailure(context.Background(), rec, &tc.f)
 			if rec.Code != tc.wantStatus || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %s, want %d containing %q", rec.Code, rec.Body, tc.wantStatus, tc.wantBody)
 			}

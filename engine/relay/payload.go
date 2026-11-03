@@ -110,6 +110,13 @@ const (
 	// answered, so documentation sent there stays on the network. It is
 	// made even where a signature covers the payer-url (signedExempt, D127).
 	EditPASPendReturnRekey EditID = "E-10"
+	// EditCDexTaskReturnRekey re-keys the payer-url input of a payer's CDex
+	// attachment-request Task, as the provider's gateway carries it to its
+	// own system, to the gateway's network return path for the payer that
+	// sent it, so the documentation the provider sends there stays on the
+	// network. It is made even where a signature covers the payer-url
+	// (signedExempt, D127).
+	EditCDexTaskReturnRekey EditID = "E-11"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -118,7 +125,7 @@ const (
 	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept

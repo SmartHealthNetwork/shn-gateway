@@ -330,6 +330,7 @@ func TestFederatedQuery_PatientReferenceForms(t *testing.T) {
 		for _, level := range bindLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				p, got := newRecordingLevelPayer(t, level)
+				p.answering(t, "federated-query")
 				p.g.cfg.ConsentURL = "http://consent.test"
 				p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 				reads := &recordReadCounter{SystemOfRecord: p.g.cfg.SoR, ContextSystemOfRecord: ReadSystemOfRecord(p.g.cfg.SoR)}
@@ -351,7 +352,7 @@ func TestFederatedQuery_PatientReferenceForms(t *testing.T) {
 				relative := sendConsented(t, p, "federated-query", cdexTaskFor(t, dtrFrameMember), other, "Consent/c-1")
 				got.reset()
 				form := sendConsented(t, p, "federated-query", task(dtrFrameMember), other, "Consent/c-1")
-				wantRefusal(t, got.only(t), form.status, RefusedByPayerGateway, RefusalConsent)
+				wantRefusal(t, got.only(t), form.status, partyAnswering("federated-query"), RefusalConsent)
 				if form.status != relative.status || !bytes.Equal(form.body, relative.body) {
 					t.Fatalf("another patient's query answered %d %s, the relative form %d %s", form.status, form.body, relative.status, relative.body)
 				}
@@ -386,6 +387,7 @@ func TestFederatedQuery_MalformedPatientReferenceIsRefused(t *testing.T) {
 		for _, level := range bindLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				p, _ := newRecordingLevelPayer(t, level)
+				p.answering(t, "federated-query")
 				p.g.cfg.ConsentURL = "http://consent.test"
 				p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 				reads := &recordReadCounter{SystemOfRecord: p.g.cfg.SoR, ContextSystemOfRecord: ReadSystemOfRecord(p.g.cfg.SoR)}

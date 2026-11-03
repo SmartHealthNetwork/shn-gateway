@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -32,11 +33,15 @@ func pendBundle(bundleSig, taskSig, provenance string) []byte {
 
 const rekeyed = `"https://provider-gw.example/cdex/payer/payer-1"`
 
-// TestSignedContentRekeyExemption: the PAS pend return-path re-key (E-10) is
-// made even where a signature covers the payer-url it changes (D127), and is
-// the only edit that is: every other edit of signed content is still refused,
-// and E-10 itself is refused on any other signed value.
+// TestSignedContentRekeyExemption: the PAS pend return-path re-key (E-10) and
+// the attachment-request Task's (E-11) are made even where a signature covers
+// the payer-url they change (D127), and are the only edits that are: every
+// other edit of signed content is still refused, and each of the two is
+// refused on any other signed value.
 func TestSignedContentRekeyExemption(t *testing.T) {
+	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey}) {
+		t.Fatalf("signed-content exempt edits %v, want exactly E-10 and E-11", got)
+	}
 	bundleSigned := NewBody(pendBundle(`,"signature":{`+signatureElement+`}`, "", ""), OriginPeerFrame)
 	provSigned := NewBody(pendBundle("", "", `,{"resource":{"resourceType":"Provenance","target":[{"reference":"Task/t1"}],`+
 		`"recorded":"2026-10-29T00:00:00Z","signature":[{`+signatureElement+`}]}}`), OriginPeerFrame)
@@ -88,10 +93,19 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 			return []Op{d.Replace(at(t, d, payerURL...), []byte(rekeyed)), d.Replace(at(t, d, "entry", "1", "resource", "status"), []byte(`"x"`))}
 		}, "Provenance.signature", nil},
 	}
-	// Every other edit made by ApplyChanges, on exactly the value E-10 may
-	// change, is still refused (D127's row).
+	// The attachment-request Task's re-key (E-11) is exempt at exactly the
+	// same place as E-10, on the same terms: every E-10 row holds for it.
+	for _, r := range slices.Clone(rows) {
+		if r.edit == EditPASPendReturnRekey {
+			r.name = strings.Replace(r.name, "E-10", "E-11", 1)
+			r.edit = EditCDexTaskReturnRekey
+			rows = append(rows, r)
+		}
+	}
+	// Every other edit made by ApplyChanges, on exactly the value the exempt
+	// edits may change, is still refused (D127's row).
 	for _, id := range EditIDs() {
-		if id == EditPASPendReturnRekey || slices.Contains(TransformEditIDs(), id) {
+		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) {
 			continue
 		}
 		rows = append(rows, row{"other edit " + string(id) + " on the signed payer-url", bundleSigned, id, replace(payerURL, rekeyed), "Bundle.signature", nil})
@@ -158,7 +172,7 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 
 // The exemption's place is structural all the way down: a payer-url-typed
 // valueUrl outside a Task's input array, or one that is not a string, is no
-// place E-10 may change on signed content.
+// place E-10 or E-11 may change on signed content.
 func TestSignedContentRekeyExemptionPlace(t *testing.T) {
 	const payerURLInput = `{"type":{"coding":[{"system":"http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes","code":"payer-url"}]},"valueUrl":%s}`
 	signed := func(resource string) Body {
@@ -177,14 +191,16 @@ func TestSignedContentRekeyExemptionPlace(t *testing.T) {
 		{"a payer-url valueUrl that is not a string", signed(`{"resourceType":"Task","input":[` + in(`5`) + `]}`),
 			[]string{"entry", "0", "resource", "input", "0", "valueUrl"}},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			d := mustDoc(t, row.body)
-			_, err := Apply(row.body, fhirJSON, EditPASPendReturnRekey, d.Replace(at(t, d, row.path...), []byte(rekeyed)))
-			var se *SignedContentError
-			if !errors.As(err, &se) || se.Edit != EditPASPendReturnRekey || se.Carrier != "Bundle.signature" {
-				t.Fatalf("want E-10 refused on Bundle.signature, got %v", err)
-			}
-		})
+		for _, id := range []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey} {
+			t.Run(string(id)+" "+row.name, func(t *testing.T) {
+				d := mustDoc(t, row.body)
+				_, err := Apply(row.body, fhirJSON, id, d.Replace(at(t, d, row.path...), []byte(rekeyed)))
+				var se *SignedContentError
+				if !errors.As(err, &se) || se.Edit != id || se.Carrier != "Bundle.signature" {
+					t.Fatalf("want %s refused on Bundle.signature, got %v", id, err)
+				}
+			})
+		}
 	}
 	// A carrier repeats a resource type only when it reads as a FHIR type
 	// name: anything else the payload calls itself is not carried into a
@@ -198,4 +214,39 @@ func TestSignedContentRekeyExemptionPlace(t *testing.T) {
 			t.Fatalf("got %v %v, want the re-key made under carrier Signature", p.SignedEdited(), err)
 		}
 	})
+}
+
+// TestSignedContentRekeyExemption_BareTask: a payer's attachment-request Task
+// travels alone, not in a Bundle. E-11 re-keys its signed payer-url, the Task
+// itself holding the Signature, and is refused on any other signed value of
+// it.
+func TestSignedContentRekeyExemption_BareTask(t *testing.T) {
+	signed := NewBody([]byte(strings.Replace(pendTask, "%s",
+		`"extension":[{"url":"http://example.org/sig","valueSignature":{`+signatureElement+`}}],`, 1)), OriginPeerFrame)
+	d := mustDoc(t, signed)
+	p, err := Apply(signed, fhirJSON, EditCDexTaskReturnRekey, d.Replace(at(t, d, "input", "0", "valueUrl"), []byte(rekeyed)))
+	if err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	if !slices.Equal(p.Edits(), []EditID{EditCDexTaskReturnRekey}) || !slices.Equal(p.SignedEdited(), []string{"Signature in Task"}) {
+		t.Fatalf("edits %v, signed %v", p.Edits(), p.SignedEdited())
+	}
+	if out := string(mustTransmit(t, p)); !strings.Contains(out, `"valueUrl":`+rekeyed) {
+		t.Fatalf("payer-url not re-keyed: %s", out)
+	}
+	for name, path := range map[string][]string{
+		"another url input":                  {"input", "1", "valueUrl"},
+		"a payer-url code of another system": {"input", "2", "valueUrl"},
+		"a payer-url that is not a valueUrl": {"input", "3", "valueString"},
+		"the Task's status":                  {"status"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := mustDoc(t, signed)
+			_, err := Apply(signed, fhirJSON, EditCDexTaskReturnRekey, d.Replace(at(t, d, path...), []byte(rekeyed)))
+			var se *SignedContentError
+			if !errors.As(err, &se) || se.Edit != EditCDexTaskReturnRekey || se.Carrier != "Signature in Task" {
+				t.Fatalf("want E-11 refused on signed %s, got %v", name, err)
+			}
+		})
+	}
 }

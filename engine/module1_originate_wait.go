@@ -431,7 +431,7 @@ func pasWaitOf(r *http.Request) (time.Duration, bool) {
 // cannot fail. On a refusal it writes 400 and returns false.
 func waitOrFail(w http.ResponseWriter, r *http.Request) bool {
 	if _, ok := pasWaitOf(r); !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wait must be a whole number of seconds"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "wait must be a whole number of seconds")})
 		return false
 	}
 	return true
@@ -879,10 +879,10 @@ func (g *Gateway) pasMemberSystem(system, member string) (string, int, string) {
 
 // pasMemberSystemOrFail is pasMemberSystem for a scenario handler: it writes the
 // refusal itself, in the same words at every originator flow.
-func (g *Gateway) pasMemberSystemOrFail(w http.ResponseWriter, system, member string) (string, bool) {
+func (g *Gateway) pasMemberSystemOrFail(ctx context.Context, w http.ResponseWriter, system, member string) (string, bool) {
 	out, status, msg := g.pasMemberSystem(system, member)
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(ctx, msg)})
 		return "", false
 	}
 	return out, true
@@ -1016,33 +1016,33 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 	var req paInquireReq
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse body failed"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "parse body failed")})
 			return
 		}
 	}
 	if req.Continuation == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "continuation is required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "continuation is required")})
 		return
 	}
 	store, ok := g.continuations()
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "this gateway keeps no prior-authorization continuations"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "this gateway keeps no prior-authorization continuations")})
 		return
 	}
 	cont, look, err := store.ReadContinuation(g.cfg.HolderID, req.Continuation)
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the continuation store is unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": afterLegs(r.Context(), "the continuation store is unavailable")})
 		return
 	}
 	if look != ContinuationFound {
 		status, msg := ContinuationRefusal(look)
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return
 	}
 	wait := PASWaitDefault
 	if req.WaitSeconds != nil {
 		if *req.WaitSeconds < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "waitSeconds must not be negative"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "waitSeconds must not be negative")})
 			return
 		}
 		wait = clampPASWait(time.Duration(*req.WaitSeconds) * time.Second)

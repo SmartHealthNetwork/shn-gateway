@@ -24,7 +24,7 @@ import (
 func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, scenario string) (string, bool) {
 	m, known := personas.ScenarioMembers(scenario)
 	if !known {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unknown scenario " + scenario})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "unknown scenario "+scenario)})
 		return "", false
 	}
 	member := g.sceneMember(m.Conformance, m.ProviderData, m.Demo)
@@ -33,12 +33,12 @@ func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, scenari
 	case "canary":
 		twin, ok := personas.CanaryTwins[member]
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no canary twin for member " + member})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "no canary twin for member "+member)})
 			return "", false
 		}
 		member = twin
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown personaSet " + ps})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "unknown personaSet "+ps)})
 		return "", false
 	}
 	return member, true

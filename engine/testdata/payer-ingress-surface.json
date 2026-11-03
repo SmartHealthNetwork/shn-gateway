@@ -1,0 +1,7 @@
+[
+  "GET /.well-known/smart-configuration",
+  "GET /cdex/providers",
+  "POST /cdex/provider/{provider}/Task",
+  "POST /oauth/token",
+  "POST /substrate/inbound"
+]

@@ -158,6 +158,11 @@ answer as usual, whatever a later leg would have needed. From the release that c
 - **At UC-07's patient questionnaire exchange:** no patient health gateway registered (`422`,
   recorded as `routing`), and, on a lane whose patient answers a score, an answer that is no
   score (`400`).
+- **At the PAS claim, after the questionnaire is filled:** a filled QuestionnaireResponse about
+  another patient than the request's or naming none, whether your operated `$populate` engine
+  returned it or the gateway's own check finds it, or for another questionnaire than the one
+  fetched or naming none (`422`, recorded as `fidelity` at stage `verify`): the fill is the
+  gateway's own edit, and it failed the gateway's own check. The claim is not sent.
 - **At the leg that consumes it**, everything only a later leg carries, refused `422` and recorded
   as `fidelity` at stage `build`:
   - at the PAS claim:
@@ -198,9 +203,16 @@ answer as usual, whatever a later leg would have needed. From the release that c
 Each of the refusals and backend failures above that comes at or after a leg's build, and each
 routing refusal of an unknown member, ends with a sentence saying which legs the request sent:
 `The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand.`,
-or `No leg of this request was sent.` The payer holds whatever those legs asked of it: a
-submission refused at its amendment leaves the payer's pend in place, for a corrected `/complete`
-or an inquiry to continue.
+or `No leg of this request was sent.` Every other answer your gateway writes itself after a leg
+of the request was carried ends with the same sentence, with its status and what it is recorded
+as unchanged: a questionnaire package with no Questionnaire, or one for another questionnaire
+than the coverage card names, a payer answer the gateway cannot read or that is not the pend the
+route expects, a payer answer your conformance level refuses, or your store failing to keep the
+payer's authorization number. On `/scenario/uc06/complete` and `/scenario/uc07/complete` the
+sentence names the legs that call sent. An answer written before any leg is unchanged, and an
+answer relayed from a leg or the network is carried as it came. The sentence is said once. The
+payer holds whatever those legs asked of it: a submission refused at its amendment leaves the
+payer's pend in place, for a corrected `/complete` or an inquiry to continue.
 
 **A PAS Bundle's payor.** On `Claim/$submit` and `Claim/$inquire`, the gateway routes by the first
 Coverage's first `payor`: an identifier it carries routes first; otherwise its reference resolves
@@ -519,7 +531,12 @@ There is nothing to configure:
   `reportType` that the amendment this gateway built does not carry, because
   its line has no place for one, its build is bridged to another line, or the
   pend ties the answer to no item. That one is your own statement, not an edit.
-  Absent when empty. Evolving.
+  From v1.5.0, on a
+  payer's attachment-request Task a provider's gateway carries to its own system (below),
+  `E-11:no-structural-payer-url` (a `payer-url` that is not a non-empty `valueUrl`),
+  `E-11:unreadable-payer-url` (several `payer-url` inputs, or an input that cannot be read, so
+  which address to re-key is unknown) and `E-11:payer-does-not-take` (a payer not known to take
+  the documentation submission). Absent when empty. Evolving.
 - `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
   `Retry-After` of a participant's 2xx answer that was not carried, and why, never its
   value: `<header>:value-not-carriable` (not an HTTP field value, or not UTF-8, which a
@@ -1687,7 +1704,8 @@ signature covered the address.
 What the gateway changes on these requests is only the callback removal and the prefetch and
 coverage additions above. A signature inside a message (`Bundle.signature`,
 `Provenance.signature`, a `Signature` element) travels untouched, apart from the `payer-url`
-re-key above. HTTP-level signatures
+re-key above and, from v1.5.0, the re-key of a payer's
+attachment-request Task (below). HTTP-level signatures
 (signed header fields, a detached JWS) are not carried: each gateway terminates HTTP, and the
 network carries only the message's media type, contract line and operation name with it. A
 participant that needs an end-to-end signature signs inside the payload. The answer's body
@@ -2285,6 +2303,111 @@ Organization by reference alone`):
 | `fhirServer's answer is not the payor Organization` (not JSON, or not the Organization asked for) | 502 |
 | `fhirServer's coverages name more than one payor Organization by reference alone` | 422 |
 
+## Take a payer's request for documentation: the attachment-request Task (provider, optional)
+
+From v1.5.0 a payer's system can ask your system for documentation for a prior authorization,
+through its own gateway and the network, by creating a CDex 2.1.0 Task Attachment Request
+(`cdex-task-attachment-request`; the payer's side is
+[below](#ask-a-provider-for-documentation-the-payers-attachment-request-task-payer-optional)). The
+leg is `cdex-attachment-request`, in the evolving tier (see `STABILITY.md`). The network delivers
+it only to a provider's gateway, and only to one whose registry entry lists the leg.
+
+A provider's gateway takes the request only once you set your system's Task endpoint:
+
+| Env var | Description |
+|---|---|
+| `PROVIDER_CDEX_TASK_URL` | The full URL your system takes the Task at (the gateway posts the Task there). Setting it makes your gateway declare the leg and serve the route the Hub delivers it on. It requires the settings below, and `PROVIDER_DAVINCI_INGRESS` with its `PROVIDER_DAVINCI_INGRESS_BASE_URL` ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)), under which the Task's documentation return path is built: without them the gateway refuses to start. |
+| `PROVIDER_CDEX_TOKEN_URL` | SMART Backend Services token endpoint of your system's authorization server. **Required** with `PROVIDER_CDEX_TASK_URL`. The client assertion's `aud` is this URL exactly as you set it. |
+| `PROVIDER_CDEX_CLIENT_ID` | SMART client id the gateway authenticates as (the client assertion's `iss` and `sub`). **Required** with `PROVIDER_CDEX_TASK_URL`. |
+| `PROVIDER_CDEX_SCOPE` | Scope the gateway asks your token endpoint for, sent as you set it, e.g. `system/Task.c`. **Required** with `PROVIDER_CDEX_TASK_URL`, with no default; a blank value refuses to start. It must let the gateway create the Task. |
+| `PROVIDER_CDEX_CLIENT_KEY` | Path to the client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (when `PROVIDER_CDEX_CLIENT_SECRET` is unset). The client assertion carries no `x5c` certificate chain, so a token endpoint that requires one in the assertion, as the UDAP Security IG has it, refuses it. |
+| `PROVIDER_CDEX_CLIENT_ALG` | `ES384`, `RS384` or `RS256`. Required for `private_key_jwt` mode. `RS256` is taken on this setting only. |
+| `PROVIDER_CDEX_CLIENT_KID` | Key id for the client assertion's `kid` header, if your authorization server requires one. Unset, the assertion carries no `kid`. |
+| `PROVIDER_CDEX_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant, for an authorization server that cannot issue asymmetric credentials. The value is the secret itself, not a path. Use it or `PROVIDER_CDEX_CLIENT_KEY`, not both. |
+
+A gateway of any other role refuses to start with any of these set, and so does one with any of
+them set but `PROVIDER_CDEX_TASK_URL`.
+
+**When your gateway takes it.** From v1.5.0, with `PROVIDER_CDEX_TASK_URL` set, your gateway's
+signed capability declaration lists the leg, it serves the route the Hub delivers the leg on
+(and needs the Hub's transport key, as every gateway that takes a leg does), and payers'
+gateways list your gateway's base. Without it, your gateway does not declare the leg or serve
+the route the Hub delivers it on, so the Hub refuses a payer's Task to it `422` (`the recipient
+does not take …`), recorded as refused by the Hub on `routing`, and payers' listings of
+providers leave it out. A hosted provider tenant takes it the same way on SHN Cloud, with the
+same settings, authenticating with a client secret or with a key SHN Cloud mints for it
+(`PROVIDER_CDEX_CLIENT_ALG`). Unless you set `PROVIDER_CDEX_CLIENT_KID`, an `ES384` or `RS384`
+key's id is its RFC 7638 thumbprint and an `RS256` key has none, as the tenant's JWKS, published
+by SHN Cloud, states; for a UDAP registration (`RS256`), SHN Cloud also publishes a certificate
+over the key, for your registration only: the gateway's client assertion does not carry it. Its
+hosted edge then serves that route to it. A provider the network's provisioning registers itself
+(a founding holder) cannot take the leg yet, whatever it sets: the registry does not take its
+declaration.
+
+**What reaches your system.** From v1.5.0 the Task is carried to `PROVIDER_CDEX_TASK_URL` as
+the payer sent it, apart from its `payer-url` (below), with the payer's FHIR JSON media type.
+The forward names the payer the network authenticated, outside the
+body: `X-SHN-Requester: <payer participant id>; identifiers="<system>|<value> …"`, the payer
+identities the network's registry attests for that payer, space-separated (the `identifiers`
+part is left out when it attests none). Your gateway sets it on the forward alone and never reads
+one from a caller. A Task whose `requester` identifier is not one of those identities, or
+cannot be read, is carried, and noted as the observer event `cdex.requester-differs`, which
+carries no identifier; it is never refused. A Task naming its requester by a reference alone
+is carried with no event.
+
+Before anything is sent, your gateway decides on the Task as the payer's gateway does, at every
+conformance level, and answers the payer with the refusal:
+
+| Answer | When |
+|---|---|
+| `400 the Task can be read two ways: it repeats a member name, or names one in another case` | The body repeats a member name, or names one in another case (`integrity`). |
+| `403 not a CDex Task Attachment Request: the body is not a Task this leg carries` | The body is not JSON, or not a Task (the leg's `authority`). |
+| `403 the Task's code is not one this leg carries: …` | `Task.code` holds no `PASTempCodes#attachment-request-code` coding (the leg's `authority`). |
+| `422 cannot bind the request to a patient: Task.for names no one member number (an identifier typed v2-0203#MB)` | `Task.for`, on the reference or on the Patient it contains, names no member number, or two that differ (the leg's `authority`). |
+
+Your gateway binds the member number against your system of record, as on every leg the network
+delivers: a member your system holds is that patient, and one it does not hold is identified from
+the number alone and carried, unless you require known members (`REQUIRE_KNOWN_MEMBERS`, then
+`400 unknown member`). A system of record that fails the lookup gives the usual `502` or `503`.
+
+**The answer.** Your system's answer (`201` with the Task, or an error) reaches the payer's
+system as your system sent it. The forward, its token request included, has the deadline a payer's
+gateway gives every call to its own system by default: 25 seconds, the network's 30-second leg
+budget less five, so your gateway's answer reaches the payer inside the payer's budget. When your
+system fails, the payer gets the answers every forward to a participant's own system gives:
+`502 the provider's system could not be reached` (a token endpoint that does not answer in 10
+seconds reads this way), `504 the provider's system could not be reached in time`, or, once the
+Task was sent, `502` or `504` saying your system received it and may have acted on it. When your
+gateway's own work before the call (binding the member against your system of record) uses the
+whole deadline, the answer is `504 the provider's gateway ran out of time before it could send
+this request to the provider's system; the provider's system did not receive it`.
+
+**The Task's documentation return address.** From v1.5.0, before your gateway carries a
+payer's Task to your system, it re-keys the Task's `payer-url` (registered edit E-11,
+`cdex-task-return-rekey`): the `valueUrl` of the Task's one `payer-url` input (typed
+`PASTempCodes#payer-url`) becomes your gateway's documentation return path for the payer that
+sent the Task, `PROVIDER_DAVINCI_INGRESS_BASE_URL` + `/cdex/payer/` + that payer's participant
+id, rebuilt from the authenticated payer and never read from the Task. Documentation your system
+sends there with `$submit-attachment` reaches that payer through the network. Nothing else in the
+Task changes. The re-key is made even where a signature covers the `payer-url`, so that signature
+no longer verifies in your copy; the forward then carries `X-SHN-Edited: cdex-task-return-rekey`,
+with `; signed="<signatures>"` added when a signature covered the address.
+
+The Task is carried exactly as the payer sent it, and the exchange record's `editsNotMade` says
+why, when the gateway cannot tell which address to re-key, or the payer does not take the
+documentation submission:
+- a `payer-url` that is not a non-empty `valueUrl` (`E-11:no-structural-payer-url`);
+- several `payer-url` inputs, or an input that cannot be read (`E-11:unreadable-payer-url`);
+- a payer not known to take the documentation submission (`E-11:payer-does-not-take`): one
+  whose registry entry lacks the leg, one that declares no list, or one your gateway cannot
+  read. The Hub refuses that leg to a payer that does not take it.
+
+A Task with no `payer-url` needs no edit and is carried exactly. A re-key that cannot be made,
+as for a payer whose participant id cannot form a return path, is refused `422 the gateway
+cannot re-key the Task's documentation return address to the network (fidelity of SHN's own
+edit): <reason>`, recorded as `fidelity` at stage `build` when there is no return path to write
+and `verify` otherwise; the Task is not sent.
+
 ## Advanced overrides (rarely needed)
 
 Each network endpoint and trust-anchor key URL is resolved from discovery by
@@ -2357,7 +2480,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 |---|---|
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
+| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). The client assertion signed with it carries no `x5c` certificate chain, only a `kid` when `PAYER_DAVINCI_CLIENT_KID` is set, so a token endpoint that requires the chain in the assertion, as the UDAP Security IG has it, refuses it. |
 | `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
 | `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` and `/Claim/$inquire` as well as the read-only legs, since every leg forwards. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
@@ -2553,6 +2676,75 @@ later decision instead of the pended response.
 Both env vars are **all-or-nothing**: setting one without the other is a startup error.
 Leaving both unset (the default) disables this mapping entirely — requests forward with
 their payor identifier untouched, the behavior for every deployment that doesn't need it.
+
+## Ask a provider for documentation: the payer's attachment-request Task (payer, optional)
+
+Set `PAYER_DAVINCI_INGRESS=1` to mount the payer-side Da Vinci ingress. Through it your own system
+asks a provider for documentation for a prior authorization by creating a CDex 2.1.0 Task
+Attachment Request (`cdex-task-attachment-request`), which the gateway sends through the network
+to that provider's gateway. It is in the evolving tier (see `STABILITY.md`).
+
+| Env var | Description |
+|---|---|
+| `PAYER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the payer gateway (any non-empty value turns it on, `0` and `false` included). A gateway of any other role refuses to start with it set. |
+| `PAYER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL: the SMART audience the gateway pins, the token endpoint it advertises, and the base of each provider's base below. **Required** when the ingress is enabled. It must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
+| `INGRESS_CLIENTS_FILE` | Your system's registered clients, as for the provider's ingress ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)). **Required** (≥1 client) when the ingress is enabled. A client that lists no `scopes` is registered for `system/Task.write`; one whose `scopes` leave it out refuses the gateway's start, since every route of this ingress would refuse it. |
+
+**Authenticating.** Your system gets a bearer from the gateway's own token endpoint
+(`POST /oauth/token`, SMART Backend Services, `private_key_jwt`), asking for the scope
+`system/Task.write`. `/.well-known/smart-configuration` advertises that scope. Each Task route
+takes only a bearer granted exactly `system/Task.write`. A bearer granted another scope, or none,
+is refused `403` with `WWW-Authenticate: Bearer error="insufficient_scope"`, recorded as
+`authority`. A missing or invalid bearer is `401`.
+
+**Where to create the Task.** Each registered provider that takes the request has a base on this
+gateway, `{PAYER_DAVINCI_INGRESS_BASE_URL}/cdex/provider/{provider}`. Your system creates the Task
+for that provider with `POST {base}/Task`. The base names the provider, so the network routes the
+Task by the address alone.
+
+`GET /cdex/providers`, with the same bearer, lists them:
+`{"providers":[{"participant":"…","base":"…"}]}`. The list holds every registered provider whose
+gateway declares that it takes the request, and nothing else.
+
+There is no plain `POST /Task`. A Task names its provider in `Task.owner`, by an identifier such
+as an NPI, and the network does not yet know registered providers by such identifiers.
+
+**What the network checks.** The network refuses a Task only on its own rules, at every
+conformance level, and records each refusal as this gateway's:
+- **Reads two ways:** a body that repeats a member name, or names one in another case, is `400`
+  (`integrity`).
+- **Not a Task Attachment Request:** a body that is not a Task, or whose `Task.code` is not
+  `http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes#attachment-request-code`, is `403`
+  (`authority`). The code is read by system and code. A request for a questionnaire
+  (`attachment-request-questionnaire`) is not taken yet.
+- **No provider at the base:** a base that names no registered provider is `422` (`routing`).
+- **No patient to bind:** the patient is bound by its member number (an identifier typed
+  `v2-0203#MB`), as the other legs bind theirs. The number is read from the Patient the Task
+  contains as `Task.for` (a `#id` reference), or from `Task.for.identifier`. A Task that names no
+  member number for `Task.for`, or two that differ, is `422` (`authority`), since the network
+  cannot identify the patient. A member your system of record does not hold is carried, unless
+  `REQUIRE_KNOWN_MEMBERS=true`, which refuses it `400` (`conformance`). Its network patient
+  identifier is derived as on the provider's CDex submission, which names the same number: from
+  the member number, with the birth date and family name of a Patient the Task carries only when
+  that Patient's `id` is the number or it carries the number under the system `urn:shn:member`.
+  A Patient naming the number only under your own identifier system, as the CDex IG's example
+  does, is not read for them, so the identifier derives from the number alone. In that same
+  reading, a Task carrying no Patient of the member's own but another person (a Coverage's
+  subscriber, policyholder or payor) under the member's `id` or `urn:shn:member` number is
+  `422` (`authority`): the number is shared, so it identifies no one patient.
+
+Nothing else in the Task is read. The network does not judge its `owner`, `requester`,
+tracking identifier or `payer-url`.
+
+**The answer.** The provider's answer is relayed as its side sent it, with its status and media
+type. One that repeats a member name is refused `502` (`integrity`), since it can be read two
+ways; nothing else in it is read. No `Location` is added: reading a created Task back through the
+network is a later leg.
+
+A provider's gateway takes the request only once its participant configures it to (its own
+system's Task endpoint, `PROVIDER_CDEX_TASK_URL`). Until a provider's gateway declares that it
+takes it, that provider is not listed, and a Task to its base is refused by the Hub, `422`
+(`routing`).
 
 ## Provider DTR population (`PROVIDER_DTR_*`)
 

@@ -1278,7 +1278,7 @@ func TestScenarioToPend_ThreadsChainCarriedEntriesIntoThePendRecord(t *testing.T
 
 func assertBuildsAfterLineSelection(t *testing.T, fn, fnName string) {
 	t.Helper()
-	sel := `route, ok := g.selectLegLineOrFail(w, res.recipient, "pas-claim", pasCorr, relay.BuilderSDKPASSubmit)`
+	sel := `route, ok := g.selectLegLineOrFail(r.Context(), w, res.recipient, "pas-claim", pasCorr, relay.BuilderSDKPASSubmit)`
 	selAt := strings.Index(fn, sel)
 	if selAt < 0 {
 		t.Fatalf("%s does not pre-select the pas-claim line via g.selectLegLineOrFail before its pas-claim leg", fnName)

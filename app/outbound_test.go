@@ -72,6 +72,8 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 		PayerDavinciBaseURL: u("payer"), PayerDavinciDTRBaseURL: u("dtr"), PayerDavinciPASBaseURL: u("pas"),
 		PayerDavinciTokenURL: u("payer-token"), ProviderDTRPopulateURL: u("populate"),
 		ProviderDTRPopulateTokenURL: u("populate-token"), ProviderDavinciIngressBaseURL: u("ingress"),
+		PayerDavinciIngressBaseURL: u("payer-ingress"),
+		ProviderCDexTaskURL:        u("cdex-task"), ProviderCDexTokenURL: u("cdex-task-token"),
 		DiscoveryURL: u("discovery"), AuthzPubkeyURL: u("authz-key"), HubTransportKeyURL: u("hub-key"),
 	}
 	for _, row := range optionalURLs(cfg) {
@@ -94,8 +96,10 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 		"PAYER_DAVINCI_BASE_URL": of(endpointcert.PayerDavinci), "PAYER_DAVINCI_DTR_BASE_URL": of(endpointcert.PayerDTR),
 		"PAYER_DAVINCI_PAS_BASE_URL": of(endpointcert.PayerPAS), "PAYER_DAVINCI_TOKEN_URL": of(endpointcert.PayerToken),
 		"PROVIDER_DTR_POPULATE_URL": of(endpointcert.Populate), "PROVIDER_DTR_POPULATE_TOKEN_URL": of(endpointcert.PopulateToken),
-		"PROVIDER_DAVINCI_INGRESS_BASE_URL": of(endpointcert.Ingress), "SHN_DISCOVERY_URL": of(endpointcert.Discovery),
-		"AUTHZ_PUBKEY_URL": of(endpointcert.AuthorizationKey), "HUB_TRANSPORT_KEY_URL": of(endpointcert.HubKey),
+		"PROVIDER_CDEX_TASK_URL": of(endpointcert.CDexTask), "PROVIDER_CDEX_TOKEN_URL": of(endpointcert.CDexTaskToken),
+		"PROVIDER_DAVINCI_INGRESS_BASE_URL": of(endpointcert.Ingress), "PAYER_DAVINCI_INGRESS_BASE_URL": of(endpointcert.Ingress),
+		"SHN_DISCOVERY_URL": of(endpointcert.Discovery),
+		"AUTHZ_PUBKEY_URL":  of(endpointcert.AuthorizationKey), "HUB_TRANSPORT_KEY_URL": of(endpointcert.HubKey),
 		"AUDIT_ENDPOINT": of(endpointcert.Audit), "PAYER_DAVINCI_WELL_KNOWN": of(endpointcert.PayerDavinci),
 		"validator-lane-2.0": validatorLane("2.0"), "validator-lane-2.1": validatorLane("2.1"), "validator-lane-2.2": validatorLane("2.2"),
 	}

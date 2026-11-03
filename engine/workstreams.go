@@ -242,15 +242,30 @@ func workstreamCatalogs() []map[string]legSpec {
 	return out
 }
 
-// AnsweredLegs are the legs a gateway of role takes as a recipient, by flat name
-// and sorted: every leg compiled in whose response side role may hold. A role
-// that answers none gets an empty list, never nil: a declared list that names
-// no leg, which is not a holder that declares none.
+// AnsweredLegs are the legs a gateway of role takes as a recipient whatever its
+// participant configures, by flat name and sorted: every leg compiled in whose
+// response side role may hold, but a leg taken only once the participant
+// configures it (the adapter's legSpec.TakenWhenSet). A role that answers none
+// gets an empty list, never nil: a declared list that names no leg, which is
+// not a holder that declares none.
 func AnsweredLegs(role string) []string {
+	return TakenLegs(role, func(string) bool { return false })
+}
+
+// TakenLegs are the legs a gateway of role takes as a recipient where set
+// reports which settings its participant has set: AnsweredLegs, and each leg
+// role may answer whose setting (legSpec.TakenWhenSet) is set. It is what the
+// gateway declares it takes (the capability declaration), what mounts its
+// inbound route (takesLegs), and what a hosted tenant's edge reads (the root
+// legtaxonomy.TakenWhenSet names the same settings). Sorted, never nil.
+func TakenLegs(role string, set func(setting string) bool) []string {
 	legs := []string{}
 	for _, catalog := range workstreamCatalogs() {
 		for leg, spec := range catalog {
-			if slices.Contains(spec.RecipientRoles, role) {
+			if !slices.Contains(spec.RecipientRoles, role) {
+				continue
+			}
+			if spec.TakenWhenSet == "" || set(spec.TakenWhenSet) {
 				legs = append(legs, leg)
 			}
 		}
@@ -719,7 +734,8 @@ func (g *Gateway) moduleRoutes(role string) (out []mountedRoute) {
 
 // legSpec is the per-leg-type contract the origination and inbound sides both
 // read. ReqFrame is the originator's authority frame ("provider-tpo" for every
-// PA leg today); RespFrame is the responder's. Op/RespOp
+// provider's PA leg, "payer-payment" for the payer's attachment request);
+// RespFrame is the responder's. Op/RespOp
 // are the request/response authority operations. Scope is the policy-derived
 // min-necessary scope label (documentary; authz derives the real scope, and the
 // network's lockstep conformance check pins this label to it). Physics is
@@ -754,6 +770,12 @@ type legSpec struct {
 	// transaction type with its workstream's prefix (the taxonomy's
 	// stagedName, "pa.pas-claim"). The catalog stays keyed by the flat name.
 	WireName string
+	// TakenWhenSet names the setting that makes a gateway take a leg it
+	// compiles but takes only once its participant configures where the leg
+	// goes, so it never declares a leg it cannot deliver (TakenLegs); "" for a
+	// leg its role takes unconditionally. The adapter sets it, to the setting
+	// the root leg taxonomy names (legtaxonomy.TakenWhenSet).
+	TakenWhenSet string
 }
 
 // legDetail is what a workstream adapter adds to one routable leg of its
@@ -764,6 +786,8 @@ type legDetail struct {
 	Physics  LegPhysics
 	Contract string
 	Seam     string
+	// TakenWhenSet is legSpec.TakenWhenSet.
+	TakenWhenSet string
 }
 
 // catalogFromTaxonomy derives a workstream's leg catalog from its leg
@@ -802,7 +826,7 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
-			RecipientRoles: l.Response.Roles,
+			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet,
 		}
 	}
 	for _, tx := range slices.Sorted(maps.Keys(detail)) {

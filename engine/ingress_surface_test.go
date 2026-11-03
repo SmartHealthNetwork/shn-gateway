@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 )
 
 // providerIngressSurfaceFile is the public surface a provider gateway with
@@ -19,10 +21,18 @@ import (
 // check.
 var providerIngressSurfaceFile = filepath.Join("testdata", "provider-ingress-surface.json")
 
-func providerIngressSurface() []string {
-	g := &Gateway{cfg: Config{Role: "provider", IngressEnabled: true, IngressBaseURL: "https://provider.example.test"}, ingressAuth: &ingressAuthServer{}}
+// payerIngressSurfaceFile is the same for a payer gateway with its Da Vinci
+// ingress (the payer's own system creating its attachment-request Task), the
+// Hub's inbound route among it: every route a payer gateway with its ingress
+// on mounts but the operator's.
+var payerIngressSurfaceFile = filepath.Join("testdata", "payer-ingress-surface.json")
+
+// ingressSurface is every route a gateway of role mounts with its ingress on,
+// its authentication and base set, but the operator's, sorted.
+func ingressSurface(role string) []string {
+	g := &Gateway{cfg: Config{Role: role, IngressEnabled: true, IngressBaseURL: "https://" + role + ".example.test"}, ingressAuth: &ingressAuthServer{}}
 	var out []string
-	for _, declared := range [][]mountedRoute{g.coreRoutes("provider"), g.workstreamRoutes("provider"), g.moduleRoutes("provider")} {
+	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 		for _, rt := range declared {
 			if !rt.operator {
 				out = append(out, rt.pattern)
@@ -33,9 +43,12 @@ func providerIngressSurface() []string {
 	return out
 }
 
-func TestProviderIngressSurfaceIsTheMountedRoutes(t *testing.T) {
-	got := providerIngressSurface()
-	raw, err := os.ReadFile(providerIngressSurfaceFile)
+func providerIngressSurface() []string { return ingressSurface("provider") }
+
+// wantSurface checks file reads exactly got.
+func wantSurface(t *testing.T, file, role string, got []string) {
+	t.Helper()
+	raw, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +58,26 @@ func TestProviderIngressSurfaceIsTheMountedRoutes(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		body, _ := json.MarshalIndent(got, "", "  ")
-		t.Fatalf("%s is not the routes a provider ingress gateway mounts; it should read:\n%s", providerIngressSurfaceFile, body)
+		t.Fatalf("%s is not the routes a %s ingress gateway mounts; it should read:\n%s", file, role, body)
 	}
+}
+
+// The payer's surface is the routes a payer gateway with its ingress mounts,
+// and holds the payer ingress's routes: a hosted payer's edge is checked
+// against it as a provider's is against its own.
+func TestPayerIngressSurfaceIsTheMountedRoutes(t *testing.T) {
+	got := ingressSurface("payer")
+	wantSurface(t, payerIngressSurfaceFile, "payer", got)
+	for _, route := range []string{"POST " + cdexroute.ProviderPrefix + "{provider}/Task", "GET " + CDexProvidersPath, "POST /oauth/token", "GET /.well-known/smart-configuration"} {
+		if !slices.Contains(got, route) {
+			t.Errorf("the payer's ingress surface %v leaves out %s", got, route)
+		}
+	}
+}
+
+func TestProviderIngressSurfaceIsTheMountedRoutes(t *testing.T) {
+	got := providerIngressSurface()
+	wantSurface(t, providerIngressSurfaceFile, "provider", got)
 	// Each operator route is left out, and only those.
 	operator := &Gateway{cfg: Config{Role: "provider"}}
 	declareOriginationProfile(operator, "demo")

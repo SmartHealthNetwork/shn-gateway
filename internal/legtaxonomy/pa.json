@@ -124,6 +124,20 @@
       "frameOperations": [],
       "advertise": true,
       "since": "1.1.0"
+    },
+    {
+      "transactionType": "cdex-attachment-request",
+      "stagedName": "pa.cdex-attachment-request",
+      "physics": "request-response",
+      "request": {"frame": "payer-payment", "roles": ["payer"], "operation": "cdex-attachment-request"},
+      "response": {"frame": "provider-disclosure", "roles": ["provider"], "operation": "cdex-attachment-request-response"},
+      "scope": "attachment-request-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.5.0"
     }
   ]
 }

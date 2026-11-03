@@ -294,6 +294,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"stale timestamp", hubAnswers{status: 400, reason: "stale or future timestamp", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
 		{"involved refused", hubAnswers{status: 400, reason: "involved patients refused: another patient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"a leg the recipient does not take", hubAnswers{status: 422, reason: "the recipient does not take cdex-attachment-submit: it declares no legs, and cdex-attachment-submit is since 1.1.0", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
+		{"a recipient of another role", hubAnswers{status: 422, reason: "the recipient cannot take cdex-attachment-request: it is registered as payer, and cdex-attachment-request is answered by provider", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"a leg the recipient does not take, whatever its reason says", hubAnswers{status: 422, reason: "some other wording", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"a 422 the recipient received is not that refusal", hubAnswers{status: 422, reason: "some other wording", delivered: "yes"}, ExchangeOther, "", ""},
 		{"a 422 the recipient may have received is not that refusal", hubAnswers{status: 422, reason: "some other wording", delivered: "unknown"}, ExchangeOther, "", ""},
@@ -1244,8 +1245,9 @@ func TestExchangeRecorder_HubDelivered(t *testing.T) {
 // A consent reference missing on a federated query is a consent refusal.
 func TestExchangeRecord_InboundConsent(t *testing.T) {
 	p, got := newRecordingLevelPayer(t, EnforcementObserve)
+	p.answering(t, "federated-query")
 	ans := p.sendAs(t, "federated-query", "", []byte(`{"resourceType":"Parameters"}`), p.pci)
-	wantRefusal(t, got.only(t), ans.status, RefusedByPayerGateway, RefusalConsent)
+	wantRefusal(t, got.only(t), ans.status, partyAnswering("federated-query"), RefusalConsent)
 }
 
 // A frame that names an operation on a leg that takes none is a frame this
@@ -2301,6 +2303,7 @@ func TestExchangeRecord_FederatedQuerySystemRepeatingAMember(t *testing.T) {
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
+			p.answering(t, "federated-query")
 			p.g.cfg.ConsentURL = "http://consent.test"
 			p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 			held := p.g.cfg.SoR
@@ -2328,7 +2331,7 @@ func TestExchangeRecord_FederatedQuerySystemRepeatingAMember(t *testing.T) {
 				},
 			} {
 				ans, rec := send(row.repeating)
-				if rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByPayerGateway || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+				if rec.Outcome != ExchangeRefused || rec.RefusedBy != partyAnswering("federated-query") || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
 					t.Errorf("%s repeating a member: %s %s/%s backend %+v", name, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
 				}
 				control, crec := send(row.otherwise)
@@ -2502,6 +2505,7 @@ func TestExchangeRecord_AnsweredReadsRepeatingAMember(t *testing.T) {
 	} {
 		for _, level := range allLevels {
 			p, got := newRecordingLevelPayer(t, level)
+			p.answering(t, row.leg)
 			p.g.cfg.ConsentURL = "http://consent.test"
 			p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 			held := p.g.cfg.SoR
@@ -2527,7 +2531,7 @@ func TestExchangeRecord_AnsweredReadsRepeatingAMember(t *testing.T) {
 				return ans, got.only(t)
 			}
 			ans, rec := send(repeated())
-			if rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByPayerGateway || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
+			if rec.Outcome != ExchangeRefused || rec.RefusedBy != partyAnswering(row.leg) || rec.Rule != RefusalIntegrity || rec.Backend == nil || rec.Backend.ErrorClass != BackendMalformed {
 				t.Errorf("%s/%s repeating a member: %s %s/%s backend %+v", name, level, rec.Outcome, rec.RefusedBy, rec.Rule, rec.Backend)
 			}
 			control, crec := send(otherwise())
@@ -2551,12 +2555,12 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 		return out
 	}
 	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", ExchangeOther}
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", ExchangeOther}
 	wantKinds = append(wantKinds, profileLegs()...)
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

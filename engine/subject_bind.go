@@ -909,12 +909,23 @@ func patientIsMember(patient map[string]any, member string) bool {
 // subject, so keying a record by it would let one patient's authority file
 // another patient's decision under the first patient's identity.
 func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload []byte) (pci string, status int, msg string) {
+	return g.bindInboundSubjectAs(ctx, member, payload, http.StatusBadRequest)
+}
+
+// bindInboundSubjectAs is bindInboundSubject answering a patient the request
+// cannot identify with unidentifiable, the status its leg refuses one with:
+// 400 on every delivered leg, 422 on the payer's attachment request, as the
+// payer's ingress refuses the same Task. Recorded as authority either way.
+func (g *Gateway) bindInboundSubjectAs(ctx context.Context, member string, payload []byte, unidentifiable int) (pci string, status int, msg string) {
 	if member == "" {
 		return "", http.StatusBadRequest, "unknown member"
 	}
 	pci, held, found, readErr := g.resolveSubjectBinding(ctx, member, payload)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
+		if errors.Is(readErr, errPatientUnidentifiable) {
+			status = unidentifiable
+		}
 		return "", status, msg
 	}
 	if !found || pci == "" {

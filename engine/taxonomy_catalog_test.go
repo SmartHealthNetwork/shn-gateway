@@ -147,6 +147,7 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		"crd-order-select": "payer-native", "crd-order-dispatch": "payer-native",
 		"pas-claim": "payer-native", "pas-claim-update": "payer-native", "pas-claim-inquire": "payer-native",
 		"patient-dtr": "phg-inbound", "cdex-attachment-submit": "payer-native",
+		"cdex-attachment-request": "provider-native",
 	}
 	if len(paCatalog) != len(wantSeam) {
 		t.Fatalf("%d catalog legs, %d pinned", len(paCatalog), len(wantSeam))

@@ -605,10 +605,26 @@ const (
 	// The amendment went on without it. Not a registered edit: the amendment is
 	// this gateway's own build.
 	EditNotMadeReportTypeNotCarried = "amendment:report-type-not-carried"
+	// EditNotMadeTaskNoStructuralPayerURL: a payer's attachment-request Task
+	// has one payer-url input and it is not a non-empty valueUrl, so the
+	// return-path re-key (E-11) has no value to replace.
+	EditNotMadeTaskNoStructuralPayerURL = "E-11:no-structural-payer-url"
+	// EditNotMadeTaskUnreadablePayerURL: the Task has several payer-url inputs,
+	// or an input that cannot be read and could be one, so which address to
+	// re-key (E-11) is unknown.
+	EditNotMadeTaskUnreadablePayerURL = "E-11:unreadable-payer-url"
+	// EditNotMadeTaskUnreadable: the request could not be read as one Task,
+	// so whether it carries a payer-url to re-key (E-11) is unknown.
+	EditNotMadeTaskUnreadable = "E-11:unreadable-task"
+	// EditNotMadeTaskPayerDoesNotTake: the payer that sent the Task is not
+	// known to take the documentation submission, so a return path (E-11) to
+	// it would always refuse.
+	EditNotMadeTaskPayerDoesNotTake = "E-11:payer-does-not-take"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
-var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried}
+var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
+	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).
@@ -1238,15 +1254,15 @@ func hubRefusalOutcome(e *hubRefusalError) (outcome, by, rule string) {
 			// Its attested refusal after its system answered, on the rule
 			// the Hub relayed; unknown ("other") when it relayed none.
 			if e.rule == "" {
-				return ExchangeRefused, RefusedByPayerGateway, ExchangeOther
+				return ExchangeRefused, recipientParty(e.leg), ExchangeOther
 			}
-			return ExchangeRefused, RefusedByPayerGateway, e.rule
+			return ExchangeRefused, recipientParty(e.leg), e.rule
 		case strings.Contains(reason, "the recipient refused it"):
-			return ExchangeRefused, RefusedByPayerGateway, ExchangeOther
+			return ExchangeRefused, recipientParty(e.leg), ExchangeOther
 		case strings.Contains(reason, "has no room for this envelope"):
 			// Its attested refusal before acting (NotActedAtCapacity): the
 			// network cannot carry this body right now.
-			return ExchangeRefused, RefusedByPayerGateway, RefusalRouting
+			return ExchangeRefused, recipientParty(e.leg), RefusalRouting
 		case strings.Contains(reason, "the recipient answered"):
 			return ExchangeUpstreamError, "", ""
 		case strings.Contains(reason, "could not be read"):
@@ -1309,7 +1325,9 @@ func (x *exchangeRecorder) legOutcome(err error) {
 	case errors.As(err, &hr):
 		x.decided(hubRefusalOutcome(hr))
 	case errors.As(err, &lost) && lost.tooLarge:
-		x.decided(ExchangeRefused, RefusedByProviderGateway, RefusalRouting)
+		// This gateway refused the answer for its size: its own refusal,
+		// whichever role sent the leg.
+		x.decided(ExchangeRefused, x.self, RefusalRouting)
 	case errors.As(err, &lost) && lost.cause == "the Hub's answer could not be read":
 		// A read that failed on the way back: transport, not integrity.
 		x.decided(ExchangeOther, "", "")
@@ -1472,15 +1490,56 @@ func (g *Gateway) exchangeClock() time.Time {
 	return g.cfg.Clock()
 }
 
-// exchangeParty is the refusing party this gateway is on direction.
+// exchangeParty is the refusing party this gateway is on direction: the
+// gateway whose ingress it is (a provider's, or a payer's for the payer's
+// attachment request), and on a leg the network delivers to it the gateway of
+// its own registered role (a payer's, or a provider's for the payer's
+// attachment request). Decided by the role, never by a name.
 func (g *Gateway) exchangeParty(direction string) string {
 	switch {
+	case direction == DirectionIngress && g.cfg.Role == "payer":
+		return RefusedByPayerGateway
 	case direction == DirectionIngress:
 		return RefusedByProviderGateway
-	case g.cfg.Role == "payer":
+	}
+	return gatewayParty(g.cfg.Role)
+}
+
+// gatewayParty is the refusing party a gateway of role is. A role with no
+// party of its own in the record's closed list is "other": unknown, never a
+// guessed party.
+func gatewayParty(role string) string {
+	switch role {
+	case "payer":
 		return RefusedByPayerGateway
+	case "provider":
+		return RefusedByProviderGateway
 	}
 	return ExchangeOther
+}
+
+// recipientParty is the gateway party that answers leg, by its row's
+// recipient roles (legSpec.RecipientRoles): the party of the one role the
+// row names, and "other" for a leg this gateway does not know or a row that
+// names several roles of different parties.
+func recipientParty(leg string) string {
+	spec, _ := legSpecFor(leg)
+	return rolesParty(spec.RecipientRoles)
+}
+
+// rolesParty is the one gateway party roles share, or "other" when they are
+// none or of different parties.
+func rolesParty(roles []string) string {
+	if len(roles) == 0 {
+		return ExchangeOther
+	}
+	party := gatewayParty(roles[0])
+	for _, r := range roles[1:] {
+		if gatewayParty(r) != party {
+			return ExchangeOther
+		}
+	}
+	return party
 }
 
 // emitExchange settles the record and hands it to Config.ExchangeObserved. A

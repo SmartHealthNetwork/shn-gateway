@@ -75,3 +75,25 @@ func withCarriedLegs(ctx context.Context, msg string) string {
 	}
 	return msg + " " + stmt
 }
+
+// afterLegs is msg for an answer this gateway writes itself on a route that
+// builds legs, wherever the call has got to: once a leg of the call was
+// carried it says which (withCarriedLegs), so a failure after a leg never
+// reads as one before any; before any leg was carried it is msg as it is. A
+// call with no tracker is not one of those routes (routes() gives every
+// exchange route one; the Da Vinci ingress relays a single leg it did not
+// build) and is left as it is. An answer relayed from a leg or the network
+// (relayOriginationError) is written as it came, never through this.
+func afterLegs(ctx context.Context, msg string) string {
+	c, _ := ctx.Value(legsCarriedKey{}).(*legsCarried)
+	if c == nil {
+		return msg
+	}
+	c.mu.Lock()
+	none := len(c.legs) == 0
+	c.mu.Unlock()
+	if none {
+		return msg
+	}
+	return withCarriedLegs(ctx, msg)
+}

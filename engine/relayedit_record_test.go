@@ -415,6 +415,7 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		relay.EditDTRAnswerLineNames:   {"dtr-answer-line-names", 0},
 		relay.EditRegisteredTransform:  {"registered-transform", relay.RoleRecipient},
 		relay.EditPASPendReturnRekey:   {"pas-pend-return-rekey", 0},
+		relay.EditCDexTaskReturnRekey:  {"cdex-task-return-rekey", 0},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

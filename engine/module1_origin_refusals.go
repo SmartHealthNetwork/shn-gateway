@@ -30,15 +30,32 @@ func (g *Gateway) refuseOriginRecord(ctx context.Context, w http.ResponseWriter,
 	var fenced *CompartmentError
 	switch {
 	case errors.As(err, &fenced):
-		g.observeOwnBuildRefused(recipient, leg, msg)
-		exchangeOfWriter(w).refusedFidelity(vocab.RefusalStageVerify)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
+		g.refuseOwnVerify(ctx, w, recipient, leg, msg)
 	case failOriginRead(ctx, w, status, msg, err):
 	case status == http.StatusUnprocessableEntity:
 		g.refuseOwnBuild(ctx, w, recipient, leg, msg)
 	default:
 		writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 	}
+}
+
+// refuseOwnVerify answers a record or a fill this gateway was to carry on leg
+// that failed its own check of it, as one about another patient than the
+// bound one: the fidelity of SHN's own edit, at the verify stage, 422,
+// recorded as leg not sent, saying which legs were carried.
+func (g *Gateway) refuseOwnVerify(ctx context.Context, w http.ResponseWriter, recipient, leg, msg string) {
+	g.observeOwnBuildRefused(recipient, leg, msg)
+	exchangeOfWriter(w).refusedFidelity(vocab.RefusalStageVerify)
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
+}
+
+// refuseOwnFill answers a questionnaire fill, made after the coverage check
+// and questionnaire legs, whose QuestionnaireResponse is about another
+// patient than the bound one or for another questionnaire than the one
+// fetched (msg says which): SHN's own fill failing its own check
+// (refuseOwnVerify), at the PAS claim that would carry it.
+func (g *Gateway) refuseOwnFill(ctx context.Context, w http.ResponseWriter, recipient, msg string) {
+	g.refuseOwnVerify(ctx, w, recipient, "pas-claim", msg)
 }
 
 // refuseOriginRouting answers an origination whose leg cannot be addressed —
@@ -98,10 +115,15 @@ func (g *Gateway) answerFollowFailure(ctx context.Context, w http.ResponseWriter
 // failPopulate answers a questionnaire fill that failed, after the coverage
 // check and questionnaire legs: a read of the participant's system, or its
 // operated $populate engine, that failed to answer is a backend failure
-// (failOriginRead); any other failure is answered with its status. Each says
-// which legs were carried.
-func failPopulate(ctx context.Context, w http.ResponseWriter, err error) {
+// (failOriginRead); a fill the operated engine made about another patient is
+// SHN's own fill failing its check (refuseOwnFill); any other failure is
+// answered with its status. Each says which legs were carried.
+func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recipient string, err error) {
 	status, msg := statusForPopulateErr(err), messageForPopulateErr(err)
+	if errors.Is(err, errPopulateForeignSubject) {
+		g.refuseOwnFill(ctx, w, recipient, msg)
+		return
+	}
 	if (isSoRPopulateError(err) || errors.Is(err, errPopulateUpstream)) && failOriginRead(ctx, w, status, msg, err) {
 		return
 	}

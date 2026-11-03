@@ -38,3 +38,20 @@ func LegOperations() map[string]LegOperation {
 	}
 	return out
 }
+
+// LegsTakenWhenSet are the compiled-in legs a recipient takes only once its
+// participant configures where the leg goes, each with the setting that
+// configures it (legSpec.TakenWhenSet), keyed by flat transaction type. The
+// network's leg taxonomy names the same settings (legtaxonomy.TakenWhenSet),
+// and the root conformance fence holds the two together.
+func LegsTakenWhenSet() map[string]string {
+	out := map[string]string{}
+	for _, c := range workstreamCatalogs() {
+		for legType, spec := range c {
+			if spec.TakenWhenSet != "" {
+				out[legType] = spec.TakenWhenSet
+			}
+		}
+	}
+	return out
+}

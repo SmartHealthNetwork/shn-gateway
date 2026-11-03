@@ -260,11 +260,18 @@ var providerOtherRoutes = []string{
 	"POST /oauth/token",
 	"GET /.well-known/smart-configuration",
 	"GET /.well-known/davinci-configuration",
+	// The payer's attachment request, delivered by the Hub, once the
+	// provider sets its own Task endpoint (PROVIDER_CDEX_TASK_URL).
+	"POST /substrate/inbound",
 }
 
 // otherRoleRoutes are the routes of the roles that originate nothing.
 var otherRoleRoutes = map[string][]string{
-	"payer":    {"POST /substrate/inbound"},
+	// A payer's own Da Vinci ingress takes its system's attachment-request
+	// Tasks at each provider's base, and lists the bases, behind its own token
+	// endpoint.
+	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "GET /cdex/providers",
+		"POST /oauth/token", "GET /.well-known/smart-configuration"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},
 }
@@ -761,7 +768,7 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 

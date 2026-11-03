@@ -65,6 +65,8 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			[]string{"$ (the whole Bundle)"}, "registered-transform"},
 		{"E-10", "pas-pend-return-rekey", []string{"pas-claim", "pas-claim-inquire", "pas-claim-update"}, relay.RoleRequester, relay.DirectionResponse,
 			[]string{"Task.input[i].valueUrl (the input whose type is PASTempCodes#payer-url)"}, "replace-value"},
+		{"E-11", "cdex-task-return-rekey", []string{"cdex-attachment-request"}, relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"Task.input[i].valueUrl (the one input whose type is PASTempCodes#payer-url)"}, "replace-value"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))

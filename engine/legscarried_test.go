@@ -77,3 +77,26 @@ func TestTracksLegsCarried_OnePerCall(t *testing.T) {
 	}
 	carriedLeg(context.Background(), "pas-claim") // no tracker: records nothing, never panics
 }
+
+// An answer the gateway writes itself says which legs were carried once a leg
+// was, once, and is left as it is before any leg and on a call with no
+// tracker (a route that builds no legs).
+func TestAfterLegs(t *testing.T) {
+	tracked := func(legs ...string) context.Context {
+		return context.WithValue(context.Background(), legsCarriedKey{}, &legsCarried{legs: legs})
+	}
+	if got := afterLegs(tracked(), "bad request"); got != "bad request" {
+		t.Errorf("before any leg: %q, want the answer as it is", got)
+	}
+	ctx := tracked("crd-order-select", "dtr-questionnaire-fetch")
+	once := afterLegs(ctx, "expected pended response")
+	if want := "expected pended response. " + carriedStatement("crd-order-select", "dtr-questionnaire-fetch"); once != want {
+		t.Errorf("after legs: %q, want %q", once, want)
+	}
+	if twice := afterLegs(ctx, once); twice != once {
+		t.Errorf("said twice: %q", twice)
+	}
+	if got := afterLegs(context.Background(), "refused"); got != "refused" {
+		t.Errorf("no tracker: %q, want the answer as it is", got)
+	}
+}

@@ -256,7 +256,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	// builds nor reads is not covered by it. Selection precedes the exchange so a
 	// refusal costs no Exchange record.
 	child := g.ingressCorrelation(w, r)
-	route, ok := g.selectLegLineOrFail(w, recipient, legType, child, carriedRequest)
+	route, ok := g.selectLegLineOrFail(r.Context(), w, recipient, legType, child, carriedRequest)
 	if !ok {
 		return
 	}
@@ -400,7 +400,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// request (envelopeEgressLegs); a walk that would change one is not
 	// applied: the request is carried as sent.
 	child := g.ingressCorrelation(w, r)
-	route, ok := g.selectLegLineOrFail(w, recipient, legType, child, carriedRequest)
+	route, ok := g.selectLegLineOrFail(r.Context(), w, recipient, legType, child, carriedRequest)
 	if !ok {
 		return
 	}

@@ -62,7 +62,22 @@ evolving.
   a participant boundary so that documentation the provider sends stays on the
   network, and nothing used it in production when it shipped. The exception is
   this edit only: it lets no minor release add another edit to a full item, or
-  make another edit to signed content.
+  make another edit to signed content. (v1.5.0 records a second exception of its
+  own, for one other edit only; see the next entry.)
+- **A second recorded exception, v1.5.0:** signed content travelling untouched is
+  full, and v1.5.0, a minor release, makes a second edit to signed content. On
+  the payer's attachment-request leg (`cdex-attachment-request`, evolving), the
+  provider's gateway re-keys the one `payer-url` of the payer's Task, on the
+  leg's request only, to its documentation return path for the payer that sent
+  it (E-11, `cdex-task-return-rekey`), even where a signature covers the
+  `payer-url`, and the forward to the provider's system names it in
+  `X-SHN-Edited`. It keeps a documentation return address on the network, as
+  E-10 does, so that a Task cannot direct the provider's documentation off the
+  network, and no participant used the leg when it shipped. The exception is
+  this edit only, on this leg's request only. With it, E-10 and E-11 are the only
+  edits the gateway makes to signed content, each only at a `payer-url`; neither
+  exception lets a minor release add another edit to signed content, or make
+  either edit anywhere else.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -127,8 +142,9 @@ The classes are:
   Services): a workstream's own surface, documented under that workstream.
 - `PA workstream, evolving`: the Prior Authorization workstream's eligibility,
   patient-authored DTR and CDex documentation exchange items (the CDex legs,
-  from v1.1.0 `cdex-attachment-submit`, and their ingress, return paths and
-  size limits), owned by `PA workstream`, which are evolving while its CRD, DTR
+  from v1.1.0 `cdex-attachment-submit` and from v1.5.0
+  `cdex-attachment-request`, and their ingress, return paths and size limits),
+  owned by `PA workstream`, which are evolving while its CRD, DTR
   and PAS items are full.
 - `module 1` (building messages on a participant's behalf), `module 2`
   (bridging and translating between IG lines), `module 3` (opt-in conformance
@@ -312,9 +328,19 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PROVIDER_DTR_POPULATE_SCOPE` | module 1 | module 1 |
 | `PROVIDER_DTR_POPULATE_CLIENT_KID` | module 1 | module 1 |
 | `PROVIDER_DTR_POPULATE_CLIENT_SECRET` | module 1 | module 1 |
+| `PROVIDER_CDEX_TASK_URL` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_TOKEN_URL` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_CLIENT_ID` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_CLIENT_KEY` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_CLIENT_ALG` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_SCOPE` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_CLIENT_KID` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_CLIENT_SECRET` | PA workstream, evolving | PA workstream |
 | `PROVIDER_DAVINCI_INGRESS` | core | core |
 | `PROVIDER_DAVINCI_INGRESS_BASE_URL` | core | core |
 | `INGRESS_CLIENTS_FILE` | core | core |
+| `PAYER_DAVINCI_INGRESS` | PA workstream, evolving | PA workstream |
+| `PAYER_DAVINCI_INGRESS_BASE_URL` | PA workstream, evolving | PA workstream |
 | `CDS_FHIR_SERVER_READ` | PA workstream | PA workstream |
 | `CDS_ADVERTISE_HOOKS` | PA workstream | PA workstream |
 | `PAYER_DIRECTORY` | PA workstream | PA workstream |
@@ -791,7 +817,9 @@ and the ingress's own authorization endpoints are served by a provider's
 gateway with `PROVIDER_DAVINCI_INGRESS` set (the authorization endpoints when
 its ingress authorization is configured, and
 `/.well-known/davinci-configuration` when `PROVIDER_DAVINCI_INGRESS_BASE_URL`
-is set), `POST /substrate/inbound` by a
+is set), the attachment-request Task routes and the same authorization
+endpoints by a payer's gateway with `PAYER_DAVINCI_INGRESS` set,
+`POST /substrate/inbound` by a
 gateway that receives legs from the Hub, and the `/scenario/*` routes, which
 are test tooling, only by a provider's gateway.
 
@@ -814,6 +842,8 @@ The main listener, on `HOST` and `PORT`:
 | `POST /cdex/payer/{payer}` | PA workstream, evolving | PA workstream |
 | `POST /cdex/payer/{payer}/$submit-attachment` | PA workstream, evolving | PA workstream |
 | `GET /cdex/payers` | PA workstream, evolving | PA workstream |
+| `POST /cdex/provider/{provider}/Task` | PA workstream, evolving | PA workstream |
+| `GET /cdex/providers` | PA workstream, evolving | PA workstream |
 | `GET /metadata` | core | core |
 | `POST /oauth/token` | core | core |
 | `GET /.well-known/smart-configuration` | core | core |
@@ -1346,6 +1376,7 @@ table.
 | `conformance.observed` | module 3 | module 3 |
 | `involved.omitted` | core | core |
 | `subject.binding-differs` | core | core |
+| `cdex.requester-differs` | PA workstream, evolving | PA workstream |
 | `crd.embedded.validated` | module 3 | module 3 |
 | `prefetch.obtained` | PA workstream | PA workstream |
 | `peer.nonconformant` | module 3 | module 3 |
@@ -1373,6 +1404,7 @@ table.
 | `pas-inquire-ingress` | PA workstream | PA workstream |
 | `eligibility-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-ingress` | PA workstream, evolving | PA workstream |
+| `cdex-request-ingress` | PA workstream, evolving | PA workstream |
 | `federated-query-ingress` | FQS workstream | FQS workstream |
 
 | Item | Class | Owner |
@@ -2078,8 +2110,8 @@ endpoints of optional diagnostic collection.
 
 Of the leg types, `coverage-eligibility` and `patient-dtr` (`PA workstream,
 evolving`) and `federated-query` (`FQS workstream`) are evolving at v1.0, and
-the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`)
-are evolving when they ship: a minor gateway release may change how the gateway
+the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`
+and from v1.5.0 `cdex-attachment-request`) are evolving when they ship: a minor gateway release may change how the gateway
 carries them. The wire protocol's own versioning still governs their names.
 
 | Item | Class | Owner |
@@ -2107,6 +2139,7 @@ carries them. The wire protocol's own versioning still governs their names.
 | `transactionType=pas-claim-inquire` | PA workstream | PA workstream |
 | `transactionType=patient-dtr` | PA workstream, evolving | PA workstream |
 | `transactionType=cdex-attachment-submit` | PA workstream, evolving | PA workstream |
+| `transactionType=cdex-attachment-request` | PA workstream, evolving | PA workstream |
 | `transactionType=federated-query` | FQS workstream | FQS workstream |
 | `POST <authz>/authorize` | core | core |
 | `X-Hub-Assertion` | core | core |

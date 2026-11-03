@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -74,13 +75,13 @@ func (g *Gateway) selectLegLine(recipient, legType, corrID string, builder relay
 // selectLegLineOrFail is selectLegLine for the scenario handlers, which own the
 // ResponseWriter: on refusal it writes the legible 422 (relayOriginationError) or
 // the 502 fallback and returns ok=false.
-func (g *Gateway) selectLegLineOrFail(w http.ResponseWriter, recipient, legType, corrID string, builder relay.BuilderID) (legRoute, bool) {
+func (g *Gateway) selectLegLineOrFail(ctx context.Context, w http.ResponseWriter, recipient, legType, corrID string, builder relay.BuilderID) (legRoute, bool) {
 	route, err := g.selectLegLine(recipient, legType, corrID, builder)
 	if err != nil {
 		if g.relayOriginationError(w, err) {
 			return legRoute{}, false
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(ctx, err.Error())})
 		return legRoute{}, false
 	}
 	return route, true

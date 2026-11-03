@@ -147,11 +147,11 @@ func ensureOriginationClaimInput(r *http.Request) *http.Request {
 func claimInputOrFail(w http.ResponseWriter, r *http.Request) (originationClaimInput, bool) {
 	in, err := claimInputOf(r)
 	if errors.Is(err, errOriginationBodyTooLarge) {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return originationClaimInput{}, false
 	}
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return originationClaimInput{}, false
 	}
 	return in, true
@@ -184,7 +184,7 @@ func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback
 	}
 	// This gateway's own failure, never a refusal.
 	exchangeOf(r.Context()).ownFailure()
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fallback})
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), fallback)})
 }
 
 // isPASBuildFidelity reports whether a PAS builder refused the request on
@@ -670,7 +670,7 @@ func (g *Gateway) resumeAmendmentOrFail(w http.ResponseWriter, r *http.Request, 
 	route, err := g.selectResumeRoute(st.pasToken, st.recipient, "pas-claim-update", relay.BuilderSDKPASUpdate)
 	if err != nil {
 		if !g.relayOriginationError(w, err) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		}
 		return resumeAmendment{}, false
 	}

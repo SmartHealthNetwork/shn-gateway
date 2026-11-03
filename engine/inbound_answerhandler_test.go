@@ -33,6 +33,7 @@ func TestInbound_LegWithoutAnswerHandlerIsOwnFailure(t *testing.T) {
 	// (whose adapter answers toy-echo) runs it unchanged.
 	workstreams = append(slices.Clone(saved), toyWorkstream{tag: "unanswered", legs: map[string]legSpec{"unanswered-echo": {
 		ReqFrame: "provider-tpo", RespFrame: "unanswered-answer", Op: "unanswered-ask", RespOp: "unanswered-answer", Scope: "unanswered-only", Physics: paReadOnly,
+		RecipientRoles: []string{"payer"},
 	}}})
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {

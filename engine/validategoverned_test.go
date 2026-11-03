@@ -408,6 +408,8 @@ func drivePayerEligibilityIngress(t *testing.T, marker string) (int, string, []O
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-COVERED"})
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
+	// The fixture is a provider's; the leg is answered by a payer's gateway.
+	gw.cfg.Role = "payer"
 	rec := httptest.NewRecorder()
 	gw.handleInbound(rec, eligibilityInboundRequest(t, gw, marker))
 	return rec.Code, rec.Body.String(), events
@@ -423,6 +425,8 @@ func drivePayerEligibilityEgress(t *testing.T, marker string) (int, string, []Ob
 	gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-COVERED"})
 	gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 	gw.cfg.Validator = &shnsdk.FakeValidator{RejectIfContains: marker}
+	// The fixture is a provider's; the leg is answered by a payer's gateway.
+	gw.cfg.Role = "payer"
 	rec := httptest.NewRecorder()
 	gw.handleInbound(rec, eligibilityInboundRequestClean(t, gw, marker))
 	return rec.Code, rec.Body.String(), events

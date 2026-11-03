@@ -215,6 +215,7 @@ func TestFederatedQuery_PatientNotTheConsentedOneIsRefused(t *testing.T) {
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
+			p.answering(t, "federated-query")
 			// A consent service that permits, and a count of the reads that
 			// fetch the member's records for disclosure.
 			p.g.cfg.ConsentURL = "http://consent.test"
@@ -231,13 +232,13 @@ func TestFederatedQuery_PatientNotTheConsentedOneIsRefused(t *testing.T) {
 			got.reset()
 			other, _, _ := p.store.ResolvePatient(anotherHeldMember)
 			held := sendConsented(t, p, "federated-query", cdexTaskFor(t, dtrFrameMember), other, "Consent/c-1")
-			wantRefusal(t, got.only(t), held.status, RefusedByPayerGateway, RefusalConsent)
+			wantRefusal(t, got.only(t), held.status, partyAnswering("federated-query"), RefusalConsent)
 			if held.status != http.StatusForbidden || !bytes.Contains(held.body, []byte(refusalPatientNotConsented)) {
 				t.Fatalf("held answer %d %s", held.status, held.body)
 			}
 			got.reset()
 			notHeld := sendConsented(t, p, "federated-query", cdexTaskFor(t, "MBR-NOT-HELD"), other, "Consent/c-1")
-			wantRefusal(t, got.only(t), notHeld.status, RefusedByPayerGateway, RefusalConsent)
+			wantRefusal(t, got.only(t), notHeld.status, partyAnswering("federated-query"), RefusalConsent)
 			if notHeld.status != held.status || notHeld.framed != held.framed || !bytes.Equal(notHeld.body, held.body) {
 				t.Fatalf("not held answered %d %s, held %d %s: the refusal tells them apart", notHeld.status, notHeld.body, held.status, held.body)
 			}
@@ -292,6 +293,7 @@ func TestPatientDTR_PatientNotTheAuthorizedOneIsRefused(t *testing.T) {
 	for _, level := range bindLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
+			p.answering(t, "patient-dtr")
 			control := p.sendAs(t, "patient-dtr", "", patientDTRFor(t, dtrFrameMember), p.pci)
 			if control.status != http.StatusOK || !bytes.Contains(control.body, []byte("attestedItem")) {
 				t.Fatalf("control answer %d %s, want the attested item", control.status, control.body)
@@ -299,13 +301,13 @@ func TestPatientDTR_PatientNotTheAuthorizedOneIsRefused(t *testing.T) {
 			got.reset()
 			other, _, _ := p.store.ResolvePatient(anotherHeldMember)
 			held := p.sendAs(t, "patient-dtr", "", patientDTRFor(t, dtrFrameMember), other)
-			wantRefusal(t, got.only(t), held.status, RefusedByPayerGateway, RefusalAuthority)
+			wantRefusal(t, got.only(t), held.status, partyAnswering("patient-dtr"), RefusalAuthority)
 			if held.status != http.StatusForbidden || !bytes.Contains(held.body, []byte(refusalPatientNotAuthorized)) || bytes.Contains(held.body, []byte("attestedItem")) {
 				t.Fatalf("held answer %d %s", held.status, held.body)
 			}
 			got.reset()
 			notHeld := p.sendAs(t, "patient-dtr", "", patientDTRFor(t, "MBR-NOT-HELD"), other)
-			wantRefusal(t, got.only(t), notHeld.status, RefusedByPayerGateway, RefusalAuthority)
+			wantRefusal(t, got.only(t), notHeld.status, partyAnswering("patient-dtr"), RefusalAuthority)
 			if notHeld.status != held.status || notHeld.framed != held.framed || !bytes.Equal(notHeld.body, held.body) {
 				t.Fatalf("not held answered %d %s, held %d %s: the refusal tells them apart", notHeld.status, notHeld.body, held.status, held.body)
 			}
@@ -316,6 +318,7 @@ func TestPatientDTR_PatientNotTheAuthorizedOneIsRefused(t *testing.T) {
 // A patient-authored DTR request naming no patient is refused as unreadable.
 func TestPatientDTR_NoPatientIsRefused(t *testing.T) {
 	p := newLevelPayer(t, EnforcementNone)
+	p.answering(t, "patient-dtr")
 	ans := p.sendAs(t, "patient-dtr", "", []byte(`{"linkId":"functional-status-oswestry","answer":"42"}`), p.pci)
 	if ans.status != http.StatusBadRequest || !bytes.Contains(ans.body, []byte(refusalPatientDTRNoPatient)) {
 		t.Fatalf("answer %d %s", ans.status, ans.body)
@@ -374,6 +377,7 @@ func TestPatientMatch_UnreadableMemberRecordsAnswerAsNotHeld(t *testing.T) {
 		for _, level := range bindLevels {
 			t.Run(leg.name+"/"+level.String(), func(t *testing.T) {
 				p, got := newRecordingLevelPayer(t, level)
+				p.answering(t, leg.name)
 				p.g.cfg.SoR = ambiguousMemberSoR{SystemOfRecord: p.g.cfg.SoR, ContextSystemOfRecord: ReadSystemOfRecord(p.g.cfg.SoR), member: ambiguous}
 				notHeld := leg.send(t, p, leg.body(t, "MBR-NOT-HELD"), p.pci)
 				got.reset()

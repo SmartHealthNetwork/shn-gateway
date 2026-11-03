@@ -57,6 +57,8 @@ var (
 	CDS              = Kind{"cds"}               // PAYER_DAVINCI_CDS_BASE_URL
 	Populate         = Kind{"populate"}          // PROVIDER_DTR_POPULATE_URL
 	PopulateToken    = Kind{"populate-token"}    // PROVIDER_DTR_POPULATE_TOKEN_URL
+	CDexTask         = Kind{"cdex-task"}         // PROVIDER_CDEX_TASK_URL
+	CDexTaskToken    = Kind{"cdex-task-token"}   // PROVIDER_CDEX_TOKEN_URL
 	CRDFHIRServer    = Kind{"crd-fhir-server"}   // the fhirServer a CRD request names
 	Discovery        = Kind{"discovery"}         // DISCOVERY_URL
 	Hub              = Kind{"hub"}               // HUB_URL
@@ -77,7 +79,7 @@ var (
 var kinds = []Kind{
 	Ingress, MetricsPull, OTLP,
 	FHIR, FHIRToken, PayerDavinci, PayerDTR, PayerPAS, PayerEligibility, PayerToken, CDS,
-	Populate, PopulateToken, CRDFHIRServer,
+	Populate, PopulateToken, CDexTask, CDexTaskToken, CRDFHIRServer,
 	Discovery, Hub, HubKey, Authorization, AuthorizationKey, Registrar, Consent, Audit,
 	Validator, Certify,
 	Diagnostic, Store,

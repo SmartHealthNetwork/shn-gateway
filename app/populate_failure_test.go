@@ -45,11 +45,15 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 		tokenStatus, status  int
 		body, record, public string
 		calls                int32
+		// answer is the status the caller receives: 502 when the
+		// operated engine failed to answer, 422 when its fill fails the
+		// gateway's own check of it.
+		answer int
 	}{
-		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 0},
-		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1},
-		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1},
-		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical"}` + "\n", 1},
+		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 0, 502},
+		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 502},
+		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 422},
+		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 422},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var calls, tokenCalls atomic.Int32
@@ -77,8 +81,8 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 			handler := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": pop.URL + "/CANARY-URL", "PROVIDER_DTR_POPULATE_TOKEN_URL": token.URL + "/CANARY-TOKEN-URL", "PROVIDER_DTR_POPULATE_CLIENT_ID": "CANARY-CLIENT", "PROVIDER_DTR_POPULATE_CLIENT_SECRET": "CANARY-SECRET"}, out)
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
-			if rr.Code != 502 || rr.Body.String() != row.public {
-				t.Fatalf("public response=%d %q, want 502 %q", rr.Code, rr.Body.String(), row.public)
+			if rr.Code != row.answer || rr.Body.String() != row.public {
+				t.Fatalf("public response=%d %q, want %d %q", rr.Code, rr.Body.String(), row.answer, row.public)
 			}
 			var records []string
 			for _, line := range strings.Split(out.text(), "\n") {

@@ -344,6 +344,23 @@ type config struct {
 	ProviderDTRPopulateClientKID    string
 	ProviderDTRPopulateClientSecret string // value, not a path (unlike *ClientKey)
 
+	// PROVIDER_CDEX_TASK_URL is the provider's own Task endpoint, the full URL
+	// a payer's attachment-request Task is carried to. Set, the provider takes
+	// the payer's attachment request (cdex-attachment-request): it declares
+	// it and serves it. PROVIDER_CDEX_* is the forward's SMART Backend
+	// Services credential block, by the PAYER_DAVINCI_* pattern, required with
+	// the endpoint (no Task is carried unauthenticated), its scope stated
+	// (no default), and RS256 admitted beside ES384 and RS384 for this block
+	// alone. Provider role only.
+	ProviderCDexTaskURL      string
+	ProviderCDexTokenURL     string
+	ProviderCDexClientID     string
+	ProviderCDexClientKey    string
+	ProviderCDexClientAlg    string
+	ProviderCDexScope        string
+	ProviderCDexClientKID    string
+	ProviderCDexClientSecret string // value, not a path (unlike *ClientKey)
+
 	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
 	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
 	// PROVIDER_DAVINCI_INGRESS (any non-empty value enables). When enabled,
@@ -357,8 +374,22 @@ type config struct {
 	ProviderDavinciIngressBaseURL string
 	// ProviderDavinciIngressClientsFile is the path to the JSON registration file
 	// ([{client_id, alg, public_key_pem, scopes}]). Set by INGRESS_CLIENTS_FILE.
-	// Required when ProviderDavinciIngress is set.
+	// Required when ProviderDavinciIngress or PayerDavinciIngress is set.
 	ProviderDavinciIngressClientsFile string
+
+	// PayerDavinciIngress mounts the payer's Da Vinci ingress for the CDex
+	// attachment request on the payer role: a Task create at each provider's
+	// base (POST /cdex/provider/{provider}/Task) and the bases' listing
+	// (GET /cdex/providers), behind the same SMART Backend Services
+	// token endpoint as the provider's ingress. Set by PAYER_DAVINCI_INGRESS
+	// (any non-empty value enables). When enabled,
+	// PAYER_DAVINCI_INGRESS_BASE_URL and INGRESS_CLIENTS_FILE are required, as
+	// for the provider's (FR-G13 all-or-nothing).
+	PayerDavinciIngress bool
+	// PayerDavinciIngressBaseURL is the payer ingress's CONFIG-PINNED SMART aud
+	// and the base every per-provider base is built under. Set by
+	// PAYER_DAVINCI_INGRESS_BASE_URL. Required when PayerDavinciIngress is set.
+	PayerDavinciIngressBaseURL string
 
 	// RequireKnownMembers is the participant's opt-in to checking members: on the Da
 	// Vinci CRD/DTR/PAS legs, a subject its system of record does not hold is refused.
@@ -484,11 +515,81 @@ func parsePayerIdentifier(envName, raw string) (shnsdk.PayerIdentifier, error) {
 	return shnsdk.PayerIdentifier{System: system, Value: value}, nil
 }
 
+// providerCDexSettings are the PROVIDER_CDEX_* settings, each with whether
+// it is set.
+func providerCDexSettings(cfg config) []struct {
+	key string
+	set bool
+} {
+	return []struct {
+		key string
+		set bool
+	}{
+		{"PROVIDER_CDEX_TASK_URL", cfg.ProviderCDexTaskURL != ""},
+		{"PROVIDER_CDEX_TOKEN_URL", cfg.ProviderCDexTokenURL != ""},
+		{"PROVIDER_CDEX_CLIENT_ID", cfg.ProviderCDexClientID != ""},
+		{"PROVIDER_CDEX_CLIENT_KEY", cfg.ProviderCDexClientKey != ""},
+		{"PROVIDER_CDEX_CLIENT_ALG", cfg.ProviderCDexClientAlg != ""},
+		{"PROVIDER_CDEX_SCOPE", cfg.ProviderCDexScope != ""},
+		{"PROVIDER_CDEX_CLIENT_KID", cfg.ProviderCDexClientKID != ""},
+		{"PROVIDER_CDEX_CLIENT_SECRET", cfg.ProviderCDexClientSecret != ""},
+	}
+}
+
+// checkProviderCDex is the provider's own Task endpoint's admission: a
+// provider's setting, required with its whole credential block and with the
+// Da Vinci ingress whose base the Task's documentation return path is built
+// under (E-11); a credential without the endpoint is a partial block.
+func checkProviderCDex(role string, cfg config) error {
+	var set []string
+	for _, s := range providerCDexSettings(cfg) {
+		if s.set {
+			set = append(set, s.key)
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	if role != "provider" {
+		return fmt.Errorf("gateway: %s is provider-only (role=%q): only a provider takes the payer's attachment request", strings.Join(set, ", "), role)
+	}
+	if cfg.ProviderCDexTaskURL == "" {
+		return fmt.Errorf("gateway: %s set requires PROVIDER_CDEX_TASK_URL, the provider's own Task endpoint", strings.Join(set, ", "))
+	}
+	if !cfg.ProviderDavinciIngress || cfg.ProviderDavinciIngressBaseURL == "" {
+		return fmt.Errorf("gateway: PROVIDER_CDEX_TASK_URL requires PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL: the Task's payer-url is re-keyed to the documentation return path under that base")
+	}
+	for _, req := range []struct{ key, val string }{
+		{"PROVIDER_CDEX_TOKEN_URL", cfg.ProviderCDexTokenURL},
+		{"PROVIDER_CDEX_CLIENT_ID", cfg.ProviderCDexClientID},
+		{"PROVIDER_CDEX_SCOPE", cfg.ProviderCDexScope},
+	} {
+		if strings.TrimSpace(req.val) == "" {
+			return fmt.Errorf("gateway: PROVIDER_CDEX_TASK_URL requires %s: the Task is forwarded to the provider's own system only with its own credentials", req.key)
+		}
+	}
+	return checkClientAuthModeAlgs("PROVIDER_CDEX", cfg.ProviderCDexClientKey, cfg.ProviderCDexClientAlg, cfg.ProviderCDexClientKID, cfg.ProviderCDexClientSecret, providerCDexAlgs)
+}
+
+// providerCDexAlgs are the private_key_jwt algs the provider's Task forward
+// signs with: SMART Backend Services' two, and RS256, the one the Da Vinci
+// reference provider's authorization server verifies.
+var providerCDexAlgs = []string{"ES384", "RS384", "RS256"}
+
+// smartAlgs are the private_key_jwt algs every other credential block signs
+// with (SMART Backend Services').
+var smartAlgs = []string{"ES384", "RS384"}
+
 // checkClientAuthMode enforces exactly one outbound client-auth mode per
 // credential block: private_key_jwt (KEY+ALG, preferred) or client_secret_post
 // (SECRET). prefix is the env family: "FHIR", "PAYER_DAVINCI" or
 // "PROVIDER_DTR_POPULATE".
 func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
+	return checkClientAuthModeAlgs(prefix, key, alg, kid, secret, smartAlgs)
+}
+
+// checkClientAuthModeAlgs is checkClientAuthMode with the block's own algs.
+func checkClientAuthModeAlgs(prefix, key, alg, kid, secret string, algs []string) error {
 	hasJWT := key != "" || alg != "" || kid != ""
 	switch {
 	case secret != "" && hasJWT:
@@ -499,8 +600,8 @@ func checkClientAuthMode(prefix, key, alg, kid, secret string) error {
 		return fmt.Errorf("gateway: %s_TOKEN_URL requires credentials — either %s_CLIENT_KEY + %s_CLIENT_ALG (private_key_jwt, preferred) or %s_CLIENT_SECRET (client_secret_post)", prefix, prefix, prefix, prefix)
 	case key == "":
 		return fmt.Errorf("gateway: %s_CLIENT_ALG set requires %s_CLIENT_KEY", prefix, prefix)
-	case alg != "ES384" && alg != "RS384":
-		return fmt.Errorf("gateway: %s_CLIENT_ALG must be ES384|RS384, got %q", prefix, alg)
+	case !slices.Contains(algs, alg):
+		return fmt.Errorf("gateway: %s_CLIENT_ALG must be %s, got %q", prefix, strings.Join(algs, "|"), alg)
 	}
 	return nil
 }
@@ -709,10 +810,21 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderDTRPopulateClientKID:    getenv("PROVIDER_DTR_POPULATE_CLIENT_KID"),
 		ProviderDTRPopulateClientSecret: getenv("PROVIDER_DTR_POPULATE_CLIENT_SECRET"),
 
+		ProviderCDexTaskURL:      strings.TrimSpace(getenv("PROVIDER_CDEX_TASK_URL")),
+		ProviderCDexTokenURL:     getenv("PROVIDER_CDEX_TOKEN_URL"),
+		ProviderCDexClientID:     getenv("PROVIDER_CDEX_CLIENT_ID"),
+		ProviderCDexClientKey:    getenv("PROVIDER_CDEX_CLIENT_KEY"),
+		ProviderCDexClientAlg:    getenv("PROVIDER_CDEX_CLIENT_ALG"),
+		ProviderCDexScope:        getenv("PROVIDER_CDEX_SCOPE"),
+		ProviderCDexClientKID:    getenv("PROVIDER_CDEX_CLIENT_KID"),
+		ProviderCDexClientSecret: getenv("PROVIDER_CDEX_CLIENT_SECRET"),
+
 		ProviderDavinciIngress: getenv("PROVIDER_DAVINCI_INGRESS") != "",
 
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
 		ProviderDavinciIngressClientsFile: getenv("INGRESS_CLIENTS_FILE"),
+		PayerDavinciIngress:               getenv("PAYER_DAVINCI_INGRESS") != "",
+		PayerDavinciIngressBaseURL:        getenv("PAYER_DAVINCI_INGRESS_BASE_URL"),
 		ScenarioCallersFile:               getenv("SCENARIO_CALLERS_FILE"),
 
 		ignoredSettingLines: append(ignoredSettingLines(getenv), noEffectSettingLines(getenv)...),
@@ -1124,6 +1236,41 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.IngressBaseURL = cfg.ProviderDavinciIngressBaseURL
 		cfg.IngressClients = clients
 	}
+	// The payer's ingress, by the same all-or-nothing rule (FR-G13).
+	if cfg.PayerDavinciIngress {
+		if role != "payer" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_INGRESS is payer-only (role=%q)", role)
+		}
+		if cfg.PayerDavinciIngressBaseURL == "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_INGRESS requires PAYER_DAVINCI_INGRESS_BASE_URL (the config-pinned SMART aud)")
+		}
+		// Every per-provider base the gateway lists is built under this base:
+		// a base they cannot be built under refuses to boot, so a serving
+		// gateway never lists a base it cannot build.
+		if _, err := cdexroute.ProviderBase(cfg.PayerDavinciIngressBaseURL, "boot-check"); err != nil {
+			return config{}, fmt.Errorf("gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: %v", cfg.PayerDavinciIngressBaseURL, err)
+		}
+		clients, err := loadIngressClientsScoped(cfg.ProviderDavinciIngressClientsFile, engine.TaskWriteScope)
+		if err != nil {
+			return config{}, fmt.Errorf("gateway: ingress clients: %w", err)
+		}
+		if len(clients) == 0 {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_INGRESS requires INGRESS_CLIENTS_FILE with >=1 registered client (a mounted-but-universally-401 ingress is a footgun)")
+		}
+		// Every route the payer ingress mounts takes only a bearer granted
+		// engine.TaskWriteScope: a client that cannot be granted it would be
+		// refused on every call, so it is a registration error, not a client.
+		for id, c := range clients {
+			if !slices.Contains(c.Scopes, engine.TaskWriteScope) {
+				return config{}, fmt.Errorf("gateway: ingress client %q lists no %s: every route of the payer ingress takes only a bearer granted it (list it, or leave scopes out)", id, engine.TaskWriteScope)
+			}
+		}
+		cfg.IngressBaseURL = cfg.PayerDavinciIngressBaseURL
+		cfg.IngressClients = clients
+	}
+	if err := checkProviderCDex(role, cfg); err != nil {
+		return config{}, err
+	}
 	if cfg.ScenarioCallersFile != "" {
 		if role != "provider" {
 			return config{}, fmt.Errorf("gateway: SCENARIO_CALLERS_FILE is provider-only (role=%q): no other role serves /scenario", role)
@@ -1241,6 +1388,13 @@ func loadScenarioCallers(path string) (map[string]ed25519.PublicKey, error) {
 // Returns nil (not error) when path is empty — the caller then enforces the
 // must-have->=1-client invariant.
 func loadIngressClients(path string) (map[string]engine.IngressClientRegistration, error) {
+	return loadIngressClientsScoped(path, "system/Davinci.write")
+}
+
+// loadIngressClientsScoped is loadIngressClients with the scope a client that
+// lists none is registered for: the provider ingress's system/Davinci.write,
+// or, on a payer's, the attachment-request Task routes' engine.TaskWriteScope.
+func loadIngressClientsScoped(path, defaultScope string) (map[string]engine.IngressClientRegistration, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -1291,7 +1445,7 @@ func loadIngressClients(path string) (map[string]engine.IngressClientRegistratio
 		}
 		scopes := c.Scopes
 		if len(scopes) == 0 {
-			scopes = []string{"system/Davinci.write"}
+			scopes = []string{defaultScope}
 		}
 		out[c.ClientID] = engine.IngressClientRegistration{Alg: c.Alg, PublicKeyPEM: pemBytes, Scopes: scopes, Module: c.Module}
 	}
@@ -1339,11 +1493,24 @@ func optionalURLs(cfg config) [][2]string {
 		{"PAYER_DAVINCI_TOKEN_URL", cfg.PayerDavinciTokenURL},
 		{"PROVIDER_DTR_POPULATE_URL", cfg.ProviderDTRPopulateURL},
 		{"PROVIDER_DTR_POPULATE_TOKEN_URL", cfg.ProviderDTRPopulateTokenURL},
+		{"PROVIDER_CDEX_TASK_URL", cfg.ProviderCDexTaskURL},
+		{"PROVIDER_CDEX_TOKEN_URL", cfg.ProviderCDexTokenURL},
 		{"PROVIDER_DAVINCI_INGRESS_BASE_URL", cfg.ProviderDavinciIngressBaseURL},
+		{"PAYER_DAVINCI_INGRESS_BASE_URL", cfg.PayerDavinciIngressBaseURL},
 		{"SHN_DISCOVERY_URL", cfg.DiscoveryURL},
 		{"AUTHZ_PUBKEY_URL", cfg.AuthzPubkeyURL},
 		{"HUB_TRANSPORT_KEY_URL", cfg.HubTransportKeyURL},
 	}
+}
+
+// payerDavinciPartnerBases names the partner payer system's bases among
+// optionalURLs: the targets PAYER_DAVINCI_BACKEND_HEADERS is sent to. Named one
+// by one, never by prefix: PAYER_DAVINCI_TOKEN_URL and
+// PAYER_DAVINCI_INGRESS_BASE_URL (this gateway's own base) share it.
+var payerDavinciPartnerBases = map[string]bool{
+	"PAYER_DAVINCI_BASE_URL":     true,
+	"PAYER_DAVINCI_DTR_BASE_URL": true,
+	"PAYER_DAVINCI_PAS_BASE_URL": true,
 }
 
 // checkTargets derives the /internal/checks probe targets from
@@ -1375,9 +1542,10 @@ func checkTargets(cfg config) []checks.Target {
 		if name == "PAYER_DAVINCI_BASE_URL" {
 			t.DeclaredVersions = cfg.PayerDavinciContractVersions
 		}
-		if strings.HasPrefix(name, "PAYER_DAVINCI_") && name != "PAYER_DAVINCI_TOKEN_URL" {
+		if payerDavinciPartnerBases[name] {
 			// The partner's bases are probed the way they are called; the token
-			// endpoint never sees the partner's routing headers.
+			// endpoint and this gateway's own ingress base never see the
+			// partner's routing headers.
 			t.Headers = cfg.PayerDavinciBackendHeaders
 		}
 		switch name {
@@ -1400,6 +1568,9 @@ func checkTargets(cfg config) []checks.Target {
 		case "PROVIDER_DTR_POPULATE_TOKEN_URL":
 			t.Kind = checks.KindToken
 			t.TokenFetch = providerDTRPopulateTokenFetch(cfg)
+		case "PROVIDER_CDEX_TOKEN_URL":
+			t.Kind = checks.KindToken
+			t.TokenFetch = providerCDexTokenFetch(cfg)
 		default:
 			t.Kind = checks.KindReachable
 		}
@@ -2125,7 +2296,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		// Replay and exchange stay unconditional — the Hub-assertion guard and the
 		// exchange seam run on every role.
 		ingressKey := "off"
-		if cfg.ProviderDavinciIngress {
+		if cfg.ProviderDavinciIngress || cfg.PayerDavinciIngress {
 			ks := pgstore.NewIngressKeyStore(p, bundle.Identity.HolderID, clock)
 			ingressKeys = ks
 			keyTimes = ks.KeyTimes
@@ -2390,7 +2561,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwOpts = append(gwOpts, engine.WithPopulator(engine.NewNativePopulatorWithFailureObserver(ppc, cfg.ProviderDTRPopulateURL, populateFailureObserver(stdout))))
 		operatedPopulate = true
 	}
-	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress
+	// The provider's own Task endpoint: the payer's attachment request is
+	// forwarded there with the client authorized to the provider's own
+	// system (loadConfig requires the block with the endpoint).
+	if cfg.ProviderCDexTaskURL != "" {
+		tc, err := providerCDexHTTPClient(cfg)
+		if err != nil {
+			return b, fmt.Errorf("gateway: PROVIDER_CDEX_*: %w", err)
+		}
+		gwCfg.ProviderCDexTaskURL = cfg.ProviderCDexTaskURL
+		gwCfg.ProviderCDexTaskClient = tc
+	}
+	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress || cfg.PayerDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
 	gwCfg.ScenarioCallers = cfg.ScenarioCallers
@@ -3222,9 +3404,11 @@ const (
 )
 
 // capabilityDeclaration is what this gateway's system takes as a recipient: the
-// network's legs it compiles for its role.
+// network's legs it compiles for its role, and each one its role takes only
+// once its participant configures it whose setting is set (engine.TakenLegs:
+// the payer's attachment request, with PROVIDER_CDEX_TASK_URL).
 func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
-	return shnsdk.CapabilityDeclaration{Legs: networkLegs(engine.AnsweredLegs(cfg.Role)), AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes}
+	return shnsdk.CapabilityDeclaration{Legs: networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL}.TakenLegs()), AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes}
 }
 
 // networkLegs is legs without any leg the SDK does not name: a test profile's,
@@ -3488,6 +3672,56 @@ func providerDTRPopulateHTTPClient(cfg config) (*http.Client, error) {
 	return hc, nil
 }
 
+// providerCDexHTTPClient is the client the provider's Task forward posts
+// with: authenticated per its PROVIDER_CDEX_* block's mode, through the same
+// smartauth client every connector uses. A token refusal surfaces as the
+// forward's error; there is no unauthenticated fallback.
+func providerCDexHTTPClient(cfg config) (*http.Client, error) {
+	sc, err := providerCDexSmartConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.diagnostic.smart(&sc)
+	hc, err := smartauth.NewHTTPClient(sc)
+	if err != nil {
+		return nil, fmt.Errorf("Task forward smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
+// providerCDexSmartConfig is the PROVIDER_CDEX_* SMART config, its
+// credential loaded, tagged cdex-task (the forward) and cdex-task-token
+// (its token endpoint).
+func providerCDexSmartConfig(cfg config) (smartauth.Config, error) {
+	sc := smartauth.Config{
+		TokenURL: cfg.ProviderCDexTokenURL, ClientID: cfg.ProviderCDexClientID, Scope: cfg.ProviderCDexScope,
+		Observer: cfg.tokenNotes,
+	}
+	tagSmart(cfg.certs, &sc, cfg.certs.Wrap(endpointcert.Of(endpointcert.CDexTask), nil), endpointcert.CDexTaskToken)
+	if cfg.ProviderCDexClientSecret != "" {
+		sc.ClientSecret = cfg.ProviderCDexClientSecret
+		return sc, nil
+	}
+	key, err := loadSmartKey(cfg.ProviderCDexClientKey, cfg.ProviderCDexClientAlg)
+	if err != nil {
+		return smartauth.Config{}, fmt.Errorf("load Task forward client key: %w", err)
+	}
+	sc.Alg, sc.Key, sc.KID = cfg.ProviderCDexClientAlg, key, cfg.ProviderCDexClientKID
+	return sc, nil
+}
+
+// providerCDexTokenFetch is fhirTokenFetch's PROVIDER_CDEX_* counterpart.
+// Same fresh-TokenSource-per-invocation rule applies (see fhirTokenFetch's doc).
+func providerCDexTokenFetch(cfg config) func(context.Context) error {
+	sc, err := providerCDexSmartConfig(cfg)
+	if err != nil {
+		return func(context.Context) error { return err }
+	}
+	return func(ctx context.Context) error {
+		return classifyTokenErr(errFromToken(&smartauth.TokenSource{Config: sc}, ctx))
+	}
+}
+
 // providerDTRPopulateSmartBase is the PROVIDER_DTR_POPULATE_* SMART config
 // before its credential: the client, scope and tagged transports both the
 // $populate client and its token check use.
@@ -3500,8 +3734,9 @@ func providerDTRPopulateSmartBase(cfg config) smartauth.Config {
 	return sc
 }
 
-// loadSmartKey reads a PEM-encoded EC or RSA private key from path. Only ES384
-// and RS384 are supported (AI-11 / OWD-6: no shared-secret algorithms).
+// loadSmartKey reads a PEM-encoded EC or RSA private key from path. ES384,
+// RS384 and, for the blocks that admit it (checkClientAuthModeAlgs), RS256
+// are supported (AI-11 / OWD-6: no shared-secret algorithms).
 func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -3510,7 +3745,7 @@ func loadSmartKey(path, alg string) (crypto.PrivateKey, error) {
 	switch alg {
 	case "ES384":
 		return jwt.ParseECPrivateKeyFromPEM(pemBytes)
-	case "RS384":
+	case "RS384", "RS256":
 		return jwt.ParseRSAPrivateKeyFromPEM(pemBytes)
 	default:
 		return nil, fmt.Errorf("unsupported alg %q", alg)

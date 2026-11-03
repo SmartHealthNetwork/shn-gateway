@@ -124,6 +124,32 @@ func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOpt
 	return lp
 }
 
+// answering makes the rig's gateway one of the role leg's row names for its
+// recipient (the first), as the network delivers the leg only to one: a
+// facility's for a federated query, a PHG's for a patient-authored DTR item.
+// The rig is otherwise the payer's.
+func (p *levelPayer) answering(t *testing.T, leg string) {
+	t.Helper()
+	spec, ok := legSpecFor(leg)
+	if !ok || len(spec.RecipientRoles) == 0 {
+		t.Fatalf("no recipient role for %s", leg)
+	}
+	p.g.cfg.Role = spec.RecipientRoles[0]
+}
+
+// partyAnswering is the refusing party the record names for the gateway
+// answering leg, by its row's recipient role: the payer's gateway on a
+// payer's leg. A facility's or a PHG's gateway has no party of its own in the
+// record's closed list yet, so it reads "other", unknown, never a guessed
+// payer's (TestRecipientParty_ByTheLegsRow pins each).
+func partyAnswering(leg string) string {
+	spec, _ := legSpecFor(leg)
+	if len(spec.RecipientRoles) == 0 {
+		return ExchangeOther
+	}
+	return gatewayParty(spec.RecipientRoles[0])
+}
+
 // payerAnswer is what the requester received: the application status and
 // body of the response frame, or the raw refusal the payer gateway wrote.
 type payerAnswer struct {

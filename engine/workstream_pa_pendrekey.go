@@ -16,8 +16,8 @@ import (
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
-// errNoReturnPath: the gateway has no network return path to write, so the
-// return-path re-key (E-10) cannot be made. A released gateway never reaches
+// errNoReturnPath: the gateway has no network return path to write, so a
+// return-path re-key (E-10, E-11) cannot be made. A released gateway never reaches
 // it: one serving the ingress refuses to start without a base a return path
 // can be built under (the app's PROVIDER_DAVINCI_INGRESS_BASE_URL check, and
 // New's checkIngressBase, which accepts exactly the bases cdexroute.ReturnBase
@@ -25,7 +25,8 @@ import (
 // IngressBaseURL cleared, serves the ingress without one.
 var errNoReturnPath = errors.New("no documentation return path")
 
-// noRekeyedAnswer is pendReturnRekey's payload when it returns an error.
+// noRekeyedAnswer is the payload a return-path re-key (pendReturnRekey,
+// cdexTaskReturnRekey) returns with an error.
 var noRekeyedAnswer relay.Payload
 
 // pasTempCodesSystem is the PAS code system that types a Task's payer-url input.

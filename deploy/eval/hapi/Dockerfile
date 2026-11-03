@@ -55,8 +55,9 @@ COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69
 COPY validator/truststore/drop-emsign-roots.sh /truststore/drop-emsign-roots.sh
 RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacerts
 
-# The backported WAR on the pinned distroless Java base upstream builds HAPI on
-# (same JRE and env), without upstream's unused bundled jars.
+# The backported WAR on the pinned distroless Java base: a later build of the one
+# upstream builds HAPI on, with the same environment apart from the JRE's version (newer
+# here, of the same feature release), and without upstream's unused bundled jars.
 FROM gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d
 USER 65532:65532
 COPY --from=truststore /out/cacerts /etc/ssl/certs/java/cacerts

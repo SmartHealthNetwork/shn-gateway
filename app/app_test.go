@@ -2772,6 +2772,9 @@ func TestCheckTargets_PayerDavinciBackendHeaders(t *testing.T) {
 		PayerDavinciClientID:       "c1",
 		PayerDavinciClientSecret:   "s1",
 		PayerDavinciBackendHeaders: hdr,
+		// This gateway's own ingress base shares the name prefix and is no
+		// partner base.
+		PayerDavinciIngressBaseURL: "https://payer-gw.example/fhir",
 	}
 	withHeaders := map[string]bool{
 		"PAYER_DAVINCI_BASE_URL": true, "PAYER_DAVINCI_DTR_BASE_URL": true,
@@ -2795,7 +2798,7 @@ func TestCheckTargets_PayerDavinciBackendHeaders(t *testing.T) {
 			t.Errorf("target %s missing", id)
 		}
 	}
-	for _, id := range []string{"PAYER_DAVINCI_TOKEN_URL", "FHIR_DATA_URL", "FHIR_TOKEN_URL", "HUB_URL"} {
+	for _, id := range []string{"PAYER_DAVINCI_TOKEN_URL", "PAYER_DAVINCI_INGRESS_BASE_URL", "FHIR_DATA_URL", "FHIR_TOKEN_URL", "HUB_URL"} {
 		if !seen[id] {
 			t.Errorf("control target %s missing", id)
 		}

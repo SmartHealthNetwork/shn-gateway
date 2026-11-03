@@ -40,7 +40,13 @@ const (
 	IngressBearerTTL = 5 * time.Minute
 	ingressJTIWindow = 5 * time.Minute
 	ingressScope     = "system/Davinci.write"
-	assertionType    = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	// TaskWriteScope is the one scope a payer gateway's attachment-request
+	// Task routes admit (POST <per-provider base>/Task, GET /cdex/providers): SMART
+	// v1's system-level write of the Task resource. It is checked on every
+	// call (ingressScopeRefused), unlike the provider ingress's routes, which
+	// take any bearer the token endpoint issued.
+	TaskWriteScope = "system/Task.write"
+	assertionType  = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
 	// maxAssertionLifetime caps the client_assertion lifetime (RFC 7523 / SMART
 	// Backend Services recommends <= 5 min). It MUST be <= ingressJTIWindow so a jti is
@@ -74,6 +80,10 @@ type ingressAuthServer struct {
 	// Gateway.noteStoreError). Set by New; nil in a bare-constructed server, and
 	// every call site is nil-guarded.
 	storeErr func(store string)
+	// scopes are the scopes the SMART configuration advertises: the ones the
+	// routes of this gateway's ingress take. Set by New (ingressScopes); a
+	// bare-constructed server advertises the provider ingress's.
+	scopes []string
 }
 
 // noteStoreError counts one store failure on the token endpoint. Nil-safe.
@@ -379,9 +389,16 @@ func scopeAllowed(requested string, allowed []string) bool {
 // resolved is never admitted. The outage is counted here, at the one place that knows a
 // store call failed.
 func (s *ingressAuthServer) verifyBearer(r *http.Request) (client string, ok bool, unavailable bool) {
+	client, _, ok, unavailable = s.verifyBearerScope(r)
+	return client, ok, unavailable
+}
+
+// verifyBearerScope is verifyBearer with the scope the token endpoint granted
+// the bearer ("" when the client asked for none).
+func (s *ingressAuthServer) verifyBearerScope(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	raw, present := bearerToken(r.Header.Get("Authorization"))
 	if !present {
-		return "", false, false
+		return "", "", false, false
 	}
 	storeDown := false
 	claims := jwt.MapClaims{}
@@ -415,14 +432,16 @@ func (s *ingressAuthServer) verifyBearer(r *http.Request) (client string, ok boo
 		jwt.WithTimeFunc(s.now))
 	if err != nil && storeDown {
 		s.noteStoreError(storeErrIngressKey)
-		return "", false, true
+		return "", "", false, true
 	}
 	if err != nil {
-		return "", false, false
+		return "", "", false, false
 	}
-	// The client the gateway issued the bearer to (signBearer).
+	// The client the gateway issued the bearer to (signBearer), and the scope
+	// it granted.
 	client, _ = claims["client_id"].(string)
-	return client, true, false
+	scope, _ = claims["scope"].(string)
+	return client, scope, true, false
 }
 
 // audUnder reports whether aud is the config base itself or a path strictly under it.
@@ -441,28 +460,51 @@ func audUnder(aud, base string) bool {
 // from verifyBearer (the gateway's OWN ephemeral ES384 bearer); the two are token-shape
 // DISJOINT (an issued bearer carries no iss), so the OR in ingressAuthOK cannot fail open.
 // It touches no shared store, so it keeps answering through a key-store outage.
-// Authority is edge-only (never reaches authorize()); org-level TPO; scope is advisory and
-// NOT enforced on either path. A registered client implicitly gains both auth modes.
+// Authority is edge-only (never reaches authorize()); org-level TPO. Scope is not
+// enforced on a provider's ingress routes, by either path; a payer's Task routes
+// require TaskWriteScope on both (ingressScopeRefused). A registered client implicitly
+// gains both auth modes.
 func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
+	client, _, ok := s.verifyDirectBearerScope(r)
+	return client, ok
+}
+
+// verifyDirectBearerScope is verifyDirectBearer with the scope the token
+// states, kept only when the client's registration allows it ("" otherwise):
+// a client cannot grant itself a scope its registration does not.
+func (s *ingressAuthServer) verifyDirectBearerScope(r *http.Request) (client, scope string, ok bool) {
+	client, claims, ok := s.verifyDirectBearerClaims(r)
+	if !ok {
+		return "", "", false
+	}
+	if stated, _ := claims["scope"].(string); stated != "" && scopeAllowed(stated, s.clients[client].Scopes) {
+		scope = stated
+	}
+	return client, scope, true
+}
+
+// verifyDirectBearerClaims is verifyDirectBearer with the token's verified
+// claims.
+func (s *ingressAuthServer) verifyDirectBearerClaims(r *http.Request) (string, jwt.MapClaims, bool) {
 	raw, present := bearerToken(r.Header.Get("Authorization"))
 	if !present {
-		return "", false
+		return "", nil, false
 	}
 
 	// Peek iss (unverified) → select the registered key + alg. An issued ephemeral bearer
 	// has no iss, so it fails here — keeping the two paths disjoint.
 	var unv jwt.MapClaims
 	if _, _, err := jwt.NewParser().ParseUnverified(raw, &unv); err != nil {
-		return "", false
+		return "", nil, false
 	}
 	clientID, _ := unv["iss"].(string)
 	if clientID == "" {
-		return "", false
+		return "", nil, false
 	}
 	reg, ok := s.clients[clientID]
 	pub := s.pubKeys[clientID]
 	if !ok || pub == nil {
-		return "", false
+		return "", nil, false
 	}
 
 	// alg PINNED to the registration (no alg confusion); exp required; signature vs the
@@ -474,20 +516,20 @@ func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
 		jwt.WithExpirationRequired(),
 		jwt.WithTimeFunc(s.now),
 	).ParseWithClaims(raw, claims, func(*jwt.Token) (any, error) { return pub, nil }); err != nil {
-		return "", false
+		return "", nil, false
 	}
 	// sub is OPTIONAL: br-provider's CDS client JWT omits it (verified against the real
 	// token — it emits iss/aud/exp/iat/jti only). RFC 7523 client auth identifies the
 	// client by iss, which we verify against the REGISTERED key; an absent sub is accepted,
 	// but a PRESENT sub that differs from iss is rejected (no identity confusion).
 	if sub, present := claims["sub"].(string); present && sub != clientID {
-		return "", false
+		return "", nil, false
 	}
 	// aud path-boundary-pinned to the config base (never r.Host). At least one aud entry
 	// must be the base or a path under it.
 	auds, err := claims.GetAudience()
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	audOK := false
 	for _, a := range auds {
@@ -497,21 +539,21 @@ func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
 		}
 	}
 	if !audOK {
-		return "", false
+		return "", nil, false
 	}
 	// exp capped to <= now + maxAssertionLifetime (same as the assertion path).
 	expTime, err := claims.GetExpirationTime()
 	if err != nil || expTime == nil || expTime.Time.After(s.now().Add(maxAssertionLifetime)) {
-		return "", false
+		return "", nil, false
 	}
 	// jti PRESENCE required but NOT one-time-use: a presented bearer is reusable within its
 	// exp, matching the replayable issued bearer (single-use would wedge
 	// br-provider's discovery-GET-then-hook-POST with one JWT and buys no security over the
 	// existing replayable-bearer posture).
 	if jtiVal, _ := claims["jti"].(string); jtiVal == "" {
-		return "", false
+		return "", nil, false
 	}
-	return clientID, true
+	return clientID, claims, true
 }
 
 func (s *ingressAuthServer) handleSmartConfig(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +563,14 @@ func (s *ingressAuthServer) handleSmartConfig(w http.ResponseWriter, r *http.Req
 		"grant_types_supported":                            []string{"client_credentials"},
 		"token_endpoint_auth_methods_supported":            []string{"private_key_jwt"},
 		"token_endpoint_auth_signing_alg_values_supported": []string{"ES384", "RS384"},
-		"scopes_supported":                                 []string{ingressScope},
+		"scopes_supported":                                 s.supportedScopes(),
 	})
+}
+
+// supportedScopes are the scopes the SMART configuration advertises.
+func (s *ingressAuthServer) supportedScopes() []string {
+	if len(s.scopes) == 0 {
+		return []string{ingressScope}
+	}
+	return s.scopes
 }

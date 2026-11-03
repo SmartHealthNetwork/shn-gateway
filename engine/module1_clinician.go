@@ -151,10 +151,10 @@ const msgSentNPIInvalid = "npi must be a ten-digit NPI with a valid check digit"
 // requireValidStatedNPI refuses a request whose stated npi is not an NPI: it
 // would be stated on the participant's behalf as one. It returns false when
 // it refused.
-func requireValidStatedNPI(w http.ResponseWriter, npi string) bool {
+func requireValidStatedNPI(ctx context.Context, w http.ResponseWriter, npi string) bool {
 	if npi == "" || ValidNPI(npi) {
 		return true
 	}
-	writeJSON(w, http.StatusBadRequest, map[string]string{"error": msgSentNPIInvalid})
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(ctx, msgSentNPIInvalid)})
 	return false
 }

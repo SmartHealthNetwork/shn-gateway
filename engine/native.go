@@ -34,6 +34,9 @@ import (
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
 
 type nativeResponder struct {
+	// party is whose own system the responder forwards to, as its errors and
+	// log lines name it: "" for the payer's (WithUpstreamParty).
+	party      string
 	diagnostic DiagnosticSink
 	client     *http.Client
 	baseURL    string // the participant's own system's base; a workstream's option may name another for an operation
@@ -140,6 +143,37 @@ func (n *nativeResponder) RequireSharedLineForTest() bool { return n.requireShar
 
 // ClientForTest is the client the responder forwards to the payer's system with.
 func (n *nativeResponder) ClientForTest() *http.Client { return n.client }
+
+// WithUpstreamParty names whose own system the responder forwards to, as its
+// errors and log lines say ("upstream provider …"): a provider's gateway
+// forwarding the payer's attachment request to its own Task endpoint. The
+// default is the payer's.
+func WithUpstreamParty(party string) NativeOption {
+	return func(n *nativeResponder) { n.party = party }
+}
+
+// upstreamParty is whose system the responder forwards to.
+func (n *nativeResponder) upstreamParty() string {
+	if n.party == "" {
+		return "payer"
+	}
+	return n.party
+}
+
+// forwardHeadersKey carries the headers a leg's handler sets on its forward
+// to the participant's own system.
+type forwardHeadersKey struct{}
+
+// withForwardHeaders returns ctx carrying h for the forward (nativeResponder.post).
+func withForwardHeaders(ctx context.Context, h http.Header) context.Context {
+	return context.WithValue(ctx, forwardHeadersKey{}, h)
+}
+
+// forwardHeadersFrom is the headers withForwardHeaders set, nil when none.
+func forwardHeadersFrom(ctx context.Context) http.Header {
+	h, _ := ctx.Value(forwardHeadersKey{}).(http.Header)
+	return h
+}
 
 // WithBackendHeaders sets fixed request headers for a partner system that
 // routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
@@ -376,13 +410,16 @@ type upstreamReply struct {
 // (upstreamReply{}, LegResult{}, error) → responderFailed answers it as this
 // gateway's own framed 502 or 504 (responderFailure).
 func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
+	// The label names whose system the call is to: the payer's, unless the
+	// responder forwards to another party's (WithUpstreamParty).
+	label = n.upstreamParty() + " " + label
 	k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 	body, err := relay.Transmit(p, relay.Check(k))
 	if err != nil {
 		// The responder has no gateway: the refusal is logged here and
 		// observed by the inbound handler (responderFailed).
 		(*Gateway)(nil).ownershipRefused(k, err)
-		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s request not sent: %w", label, err)
+		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: %w", label, err)
 	}
 	// The call runs under the responder's own deadline, when it has one;
 	// the request's end still cuts it short (callEndedClass reads which).
@@ -410,7 +447,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	}
 	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
-		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream payer %s request build failed: %w", label, err)
+		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request build failed: %w", label, err)
 	}
 	// Each leg's own media type (or the sender's declared FHIR media type),
 	// as a direct client would send it — never application/json on a FHIR
@@ -419,6 +456,13 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	req.Header.Set("Content-Type", ct)
 	req.Header.Set("Accept", acceptFor(ct))
 	n.applyBackendHeaders(req)
+	// The headers a leg's handler sets on this forward (forwardHeaders: the
+	// payer's attachment request names its requester), and the disclosure
+	// of each registered edit the network discloses on it (E-11).
+	for name, values := range forwardHeadersFrom(ctx) {
+		req.Header[name] = append([]string(nil), values...)
+	}
+	setEditedHeader(req.Header, p)
 	if n.noBackendCorrelation {
 		req.Header.Del(CorrelationHeader)
 	} else {
@@ -468,10 +512,10 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		}
 		if timedOut() {
 			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, sent)
-			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s did not answer within %s: %w", label, n.backendDeadline, err), sent: sent, timedOut: true}
+			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s did not answer within %s: %w", label, n.backendDeadline, err), sent: sent, timedOut: true}
 		}
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
-		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s unreachable: %w", label, err), sent: sent}
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s unreachable: %w", label, err), sent: sent}
 	}
 	// The payer's system answered: the edits the forward carried were sent.
 	x.sent(p)
@@ -483,7 +527,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	// system answered, so the refusal says it was delivered (responderFailed).
 	if isBodyTooLarge(err) {
 		x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
-		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s answer over %d bytes: %w", label, maxPartnerBody, errAnswerTooLarge), sent: true}
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s answer over %d bytes: %w", label, maxPartnerBody, errAnswerTooLarge), sent: true}
 	}
 	if capture != nil {
 		capture.response = append([]byte(nil), rb...)
@@ -496,10 +540,10 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		x.backend(resp.StatusCode, x.since(n.now, callStart), class)
 		if timedOut() {
 			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, true)
-			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s answer not read within %s: %w", label, n.backendDeadline, err), sent: true, timedOut: true}
+			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s answer not read within %s: %w", label, n.backendDeadline, err), sent: true, timedOut: true}
 		}
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
-		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream payer %s read failed: %w", label, err), sent: true}
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s read failed: %w", label, err), sent: true}
 	}
 	x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
 	reply, result, err := upstreamAnswer(resp, rb, label)
@@ -564,7 +608,7 @@ func logUpstreamAbandoned(ctx context.Context, label, leg, rawURL string, elapse
 	if written {
 		wrote = "yes"
 	}
-	log.Printf("gateway: upstream payer %s call abandoned after %.1fs: the request it serves ended (%v) (host %s, leg %s, correlation %s, request written: %s)", label, elapsed.Seconds(), cause, host, leg, corr, wrote)
+	log.Printf("gateway: upstream %s call abandoned after %.1fs: the request it serves ended (%v) (host %s, leg %s, correlation %s, request written: %s)", label, elapsed.Seconds(), cause, host, leg, corr, wrote)
 }
 
 // deadlineSpent is a forward never sent: the responder's deadline had passed
@@ -580,7 +624,7 @@ func (e *deadlineSpent) Error() string {
 // sent because its own work before the call used the deadline.
 func logDeadlineSpent(ctx context.Context, label, leg string, deadline time.Duration) {
 	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
-	log.Printf("gateway: upstream payer %s call not sent: this gateway's own work used its %s deadline for its system: answered 504 (leg %s, correlation %s)", label, deadline, leg, corr)
+	log.Printf("gateway: upstream %s call not sent: this gateway's own work used its %s deadline for its system: answered 504 (leg %s, correlation %s)", label, deadline, leg, corr)
 }
 
 // logUpstreamTimedOut writes the payer gateway's own line when its call to
@@ -599,7 +643,7 @@ func logUpstreamTimedOut(ctx context.Context, label, leg, rawURL string, deadlin
 	if written {
 		wrote = "yes"
 	}
-	log.Printf("gateway: upstream payer %s call timed out after %s, this gateway's deadline for its system: answered 504 (host %s, leg %s, correlation %s, request written: %s)", label, deadline, host, leg, corr, wrote)
+	log.Printf("gateway: upstream %s call timed out after %s, this gateway's deadline for its system: answered 504 (host %s, leg %s, correlation %s, request written: %s)", label, deadline, host, leg, corr, wrote)
 }
 
 // upstreamAnswer classifies a read upstream response for post and get.

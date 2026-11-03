@@ -76,9 +76,15 @@ var errNoClinicalContext = errors.New("no clinical context for member")
 var errPopulateUpstream = errors.New("$populate upstream failed")
 
 // errPopulateForeignSubject is the native foreign-subject fence: the operated engine returned a QR
-// about a patient other than the one we asked to populate. Maps to 502. The message is kept stable
-// ("...subject does not match...") since it is the participant-visible rejection reason.
-var errPopulateForeignSubject = errors.New("populated QR subject does not match patient")
+// about a patient other than the one we asked to populate. It reads as the gateway's own subject
+// fence does (msgFillForeignSubject): SHN's own fill failing its check, refused 422 (refuseOwnFill).
+var errPopulateForeignSubject = errors.New(msgFillForeignSubject)
+
+// The answers to a fill that fails this gateway's own check of it (refuseOwnFill).
+const (
+	msgFillForeignSubject   = "populated QR subject does not match patient"
+	msgFillForeignCanonical = "populated QR questionnaire does not match canonical"
+)
 
 // managedPopulator is the in-house backend: today's ClinicalContext + FillQuestionnaire,
 // byte-preserved behind the seam. The demo GREEN-KEEPER — FillQuestionnaire fails

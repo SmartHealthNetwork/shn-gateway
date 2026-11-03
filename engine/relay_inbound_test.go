@@ -41,6 +41,9 @@ type inboundTestRequester struct {
 type inboundAuthzStub struct {
 	authzPriv ed25519.PrivateKey
 	clock     func() time.Time
+	// holder is the answering holder the minted token names; "payer" when
+	// unset, the recipient every payer-side suite builds.
+	holder string
 }
 
 func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -56,12 +59,16 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 		PayloadHash   string `json:"payloadHash"`
 	}
 	_ = json.Unmarshal(body, &authReq)
+	holder := s.holder
+	if holder == "" {
+		holder = "payer"
+	}
 	tok := shnsdk.Token{
 		Operation:     authReq.Operation,
 		Scope:         "crd-context",
 		Subject:       authReq.SubjectPCI,
 		Frame:         authReq.Frame,
-		Holder:        "payer",
+		Holder:        holder,
 		CorrelationID: authReq.CorrelationID,
 		Expiry:        s.clock().Add(time.Hour),
 		PayloadHash:   authReq.PayloadHash,

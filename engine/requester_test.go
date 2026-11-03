@@ -304,6 +304,7 @@ func TestRequesterGuard_EveryLegRefusedBeforeItsHandler(t *testing.T) {
 	for _, leg := range networkLegs() {
 		t.Run(leg, func(t *testing.T) {
 			p, ct := guardPayer(t, EnforcementStrict)
+			p.answering(t, leg)
 			var validations atomic.Int32
 			p.g.cfg.Validator = guardValidations{p.g.cfg.Validator, &validations}
 			for key, v := range p.g.cfg.ValidatorsByContractLine {

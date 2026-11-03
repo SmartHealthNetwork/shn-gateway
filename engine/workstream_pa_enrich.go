@@ -9,6 +9,10 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
+	"time"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // nativeEnrichment is the one hook through which a participant's own
@@ -51,13 +55,27 @@ type paGatewayState struct {
 	// managed populator over the gateway's system of record unless
 	// WithPopulator sets another.
 	populator Populator
+	// cdexTask is the forward to the provider's own Task endpoint, on a
+	// provider whose participant sets one (Config.ProviderCDexTaskURL); nil
+	// otherwise, when the payer's attachment request is refused as routing.
+	cdexTask *nativeResponder
 }
+
+// cdexTaskDeadline bounds the provider's Task forward, its token request
+// included, as a payer's forwards are bounded by default: the requester's
+// leg budget less five seconds, so the provider gateway's own answer (a
+// framed 504 naming the provider's system) reaches the payer inside it.
+var cdexTaskDeadline = shnsdk.NewClient().Timeout - 5*time.Second
 
 // newGatewayState: the PA workstream's state on a new gateway, its hook
 // installed (or not) as the participant's opt-in says, and its populator the
 // managed one over the system of record New has decorated.
 func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
 	st := &paGatewayState{populator: newManagedPopulator(g.cfg.SoR)}
+	if url := strings.TrimSpace(g.cfg.ProviderCDexTaskURL); url != "" && g.cfg.Role == "provider" {
+		st.cdexTask = NewNativeResponder(g.cfg.ProviderCDexTaskClient, url, g.cfg.Clock, WithUpstreamParty("provider"),
+			WithBackendDeadline(cdexTaskDeadline))
+	}
 	if err := g.installEnrichment(st); err != nil {
 		return nil, err
 	}

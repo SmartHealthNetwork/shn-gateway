@@ -49,8 +49,7 @@ import (
 // The Validator interface keeps the profile param so explicit per-call pinning
 // stays a one-line change (see validateFHIR).
 
-// Config wires a gateway. The same struct constructs all roles; provider-only
-// fields (HubURL) are unused on the payer/facility side.
+// Config wires a gateway. The same struct constructs all roles.
 type Config struct {
 	Role     string // "provider" | "payer" | "facility"
 	HolderID string
@@ -79,11 +78,14 @@ type Config struct {
 	AuthzPub ed25519.PublicKey
 	// HubTransportPub verifies the per-hop X-Hub-Assertion the Hub sends with
 	// every /substrate/inbound forward (per-hop transport auth). REQUIRED
-	// for roles that mount /substrate/inbound (payer/facility/phg): New panics
-	// without it — mandatory enforcement, no "configured off" state.
+	// for a role that mounts /substrate/inbound, one that takes a leg
+	// (takesLegs): New panics without it — mandatory enforcement, no
+	// "configured off" state.
 	HubTransportPub ed25519.PublicKey
-	HubURL          string // provider only
-	Reg             shnsdk.Registry
+	// HubURL is the Hub a gateway originates its legs through: a provider's,
+	// and a payer's for its attachment request.
+	HubURL string
+	Reg    shnsdk.Registry
 	// RegistryRefresh, when set, re-reads Reg from the deployment's registrar
 	// at once (gateway/app wires its registrar feed read). The inbound route
 	// calls it, single-flight and bounded, when a leg's requester is not in
@@ -269,15 +271,28 @@ type Config struct {
 	// engine does NOT foreign-$validate it. false ⇒ an SHN-produced, US-Core-resolvable
 	// package, which still egress-$validates byte-identically. FR-G28.
 	PayerDavinciNative bool
-	// IngressEnabled mounts the Da Vinci ingress routes on the provider role.
-	// Set from PROVIDER_DAVINCI_INGRESS by app.go. The routes fail-closed without
+	// ProviderCDexTaskURL is the provider's own Task endpoint, the full URL a
+	// payer's attachment-request Task is carried to (PROVIDER_CDEX_TASK_URL).
+	// Set, a provider's gateway takes the payer's attachment request
+	// (cdex-attachment-request: TakenLegs, the leg's TakenWhenSet), declares it,
+	// mounts its inbound route and needs the Hub's transport key; unset, it
+	// takes none of that. Provider role only.
+	ProviderCDexTaskURL string
+	// ProviderCDexTaskClient is the client the Task is forwarded with,
+	// authorized to the provider's own system (PROVIDER_CDEX_CLIENT_*, SMART
+	// Backend Services). Required with ProviderCDexTaskURL.
+	ProviderCDexTaskClient *http.Client
+	// IngressEnabled mounts the Da Vinci ingress routes: a provider's, or on a
+	// payer the attachment-request Task routes. Set from PROVIDER_DAVINCI_INGRESS
+	// or PAYER_DAVINCI_INGRESS by app.go. The routes fail-closed without
 	// ingressAuthBypass (real inbound UDAP auth is a planned future enhancement), so
 	// enabling them in prod is safe — they reject every call.
 	IngressEnabled bool
 	// IngressBaseURL is the gateway's CONFIG-PINNED public base URL: the SMART
 	// Backend Services aud (assertion + bearer) and the advertised token endpoint.
 	// Never request-derived (no Host-header spoof). Required when IngressEnabled and
-	// not bypassed. Set from PROVIDER_DAVINCI_INGRESS_BASE_URL by app.go.
+	// not bypassed. Set by app.go from PROVIDER_DAVINCI_INGRESS_BASE_URL on a
+	// provider, or PAYER_DAVINCI_INGRESS_BASE_URL on a payer.
 	IngressBaseURL string
 	// ScenarioCallers are the callers this gateway's /scenario operator routes
 	// admit, by label: each request must carry the caller's own
@@ -626,11 +641,8 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	if cfg.TranslateIGLines && len(cfg.ValidatorsByContractLine) > 0 {
 		cfg.ValidatorsByContractLine, explicit = explicitLanes(cfg.ValidatorsByContractLine)
 	}
-	switch cfg.Role {
-	case "payer", "facility", "phg":
-		if len(cfg.HubTransportPub) != ed25519.PublicKeySize {
-			panic("gateway: HubTransportPub, an Ed25519 public key, required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
-		}
+	if takesLegs(cfg) && len(cfg.HubTransportPub) != ed25519.PublicKeySize {
+		panic("gateway: HubTransportPub, an Ed25519 public key, required for role " + cfg.Role + " (mounts /substrate/inbound; hop-auth has no off state)")
 	}
 	// Observer seam: decorate the SoR BEFORE the workstreams' states are built
 	// below — the PA workstream's managed populator captures cfg.SoR at
@@ -651,6 +663,24 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	// directly. There is NO derived in-process fallback any more — the in-process responder
 	// that used to be synthesized here from Config.Adjudicator is deleted, so a payer with
 	// no occupant refuses to boot instead of quietly serving invented verdicts.
+	// The provider's own Task endpoint is a provider's setting, and its
+	// forward is authorized: a Task URL on another role, or without its
+	// client, refuses to boot rather than declare a leg it cannot deliver.
+	if strings.TrimSpace(cfg.ProviderCDexTaskURL) != "" {
+		if cfg.Role != "provider" {
+			return nil, fmt.Errorf("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) is a provider's own Task endpoint; this gateway's role is %q", cfg.Role)
+		}
+		if cfg.ProviderCDexTaskClient == nil {
+			return nil, errors.New("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) requires ProviderCDexTaskClient, the client authorized to the provider's own system (PROVIDER_CDEX_CLIENT_*)")
+		}
+		// The Task's payer-url is re-keyed to the documentation return path
+		// under the ingress base (E-11), which only the ingress serves:
+		// without it, every re-keyed address would be a route this gateway
+		// does not serve, so the leg is not declared.
+		if !cfg.IngressEnabled || strings.TrimSpace(cfg.IngressBaseURL) == "" {
+			return nil, errors.New("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) requires the Da Vinci ingress (IngressEnabled, PROVIDER_DAVINCI_INGRESS) and its IngressBaseURL (PROVIDER_DAVINCI_INGRESS_BASE_URL), under which the Task's documentation return path is built and served")
+		}
+	}
 	if cfg.Role == "payer" && cfg.Responder == nil {
 		return nil, errors.New("gateway: a payer gateway has no content occupant — set Config.Responder " +
 			"(a native-forward responder over the payer's own Da Vinci endpoint, or your own LegResponder). " +
@@ -742,6 +772,7 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 			return nil, fmt.Errorf("gateway: ingress auth: %w", err)
 		}
 		ia.storeErr = g.noteStoreError
+		ia.scopes = ingressScopes(cfg.Role)
 		g.ingressAuth = ia
 	}
 	// A responder that can take the finding emitter gets it now: it could not
@@ -961,13 +992,52 @@ func (g *Gateway) RoutePatternsForTest() []string {
 	return slices.Clone(*g.routePatterns.Load())
 }
 
-// coreRoutes are the core's own routes: a responding role's Hub-routed legs.
+// coreRoutes are the core's own routes: the Hub-routed legs of a gateway that
+// takes any (takesLegs). One that takes none, a provider's until its
+// participant configures where the payer's attachment request goes, mounts
+// no inbound route and needs no Hub transport key.
 func (g *Gateway) coreRoutes(role string) []mountedRoute {
-	switch role {
-	case "payer", "facility", "phg":
-		return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
+	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL))) == 0 {
+		return nil
 	}
-	return nil
+	return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
+}
+
+// takesLegs says a gateway configured as cfg takes a leg the network
+// delivers to it: it declares one (TakenLegs, from the legs' rows and the
+// settings its participant set), never by the role's name.
+func takesLegs(cfg Config) bool {
+	return len(cfg.TakenLegs()) > 0
+}
+
+// TakenLegs are the legs a gateway configured as cfg takes as a recipient
+// (TakenLegs, with the settings cfg holds): what it declares, and what
+// mounts its inbound route.
+func (cfg Config) TakenLegs() []string {
+	return TakenLegs(cfg.Role, cfg.settingSet)
+}
+
+// settingProviderCDexTaskURL is the setting that makes a provider take the
+// payer's attachment request (legtaxonomy.TakenWhenSet).
+const settingProviderCDexTaskURL = "PROVIDER_CDEX_TASK_URL"
+
+// settingSet reports whether the participant set the named setting, for a
+// leg taken only when configured (legSpec.TakenWhenSet). A setting this
+// engine does not hold reads as unset: unknown is never taken.
+func (cfg Config) settingSet(setting string) bool {
+	return settingsSet(cfg.ProviderCDexTaskURL)(setting)
+}
+
+// settingsSet is settingSet over the settings it reads, each passed as its
+// value, so a route declaration reads only those (coreRoutes).
+func settingsSet(providerCDexTaskURL string) func(setting string) bool {
+	return func(setting string) bool {
+		switch setting {
+		case settingProviderCDexTaskURL:
+			return strings.TrimSpace(providerCDexTaskURL) != ""
+		}
+		return false
+	}
 }
 
 // ingressAuthOK gates every ingress route. Real SMART Backend Services bearer
@@ -987,11 +1057,22 @@ func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
 // client_id of the bearer this gateway issued, or the iss of a registered
 // client's direct bearer. "" under the test bypass, which verifies no client.
 func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, unavailable bool) {
+	client, _, ok, unavailable = g.ingressAuthGrant(r)
+	return client, ok, unavailable
+}
+
+// ingressAuthGrant is ingressAuthClient with the scope the caller's bearer
+// carries: the one the token endpoint granted an issued bearer, or the one a
+// registered client's direct bearer states and its registration allows; ""
+// when it carries none. The test bypass verifies no client and grants
+// TaskWriteScope, so a route that checks scope is reached as with a granted
+// one.
+func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return "", true, false
+		return "", TaskWriteScope, true, false
 	}
 	if g.ingressAuth == nil {
-		return "", false, false // fail-closed: no inbound auth configured
+		return "", "", false, false // fail-closed: no inbound auth configured
 	}
 	// SMART Backend Services issued bearer (token-exchange) OR a UDAP B2B direct bearer
 	// (a registered client's self-signed private_key_jwt, the form br-provider sends).
@@ -1000,13 +1081,48 @@ func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, un
 	// ORDER IS LOAD-BEARING: verifyBearer is the only arm that touches the ingress key
 	// store, and the direct-bearer arm keeps answering through a key-store outage — so a
 	// store outage is reported only when NEITHER arm admitted the caller.
-	if client, ok, unavailable := g.ingressAuth.verifyBearer(r); ok {
-		return client, true, false
-	} else if client, ok := g.ingressAuth.verifyDirectBearer(r); ok {
-		return client, true, false
+	if client, scope, ok, unavailable := g.ingressAuth.verifyBearerScope(r); ok {
+		return client, scope, true, false
+	} else if client, scope, ok := g.ingressAuth.verifyDirectBearerScope(r); ok {
+		return client, scope, true, false
 	} else {
-		return "", false, unavailable
+		return "", "", false, unavailable
 	}
+}
+
+// ingressScopes are the scopes a gateway of role's ingress takes: a payer's
+// takes the attachment-request Task routes alone (TaskWriteScope), a
+// provider's the Da Vinci routes.
+func ingressScopes(role string) []string {
+	if role == "payer" {
+		return []string{TaskWriteScope}
+	}
+	return []string{ingressScope}
+}
+
+// ingressScopeRefused is ingressAuthRefused for a route that admits only a
+// bearer granted scope: one that authenticates but carries another scope, or
+// none, is refused 403 insufficient_scope (RFC 6750 §3.1), recorded as
+// authority. It reports whether it wrote a refusal.
+func (g *Gateway) ingressScopeRefused(w http.ResponseWriter, r *http.Request, scope string) bool {
+	client, granted, ok, unavailable := g.ingressAuthGrant(r)
+	switch {
+	case unavailable:
+		writeStoreUnavailable(w, "ingress key store unavailable")
+		return true
+	case !ok:
+		exchangeOf(r.Context()).refused(RefusalAuthentication)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+		return true
+	}
+	noteIngressCaller(r.Context(), client)
+	if granted != scope {
+		exchangeOf(r.Context()).refused(RefusalAuthority)
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+scope+`"`)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient_scope: this route takes a bearer granted " + scope})
+		return true
+	}
+	return false
 }
 
 // ingressAuthRefused writes the refusal an ingress route owes when the caller is not
@@ -1188,7 +1304,7 @@ func answerAuthorizationRefusal(err error) (reason, by string) {
 // provider's route answers its own 503 and the leg is not sent to the Hub; a
 // denial (errAuthorizationDenied) and any other answer keep their own
 // answers.
-var errAuthzUnreachable = errors.New("the authorization service could not be reached, so this leg was not sent to the payer")
+var errAuthzUnreachable = errors.New("the authorization service could not be reached, so this leg was not sent to the recipient")
 
 // authzRefusal is the Authorization Framework's refusal on a network rule it
 // states in its 502 answer's "rule" (PARTICIPANT_PROTOCOL §4.1): the audit
@@ -1335,6 +1451,9 @@ type hubRefusalError struct {
 	// (withEnvelopeBudgetWait), in seconds.
 	notActed   bool
 	retryAfter int
+	// leg is the transaction type the refused POST sent: its row's recipient
+	// roles name whose gateway a recipient's refusal is (recipientParty).
+	leg string
 	// atCapacity says why it did not act: it had no room for the envelope
 	// (NotActedAtCapacity), where otherwise it does not know this gateway yet.
 	atCapacity bool
@@ -1349,9 +1468,10 @@ func (e *hubRefusalError) Error() string {
 	return fmt.Sprintf("hub refused the exchange (%d): %s", e.status, e.reason)
 }
 
-// legNotTaken says the Hub refused the leg because its recipient does not take
-// it: the one 422 its route handler answers, before forwarding. The status and
-// the delivered header say so; the reason is for people.
+// legNotTaken says the Hub refused the leg on routing before forwarding,
+// because its recipient does not take it or is of a role the leg's row does
+// not name for its recipient: the 422 its route handler answers for either.
+// The status and the delivered header say so; the reason is for people.
 func (e *hubRefusalError) legNotTaken() bool {
 	return e.fromHub && e.status == http.StatusUnprocessableEntity && e.delivered == ""
 }
@@ -2013,6 +2133,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		exchangeOf(ctx).responseHash(sha256hex(respEnv.Ciphertext))
 	}
 	if refused != nil {
+		// The refused leg names whose gateway answers it (its row's
+		// recipient roles), so the record attributes a recipient's refusal
+		// by structure.
+		refused.leg = txType
 		return nil, refused
 	}
 	if lost != nil {
@@ -2029,7 +2153,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 			return nil, err
 		}
 		if wasSent {
-			return nil, &hubRefusalError{status: http.StatusBadGateway, reason: "the connection to the Hub failed after the request was sent", delivered: "unknown"}
+			return nil, &hubRefusalError{status: http.StatusBadGateway, reason: "the connection to the Hub failed after the request was sent", delivered: "unknown", leg: txType}
 		}
 		return nil, err
 	}

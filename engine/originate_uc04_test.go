@@ -42,7 +42,7 @@ func TestHandleUC04_ProviderDataAttestsAndLeanTail(t *testing.T) {
 	// per-scenario literal. The literal named an order no participant's system held,
 	// so both the stored authorization and any later inquiry were keyed on a
 	// reference that resolved to nothing.
-	if !strings.Contains(fn, "srRef, ok := orderRefOrFail(w, res.srJSON)") {
+	if !strings.Contains(fn, "srRef, ok := orderRefOrFail(r.Context(), w, res.srJSON)") {
 		t.Fatalf("handleUC04 must derive the order ref from the order the system of record supplied")
 	}
 	for _, literal := range []string{`"ServiceRequest/sr-uc04"`, `"ServiceRequest/sr-uc03"`} {

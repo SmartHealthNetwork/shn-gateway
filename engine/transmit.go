@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -245,45 +246,69 @@ func (g *Gateway) responderFailure(ctx context.Context, leg string, err error) (
 		k := relay.Key{Leg: leg, Role: relay.RoleRecipient, Direction: relay.DirectionRequest, Outcome: relay.OutcomeCarried}
 		g.observe(ObserverEvent{Kind: relay.RefusedEvent, LegType: k.Leg, Direction: k.Role.String() + "-" + k.Direction.String(), Detail: err.Error()})
 	}
+	party := responderParty(leg)
 	var spent *deadlineSpent
 	if errors.As(err, &spent) {
-		return http.StatusGatewayTimeout, errDeadlineSpent
+		return http.StatusGatewayTimeout, fmt.Sprintf(errDeadlineSpentFor, party)
 	}
 	var up *upstreamFailure
 	if errors.As(err, &up) {
 		switch {
 		case up.timedOut && up.sent:
-			return http.StatusGatewayTimeout, errUpstreamTimedOut
+			return http.StatusGatewayTimeout, fmt.Sprintf(errUpstreamTimedOutFor, party)
 		case up.timedOut:
-			return http.StatusGatewayTimeout, errUpstreamNotReachedInTime
+			return http.StatusGatewayTimeout, fmt.Sprintf(errUpstreamNotReachedInTimeFor, party)
 		case up.sent:
-			return http.StatusBadGateway, errUpstreamNoUsableAnswer
+			return http.StatusBadGateway, fmt.Sprintf(errUpstreamNoUsableAnswerFor, party)
 		}
-		return http.StatusBadGateway, errUpstreamNotReached
+		return http.StatusBadGateway, fmt.Sprintf(errUpstreamNotReachedFor, party)
 	}
 	// Whether the request was forwarded is known only when the built-in
 	// native responder answers the leg itself: a connector, one that wraps it
 	// included, may call its system on its own.
 	forwarded, known := exchangeOf(ctx).forwardedToSystem()
-	if _, native := g.cfg.Responder.(*nativeResponder); !native && !forwarded {
+	_, native := g.cfg.Responder.(*nativeResponder)
+	if marked, _ := ctx.Value(nativeForwardKey{}).(bool); marked {
+		native = true
+	}
+	if !native && !forwarded {
 		known = false
 	}
 	switch {
 	case !known:
-		return http.StatusInternalServerError, errResponderFailedUnknown
+		return http.StatusInternalServerError, fmt.Sprintf(errResponderFailedUnknownFor, party)
 	case forwarded:
-		return http.StatusInternalServerError, errResponderFailedAfterForward
+		return http.StatusInternalServerError, fmt.Sprintf(errResponderFailedAfterForwardFor, party)
 	}
-	return http.StatusInternalServerError, errResponderFailedBeforeForward
+	return http.StatusInternalServerError, fmt.Sprintf(errResponderFailedBeforeForwardFor, party)
 }
 
-// The payer's gateway's own failures, by whether the request had been
-// forwarded to the payer's system: after, it may have acted on it.
+// The recipient gateway's own failures, by whether the request had been
+// forwarded to its system: after, it may have acted on it. Each names the
+// recipient's role (responderParty).
 const (
-	errResponderFailedBeforeForward = "the payer's gateway failed before forwarding this request to the payer's system"
-	errResponderFailedAfterForward  = "the payer's gateway failed after forwarding this request to the payer's system, which may have acted on it: check its outcome before resending"
-	errResponderFailedUnknown       = "the payer's gateway failed, and whether the payer's system received this request is not known: check its outcome before resending"
+	errResponderFailedBeforeForwardFor = "the %[1]s's gateway failed before forwarding this request to the %[1]s's system"
+	errResponderFailedAfterForwardFor  = "the %[1]s's gateway failed after forwarding this request to the %[1]s's system, which may have acted on it: check its outcome before resending"
+	errResponderFailedUnknownFor       = "the %[1]s's gateway failed, and whether the %[1]s's system received this request is not known: check its outcome before resending"
 )
+
+// The answers above for the payer's gateway, every provider's leg's.
+var (
+	errResponderFailedBeforeForward = fmt.Sprintf(errResponderFailedBeforeForwardFor, "payer")
+	errResponderFailedAfterForward  = fmt.Sprintf(errResponderFailedAfterForwardFor, "payer")
+	errResponderFailedUnknown       = fmt.Sprintf(errResponderFailedUnknownFor, "payer")
+)
+
+// nativeForwardKey marks a leg whose handler forwards to its participant's
+// own system through a native responder of its own (the provider's Task
+// forward), so a failure can say whether that system was asked as it can
+// for Config.Responder's.
+type nativeForwardKey struct{}
+
+// withNativeForward returns ctx so marked.
+func withNativeForward(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nativeForwardKey{}, true)
+}
 
 // upstreamFailure is a native forward that got no usable answer from the
 // payer's own system. sent says the request was written to it: a connection
@@ -301,17 +326,37 @@ type upstreamFailure struct {
 func (e *upstreamFailure) Error() string { return e.err.Error() }
 func (e *upstreamFailure) Unwrap() error { return e.err }
 
-// What a requester is told when the payer's own system gave no answer this
-// gateway could carry: whether it never saw the request, or may have acted on
-// it.
+// What a requester is told when the recipient's own system gave no answer
+// this gateway could carry: whether it never saw the request, or may have
+// acted on it. Each names whose system it is, the role the leg's row names
+// for its recipient (responderParty): the payer's on every provider's leg,
+// the provider's on the payer's attachment request.
 const (
-	errUpstreamNotReached     = "the payer's system could not be reached"
-	errUpstreamNoUsableAnswer = "the payer's system received this request but gave no answer this gateway could carry; it may have acted on it: check its outcome before resending"
-	// A call past the payer gateway's deadline for its own system.
-	errUpstreamTimedOut         = "the payer's system received this request but did not answer in time; it may have acted on it: check its outcome before resending"
-	errUpstreamNotReachedInTime = "the payer's system could not be reached in time"
+	errUpstreamNotReachedFor     = "the %[1]s's system could not be reached"
+	errUpstreamNoUsableAnswerFor = "the %[1]s's system received this request but gave no answer this gateway could carry; it may have acted on it: check its outcome before resending"
+	// A call past the recipient gateway's deadline for its own system.
+	errUpstreamTimedOutFor         = "the %[1]s's system received this request but did not answer in time; it may have acted on it: check its outcome before resending"
+	errUpstreamNotReachedInTimeFor = "the %[1]s's system could not be reached in time"
 	// The gateway's own work before the call used its deadline: the operation
-	// was not sent to the payer's system (a read that ran first, such as the
-	// CDS service listing, may have reached it).
-	errDeadlineSpent = "the payer's gateway ran out of time before it could send this request to the payer's system; the payer's system did not receive it"
+	// was not sent to the recipient's system (a read that ran first, such as
+	// the CDS service listing, may have reached it).
+	errDeadlineSpentFor = "the %[1]s's gateway ran out of time before it could send this request to the %[1]s's system; the %[1]s's system did not receive it"
 )
+
+// The answers above for the payer's system, every provider's leg's.
+var (
+	errUpstreamNotReached       = fmt.Sprintf(errUpstreamNotReachedFor, "payer")
+	errUpstreamNoUsableAnswer   = fmt.Sprintf(errUpstreamNoUsableAnswerFor, "payer")
+	errUpstreamTimedOut         = fmt.Sprintf(errUpstreamTimedOutFor, "payer")
+	errUpstreamNotReachedInTime = fmt.Sprintf(errUpstreamNotReachedInTimeFor, "payer")
+	errDeadlineSpent            = fmt.Sprintf(errDeadlineSpentFor, "payer")
+)
+
+// responderParty is whose system answers leg: the role its row names for
+// its recipient, "payer" for a leg this gateway does not know.
+func responderParty(leg string) string {
+	if spec, ok := legSpecFor(leg); ok && len(spec.RecipientRoles) > 0 {
+		return spec.RecipientRoles[0]
+	}
+	return "payer"
+}

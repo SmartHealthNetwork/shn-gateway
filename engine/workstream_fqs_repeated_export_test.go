@@ -25,6 +25,7 @@ func RepeatedMemberE2EMember() (member, birthDate, family string) {
 func FederatedQueryWithSoRForTest(t *testing.T, level ConformanceEnforcement, sor SystemOfRecord) (int, []byte, ExchangeRecord) {
 	t.Helper()
 	p, got := newRecordingLevelPayer(t, level)
+	p.answering(t, "federated-query")
 	p.g.cfg.ConsentURL = "http://consent.test"
 	p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 	p.g.cfg.SoR = sor

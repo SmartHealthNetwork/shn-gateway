@@ -13,7 +13,9 @@ package smartauth
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -40,8 +42,8 @@ type Config struct {
 	TokenURL string            // SMART token endpoint
 	ClientID string            // registered client id (iss/sub of the assertion)
 	Scope    string            // requested scope, e.g. "system/*.read"
-	Alg      string            // "ES384" | "RS384"
-	Key      crypto.PrivateKey // *ecdsa.PrivateKey (ES384) | *rsa.PrivateKey (RS384)
+	Alg      string            // "ES384" | "RS384" | "RS256"
+	Key      crypto.PrivateKey // *ecdsa.PrivateKey (ES384) | *rsa.PrivateKey (RS384, RS256)
 	KID      string            // optional JWS header kid
 	// ClientSecret switches the grant to client_secret_post (OAuth2
 	// client_credentials with client_id+client_secret in the form body) for
@@ -75,8 +77,13 @@ func signingMethod(alg string) (jwt.SigningMethod, error) {
 		return jwt.SigningMethodES384, nil
 	case "RS384":
 		return jwt.SigningMethodRS384, nil
+	case "RS256":
+		// Not one SMART Backend Services names (it asks for RS384 or ES384),
+		// but the one some authorization servers verify alone (the Da Vinci
+		// reference provider's): the caller decides where it is admitted.
+		return jwt.SigningMethodRS256, nil
 	default:
-		return nil, fmt.Errorf("smartauth: unsupported alg %q (want ES384|RS384)", alg)
+		return nil, fmt.Errorf("smartauth: unsupported alg %q (want ES384|RS384|RS256)", alg)
 	}
 }
 
@@ -92,8 +99,17 @@ func (c Config) validateMode() error {
 	case c.Key == nil:
 		return fmt.Errorf("smartauth: Key required (or set ClientSecret for the client_secret_post grant)")
 	default:
-		_, err := signingMethod(c.Alg)
-		return err
+		if _, err := signingMethod(c.Alg); err != nil {
+			return err
+		}
+		// The key must be the alg's kind, so a mismatch refuses the
+		// configuration rather than every token request after it.
+		_, isEC := c.Key.(*ecdsa.PrivateKey)
+		_, isRSA := c.Key.(*rsa.PrivateKey)
+		if (c.Alg == "ES384" && !isEC) || (c.Alg != "ES384" && !isRSA) {
+			return fmt.Errorf("smartauth: alg %s needs an %s private key, got %T", c.Alg, map[bool]string{true: "EC", false: "RSA"}[c.Alg == "ES384"], c.Key)
+		}
+		return nil
 	}
 }
 

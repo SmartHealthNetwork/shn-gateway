@@ -183,7 +183,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// backfill refused pa.crd@2.2-only peers this build serves byte-identically.
 	// crdCorr is hoisted so selection, adaptation and the leg share one correlation.
 	crdCorr := g.cfg.CorrelationGen()
-	crdRoute, ok := g.selectLegLineOrFail(w, recipient, "crd-order-dispatch", crdCorr, relay.BuilderSDKCRDRequest)
+	crdRoute, ok := g.selectLegLineOrFail(r.Context(), w, recipient, "crd-order-dispatch", crdCorr, relay.BuilderSDKCRDRequest)
 	if !ok {
 		return dispatchResult{}, false
 	}
@@ -208,7 +208,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		},
 	})
 	if failed != nil {
-		g.writeLegFailure(w, failed)
+		g.writeLegFailure(r.Context(), w, failed)
 		return dispatchResult{}, false
 	}
 	crdRespJSON := sent.Answer
@@ -250,7 +250,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// selected line also picks the validator lane the package answer is checked
 	// against (F7).
 	dtrCorr := g.cfg.CorrelationGen()
-	route, ok := g.selectLegLineOrFail(w, recipient, "dtr-questionnaire-fetch", dtrCorr, relay.BuilderSDKDTRPackage)
+	route, ok := g.selectLegLineOrFail(r.Context(), w, recipient, "dtr-questionnaire-fetch", dtrCorr, relay.BuilderSDKDTRPackage)
 	if !ok {
 		return dispatchResult{}, false
 	}
@@ -286,7 +286,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		Sealed: dtrPayload, Operation: shnsdk.FrameOperationQuestionnairePackage,
 	})
 	if failed != nil {
-		g.writeLegFailure(w, failed)
+		g.writeLegFailure(r.Context(), w, failed)
 		return dispatchResult{}, false
 	}
 	packageJSON := sent.Answer
@@ -297,13 +297,13 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "peer",
 	})
 	if status, msg := g.validateFHIRPayerIngress(ctx, packageJSON, dtrLine, "pa.dtr", payer); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return dispatchResult{}, false
 	}
 
 	questionnaireJSON, err := extractQuestionnaireFromPackage(packageJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire package has no Questionnaire"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "fetched questionnaire package has no Questionnaire")})
 		return dispatchResult{}, false
 	}
 
@@ -314,11 +314,11 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// this fence; this order-dispatch prefix never did.
 	fetchedURL, err := shnsdk.ParseQuestionnaireURL(questionnaireJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire url parse failed"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "fetched questionnaire url parse failed")})
 		return dispatchResult{}, false
 	}
 	if fetchedURL != canonical {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetched questionnaire does not match advertised canonical"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "fetched questionnaire does not match advertised canonical")})
 		return dispatchResult{}, false
 	}
 
@@ -337,17 +337,17 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		Authored:       authored,
 	})
 	if err != nil {
-		failPopulate(r.Context(), w, err)
+		g.failPopulate(r.Context(), w, recipient, err)
 		return dispatchResult{}, false
 	}
 	// QR-SUBJECT FENCE — the populated QR must be about the bound patient (logical ref).
 	if subj, serr := questionnaireResponseSubject(qrJSON); serr != nil || subj != patientRef {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR subject does not match patient"})
+		g.refuseOwnFill(r.Context(), w, recipient, msgFillForeignSubject)
 		return dispatchResult{}, false
 	}
 	// QR-QUESTIONNAIRE FENCE — the QR must self-declare the canonical the card advertised.
 	if qq, qerr := questionnaireResponseCanonical(qrJSON); qerr != nil || qq != canonical {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "populated QR questionnaire does not match canonical"})
+		g.refuseOwnFill(r.Context(), w, recipient, msgFillForeignCanonical)
 		return dispatchResult{}, false
 	}
 	// CRUX EVIDENCE (C1) — capture the operated-$populate computed quantity answers off the QR
@@ -360,14 +360,14 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "own",
 	})
 	if status, msg := g.validateFHIRForContract(ctx, qrJSON, "egress", "pa.dtr", dtrLine, baseQRProfile); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return dispatchResult{}, false
 	}
 
 	source := newRawDTRBuildSource(qrJSON, questionnaireJSON, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef, Authored: authored})
 	qrJSON, status, msg = g.completeDTRContext(ctx, qrJSON, dtrLine, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
 	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return dispatchResult{}, false
 	}
 	return dispatchResult{
@@ -400,7 +400,7 @@ func (g *Gateway) handleDispatch(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req) // lenient like the sibling handlers
 	}
 	if strings.TrimSpace(req.Member) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "member is required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": afterLegs(r.Context(), "member is required")})
 		return
 	}
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
@@ -495,7 +495,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// empty authorization number against the order would look like an authorization.
 	if decision.Decision == PASDecisionApproved {
 		if err := g.cfg.Store.StoreAuthNumber(res.orderRef, decision.Parsed.PreAuthRef); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "holder write failed (auth number)"})
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "holder write failed (auth number)")})
 			return
 		}
 	}

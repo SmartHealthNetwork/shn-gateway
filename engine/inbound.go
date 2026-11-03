@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,7 +105,8 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// correlation binding below (VerifyBound treats "" as skip) AND be echoed into
 	// the response leg (respondLeg reuses it), so a downstream audit could carry an
 	// empty correlation. AuthorityFrame is required for the same defense-in-depth
-	// reason; the frame is additionally pinned to the literal "provider-tpo" below.
+	// reason; the token is bound below to the leg's own request frame and
+	// operation (the catalog row's ReqFrame and Op).
 	if env.Metadata.AuthorityFrame == "" {
 		exchangeOf(r.Context()).refused(RefusalIntegrity)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing authority frame"})
@@ -138,6 +140,16 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	scope.leg = env.Metadata.TransactionType
 	exchangeOf(r.Context()).leg(env.Metadata.TransactionType)
+	// A leg goes only to a gateway of a role its row names for the recipient:
+	// the Hub routes it to no other, and a gateway that receives one anyway
+	// (a misrouted or injected envelope) refuses it on routing before any
+	// token is read, at every conformance level, rather than answer it with
+	// a handler for another side's leg.
+	if !slices.Contains(spec.RecipientRoles, g.cfg.Role) {
+		exchangeOf(r.Context()).refused(RefusalRouting)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": recipientRoleRefusal(env.Metadata.TransactionType, g.cfg.Role, spec.RecipientRoles)})
+		return
+	}
 
 	// Every governed check this leg makes is reported as this leg: an inbound
 	// request's bytes are the peer's, at the seam module3_certify.go already names.
@@ -360,4 +372,14 @@ func (g *Gateway) consentClient() *http.Client {
 		return g.cfg.ConsentClient
 	}
 	return g.cfg.Client
+}
+
+// recipientRoleRefusal is the inbound refusal of a leg whose row names other
+// roles than this gateway's for its recipient.
+func recipientRoleRefusal(leg, role string, roles []string) string {
+	self := "a " + role + " gateway"
+	if role == "" {
+		self = "a gateway with no role"
+	}
+	return "this gateway cannot take " + leg + ": it is " + self + ", and " + leg + " is answered by " + strings.Join(roles, " or ")
 }

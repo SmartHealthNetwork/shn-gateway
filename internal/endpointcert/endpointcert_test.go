@@ -23,7 +23,7 @@ func TestMONR25KindAndRoleListsArePinned(t *testing.T) {
 	wantKinds := []string{
 		"ingress", "metrics-pull", "otlp",
 		"fhir", "fhir-token", "payer-davinci", "payer-dtr", "payer-pas", "payer-eligibility", "payer-token", "cds",
-		"populate", "populate-token", "crd-fhir-server",
+		"populate", "populate-token", "cdex-task", "cdex-task-token", "crd-fhir-server",
 		"discovery", "hub", "hub-key", "authorization", "authorization-key", "registrar", "consent", "audit",
 		"validator", "certify",
 		"diagnostic", "store",

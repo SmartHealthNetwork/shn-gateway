@@ -99,6 +99,9 @@ var paIngressRoutes = map[string]ingressHandler{
 	// A submission to a payer's return path: the same handler, routed by the
 	// path (cdexroute).
 	RouteCDexReturnSubmit: {"cdex-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexSubmitIngress }},
+	// The payer's attachment-request Task, at a provider's base on the payer's
+	// gateway (cdexroute.ProviderBase).
+	RouteCDexRequestBase: {"cdex-request-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexRequestIngress }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -140,10 +143,20 @@ var paLegs = map[string]legDetail{
 	// lines: no declared contract line governs it until a second CDex line
 	// gives the network lines to route between.
 	"cdex-attachment-submit": {Physics: paMutating, Contract: "", Seam: paSeamPayer},
+	// A payer's CDex attachment-request Task asks the provider's own system to
+	// create a Task. It is carried whatever the two sides' PA lines, as the
+	// submission is.
+	// The provider takes it only once its gateway is configured with its own
+	// system's Task endpoint, so no gateway declares it until then.
+	"cdex-attachment-request": {Physics: paMutating, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderCDexTaskURL},
 }
 
 // paSeamPayer is the seam a payer's inbound PA request is judged at.
 const paSeamPayer = "payer-native"
+
+// paSeamProvider is the seam a provider's inbound PA request is judged at: a
+// payer's request to the provider's own system.
+const paSeamProvider = "provider-native"
 
 // originatedAnswerCheck: an answer to a CRD leg this gateway originates is
 // certified against the CDS Hooks response rules, as a relayed one is
@@ -158,8 +171,8 @@ func (paWorkstream) originatedAnswerCheck(leg string) legAnswerCheck {
 }
 
 // paRoutes are the PA workstream's participant-facing routes for role: the
-// provider's Da Vinci ingress, which carries its participant's own requests.
-// The payer serves no participant-facing PA route of its own.
+// provider's Da Vinci ingress, which carries its participant's own requests,
+// and the payer's, which carries its participant's attachment-request Tasks.
 func (g *Gateway) paRoutes(role string) []mountedRoute {
 	var out []mountedRoute
 	route := func(pattern string, credential routeCredential, h http.HandlerFunc) {
@@ -203,6 +216,20 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 			// HRex 1.2.0 endpoint discovery:
 			// version-specific endpoint codes for the Da Vinci-facing edge.
 			route("GET /.well-known/davinci-configuration", noCredential, g.handleDavinciConfiguration)
+		}
+	case "payer":
+		if !g.cfg.IngressEnabled {
+			return nil
+		}
+		// The payer's own system creates an attachment-request Task at a
+		// provider's base (cdexroute.ProviderPrefix), listed at
+		// CDexProvidersPath. No plain Task endpoint is mounted: the network
+		// knows no provider by the identifier Task.owner carries.
+		route("POST /cdex/provider/{provider}/Task", noCredential, g.ingressRoute(RouteCDexRequestBase))
+		route("GET /cdex/providers", noCredential, g.withIngressCorrelation(g.handleCDexProviders))
+		if g.ingressAuth != nil {
+			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
+			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)
 		}
 	}
 	return out

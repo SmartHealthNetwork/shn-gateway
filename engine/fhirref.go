@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -30,10 +31,10 @@ func resourceRef(b []byte) (ref string, ok bool) {
 // authorization they filed, and every inquiry that tried to continue one, was
 // keyed on a reference that resolved to nothing. An order with no identity is
 // refused here rather than filed under a name nothing resolves.
-func orderRefOrFail(w http.ResponseWriter, order []byte) (string, bool) {
+func orderRefOrFail(ctx context.Context, w http.ResponseWriter, order []byte) (string, bool) {
 	ref, ok := resourceRef(order)
 	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the member's open order carries no identity in the system of record"})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(ctx, "the member's open order carries no identity in the system of record")})
 		return "", false
 	}
 	return ref, true

@@ -20,6 +20,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http/httptest"
@@ -39,7 +40,7 @@ func TestSelectLegLineOrBridgeRefuse_Success(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}}}
 
 	rec := httptest.NewRecorder()
-	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-gw", "pas-claim", "corr-1", "")
+	route, ok := g.selectLegLineOrBridgeRefuse(context.Background(), rec, "bridge-demo-gw", "pas-claim", "corr-1", "")
 	if !ok {
 		t.Fatalf("want ok=true, got false (body=%s)", rec.Body.String())
 	}
@@ -67,7 +68,7 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: reg, DeclaredContractVersions: []string{shnsdk.ContractPAPAS20}, RequireSharedLine: true, TranslateIGLines: true}}
 
 	rec := httptest.NewRecorder()
-	route, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2", "")
+	route, ok := g.selectLegLineOrBridgeRefuse(context.Background(), rec, "bridge-demo-refuse-gw", "pas-claim", "corr-2", "")
 	if ok {
 		t.Fatalf("want ok=false (a designed refusal), got route=%+v", route)
 	}
@@ -99,7 +100,7 @@ func TestSelectLegLineOrBridgeRefuse_RouteRefusalError(t *testing.T) {
 func TestSelectLegLineOrBridgeRefuse_OnlyRouteRefusalErrorReshapes(t *testing.T) {
 	g := &Gateway{cfg: Config{Reg: shnsdk.NewRegistry()}}
 	rec := httptest.NewRecorder()
-	_, ok := g.selectLegLineOrBridgeRefuse(rec, "bridge-demo-refuse-gw", "not-a-real-legtype", "corr-3", "")
+	_, ok := g.selectLegLineOrBridgeRefuse(context.Background(), rec, "bridge-demo-refuse-gw", "not-a-real-legtype", "corr-3", "")
 	if ok {
 		t.Fatal("want ok=false for an unknown legType")
 	}

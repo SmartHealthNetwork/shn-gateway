@@ -127,13 +127,13 @@ func TestEveryLineSelectionNamesItsBuilder(t *testing.T) {
 	// leg is the position of each selection's leg-type argument (-1: it takes a
 	// contract, and only the wrappers call it).
 	leg := map[string]int{
-		"selectLegLine": 1, "selectLegLineOrFail": 2, "selectLegLineOrBridgeRefuse": 2, "selectLegRoute": 1,
+		"selectLegLine": 1, "selectLegLineOrFail": 3, "selectLegLineOrBridgeRefuse": 3, "selectLegRoute": 1,
 		"selectResumeRoute": 2, "routeFor": 0, "reachPeerLine": -1, "resumeReach": -1, "selectNativeReachRoute": -1,
 	}
 	consts := relayBuilderConsts(t)
 	allowed := originatedBuilders()
 	takes := map[string]int{
-		"selectLegLine": 3, "selectLegLineOrFail": 4, "selectLegLineOrBridgeRefuse": 4, "selectLegRoute": 2,
+		"selectLegLine": 3, "selectLegLineOrFail": 5, "selectLegLineOrBridgeRefuse": 5, "selectLegRoute": 2,
 		"selectResumeRoute": 3, "routeFor": 2, "reachPeerLine": 4, "resumeReach": 5, "selectNativeReachRoute": 2,
 	}
 	calls := 0

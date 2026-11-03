@@ -41,18 +41,27 @@ var (
 	// davinciConfigRoutePatterns are mounted when the ingress names its base
 	// URL.
 	davinciConfigRoutePatterns = []string{"GET /.well-known/davinci-configuration"}
+	// payerIngressRoutePatterns are mounted on a payer when its Da Vinci
+	// ingress is enabled: the attachment-request Task routes.
+	payerIngressRoutePatterns = []string{
+		"POST /cdex/provider/{provider}/Task",
+		"GET /cdex/providers",
+	}
+	// cdexTaskRoutePatterns are mounted on a provider that sets its own Task
+	// endpoint: it takes the payer's attachment request.
+	cdexTaskRoutePatterns = []string{"POST /substrate/inbound"}
 )
 
 // routeConditions is one combination of the configuration that gates a route.
 // module1 is a declared origination profile: without one, module 1 mounts no
 // /scenario route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL, module1 bool
+	ingress, ingressAuth, baseURL, module1, cdexTask bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask} {
 		if set {
 			on = append(on, name)
 		}
@@ -64,11 +73,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the four conditions.
+// everyRouteCondition is every combination of the five conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 16 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0})
+	for bits := range 32 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0})
 	}
 	return out
 }
@@ -91,7 +100,20 @@ func wantRoutes(role string, c routeConditions) []string {
 				want = append(want, davinciConfigRoutePatterns...)
 			}
 		}
-	case "payer", "facility", "phg":
+		// A provider whose participant sets its own Task endpoint takes
+		// the payer's attachment request, delivered on the inbound route.
+		if c.cdexTask {
+			want = append(want, cdexTaskRoutePatterns...)
+		}
+	case "payer":
+		want = append(want, "POST /substrate/inbound")
+		if c.ingress {
+			want = append(want, payerIngressRoutePatterns...)
+			if c.ingressAuth {
+				want = append(want, ingressAuthRoutePatterns...)
+			}
+		}
+	case "facility", "phg":
 		want = append(want, "POST /substrate/inbound")
 	}
 	slices.Sort(want)
@@ -123,6 +145,9 @@ func routeGateway(role string, c routeConditions) *Gateway {
 	}
 	if c.module1 {
 		g.cfg.OriginationProfile = "demo"
+	}
+	if c.cdexTask {
+		g.cfg.ProviderCDexTaskURL = "https://provider.example/fhir/Task"
 	}
 	return withModuleOne(g)
 }
@@ -161,16 +186,24 @@ func TestRoutes_EachRoleMountsItsPinnedSet(t *testing.T) {
 // The split above is the classified lists, and every condition's set is a
 // subset of what the classification says the role registers.
 func TestRoutes_PinnedSetsAreTheClassifiedRoutes(t *testing.T) {
-	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, davinciConfigRoutePatterns)
+	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns)
 	slices.Sort(split)
 	other := slices.Clone(providerOtherRoutes)
 	slices.Sort(other)
 	if !slices.Equal(split, other) {
-		t.Fatalf("the provider's ingress routes split by condition\n  %v\nare not providerOtherRoutes\n  %v", split, other)
+		t.Fatalf("the provider's routes split by condition\n  %v\nare not providerOtherRoutes\n  %v", split, other)
 	}
 	for _, role := range []string{"payer", "facility", "phg"} {
-		if want := wantRoutes(role, routeConditions{}); !slices.Equal(want, otherRoleRoutes[role]) {
-			t.Fatalf("%s routes %v, classified %v", role, want, otherRoleRoutes[role])
+		var want []string
+		for _, c := range everyRouteCondition() {
+			want = append(want, wantRoutes(role, c)...)
+		}
+		slices.Sort(want)
+		want = slices.Compact(want)
+		classified := slices.Clone(otherRoleRoutes[role])
+		slices.Sort(classified)
+		if !slices.Equal(want, classified) {
+			t.Fatalf("%s routes %v, classified %v", role, want, classified)
 		}
 	}
 }
