@@ -306,7 +306,7 @@ func TestNextQuestion_FramedWhenCapable(t *testing.T) {
 	})
 	t.Run("a payer that does not declare framed operations", func(t *testing.T) {
 		env, _, status, msg := round(t, false)
-		if status != http.StatusBadGateway || msg != shnsdk.ErrFramedDTRUnsupported.Error() || env.routeHitCount() != 0 {
+		if status != http.StatusUnprocessableEntity || !strings.HasPrefix(msg, shnsdk.ErrFramedDTRUnsupported.Error()+". ") || env.routeHitCount() != 0 {
 			t.Fatalf("%d %s, route hits %d", status, msg, env.routeHitCount())
 		}
 	})

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // completePASRequest retains only clinical evidence selected by the request. Reads
@@ -57,7 +59,13 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		return fail()
 	}
 	graph := &pasGraph{Bundle: bundle, Entries: entries, ByURL: map[string]*pasGraphEntry{}}
-	patient := ""
+	// patients are the request's Patient entries, by fullUrl. One is the
+	// member; any other must be a party the member's Coverage names, a
+	// dependent's parent carried as an entry of its own
+	// (shnsdk.CoverageEntryParties). A record read from the system below may
+	// add none (sealed).
+	var patients []string
+	sealed := false
 	add := func(index int, v any) bool {
 		e, ok := v.(map[string]any)
 		if !ok {
@@ -79,10 +87,10 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		}
 		graph.ByURL[full] = &pasGraphEntry{FullURL: full, Resource: r, Index: index}
 		if typ == "Patient" {
-			if patient != "" && patient != full {
+			if sealed {
 				return false
 			}
-			patient = full
+			patients = append(patients, full)
 		}
 		return true
 	}
@@ -90,6 +98,18 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		if !add(i, e) {
 			return fail()
 		}
+	}
+	sealed = true
+	patient := ""
+	parties := shnsdk.CoverageEntryParties(bundle)
+	for _, full := range patients {
+		if parties[full] {
+			continue
+		}
+		if patient != "" {
+			return fail()
+		}
+		patient = full
 	}
 	if patient == "" || !policy.Matches(graph) {
 		return fail()

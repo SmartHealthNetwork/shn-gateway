@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirclient"
 )
 
@@ -123,10 +124,12 @@ func (s *SoR) SearchPatientContext(ctx context.Context, resourceType, sorPatient
 }
 
 // searchPage GETs one page, reading at most limit bytes, trying once more
-// as fhirclient.Do does. A failure is classified: the search's own deadline is the time bound (unavailable); a transport
-// failure, a caller cancellation or an error status the server may recover
-// from is unavailable; any other error status means the server does not
-// support the search; a redirect is malformed.
+// as fhirclient.Do does. A failure is classified: the search's own deadline
+// is the time bound (unavailable); a transport failure, a caller
+// cancellation or an error status the server may recover from is
+// unavailable; a redirect is malformed; any other error status is unsupported
+// only when the server says so definitely (notSupportedAnswer), and otherwise
+// failed: an error answer that does not say the search cannot run.
 func (s *SoR) searchPage(parent, ctx context.Context, hc *http.Client, target string, limit int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -152,7 +155,10 @@ func (s *SoR) searchPage(parent, ctx context.Context, hc *http.Client, target st
 	case code/100 == 3:
 		return nil, searchFailure(engine.SearchMalformed, "redirect refused")
 	default:
-		return nil, searchFailure(engine.SearchUnsupported, "search not supported")
+		if notSupportedAnswer(code, resp.Body) {
+			return nil, searchFailure(engine.SearchUnsupported, "search not supported")
+		}
+		return nil, searchFailure(engine.SearchFailed, "search answered with an error status")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
@@ -165,6 +171,49 @@ func (s *SoR) searchPage(parent, ctx context.Context, hc *http.Client, target st
 		return nil, searchFailure(engine.SearchBound, "size bound")
 	}
 	return body, nil
+}
+
+// maxErrorAnswerBytes bounds how much of an error answer is read for its
+// OperationOutcome. A longer answer is not read as a definite one.
+const maxErrorAnswerBytes = 64 << 10
+
+// notSupportedAnswer reports whether an error answer to a search says
+// definitely that the server does not support it: 501 Not Implemented, or an
+// OperationOutcome (scanned strictly: a repeated member name, a body over
+// maxErrorAnswerBytes or one that is not JSON is not definite) with at least
+// one issue of severity error or fatal, every one of which has the code
+// not-supported. It is decided by structure alone: diagnostics, details and
+// other text are never read. Any other error answer, an issue of another code
+// beside a not-supported one included, says nothing definite.
+func notSupportedAnswer(status int, body io.Reader) bool {
+	if status == http.StatusNotImplemented {
+		return true
+	}
+	b, err := io.ReadAll(io.LimitReader(body, maxErrorAnswerBytes+1))
+	if err != nil || len(b) > maxErrorAnswerBytes {
+		return false
+	}
+	var oo struct {
+		ResourceType string `json:"resourceType"`
+		Issue        []struct {
+			Severity string `json:"severity"`
+			Code     string `json:"code"`
+		} `json:"issue"`
+	}
+	if relay.Decode(relay.NewBody(b, relay.OriginUpstreamResponse), &oo) != nil || oo.ResourceType != "OperationOutcome" {
+		return false
+	}
+	definite := false
+	for _, i := range oo.Issue {
+		if i.Severity != "error" && i.Severity != "fatal" {
+			continue
+		}
+		if i.Code != "not-supported" {
+			return false
+		}
+		definite = true
+	}
+	return definite
 }
 
 // sameSystemOfRecord resolves a next link and reports whether it stays on

@@ -830,7 +830,7 @@ func TestHandleUC05_FederatedQueryIngressRelaysBelowStrict(t *testing.T) {
 			// pas-claim-update request), federatedQueryIngressMutationMarker is injected
 			// as a synthetic TOP-LEVEL Bundle key (overrideResponse prepends
 			// `"<marker>":true,` before the bundle's own members) — not part of any FHIR
-			// resource, so cdexEvidence's extraction never carries it into the
+			// resource, so cdexEvidenceEntries' extraction never carries it into the
 			// ClaimUpdate. There is no wire body downstream of the verdict this marker
 			// could appear in.
 			// stub.overrideResponse matches every "federated-query" leg regardless of the
@@ -1315,7 +1315,10 @@ func TestHandleUC05_SelectsLineBeforeBuilding(t *testing.T) {
 
 // TestHandleUC05_RequesterRefusesAnotherPatientsRecord: a facility answer
 // that crosses the Hub carrying a report about another patient is refused by
-// the requester before any of it is used — no ClaimUpdate is sent.
+// the requester before any of it is used — no ClaimUpdate is sent. The report
+// is the claim update's evidence, so the refusal is the fidelity of the
+// requester's own build (422); module1_uc05_records_fence_test.go holds the
+// rows at each level, and for records that are not evidence.
 func TestHandleUC05_RequesterRefusesAnotherPatientsRecord(t *testing.T) {
 	gw, stub := newPendResumeFixture(t, pendFixtureOpts{
 		member: "MBR-UC05", birthDate: "1968-03-12", familyName: "Johansson",
@@ -1338,7 +1341,7 @@ func TestHandleUC05_RequesterRefusesAnotherPatientsRecord(t *testing.T) {
 	if replaced == 0 {
 		t.Fatal("the facility answer carried no report subject to replace")
 	}
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "federated response refused") {
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "(fidelity of SHN's own build)") {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "someone-else") {

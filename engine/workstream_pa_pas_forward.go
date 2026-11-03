@@ -121,8 +121,9 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 		rollback = func() { _ = release() }
 	}
 
-	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
-	// endpoint for THIS routed pa.pas line (evidence absent ⇒ the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
+	// Endpoint evidence: $submit goes under the probe-retained, same-origin-validated
+	// #<line> PAS base the payer publishes for THIS routed pa.pas line (evidence absent ⇒
+	// the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
 	// Whatever the payer answers is relayed, a conflict included: whether and when
 	// to send the amendment again is the requester's decision.
 	submitURL := n.resolvedURL(ctx, "pa.pas", n.pasBase(), "/Claim/$submit")
@@ -321,8 +322,9 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	if refused.Status != 0 {
 		return refused, nil
 	}
-	// Endpoint evidence: prefer the probe-retained, same-origin-validated #<line> $submit
-	// endpoint for THIS routed pa.pas line (evidence absent ⇒ the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
+	// Endpoint evidence: $submit goes under the probe-retained, same-origin-validated
+	// #<line> PAS base the payer publishes for THIS routed pa.pas line (evidence absent ⇒
+	// the PAS base, which is n.baseURL unless PAYER_DAVINCI_PAS_BASE_URL is set).
 	submitURL := n.resolvedURL(ctx, "pa.pas", n.pasBase(), "/Claim/$submit")
 	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerPAS)), submitURL, "", forward, "pas-claim", "PAS submit")
 	if err != nil {

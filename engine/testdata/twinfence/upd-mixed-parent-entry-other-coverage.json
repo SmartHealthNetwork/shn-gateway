@@ -1,7 +1,7 @@
 {
-  "name": "upd-mixed-parent-entry",
+  "name": "upd-mixed-parent-entry-other-coverage",
   "family": "update-bind",
-  "description": "A dependent's Coverage names the parent, its subscriber, as a Patient entry of its own: only a contained Patient is a Coverage's party, so the parent's entry is another patient.",
+  "description": "The parent's Patient entry is named only by the subscriber of another member's Coverage entry, whose beneficiary is that member's Patient entry: the request carries another patient, whatever the parent is to that Coverage.",
   "expect": "reject",
   "rejectContains": "inconsistent patient in PAS bundle",
   "rejectStatus": 403,
@@ -193,16 +193,13 @@
           "relationship": {
             "coding": [
               {
-                "code": "child",
+                "code": "self",
                 "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship"
               }
             ]
           },
           "resourceType": "Coverage",
-          "status": "active",
-          "subscriber": {
-            "reference": "Patient/MBR-PARENT"
-          }
+          "status": "active"
         }
       },
       {
@@ -442,6 +439,46 @@
             }
           ],
           "resourceType": "Patient"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Patient/MBR-NOTCOVERED",
+        "resource": {
+          "id": "MBR-NOTCOVERED",
+          "identifier": [
+            {
+              "system": "urn:shn:member",
+              "value": "MBR-NOTCOVERED"
+            }
+          ],
+          "resourceType": "Patient"
+        }
+      },
+      {
+        "fullUrl": "https://shn.example/fhir/Coverage/cov-other",
+        "resource": {
+          "beneficiary": {
+            "reference": "Patient/MBR-NOTCOVERED"
+          },
+          "id": "cov-other",
+          "payor": [
+            {
+              "reference": "Organization/org-cms-payer"
+            }
+          ],
+          "relationship": {
+            "coding": [
+              {
+                "code": "child",
+                "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship"
+              }
+            ]
+          },
+          "resourceType": "Coverage",
+          "status": "active",
+          "subscriber": {
+            "reference": "Patient/MBR-PARENT"
+          }
         }
       }
     ],

@@ -419,18 +419,19 @@ func dtrPkgCtx(ctx context.Context) context.Context {
 
 // TestNativeForwardSelectsLineEndpoint: the
 // per-line endpoint resolution before n.post. Evidence present AND
-// token-matched to the routed line -> the #<line> endpoint is used; evidence
+// token-matched to the routed line -> the operation goes under the #<line>
+// base (HRex 1.2.0 publishes a base); evidence
 // absent, or present for a DIFFERENT token, both fall back to the configured
 // base+path UNCHANGED (the fence — never a partial/wrong-token match).
 func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	p := newStubPartner(t)
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Library"}}]}`)
 	p.respByPath["/Questionnaire/$questionnaire-package"] = pkg
-	p.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
+	p.respByPath["/v22/Questionnaire/$questionnaire-package"] = pkg
 	n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithCRDService("shn-order-select"))
 
-	t.Run("evidence token-matched to the routed line: the #<line> endpoint is used", func(t *testing.T) {
-		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": p.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+	t.Run("evidence token-matched to the routed line: the operation goes under the #<line> base", func(t *testing.T) {
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": p.srv.URL + "/v22"})
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2")
 		res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 		if err != nil {
@@ -439,8 +440,8 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 		if res.Status != 0 {
 			t.Fatalf("Status = %d, want 0", res.Status)
 		}
-		if p.lastPath != "/Questionnaire/$questionnaire-package-v22" {
-			t.Fatalf("lastPath = %q, want the #2.2 evidence endpoint", p.lastPath)
+		if p.lastPath != "/v22/Questionnaire/$questionnaire-package" {
+			t.Fatalf("lastPath = %q, want the operation under the #2.2 published base", p.lastPath)
 		}
 	})
 
@@ -460,7 +461,7 @@ func TestNativeForwardSelectsLineEndpoint(t *testing.T) {
 	})
 
 	t.Run("token-mismatch rejection: evidence for a DIFFERENT line is never selected", func(t *testing.T) {
-		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.1": p.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.1": p.srv.URL + "/v22"})
 		ctx := withAnswerLine(context.Background(), "pa.dtr@2.2") // routed at 2.2; evidence is keyed 2.1
 		res, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq)
 		if err != nil {
@@ -706,16 +707,16 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
 	shared := newStubPartner(t) // the shared base: PAS lives here
 	dtr := newStubPartner(t)    // the DTR base: a different origin
-	dtr.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
+	dtr.respByPath["/v22/Questionnaire/$questionnaire-package"] = pkg
 	dtr.respByPath["/Questionnaire/$questionnaire-package"] = pkg
-	shared.respByPath["/Questionnaire/$questionnaire-package-v22"] = pkg
+	shared.respByPath["/v22/Questionnaire/$questionnaire-package"] = pkg
 
 	var notes []string
 	n := NewNativeResponder(shared.srv.Client(), shared.srv.URL, nil, WithCRDService("shn-order-select"), WithDTRBaseURL(dtr.srv.URL), WithEndpointEvidenceObserver(func(note string) { notes = append(notes, note) }))
 
-	t.Run("a DTR entry on the DTR base's origin is kept, and the published endpoint beats the configured base+path", func(t *testing.T) {
+	t.Run("a DTR entry on the DTR base's origin is kept, and the published base beats the configured base", func(t *testing.T) {
 		notes = nil
-		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": dtr.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": dtr.srv.URL + "/v22"})
 		if len(notes) != 0 {
 			t.Fatalf("the partner's own DTR endpoint was dropped: %v", notes)
 		}
@@ -723,15 +724,15 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 		if _, err := n.Handle(dtrPkgCtx(ctx), "dtr-questionnaire-fetch", "corr", "pci", dtrFetchReq); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
-		if dtr.lastPath != "/Questionnaire/$questionnaire-package-v22" {
-			t.Fatalf("DTR base lastPath = %q, want the published #2.2 endpoint", dtr.lastPath)
+		if dtr.lastPath != "/v22/Questionnaire/$questionnaire-package" {
+			t.Fatalf("DTR base lastPath = %q, want the operation under the published #2.2 base", dtr.lastPath)
 		}
 	})
 
 	t.Run("a DTR entry on the shared base's origin is dropped: the DTR forward never goes there", func(t *testing.T) {
 		notes = nil
 		dtr.lastPath, shared.lastPath = "", ""
-		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": shared.srv.URL + "/Questionnaire/$questionnaire-package-v22"})
+		n.SetEndpointEvidence(map[string]string{"pa.dtr@2.2": shared.srv.URL + "/v22"})
 		if len(notes) != 1 {
 			t.Fatalf("want exactly one drop note, got %d: %v", len(notes), notes)
 		}
@@ -749,7 +750,7 @@ func TestEndpointEvidenceFenceJudgedPerContractBase(t *testing.T) {
 
 	t.Run("a PAS entry on the shared base's origin is still kept (PAS base unset ⇒ shared)", func(t *testing.T) {
 		notes = nil
-		n.SetEndpointEvidence(map[string]string{"pa.pas@2.2": shared.srv.URL + "/Claim/$submit-v22"})
+		n.SetEndpointEvidence(map[string]string{"pa.pas@2.2": shared.srv.URL + "/pas22"})
 		if len(notes) != 0 {
 			t.Fatalf("a PAS entry on the shared base was dropped: %v", notes)
 		}

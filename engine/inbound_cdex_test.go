@@ -377,7 +377,8 @@ func TestFederatedQuery_RecordsKeepSystemOfRecordBytes(t *testing.T) {
 	if err != nil || !bytes.Equal(carried, records) {
 		t.Fatalf("records read back = %v", err)
 	}
-	dr, prov, err := cdexEvidence(carried)
+	ev, err := cdexEvidenceEntries(carried)
+	dr, prov := ev.report, ev.provenance
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +418,8 @@ func TestCDexEvidence_LatestReportByDate(t *testing.T) {
 				entries = append(entries, prov(id))
 			}
 			b := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + strings.Join(entries, `},{"resource":`) + `}]}`)
-			dr, p, err := cdexEvidence(b)
+			ev, err := cdexEvidenceEntries(b)
+			dr, p := ev.report, ev.provenance
 			if err != nil || !bytes.Contains(dr, []byte(`"id":"`+tc.want+`"`)) || !bytes.Contains(p, []byte("DiagnosticReport/"+tc.want)) {
 				t.Fatalf("evidence = %s / %s (%v)", dr, p, err)
 			}
@@ -432,15 +434,21 @@ func TestCDexEvidence_ReportAndItsProvenance(t *testing.T) {
 	bundle := func(entries ...string) []byte {
 		return []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + strings.Join(entries, `},{"resource":`) + `}]}`)
 	}
-	if _, _, err := cdexEvidence(bundle(facDR1, prov("DiagnosticReport/dr-x"))); err == nil {
+	if _, err := cdexEvidenceEntries(bundle(facDR1, prov("DiagnosticReport/dr-x"))); err == nil {
 		t.Error("a report without its own Provenance was used")
 	}
-	if _, _, err := cdexEvidence(bundle(facDOC, prov("DocumentReference/doc-1"))); err == nil {
+	if _, err := cdexEvidenceEntries(bundle(facDOC, prov("DocumentReference/doc-1"))); err == nil {
 		t.Error("an answer without a report yielded evidence")
 	}
-	dr, p, err := cdexEvidence(bundle(facDR2, prov("DiagnosticReport/dr-1"), facDR1, prov("DiagnosticReport/dr-2"), prov("DiagnosticReport/dr-1")))
-	if err != nil || string(dr) != facDR2 || !bytes.Contains(p, []byte("dr-2")) {
-		t.Fatalf("evidence = %s / %s (%v)", dr, p, err)
+	picked, err := cdexEvidenceEntries(bundle(facDR2, prov("DiagnosticReport/dr-1"), facDR1, prov("DiagnosticReport/dr-2"), prov("DiagnosticReport/dr-1")))
+	if err != nil || string(picked.report) != facDR2 || !bytes.Contains(picked.provenance, []byte("dr-2")) {
+		t.Fatalf("evidence = %s / %s (%v)", picked.report, picked.provenance, err)
+	}
+	// The entries it names are the ones it picked: what the requester's fence
+	// reads as the evidence (checkEntries).
+	ev, err := cdexEvidenceEntries(bundle(prov("DiagnosticReport/dr-1"), facDR1, facDR2, prov("DiagnosticReport/dr-2")))
+	if err != nil || ev.reportEntry != 2 || ev.provenanceEntry != 3 || string(ev.report) != facDR2 || !bytes.Contains(ev.provenance, []byte("dr-2")) {
+		t.Fatalf("evidence entries = report %d, provenance %d (%v), want 2 and 3", ev.reportEntry, ev.provenanceEntry, err)
 	}
 }
 
@@ -459,17 +467,25 @@ func TestCDexRecordsBundle_Refusals(t *testing.T) {
 	}
 }
 
-// A connector that cannot search answers with its own record bytes, also
-// carried exactly.
+// A connector that cannot search, or a system that says definitely that it
+// does not support the search, answers with the connector's own record
+// bytes, also carried exactly.
 func TestFederatedQuery_RecordsFromConnectorWithoutSearch(t *testing.T) {
-	sor := &facilitySoR{censusSoR: newCensusSoR(), patient: facPatient, noSearch: true, legacy: map[string][]byte{"DiagnosticReport": []byte(facDR1)}}
-	sor.ContextSystemOfRecord = ReadSystemOfRecord(sor.censusSoR)
-	records, _, status, msg := newFacilityGateway(sor).facilityRecordsBundle(context.Background(), "MBR-UC05", facilityQueries("DiagnosticReport", "DocumentReference"), "Consent/c-1")
-	if status != 0 {
-		t.Fatalf("status %d: %s", status, msg)
-	}
-	if !bytes.Contains(records, []byte(facDR1)) || !bytes.Contains(records, []byte(facIdentity)) || bytes.Contains(records, []byte("Hiddenfamily")) {
-		t.Fatalf("records = %s", records)
+	for name, sor := range map[string]*facilitySoR{
+		"a connector that cannot search":  {noSearch: true},
+		"a definite not-supported answer": {searchErr: &SearchError{Outcome: SearchUnsupported, Reason: "search not supported"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sor.censusSoR, sor.patient, sor.legacy = newCensusSoR(), facPatient, map[string][]byte{"DiagnosticReport": []byte(facDR1)}
+			sor.ContextSystemOfRecord = ReadSystemOfRecord(sor.censusSoR)
+			records, _, status, msg := newFacilityGateway(sor).facilityRecordsBundle(context.Background(), "MBR-UC05", facilityQueries("DiagnosticReport", "DocumentReference"), "Consent/c-1")
+			if status != 0 {
+				t.Fatalf("status %d: %s", status, msg)
+			}
+			if !bytes.Contains(records, []byte(facDR1)) || !bytes.Contains(records, []byte(facIdentity)) || bytes.Contains(records, []byte("Hiddenfamily")) {
+				t.Fatalf("records = %s", records)
+			}
+		})
 	}
 }
 
@@ -485,9 +501,14 @@ func TestFederatedQuery_RecordsRefusals(t *testing.T) {
 		"same record twice":         {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {facPage("n", facDR1), facPage("", facDR1)}}}, http.StatusBadGateway},
 		"over a bound":              {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchBound, Reason: "entry bound"}}, http.StatusUnprocessableEntity},
 		"unavailable":               {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchUnavailable, Reason: "time bound"}}, http.StatusServiceUnavailable},
-		"nothing in range":          {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {facPage("", facDROld)}}}, http.StatusNotFound},
-		"nothing held":              {&facilitySoR{patient: facPatient}, http.StatusNotFound},
-		"malformed page":            {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {[]byte(`{"resourceType":"Bundle","type":"searchset","type":"x"}`)}}}, http.StatusBadGateway},
+		// An error answer that does not say the search is unsupported is a
+		// backend failure, never the connector's other read: what the search
+		// would have found is unknown.
+		"an error answer": {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchFailed, Reason: "search answered with an error status"},
+			legacy: map[string][]byte{"DiagnosticReport": []byte(facDR1)}}, http.StatusBadGateway},
+		"nothing in range": {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {facPage("", facDROld)}}}, http.StatusNotFound},
+		"nothing held":     {&facilitySoR{patient: facPatient}, http.StatusNotFound},
+		"malformed page":   {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {[]byte(`{"resourceType":"Bundle","type":"searchset","type":"x"}`)}}}, http.StatusBadGateway},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

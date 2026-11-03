@@ -54,9 +54,9 @@ import (
 // facts are the request's own facts as the origination request stated them
 // (originationClaimInput); the SDK builder refuses a required one they do not
 // state.
-func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts shnsdk.PASClaimFacts, requester [][]byte) ([]byte, error) {
+func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON []byte, memberSystem, patientRef, coverageRef, member, corr string, created time.Time, payer shnsdk.PayerIdentifier, facts shnsdk.PASClaimFacts, requester, coverageParties [][]byte) ([]byte, error) {
 	return buildModuleOnePASSubmit(line, shnsdk.ConformantClaimInputs{
-		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
+		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, CoverageParties: coverageParties, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
 		Corr: corr, Created: created,
 		ContainedInsurer: brPayer,
 		AbsoluteRefs:     brPayer,
@@ -93,7 +93,10 @@ type pasSubmission struct {
 // relayOriginationError before the writeJSON(status,msg) fallback; a bare
 // (status,msg) return would re-synthesize the error to a string and DROP the
 // *RelayError sentinel (the %w audit).
-func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci string, orderJSON, supplierJSON []byte, requester [][]byte, source *dtrBuildSource, coverageJSON, insurerJSON []byte, patientRef, coverageRef, member, memberSystemOfFlow string, payer shnsdk.PayerIdentifier, recipient string) (pasSubmission, int, string, error) {
+func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFollowInputs) (pasSubmission, int, string, error) {
+	pci, orderJSON, supplierJSON, requester, coverageParties, source := in.pci, in.orderJSON, in.supplierJSON, in.requester, in.coverageParties, in.source
+	coverageJSON, insurerJSON, patientRef, coverageRef := in.coverage, in.insurer, in.patientRef, in.coverageRef
+	member, memberSystemOfFlow, payer, recipient := in.member, in.memberSystem, in.payer, in.recipient
 	out := pasSubmission{corr: g.cfg.CorrelationGen()}
 	// Select-before-build: this tail used to let OriginateLeg select
 	// INTERNALLY off an empty Content.ProfileID, which put the choice AFTER the bundle
@@ -113,8 +116,24 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	// The party this request comes from, read from the participant's own system
 	// through the one selection the inquiry also uses. A refusal here is named:
 	// nothing invents a provider so that a request can be sent.
-	_, providerJSON, status, msg := g.pasProvider(ctx, orderJSON, append([][]byte{supplierJSON}, requester...)...)
-	if status != 0 {
+	claimIn, err := claimInputOf(r)
+	if err != nil {
+		return out, http.StatusBadRequest, err.Error(), nil
+	}
+	// What the claim's build needs of the request and the participant's
+	// records that no earlier leg consumed, checked here, at the build of the
+	// leg that consumes it, unless the caller already did (sourcesRead).
+	if !in.sourcesRead {
+		read, refusal := g.pasClaimSourcesAt(ctx, claimIn, in.statedMember, orderJSON, in.coverage, in.pasDeferred)
+		if refusal != nil {
+			status, msg := g.pasTailRefusal(ctx, recipient, refusal)
+			return out, status, msg, nil
+		}
+		requester, coverageParties = read.requester, read.coverageParties
+	}
+	providerJSON, refusal := g.pasProviderOf(ctx, orderJSON, append([][]byte{supplierJSON}, requester...)...)
+	if refusal != nil {
+		status, msg := g.pasTailRefusal(ctx, recipient, refusal)
 		return out, status, msg, nil
 	}
 	// The member, named as the participant's own system names them — the other
@@ -125,27 +144,18 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	}
 	// The request's own facts, exactly as the request to this route states
 	// them; the builder refuses a required one it does not state.
-	claimIn, err := claimInputOf(r)
-	if err != nil {
-		return out, http.StatusBadRequest, err.Error(), nil
-	}
-	// The facts are stated for the order this claim is about, or refused.
-	if status, msg := statedOrderCheck(ctx, claimIn, orderJSON); status != 0 {
-		return out, status, msg, nil
-	}
 	facts := claimIn.facts()
-	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts, requester)
+	bundleJSON, err := buildPASSubmitBundle(route.BuildLine, relaysReferencePayerBytes(g.cfg.OriginationProfile), orderJSON, qrJSON, providerJSON, coverageJSON, insurerJSON, memberSystem, patientRef, coverageRef, member, out.corr, g.cfg.Clock(), payer, facts, requester, coverageParties)
 	if err != nil {
 		if errors.Is(err, errNoPayerRecord) {
 			// The refusal pasSubmitBuildFailure answers.
-			g.observeOwnBuildRefused(recipient, "pas-claim", msgNoPayerRecord)
-			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-			return out, http.StatusUnprocessableEntity, msgNoPayerRecord, nil
+			status, msg := g.pasTailRefusal(ctx, recipient, fidelityRefusal(msgNoPayerRecord))
+			return out, status, msg, nil
 		}
-		if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) {
+		if isPASBuildFidelity(err) {
 			// The fidelity refusal pasBuildFailure answers, at the build stage.
 			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-			return out, http.StatusUnprocessableEntity, err.Error(), nil
+			return out, http.StatusUnprocessableEntity, withCarriedLegs(ctx, err.Error()), nil
 		}
 		// This gateway's own failure, never a refusal (pasBuildFailure).
 		exchangeOf(ctx).ownFailure()
@@ -157,7 +167,16 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, pci strin
 	}
 	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
 	if err != nil {
-		return out, http.StatusBadGateway, "PAS evidence linkage failed", err
+		// Answered as failEvidenceLinkage answers it: a read the system failed
+		// to answer with its own status and reason, anything else 502.
+		status, msg := http.StatusBadGateway, "PAS evidence linkage failed"
+		var readErr *SoRReadError
+		if errors.As(err, &readErr) {
+			var why string
+			status, why = SoRFailureResponse(err)
+			msg += ": " + why
+		}
+		return out, status, msg, err
 	}
 	// This helper owns the pas-claim leg wholesale — a single-shot submit+resolve —
 	// regardless of which caller's headline leg dispatched here, so it retags rather
@@ -333,4 +352,19 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(bundle)
+}
+
+// pasTailRefusal is writePASBuildRefusal for the shared tail, which answers
+// through its caller: a fidelity refusal is recorded (the leg it would have
+// sent failing, a fidelity refusal at the build stage) and answered 422, and
+// every refusal says which legs were carried.
+func (g *Gateway) pasTailRefusal(ctx context.Context, recipient string, ref *pasBuildRefusal) (int, string) {
+	switch {
+	case ref.fidelity:
+		g.observeOwnBuildRefused(recipient, "pas-claim", ref.msg)
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+	case ref.readErr != nil:
+		exchangeOf(ctx).sorFailure(ref.readErr)
+	}
+	return ref.status, withCarriedLegs(ctx, ref.msg)
 }

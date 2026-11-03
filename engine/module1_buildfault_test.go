@@ -39,7 +39,7 @@ func (s historyWithoutOrder) SearchPatientContext(ctx context.Context, resourceT
 // a fidelity refusal at the build stage, before any leg, at every conformance
 // level, with its answer unchanged.
 func TestOriginationRecord_DispatchHistoryWithoutTheOrderIsBuildStage(t *testing.T) {
-	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed)"}`
+	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed). No leg of this request was sent."}`
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			fix := newMBROXDispatchFixture(t)
@@ -79,12 +79,13 @@ func (s activeOrderOnly) OpenOrder(member string) ([]byte, bool) {
 }
 
 // With the FHIR connector, a member whose only order is at another status has
-// no open order, so the dispatch ends there: 502, before any search of the
-// device history, with no leg sent, at every level. The active row reaches the
-// payer.
+// no open order, so the dispatch ends there: 422, a record the dispatch leg
+// carries that the system cannot supply (the fidelity of SHN's own build, at
+// the build stage), before any search of the device history, with no leg sent,
+// at every level. The active row reaches the payer.
 func TestOriginationRecord_DispatchOrderNotAtActive(t *testing.T) {
 	t.Parallel()
-	const want = `{"error":"no open order for member in SoR"}`
+	const want = `{"error":"no open order for member in SoR. No leg of this request was sent."}`
 	for _, row := range []struct {
 		status string
 		open   bool
@@ -113,16 +114,19 @@ func TestOriginationRecord_DispatchOrderNotAtActive(t *testing.T) {
 					}
 					return
 				}
-				if rec.Code != http.StatusBadGateway || strings.TrimSpace(rec.Body.String()) != want {
-					t.Fatalf("%d %s, want 502 %s", rec.Code, rec.Body.String(), want)
+				if rec.Code != http.StatusUnprocessableEntity || strings.TrimSpace(rec.Body.String()) != want {
+					t.Fatalf("%d %s, want 422 %s", rec.Code, rec.Body.String(), want)
 				}
 				if len(fix.stub.legTypes) != 0 {
 					t.Fatalf("legs %v sent", fix.stub.legTypes)
 				}
 				r := onlyRecord(t, recs)
-				wantOrigination(t, r, "POST /scenario/dispatch", http.StatusBadGateway)
-				if r.Outcome != ExchangeOther || r.RefusedBy != "" || r.Rule != "" {
-					t.Fatalf("recorded %s by %q on %q, want other: no refusal of the network's", r.Outcome, r.RefusedBy, r.Rule)
+				// The order the dispatch leg carries is a record the system cannot
+				// supply: the fidelity of SHN's own build, at the build stage.
+				wantOrigination(t, r, "POST /scenario/dispatch", http.StatusUnprocessableEntity)
+				wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
+				if r.RefusalStage != vocab.RefusalStageBuild {
+					t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
 				}
 			})
 		}
@@ -169,7 +173,7 @@ func (s historyByStatus) SearchPatientContext(ctx context.Context, resourceType,
 // connector's answer, from a server that applies the search's status.
 func TestOriginationRecord_DispatchOrderOutsideTheHistoryStatusFilterIsBuildStage(t *testing.T) {
 	t.Parallel()
-	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed)"}`
+	const want = `{"error":"build order-dispatch request failed: the system of record's device history does not hold the dispatched order DeviceRequest/dr-ox at a status the device history selects (active, on-hold, completed). No leg of this request was sent."}`
 	wantFilter := []SearchDateRange{{Param: "status", AnyOf: prefetchStatus["DeviceRequest"]}}
 	for _, row := range []struct {
 		status string
@@ -300,7 +304,9 @@ func TestRefuseBuildFailure_RecordsByWhatFailed(t *testing.T) {
 			rec := httptest.NewRecorder()
 			msg := "build order-select request failed: " + row.err.Error()
 			g.refuseBuildFailure(context.WithValue(context.Background(), exchangeRecorderKey{}, x), &exchangeWriter{ResponseWriter: rec, x: x}, "payer", "crd-order-select", msg, row.err)
-			if rec.Code != http.StatusUnprocessableEntity || strings.TrimSpace(rec.Body.String()) != `{"error":"`+msg+`"}` {
+			// A refusal says which legs the request already sent; this call has no
+			// route's tracker, so it says it cannot tell which, never that none were.
+			if rec.Code != http.StatusUnprocessableEntity || strings.TrimSpace(rec.Body.String()) != `{"error":"`+msg+`. Any leg this request sent before this point was carried and stands."}` {
 				t.Fatalf("answer %d %s, want the unchanged 422", rec.Code, rec.Body.String())
 			}
 			if row.stage == "" {

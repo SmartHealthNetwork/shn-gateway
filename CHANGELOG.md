@@ -4,6 +4,323 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A request your gateway builds carries a dependent's parent (v1.4.0)
+
+- **Behavior change (requester, `ORIGINATION_PROFILE`):** a member whose Coverage names another
+  person as its `subscriber` or `policyHolder`, by a reference to a `Patient` record of its own
+  (a dependent's parent, the PAS IG's subscriber), now gets a prior-authorization request. Before,
+  the request was not built: `500 build bundle failed`. On the `/scenario/*` routes, the gateway
+  reads that person's record from your system of record at the PAS claim's build. Every PAS
+  submission and amendment it builds under that Coverage carries the record as a `Patient` entry
+  of its own. The Coverage's slot names that entry, the Coverage's party by shn-sdk's
+  `CoverageEntryParties` (shn-sdk v1.4.0's `CoverageParties`). The request the gateway completes
+  from your system of record (`ORIGINATION_PROFILE=provider-data`) keeps that entry. Any other
+  second `Patient` entry is still refused there.
+- **Refusals, at the PAS claim's build:**
+  - a person the Coverage names whose record your system does not hold, or whose record cannot
+    be carried as it is (it contains other resources, makes a reference, or is another version
+    than the slot names): `422`, recorded as `fidelity` at stage `build`;
+  - your system failing to answer the read, or answering with another record than the person's:
+    `503` or `502`, recorded as a backend failure.
+
+  Each comes after the legs the request sent before the claim (the coverage check, and the
+  questionnaire when the payer asked for one), which stand. The answer names them.
+- **Unchanged:** a member who is their own subscriber, or a Coverage naming its parent as a
+  contained `Patient`, is built as before. A prior-authorization inquiry the gateway builds for a
+  dependent does not yet carry the parent.
+
+## On a provider's /scenario/uc05, a facility record about another patient is refused at strict only, unless it is the claim update's evidence (v1.4.0)
+
+- **Before you upgrade:** this changes what a provider gateway that declares
+  `ORIGINATION_PROFILE` (`demo` or `provider-data`) answers on `POST /scenario/uc05` when the
+  facility's federated answer carries a record about a patient other than the member.
+  - **A record that is not the evidence:** at `none`, `observe` and `structural`, it is now
+    carried, and the flow goes on to the claim update. Examples are a `DocumentReference`
+    leg's record, or a record beside the report on the `DiagnosticReport` leg. The record is
+    `patient.answer` (recorded at `observe` and `structural`; nothing is recorded at `none`).
+    Before, it was refused `502 federated response refused: …` at every level. At `strict`
+    it is still refused with that `502`, now recorded as `conformance`.
+  - **The report the claim update carries as evidence** (and the `Provenance` that
+    attributes it): if it is about another patient, it is now refused
+    `422 build update bundle failed: … (fidelity of SHN's own build)` at every level. This
+    is recorded as `fidelity` at the build stage, and no claim update is sent. Before, it was
+    `502 federated response refused: …`. A caller that reads the `502` for this case reads
+    the `422` instead.
+  - **Both refusals** now say which legs the request had already sent; those legs were
+    carried and stand.
+- **Why the two differ:** the claim update is the provider's own message, and the gateway
+  builds the report into it with the report's `subject` re-pointed at the Claim's patient,
+  as it already did. Built from another patient's report, it would state what the facility
+  never said, so that is a refusal of the gateway's own build, at every level. Any other
+  record on either leg is used for nothing; whether it is about the member is the content
+  check `patient.answer`. A participant's own federated query, through the facility's Da
+  Vinci answer, already applies that check the same way.
+- **Also refused 422 at every level:** on the report's leg, an answer whose entries the gateway
+  cannot index to resolve the evidence's references (a repeated `fullUrl`, an entry whose
+  `resource` is `null`). On the `DocumentReference` leg, the same answer is `patient.answer`,
+  as above. Before, both were `502 federated response refused: …` at every level.
+- **Unchanged:** a provider that does not declare `ORIGINATION_PROFILE` serves no
+  `/scenario` route. A facility answer that cannot be read, or holds no report with its
+  `Provenance`, is `502 federated response parse failed: …` as before.
+
+## A system-of-record search your server says it cannot run is told apart from an error (v1.4.0)
+
+- **Before you upgrade (provider):** the built-in FHIR connector no longer reads every error
+  status from your FHIR server's search as "search not supported". It now reads the status and
+  the answer's `OperationOutcome` by structure, never its text. Only `501`, or a `4xx` other
+  than `401`, `403` and `429` whose `OperationOutcome` has at least one `error` or `fatal`
+  issue, every one with the code `not-supported`, means your server cannot run the search. Any
+  other error answer (`400`, `404` or `422` without that `OperationOutcome`) is a backend
+  failure. These change, at every
+  conformance level:
+  - **A CDS Hooks or `$questionnaire-package` request that carries no coverage,** when the
+    coverage search gets such an error answer: `502 the system of record answered the coverage
+    search with an error` (was `422 coverage not in request, and the system of record cannot
+    search for it`). It is never recorded as a refusal.
+  - **A federated query's records,** when a search gets such an error answer: `502` (was the
+    connector's `FacilityRecordsContext` records, one per type).
+  - **An originated `order-select` request's draft order,** when its search gets such an
+    error answer: `502` (was `422 the system of record cannot search for the member's draft
+    order`).
+  - **Recorded outcome:** such a search is now recorded as outcome `failed` (was
+    `unsupported`) in the `prefetch.obtained` event and the holder log line. A monitor that
+    matches `unsupported` sees the new value.
+
+  A FHIR server that answers a search it does not support with a bare `400` or `404` now gets
+  `502`s where it got `422`s. To keep the `422`, answer `501`, or include an
+  `OperationOutcome` issue with code `not-supported`.
+- **Unchanged:**
+  - A prefetch value whose search gets an error answer is left out, as before.
+  - The coverage read a request your gateway originates first makes to route by, behind the
+    built-in FHIR connector, still answers `502` for a definite not-supported answer, as for an
+    answer past the gateway's bounds.
+- **New (connector authors):** `engine.SearchFailed` (`failed`) is the outcome of a search
+  your system answered with an error that does not say it cannot run it. Return
+  `engine.SearchUnsupported` only for a definite answer: the gateway reads it as your system
+  being unable to supply the value. `SearchFailed` is recorded as a backend failure of class
+  `http-4xx`.
+
+## A PAS or DTR endpoint a payer publishes is the base its operations go under (v1.4.0)
+
+- **Before you upgrade:** if your system publishes a full operation URL in its
+  `.well-known/davinci-configuration` (for example `…/Claim/$submit` as
+  `davinci_pas_submission_endpoint`) instead of the base HRex 1.2.0 defines,
+  publish the base. The gateway adds the operation's path to the published
+  value, so a full operation URL becomes
+  `…/Claim/$submit/Claim/$submit`. A system that publishes a base, or publishes
+  no `.well-known/davinci-configuration`, needs nothing.
+- **Change (behaviour):** a payer gateway that follows the PAS or DTR endpoint
+  the payer publishes in its `.well-known/davinci-configuration` invokes each
+  operation under it, as HRex 1.2.0 defines the value:
+  - `davinci_pas_submission_endpoint#<line>` is the base for `/Claim/$submit`
+    (submit and update) and `/Claim/$inquire`;
+  - `davinci_dtr_qpackage_endpoint#<line>` is the base for
+    `/Questionnaire/$questionnaire-package`, and the gateway sends
+    `/Questionnaire/$next-question` under the same base.
+
+  Earlier releases posted every one of those operations to the published value
+  itself, as if it were the operation's own URL. A payer publishing a base, as
+  the IG defines, therefore received each PAS request Bundle at its FHIR base,
+  and an inquiry went wherever a submission did.
+- The operation's path is added where the published value's path ends,
+  before any query or fragment: the slashes that end the published path are
+  dropped first, so none is doubled, and the rest of the URL the gateway
+  builds is the published value as written, sent as any URL the gateway
+  calls is. Nothing is read from how the published path ends: a value that
+  already names an operation is a base like any other.
+- The CDex `$submit-attachment` forward already read
+  `davinci_cdex_attachsubmit_endpoint` as a base; it now shares the same rule.
+- Unchanged: a published value is followed only when it is same-origin with
+  the base its contract uses. With none, the PAS and DTR forwards go under the
+  configured base as before, and so does the CDex forward, except that a query
+  or fragment on `PAYER_DAVINCI_BASE_URL` now stays after
+  `/$submit-attachment` instead of coming before it.
+
+## The validator and evaluation images run on the Temurin 21.0.13+9 distroless Java base (v1.4.0)
+
+- **Changed:** the validator image (`deploy/validator`) and the evaluation HAPI image
+  (`deploy/eval/hapi`) run on the Temurin 21.0.13+9 `gcr.io/distroless/java21-debian13:nonroot`
+  base, pinned by digest, in place of Temurin 21.0.12.1+1. What the validator checks does not
+  change.
+- **Changed:** the new base's Java trust store no longer carries the Comodo "AAA Certificate
+  Services" root. After the build removes the eMudhra emSign roots, as before, both images trust
+  145 roots, where they trusted 146.
+- **Changed:** `deploy/validator/verify.sh` checks the built image's environment against the
+  runtime base it runs on, the image's `hapi-runtime` stage. That base must set the same variables
+  as the validation engine image its WAR comes from, to the same values, apart from the JRE's
+  version, which may differ only within the same Java feature release. The engine image still
+  fixes the image's command, user and working directory.
+- **Unchanged:** a validator or evaluation image built from a release before v1.4.0, or a
+  validator tag published before it, keeps its own base: rebuild it from v1.4.0, or move to a
+  validator tag published from it. The install bundle builds its validator from source, so
+  rebuilding the bundle at v1.4.0 moves it to the new base.
+
+## A request your gateway builds is refused at the leg that consumes what is missing (v1.4.0)
+
+- **Before you upgrade (requester, `ORIGINATION_PROFILE`):** the `/scenario/*` routes your
+  gateway answers now refuse at the first leg that cannot be built, never before an earlier leg
+  that can still succeed. Some refusals that came before any leg now come after the coverage
+  check (CRD) and the questionnaire (DTR) legs, which were sent and stand. Some change status. A
+  caller that reads "nothing was sent" from these refusals must read their last sentence instead.
+  These now come after legs were sent:
+  - **At the PAS claim, after CRD and DTR,** `422`, recorded as `fidelity` at stage `build`:
+    - the member the request names, and the order it states its claim facts for. A request
+      naming no member or no order was `400`; it is now `422`;
+    - a claim fact the routed line requires;
+    - a payer Organization record your system does not hold;
+    - the records the order's requester leads to;
+    - the requesting provider your records cannot supply. This was `502`; it is now `422`;
+    - UC-03's oxygen attestation clinician;
+    - a dispatched order's supplier your system does not hold. This was `502`; it is now `422`;
+    - an order with no product coding a claim's item can name. This was `502` before any leg;
+      it is now `422` at the claim, and UC-02's coverage check now carries such an order.
+  - **At the amendment, after the submission the payer pended:** an amendment's
+    `certificationType` and `reportType`, UC-06's attesting clinician and UC-06's answer. The
+    pend stays at the payer, as it would for any amendment not sent.
+  - **At `/scenario/uc06/complete` and `/scenario/uc07/complete`,** the member, order, facts and
+    route the amendment is built from are checked at the amendment. A request naming no member
+    or no order was `400`; it is now `422`. An order of record with no product coding was `502`;
+    it is now `422`. On `/scenario/uc07/complete` this comes after the patient questionnaire
+    exchange, which needs none of it.
+  - **At UC-07's patient questionnaire exchange:** UC-07's answer.
+  - **A record your system fails to answer for** now fails where the record is first needed,
+    not before any leg. It is answered `503` or `502`, a backend failure, never a refusal. The
+    payer Organization record fails at the questionnaire request when the coverage check asks
+    for a questionnaire, and otherwise at the PAS claim. The requester's records, the requesting
+    provider and a dispatched order's supplier fail at the PAS claim.
+  - **A payer that declares no framed DTR operations** is refused at the questionnaire leg,
+    after CRD: `422` (was `502`), recorded as `routing`.
+  - **No patient health gateway registered** for UC-07's patient exchange: `422` (was `500`),
+    recorded as `routing`, before that exchange (after the submission, on the single call).
+- **Changed (requester), before any leg:**
+  - A `wait` that is not a whole number of seconds is refused `400` before any leg, on every
+    route that follows a decision; it was refused after CRD and DTR.
+  - A member your system does not hold: `400 unknown member`, now recorded as `routing`.
+  - No open order or draft order, an open order about another product than the route
+    originates for, a dispatched order with no id or performer, or a record the gateway cannot
+    name the member in: `422` (was `502`), recorded as `fidelity` at stage `build`.
+  - A record your system returns about another patient: `422` (was `502`), recorded as
+    `fidelity` at stage `verify`.
+  - A Coverage search your system fails to answer usably: before any leg, still `503` when it
+    does not answer and `502` otherwise, now recorded as a backend failure (was `other`), or as
+    `integrity` for an answer that repeats a member name, and ending with the sentence below.
+    Behind the built-in FHIR connector this is any failure of that search, including an answer
+    past the gateway's bounds and an error status, one saying your system does not support the
+    search included. Behind a connector whose coverage read is not that search, the coverage
+    the coverage check carries fails the same way when its search does, and is `502` (was
+    `422`) for an answer the gateway cannot read or an error answer that does not say the
+    search cannot run; a connector that cannot search, a definite not-supported answer, or an
+    answer past the gateway's bounds stays `422`, recorded as `fidelity` at stage `build`.
+
+  A read your system fails to answer stays `503` or `502`, before any leg or after some, and is
+  now recorded as a backend failure wherever it comes (it was recorded as `other`, or, after a
+  leg, as a refusal): the patient, the open order, a payer the coverage names by reference, the
+  clinical context the questionnaire is filled from, an order's supporting records, the order's
+  requester, the supplemental report UC-04's amendment attaches, the evidence a PAS request
+  links, the patient reference a pended claim is recorded with, and, on `/scenario/pa/inquire`,
+  the order, patient, coverage, provider and payer records an inquiry is built from. The
+  evidence, the pended claim's patient reference and the inquiry's reads were `502` whatever
+  the failure, and now answer `503` when your system does not answer. Your operated `$populate` engine failing to answer is recorded the
+  same way. These failures after a leg now end with the sentence below too: a fill or an adaptive
+  questionnaire round that fails, a decision that cannot be followed, a coverage card that
+  cannot be read, an order with no id, evidence that cannot be linked, and a questionnaire
+  request the gateway cannot carry unchanged. An answer relayed from a leg or the network is
+  carried as it came. The sentence is said once.
+- **Changed (requester), the refusals above:** each refusal and backend failure listed above ends
+  with a sentence saying which legs it carried: `The crd-order-select and dtr-questionnaire-fetch
+  legs this request sent were carried and stand.`, or `No leg of this request was sent.` A
+  request that can still succeed without the refused leg is carried, whatever that leg would
+  have needed:
+  - a payer's not-covered answer;
+  - the no-PA coverage check;
+  - UC-01's eligibility check, which no longer checks the member the request names;
+  - UC-05 when the disclosure is denied.
+
+  See CONFIGURATION, "Where a request your gateway builds is refused".
+
+## The involved list reads a request as the leg's deciding readers do (v1.4.0)
+
+The involved list, the other patients a prior-authorization request carries and the Hub records the exchange under, now reads the request with the same strict decoder as the leg's subject binding and routing. A request that repeats a member name, exactly or in another case, names no other patient, just as an unreadable request names none.
+
+Nothing changes on the wire, and no exchange's involved list changes. Every request this gateway sends on such a leg is already read strictly first, and one that repeats a member name is refused before it is sent. The involved list no longer depends on that.
+
+## A Coverage's parent carried as a Patient entry is no longer read as another patient (v1.4.0)
+
+- **Fix:** a coverage search the gateway runs on your system of record may return
+  `Patient` entries as included records. The gateway now drops every one except the Patient
+  a Coverage's `beneficiary` names, instead of reading it as another patient's record.
+  - The usual one is the parent a dependent's Coverage names as its `subscriber` or
+    `policyHolder`. R4 also lets a Coverage's `payor` name a Patient.
+  - Earlier gateways refused such a search (`502`, at every conformance level) on these reads:
+    - the routing read;
+    - the coverage `ENRICH_NATIVE_REQUESTS` adds;
+    - the coverage of a CRD request the gateway originates.
+  - A dropped Patient is not sent to the payer.
+  - The Patient a `beneficiary` names is kept and carried as before, and must be the patient.
+    Each Coverage is still checked against the patient by its `beneficiary`.
+  - The routing read of a `$questionnaire-package` request already checked each Coverage on
+    its own and never carried an included record, so it does not change.
+- **Fix:** the check that a prefetch or `$questionnaire-package` value is about one patient
+  (`patient.mixed`) now accepts a Coverage's party carried as a `Patient` entry of its own,
+  as it already accepted one contained in the Coverage. That check is not run at `none`,
+  records at `observe` and `structural`, and refuses at `strict`.
+  - The entry must be one shn-sdk's `CoverageEntryParties` names for its Bundle, the same
+    rule the PAS checks use. Among its conditions: nothing else in the Bundle refers to the
+    entry, and the Coverage's beneficiary is another `Patient` entry of the Bundle.
+  - Any other `Patient` entry is still checked against the patient.
+- **Fix:** the coverage read through a CDS Hooks request's `fhirServer` no longer refuses an
+  answer because it holds a `Patient` entry (`412 … is not a Coverage searchset`, at every
+  level). It treats one the way the gateway's own searches do.
+  - A `Patient` entry a Coverage's `beneficiary` names is checked with the Coverages and must
+    be the patient (`502` when it is another).
+  - Any other `Patient` entry, such as the parent the EHR's server returns as an entry of its
+    own, is dropped before the check.
+  - What the read carries as `prefetch.coverage` does not change: the chosen Coverages and their
+    payor Organizations, never a `Patient`.
+- **Unchanged:** the federated-query checks read only a party contained in the Coverage.
+
+## A dependent's parent carried as a Patient entry of its own is the Coverage's party, on the request and the answer (v1.4.0)
+
+- **Behavior change:** a Coverage's party may be a `Patient` entry of its own that only a
+  Coverage's `subscriber` or `policyHolder` names, as well as a Patient contained in the
+  Coverage. The entry is named by its exact `fullUrl` or by a relative reference that resolves
+  to it against the Coverage entry's base (never by id alone), and nothing else in the Bundle
+  refers to it. shn-sdk's `CoverageEntryParties` decides it (shn-sdk v1.3.0); the gateway keeps
+  no copy of the rule. The rule does not check that the Coverage's `beneficiary` is the member:
+  the checks below do, and refuse another member as before. The PAS IG carries its subscriber
+  profile this way.
+  - The request's check for another patient (rule `patient.mixed`), on `Claim/$submit`, an
+    amendment and `Claim/$inquire` (the inquiry's member check included), reads the parent's
+    entry as the Coverage's party, as it reads a parent contained in the Coverage: its own
+    identity is not read as another patient, the slot's reference and an identifier beside it
+    that the parent carries name the parent, and what the parent's entry references is read.
+  - The answer's check (rule `patient.answer`), on a `Claim/$submit` answer and a
+    `Claim/$inquire` answer, at the payer's gateway and the provider's, reads it the same way:
+    the parent's entry is no second patient, and the slot naming it, typed `Patient` or not, is
+    no reference to the patient.
+  - The patients a request involves, which the Hub records the exchange under, do not include
+    the parent, and do include a patient the parent's entry names (one it links to, say),
+    as for a parent contained in the Coverage. A refused token for that patient leaves them
+    out with the refusal counted, and the leg is sent as usual.
+
+  Before, such a request was refused at `strict` (`403 inconsistent patient in PAS bundle`,
+  `403 inconsistent patient in PAS inquiry`), and such an answer refused at `strict` (`PAS
+  response has inconsistent patient linkage`, `PAS inquiry answer has inconsistent patient
+  linkage`), each recorded and carried at `observe` and `structural`. Now both are carried and
+  read at every level, and the answer written from as any readable answer is.
+- **Unchanged:** a `Patient` entry no Coverage names, one a relative reference names that does
+  not resolve to its `fullUrl`, one anything else in the Bundle refers to (the Claim, an
+  extension, a beneficiary), and another patient's Coverage entry beside that patient are
+  refused at `strict` as another patient, and recorded and carried at `observe` and
+  `structural`; nothing is checked at `none`. A `$submit` answer whose slot names, by a
+  relative reference, an entry the Bundle does not hold is refused by the answer's own graph
+  check (`answer.shape`) as before. The request a provider's gateway builds from its system of
+  record (`ORIGINATION_PROFILE`) carries the parent as an entry of its own from v1.4.0
+  (see "A request your gateway builds carries a dependent's parent"). The
+  checks of CDS Hooks prefetch and `$questionnaire-package` values read a Coverage's party
+  carried as a `Patient` entry by the same rule; federated query values read only a contained
+  party.
+
 ## A payer's 2xx answer reaches the provider's system with its ETag, Last-Modified and Retry-After (v1.3.0)
 
 - **Before you upgrade:** nothing to configure. The three headers reach a participant's system

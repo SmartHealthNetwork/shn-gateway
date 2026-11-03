@@ -197,7 +197,7 @@ func TestOriginationRoute_EachRequiredFactAtEachLine(t *testing.T) {
 		}
 		return buildPASSubmitBundle(line, false, pasTailServiceRequest(), nil, testRequestingProvider(), testMemberCoverage(member),
 			testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, "Patient/"+member, "Coverage/"+member, member,
-			"corr-facts", pasTailClock(), shnsdk.CMSPayerIdentity, in.facts(), nil)
+			"corr-facts", pasTailClock(), shnsdk.CMSPayerIdentity, in.facts(), nil, nil)
 	}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, r := range required[line] {
@@ -311,7 +311,7 @@ func TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission(t *testing.
 		facts.ClaimType = json.RawMessage(statedType)
 		in.PASClaimFacts = facts
 		sub, err := buildPASSubmitBundle(line, false, in.SR, nil, in.Provider, in.Coverage, in.Insurer, in.MemberIDSystem,
-			in.PatientRef, in.CoverageRef, in.MemberID, in.OriginalCorr, submittedAt, in.Payer, facts, nil)
+			in.PatientRef, in.CoverageRef, in.MemberID, in.OriginalCorr, submittedAt, in.Payer, facts, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

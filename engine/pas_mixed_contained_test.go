@@ -17,9 +17,9 @@ import (
 // another member names another patient as surely as an order for one does:
 // patient.mixed reads every resource the bundle carries, contained
 // and nested ones included, and every reference in them. A Coverage's party
-// (coverageParty: a dependent's parent, named by its subscriber or
-// policyHolder) is another person the Coverage names, so only its own
-// identity is not checked; what it names is.
+// (a dependent's parent, named by its subscriber or policyHolder, contained
+// in the Coverage or a Patient entry of its own) is another person the
+// Coverage names, so only its own identity is not checked; what it names is.
 
 // pasCarried is what a row adds to the request: a resource in the member's
 // Coverage, an entry of its own, identifiers on the member's Patient entry, or
@@ -57,15 +57,18 @@ var pasAnotherPatientCarried = map[string]pasCarried{
 	// patient, whatever else it carries.
 	"the member's Patient entry carrying another member's identifier too": {memberIdentifiers: `{"system":"urn:shn:member","value":"MBR-COVERED"},{"system":"urn:shn:member","value":"MBR-NOTCOVERED"}`},
 	"a Patient carrying both members' identifiers":                        {resource: `{"resourceType":"Patient","id":"x","identifier":[{"system":"urn:shn:member","value":"MBR-COVERED"},{"system":"urn:shn:member","value":"MBR-NOTCOVERED"}]}`},
-	// A party is a contained Patient; the parent carried as a Patient entry
-	// of its own, even one the member's Coverage names as its subscriber, is
-	// another patient.
-	"the parent as a Patient entry of its own, named by the subscriber": {
+	// The parent carried as a Patient entry of its own is the Coverage's
+	// party only when the slot's reference resolves to its fullUrl
+	// (shnsdk.CoverageEntryParties): this request's Coverage entry has no
+	// fullUrl, so "Patient/MBR-PARENT" resolves to no entry (never by id
+	// alone), and the parent's entry is another patient. The resolving shapes
+	// are workstream_pa_entry_party_test.go's.
+	"the parent as a Patient entry of its own, named by a reference that does not resolve": {
 		entry:      `{"fullUrl":"http://localhost/fhir/Patient/MBR-PARENT","resource":{"resourceType":"Patient","id":"MBR-PARENT","identifier":[{"system":"urn:shn:member","value":"MBR-PARENT"}]}}`,
 		subscriber: "Patient/MBR-PARENT",
 	},
-	// A party is a contained Patient; a subscriber named as a Patient
-	// reference is another patient.
+	// A subscriber naming, as a Patient reference, a parent the request does
+	// not carry names another patient.
 	"a subscriber naming the parent as a literal Patient reference": {subscriber: "Patient/MBR-PARENT"},
 	// A member identifier names that member in any element, typed or not.
 	"an untyped reference to another member by identifier in any element": {resource: `{"resourceType":"Organization","id":"x","extension":[{"url":"http://example.org/fhir/StructureDefinition/about","valueReference":{"identifier":{"system":"urn:shn:member","value":"MBR-NOTCOVERED"}}}]}`},

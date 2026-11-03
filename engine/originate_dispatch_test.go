@@ -330,7 +330,7 @@ func TestHandleDispatch_UnknownMember(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if body["error"] != "unknown member" {
+	if !strings.HasPrefix(body["error"], "unknown member. ") {
 		t.Errorf(`error = %q, want "unknown member"`, body["error"])
 	}
 }

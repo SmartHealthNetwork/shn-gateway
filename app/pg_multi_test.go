@@ -47,6 +47,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/pgstore"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/auditappend"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -797,40 +798,144 @@ func TestPgMulti_PoolStatsCarriedOnlyWithMetricsOptIn(t *testing.T) {
 // instance of the same holder, built afterwards (a restart), finds queued.
 func TestPgMulti_AuditOutboxIsDurableAndShared(t *testing.T) {
 	env, _, dsn, holderID := pgMultiSetup(t)
-	first, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
-	t.Cleanup(func() {
-		if first.gateway != nil {
-			_ = first.gateway.Close()
-		}
-	})
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	rec := shnsdk.AuditRecord{
-		Timestamp: "2027-01-01T00:00:00Z", Sender: holderID, Recipient: "payer-b",
-		TransactionType: shnsdk.AuditTypeModuleDetails, Outcome: "authored",
-		PayloadBundleHash: strings.Repeat("ab", 32), Version: 2, CorrelationID: "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
-		Module: &shnsdk.Module{Body: "request", Leg: "pa.pas-claim", Ownership: "authored", Builder: "sdk-pas-submit"},
-	}
-	if got := first.auditAppender.Append(rec); got != "queued" {
-		t.Fatalf("Append = %s, want queued", got)
-	}
-	restarted, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
-	t.Cleanup(func() {
-		if restarted.gateway != nil {
-			_ = restarted.gateway.Close()
-		}
-	})
-	if err != nil {
-		t.Fatalf("second build: %v", err)
-	}
+	first := pgMultiBuild(t, env)
+	rec := pgMultiAuditRecord(t, holderID)
+	appendUntilQueued(t, first.auditAppender, rec)
+	pgMultiBuild(t, env) // the restart
+	assertOutboxHoldsOnly(t, dsn, holderID, rec)
+}
+
+// TestPgMulti_AuditOutboxQueuesAfterASlowWrite: a store write held past
+// Append's bound is a counted drop ("store"), and the same record appended
+// again is queued once, under its recordId, across a restart. Another
+// session's uncommitted insert of the same recordId holds the first write, so
+// the drop does not depend on the runner's speed.
+func TestPgMulti_AuditOutboxQueuesAfterASlowWrite(t *testing.T) {
+	env, _, dsn, holderID := pgMultiSetup(t)
+	first := pgMultiBuild(t, env)
+	rec := pgMultiAuditRecord(t, holderID)
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	var n int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM gw_audit_outbox WHERE holder_id = $1`, holderID).Scan(&n); err != nil {
+	ctx := context.Background()
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	now := time.Now()
+	if _, err := holder.Exec(ctx, `
+INSERT INTO gw_audit_outbox (holder_id, record_id, body, enqueued_at, next_attempt_at)
+VALUES ($1, $2, $3, $4, $4)`, holderID, rec.RecordID, []byte(`{}`), now); err != nil {
+		t.Fatal(err)
+	}
+	if got := first.auditAppender.Append(rec); got != auditappend.DropStore {
+		t.Fatalf("Append behind a held write = %s, want %s", got, auditappend.DropStore)
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	appendUntilQueued(t, first.auditAppender, rec)
+	pgMultiBuild(t, env) // the restart
+	assertOutboxHoldsOnly(t, dsn, holderID, rec)
+}
+
+// pgMultiBuild builds one instance from env. At the test's end it closes the
+// gateway and then the store pool (Run closes both at stop, with its lanes
+// and telemetry), so repeated runs in one process do not exhaust the
+// database's connections.
+func pgMultiBuild(t *testing.T, env map[string]string) built {
+	t.Helper()
+	b, err := build(context.Background(), func(k string) string { return env[k] }, io.Discard, nil)
+	t.Cleanup(func() {
+		if b.gateway != nil {
+			_ = b.gateway.Close()
+		}
+		if b.closeStore != nil {
+			b.closeStore()
+		}
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return b
+}
+
+// pgMultiAuditRecord is a module-details record of holderID's, its recordId
+// set so appending it again cannot queue a second row.
+func pgMultiAuditRecord(t *testing.T, holderID string) shnsdk.AuditRecord {
+	t.Helper()
+	id, err := auditappend.NewRecordID(time.Now(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shnsdk.AuditRecord{
+		RecordID:  id,
+		Timestamp: "2027-01-01T00:00:00Z", Sender: holderID, Recipient: "payer-b",
+		TransactionType: shnsdk.AuditTypeModuleDetails, Outcome: "authored",
+		PayloadBundleHash: strings.Repeat("ab", 32), Version: 2, CorrelationID: "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+		Module: &shnsdk.Module{Body: "request", Leg: "pa.pas-claim", Ownership: "authored", Builder: "sdk-pas-submit"},
+	}
+}
+
+// appendUntilQueued appends rec until the outbox takes it. A write that
+// misses Append's short bound on a loaded runner is a counted drop ("store")
+// by design, so the record is appended again under its own recordId; any
+// other answer, or no "queued" within the deadline, fails the test.
+func appendUntilQueued(t *testing.T, a *auditappend.Appender, rec shnsdk.AuditRecord) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for drops := 0; ; drops++ {
+		got := a.Append(rec)
+		if got == auditappend.Queued {
+			if drops > 0 {
+				t.Logf("Append queued after %d store drops", drops)
+			}
+			return
+		}
+		if got != auditappend.DropStore {
+			t.Fatalf("Append = %s, want %s", got, auditappend.Queued)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Append = %s for %d tries, want %s", got, drops+1, auditappend.Queued)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// assertOutboxHoldsOnly fails unless gw_audit_outbox holds exactly one row
+// for holderID, and that row is rec as Append queued it.
+func assertOutboxHoldsOnly(t *testing.T, dsn, holderID string, rec shnsdk.AuditRecord) {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	rows, err := pool.Query(context.Background(), `SELECT record_id, body FROM gw_audit_outbox WHERE holder_id = $1`, holderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		n++
+		var id string
+		var body []byte
+		if err := rows.Scan(&id, &body); err != nil {
+			t.Fatal(err)
+		}
+		var got shnsdk.AuditRecord
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("queued body: %v", err)
+		}
+		if id != rec.RecordID || got.RecordID != rec.RecordID || got.CorrelationID != rec.CorrelationID {
+			t.Errorf("queued row %s holds record %q (correlation %q), want %s", id, got.RecordID, got.CorrelationID, rec.RecordID)
+		}
+	}
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {

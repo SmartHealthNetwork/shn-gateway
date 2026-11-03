@@ -46,9 +46,9 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 		body, record, public string
 		calls                int32
 	}{
-		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed"}` + "\n", 0},
-		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed"}` + "\n", 1},
-		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient"}` + "\n", 1},
+		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 0},
+		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1},
+		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1},
 		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical"}` + "\n", 1},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -378,7 +378,7 @@ func TestBuildPopulateFailureEvidenceWriterFailurePreservesResponse(t *testing.T
 	h := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": srv.URL}, populateFailingWriter{})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
-	if rr.Code != 502 || rr.Body.String() != `{"error":"$populate upstream failed"}`+"\n" || calls.Load() != 1 {
+	if rr.Code != 502 || rr.Body.String() != `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}`+"\n" || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%q calls=%d", rr.Code, rr.Body.String(), calls.Load())
 	}
 }

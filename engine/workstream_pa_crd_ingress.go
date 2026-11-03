@@ -642,7 +642,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// the opt-in, and the one read under it when the system names the
 			// patient by another id): every Coverage, routed on
 			// routingCoverageChoice's, never inserted.
-			value, outcome, status, msg = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
+			value, outcome, status, msg, _ = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
 		} else {
 			value, outcome, status, msg = hook.prefetchValue(ctx, leg, key, sorID, obtainFence)
 			if status == 0 && value != nil {
@@ -668,7 +668,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// The system could not answer the template's search: the key is
 			// left out, as a history the system cannot search is, and the
 			// request is routed by the routing read, as without the opt-in.
-			value, outcome, status, msg = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
+			value, outcome, status, msg, _ = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
 			if status != 0 {
 				return out, status, msg
 			}
@@ -697,7 +697,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 			// stays null. The opt-in never leaves a member with less to route
 			// by than the default.
 			if string(value) == "null" {
-				value, outcome, status, msg = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
+				value, outcome, status, msg, _ = g.obtainRoutingCoverage(ctx, sorID, obtainFence, g.coveragePrefetchRecorder(leg))
 				if status != 0 {
 					return out, status, msg
 				}
@@ -783,16 +783,26 @@ const historyNamedDifferently = "patient named differently in the system of reco
 const historyMemberNotHeld = "member not held by the system of record"
 
 // coverageOmitted is the refusal for a request whose coverage the system of
-// record could not provide.
+// record could not provide. A system that answered the search with an error
+// that does not say it cannot run it (SearchFailed) is a backend failure:
+// what it holds is unknown, never empty. Only a definite answer that the
+// system cannot run the search (SearchUnsupported) is a refusal.
 func coverageOmitted(o SearchOutcome) (int, string) {
 	switch o {
 	case SearchUnavailable:
 		return http.StatusServiceUnavailable, "coverage unavailable from system of record"
+	case SearchFailed:
+		return http.StatusBadGateway, coverageSearchAnsweredError
 	case SearchUnsupported:
 		return http.StatusUnprocessableEntity, "coverage not in request, and the system of record cannot search for it"
 	}
 	return http.StatusUnprocessableEntity, "coverage unreadable from system of record"
 }
+
+// coverageSearchAnsweredError is the backend failure of a coverage search the
+// system of record answered with an error status that does not say it cannot
+// run the search (SearchFailed).
+const coverageSearchAnsweredError = "the system of record answered the coverage search with an error"
 
 // coveragePrefetchRecorder records the routing coverage read on leg as the
 // coverage prefetch attempt it is (obtainRoutingCoverage's observer).
@@ -903,8 +913,15 @@ func (g *Gateway) coverageFromFHIRServer(ctx context.Context, routing *fhirServe
 		// that patient's payer: refused at every level.
 		// Only a Coverage that names another patient is another patient's;
 		// any other answer the check refuses (a patient it cannot identify
-		// among them) is one the read cannot use.
-		if err := fence.check(value); err != nil {
+		// among them) is one the read cannot use. A Patient entry no
+		// Coverage's beneficiary names is neither carried nor fenced
+		// (fhirServerFencedValue).
+		fenced, ok := fhirServerFencedValue(value, fence)
+		if !ok {
+			status, msg = fhirServerRefused, fhirServerNotSearchset
+			break
+		}
+		if err := fence.check(fenced); err != nil {
 			var ce *CompartmentError
 			if errors.As(err, &ce) && ce.ResourceType == "Coverage" && ce.Reason == fenceAnotherPatientReference {
 				status, msg = http.StatusBadGateway, fhirServerOtherPatient

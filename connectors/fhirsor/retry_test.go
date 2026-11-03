@@ -101,7 +101,8 @@ func TestSearchTriesAPageOnceMore(t *testing.T) {
 		{"next page dropped", "1", 0, 200, 3, ""},
 		{"next page 504", "1", 504, 200, 3, ""},
 		{"first page 503 twice", "", 503, 503, 2, engine.SearchUnavailable},
-		{"first page 404", "", 404, 200, 1, engine.SearchUnsupported},
+		{"first page 404", "", 404, 200, 1, engine.SearchFailed},
+		{"first page 501", "", 501, 200, 1, engine.SearchUnsupported},
 		{"first page 403", "", 403, 200, 1, engine.SearchUnavailable},
 	} {
 		t.Run(c.name, func(t *testing.T) {

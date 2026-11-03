@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -217,6 +218,22 @@ func (g *Gateway) federatedQueryRecipient(owner *federatedQueryOwner) (string, i
 		return "", http.StatusUnprocessableEntity, "no facility to route the federated query to: the Task's owner " + quotedBounded(id) + " is a " + holder.Role + ", not a facility"
 	}
 	return id, 0, ""
+}
+
+// federatedRecordsRefused is a requester's check of the records a facility's
+// federated answer discloses, apart from any it builds into a message of its
+// own: a record about a patient other than member is the content check
+// patient.answer (the requester's records fence), refused at strict and
+// recorded and carried below it, as the answer to a participant's own
+// federated query is (federatedAnswerOtherPatient). answer is the facility's
+// answer, the finding's payload; records is its records Bundle. It returns the
+// refusal's reason, which names the class of failure and never a patient, or
+// "" when the records are carried.
+func (g *Gateway) federatedRecordsRefused(ctx context.Context, member string, answer, records []byte) string {
+	if err := requesterRecordsFence(member).check(records); err != nil && g.guard(ctx, KindContent, RulePatientAnswer, answer) {
+		return err.Error()
+	}
+	return ""
 }
 
 // federatedAnswerOtherPatient is why a facility's federated-query answer reads

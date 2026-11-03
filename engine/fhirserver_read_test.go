@@ -428,10 +428,12 @@ func TestFHIRServerReadRefusesWhatTheServerDoes(t *testing.T) {
 			w.Header()["Content-Type"] = nil
 			_, _ = w.Write([]byte(coverageSearchset("p1", "00001")))
 		}, roots: true, status: 412, msg: fhirServerNotSearchset},
-		"not a Bundle":       {handler: ehrAnswer(200, "application/json", `{"resourceType":"Coverage"}`), roots: true, status: 412, msg: fhirServerNotSearchset},
-		"not a searchset":    {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"collection"}`), roots: true, status: 412, msg: fhirServerNotSearchset},
-		"a Patient entry":    {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Patient","id":"p1"}}]}`), roots: true, status: 412, msg: fhirServerNotSearchset},
-		"unreadable entries": {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":7}]}`), roots: true, status: 412, msg: fhirServerNotSearchset},
+		"not a Bundle":    {handler: ehrAnswer(200, "application/json", `{"resourceType":"Coverage"}`), roots: true, status: 412, msg: fhirServerNotSearchset},
+		"not a searchset": {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"collection"}`), roots: true, status: 412, msg: fhirServerNotSearchset},
+		// A Patient entry is read (and fenced only when a Coverage's
+		// beneficiary names it); any other type is not a Coverage searchset.
+		"a RelatedPerson entry": {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"RelatedPerson","id":"r1","patient":{"reference":"Patient/p1"}}}]}`), roots: true, status: 412, msg: fhirServerNotSearchset},
+		"unreadable entries":    {handler: ehrAnswer(200, "application/json", `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":7}]}`), roots: true, status: 412, msg: fhirServerNotSearchset},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEHRServer(t, row.handler)

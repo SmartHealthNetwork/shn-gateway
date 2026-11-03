@@ -231,9 +231,12 @@ func TestOriginationRecord_StatedOrderMismatchIsBuildStage(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "fidelity of SHN's own build") {
 		t.Fatalf("%s = %d %s, want the 422 fidelity refusal", route, rec.Code, rec.Body.String())
 	}
-	if sent := stub.legTypes[before:]; len(sent) != 0 {
-		t.Fatalf("legs %v sent before the refusal", sent)
+	// The amendment is the leg that consumes the stated order; UC-07's
+	// patient-DTR exchange, which needs none of it, is sent first and stands.
+	if sent := stub.legTypes[before:]; !slices.Equal(sent, []string{"patient-dtr"}) {
+		t.Fatalf("legs %v sent before the refusal, want the patient-DTR exchange alone", sent)
 	}
+	wantCarried(t, rec.Body.String(), "patient-dtr")
 	r := onlyRecord(t, recs)
 	wantOrigination(t, r, route, http.StatusUnprocessableEntity)
 	wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
@@ -241,17 +244,21 @@ func TestOriginationRecord_StatedOrderMismatchIsBuildStage(t *testing.T) {
 		t.Fatalf("stage %q, want %s: nothing was built", r.RefusalStage, vocab.RefusalStageBuild)
 	}
 
-	// The request's other faults on the same check are not fidelity
-	// refusals: no order named is the request's own fault (400, rule other).
+	// A request naming no order states facts for none: the amendment's build
+	// cannot carry them either, the same fidelity refusal at the same point.
+	before = len(stub.legTypes)
 	body = editBody(t, testRouteBody(g, "/scenario/uc07/complete", `"resumeToken":"`+started.ResumeToken+`"`), func(m map[string]json.RawMessage) { delete(m, "order") })
 	rec, recs = serveRecorded(t, g, route, body)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("no order: %d %s, want 400", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `the request names no \"order\"`) {
+		t.Fatalf("no order: %d %s, want 422 naming the absent order", rec.Code, rec.Body.String())
+	}
+	if sent := stub.legTypes[before:]; !slices.Equal(sent, []string{"patient-dtr"}) {
+		t.Fatalf("no order: legs %v sent before the refusal, want the patient-DTR exchange alone", sent)
 	}
 	r = onlyRecord(t, recs)
-	wantRefusal(t, r, http.StatusBadRequest, RefusedByProviderGateway, ExchangeOther)
-	if r.RefusalStage != "" {
-		t.Fatalf("a refusal on rule other carries stage %q", r.RefusalStage)
+	wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
+	if r.RefusalStage != vocab.RefusalStageBuild {
+		t.Fatalf("no order: stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
 	}
 }
 
@@ -501,9 +508,10 @@ func withoutClaimFact(t *testing.T, body, fact string) string {
 // A prior-authorization request the caller states without a claim fact the
 // line requires is SHN refusing to build what it cannot build faithfully: a
 // fidelity refusal at the build stage, at every conformance level, with the
-// answer unchanged (422 naming the element). Each route refuses it before
-// any leg (claimFactsBeforeAnyLeg, through pasBuildFailure); the waiting
-// tail's own build is TestSubmitPASClaim_UnstatedClaimFactIsBuildStage.
+// answer unchanged (422 naming the element). Each route refuses it at the PAS
+// claim's build (pasBuildFailure, or the shared tail's own build), after the
+// CRD and questionnaire legs, which were carried and stand, as the answer
+// says.
 func TestOriginationRecord_UnstatedClaimFactIsBuildStage(t *testing.T) {
 	t.Parallel()
 	for _, level := range []ConformanceEnforcement{EnforcementNone, EnforcementObserve, EnforcementStructural, EnforcementStrict} {
@@ -516,18 +524,31 @@ func TestOriginationRecord_UnstatedClaimFactIsBuildStage(t *testing.T) {
 			route := row.route
 			t.Run(level.String()+"/"+route, func(t *testing.T) {
 				var g *Gateway
-				if route == "POST /scenario/dispatch" {
+				switch route {
+				case "POST /scenario/dispatch":
 					g = newMBROXDispatchFixture(t).gw
-				} else {
+				case "POST /scenario/uc03":
+					g = uc03ProviderDataFixture(t).gw
+				case "POST /scenario/uc04":
+					g, _ = newPendResumeFixture(t, pendFixtureOpts{member: "MBR-UC04", birthDate: "1982-11-03", familyName: "Chen", pendedItem: "operative-diagnostic-report"})
+				default:
 					g, _ = uc07RouteFixture(t, "2.0")
 				}
+				profile := g.cfg.OriginationProfile
 				mountOriginationRoutes(g)
+				g.cfg.OriginationProfile = profile
 				g.cfg.ConformanceEnforcement = level
+				answered := recordAnsweredLegs(g)
 				_, path, _ := strings.Cut(route, " ")
 				rec, recs := serveRecorded(t, g, route, withoutClaimFact(t, testRouteBody(g, path, row.extra), "claimType"))
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "Claim.type") {
 					t.Fatalf("%s = %d %s, want 422 naming Claim.type", route, rec.Code, rec.Body.String())
 				}
+				legs := answered.list()
+				if len(legs) == 0 || slices.Contains(legs, "pas-claim") {
+					t.Fatalf("%s: legs %v answered, want the legs before the claim and no claim", route, legs)
+				}
+				wantCarried(t, rec.Body.String(), legs...)
 				r := onlyRecord(t, recs)
 				wantOrigination(t, r, route, http.StatusUnprocessableEntity)
 				wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)

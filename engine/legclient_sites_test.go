@@ -83,9 +83,10 @@ func (f *legFault) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f.next.RoundTrip(req)
 }
 
-// post is a POST to path carrying gw's route body.
+// post is a POST to path carrying gw's route body, with the tracker a route
+// gives it (withLegsTracked), so a refusal can say which legs it carried.
 func post(gw *Gateway, path, extra string) *http.Request {
-	return httptest.NewRequest(http.MethodPost, path, strings.NewReader(testRouteBody(gw, path, extra)))
+	return withLegsTracked(httptest.NewRequest(http.MethodPost, path, strings.NewReader(testRouteBody(gw, path, extra))))
 }
 
 // legSiteRow is one module 1 send site with its leg refused by the Hub: how to

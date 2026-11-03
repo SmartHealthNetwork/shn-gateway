@@ -49,21 +49,6 @@ func statedClinician(ctx context.Context) (npi string, verified bool) {
 	return npi, verified
 }
 
-// attestsBeforeAnyLegKey marks an origination that attests with a clinician
-// NPI and holds every source of it before its first leg (the single call,
-// UC-03's oxygen attestation): the attesting clinician is resolved there, so a
-// request no source names one for is refused before anything is sent.
-type attestsBeforeAnyLegKey struct{}
-
-func withAttestationBeforeAnyLeg(r *http.Request) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), attestsBeforeAnyLegKey{}, true))
-}
-
-func attestsBeforeAnyLeg(ctx context.Context) bool {
-	v, _ := ctx.Value(attestsBeforeAnyLegKey{}).(bool)
-	return v
-}
-
 // answerLinkID is the questionnaire item UC-06's and UC-07's attestation
 // answers: the HomeHealthAssessment's free-text functional status on the
 // lanes that attest on it, else the Oswestry score.
@@ -74,14 +59,15 @@ func (g *Gateway) answerLinkID() string {
 	return oswestryLinkID
 }
 
-// requireStatedAnswer refuses a request that states no attestation answer:
-// the answer is the participant's own statement, and this gateway supplies
-// none. It returns false when it refused.
-func (g *Gateway) requireStatedAnswer(w http.ResponseWriter, answer, recipient string) bool {
+// requireStatedAnswer refuses a request that states no attestation answer, at
+// the build of leg, the leg that carries it (UC-06's amendment, UC-07's
+// patient-DTR exchange): the answer is the participant's own statement, and
+// this gateway supplies none. It returns false when it refused.
+func (g *Gateway) requireStatedAnswer(ctx context.Context, w http.ResponseWriter, answer, recipient, leg string) bool {
 	if answer != "" {
 		return true
 	}
-	g.refuseOwnBuild(w, recipient, "pas-claim-update",
+	g.refuseOwnBuild(ctx, w, recipient, leg,
 		"answer is required: the request states no answer for questionnaire item "+g.answerLinkID()+", and this gateway does not supply one")
 	return false
 }
@@ -90,9 +76,12 @@ func (g *Gateway) requireStatedAnswer(w http.ResponseWriter, answer, recipient s
 // the participant because a statement it needs is missing (from the request
 // or the participant's own records): 422, recorded as the leg it would have
 // sent failing and as a fidelity refusal at the build stage (refuseBuilder).
-func (g *Gateway) refuseOwnBuild(w http.ResponseWriter, recipient, legType, msg string) {
+// The answer also says which legs the request already sent were carried
+// (withCarriedLegs): a refusal at a later leg never reads as one before
+// any leg.
+func (g *Gateway) refuseOwnBuild(ctx context.Context, w http.ResponseWriter, recipient, legType, msg string) {
 	g.observeOwnBuildRefused(recipient, legType, msg)
-	refuseBuilder(w, msg)
+	refuseBuilder(w, withCarriedLegs(ctx, msg))
 }
 
 // observeOwnBuildRefused records the leg a fidelity refusal at the build stage
@@ -119,16 +108,16 @@ func (g *Gateway) refuseBuildFailure(ctx context.Context, w http.ResponseWriter,
 	var fault *buildFault
 	switch {
 	case errors.Is(err, errNoOrderingClinician), errors.As(err, &fault) && !fault.own:
-		g.refuseOwnBuild(w, recipient, legType, msg)
+		g.refuseOwnBuild(ctx, w, recipient, legType, msg)
 	case errors.As(err, &fault):
 		g.observe(ObserverEvent{
 			Kind: "leg.failed", Direction: "originate", LegType: legType,
 			Counterpart: recipient, Detail: msg,
 		})
 		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageVerify)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
 	default:
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
 	}
 }
 

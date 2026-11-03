@@ -605,12 +605,102 @@ func TestSearch_UnavailableOnServerErrorOrTimeout(t *testing.T) {
 	})
 }
 
-func TestSearch_UnsupportedSearch(t *testing.T) {
-	for _, code := range []int{400, 404, 405, 501} {
-		p := newPagedServer(t, func(_ *pagedServer, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) })
-		_, err := p.sor().SearchPatientContext(context.Background(), "Observation", "p1")
-		wantOutcome(t, err, engine.SearchUnsupported)
+// operationOutcome is an OperationOutcome holding one issue per
+// severity/code pair, each with diagnostics that say the opposite of its code:
+// the answer is decided by structure, never by text.
+func operationOutcome(issues ...[2]string) string {
+	var b strings.Builder
+	b.WriteString(`{"resourceType":"OperationOutcome","issue":[`)
+	for i, is := range issues {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		diag := "the search is not supported"
+		if is[1] == "not-supported" {
+			diag = "an error occurred"
+		}
+		b.WriteString(`{"severity":"` + is[0] + `","code":"` + is[1] + `","diagnostics":"` + diag + `"}`)
 	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+// A search is unsupported only when the server says so definitely: 501, or an
+// error status whose OperationOutcome's every error or fatal issue is
+// not-supported. Any other error answer is failed: what the server holds is
+// unknown.
+func TestSearch_UnsupportedSearch(t *testing.T) {
+	notSupported := operationOutcome([2]string{"error", "not-supported"})
+	for _, row := range []struct {
+		name string
+		code int
+		body string
+		want engine.SearchOutcome
+	}{
+		// Definite.
+		{"501 with no body", 501, "", engine.SearchUnsupported},
+		{"501 with another code", 501, operationOutcome([2]string{"error", "processing"}), engine.SearchUnsupported},
+		{"400 not-supported", 400, notSupported, engine.SearchUnsupported},
+		{"404 not-supported", 404, notSupported, engine.SearchUnsupported},
+		{"405 not-supported", 405, notSupported, engine.SearchUnsupported},
+		{"422 not-supported", 422, notSupported, engine.SearchUnsupported},
+		{"fatal not-supported", 400, operationOutcome([2]string{"fatal", "not-supported"}), engine.SearchUnsupported},
+		{"not-supported beside a warning of another code", 400, operationOutcome([2]string{"error", "not-supported"}, [2]string{"warning", "processing"}), engine.SearchUnsupported},
+		{"two not-supported issues", 400, operationOutcome([2]string{"error", "not-supported"}, [2]string{"fatal", "not-supported"}), engine.SearchUnsupported},
+		// Not definite: failed.
+		{"400 with no body", 400, "", engine.SearchFailed},
+		{"404 with no body", 404, "", engine.SearchFailed},
+		{"405 with no body", 405, "", engine.SearchFailed},
+		{"422 with no body", 422, "", engine.SearchFailed},
+		{"400 processing", 400, operationOutcome([2]string{"error", "processing"}), engine.SearchFailed},
+		{"404 not-found", 404, operationOutcome([2]string{"error", "not-found"}), engine.SearchFailed},
+		{"not-supported beside an error of another code", 400, operationOutcome([2]string{"error", "not-supported"}, [2]string{"error", "invalid"}), engine.SearchFailed},
+		{"not-supported only as a warning", 400, operationOutcome([2]string{"warning", "not-supported"}), engine.SearchFailed},
+		{"not-supported only as information", 400, operationOutcome([2]string{"information", "not-supported"}), engine.SearchFailed},
+		{"no issue", 400, `{"resourceType":"OperationOutcome","issue":[]}`, engine.SearchFailed},
+		{"not an OperationOutcome", 400, `{"resourceType":"Bundle","issue":[{"severity":"error","code":"not-supported"}]}`, engine.SearchFailed},
+		{"no resourceType", 400, `{"issue":[{"severity":"error","code":"not-supported"}]}`, engine.SearchFailed},
+		{"a repeated member name", 400, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","code":"not-supported"}]}`, engine.SearchFailed},
+		{"a member name differing in case", 400, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","Code":"processing","code":"not-supported"}]}`, engine.SearchFailed},
+		{"not JSON", 400, `not-supported`, engine.SearchFailed},
+		{"text only", 400, `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"processing","diagnostics":"not-supported"}]}`, engine.SearchFailed},
+		{"over the bound", 400, `{"resourceType":"OperationOutcome","text":"` + strings.Repeat("x", maxErrorAnswerBytes) + `","issue":[{"severity":"error","code":"not-supported"}]}`, engine.SearchFailed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			p := newPagedServer(t, func(_ *pagedServer, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(row.code)
+				_, _ = w.Write([]byte(row.body))
+			})
+			_, err := p.sor().SearchPatientContext(context.Background(), "Observation", "p1")
+			wantOutcome(t, err, row.want)
+		})
+	}
+	// Statuses the server may recover from stay unavailable, whatever the
+	// answer says.
+	for _, code := range []int{401, 403, 429, 500, 503} {
+		t.Run(fmt.Sprint(code, " not-supported"), func(t *testing.T) {
+			p := newPagedServer(t, func(_ *pagedServer, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(notSupported))
+			})
+			_, err := p.sor().SearchPatientContext(context.Background(), "Observation", "p1")
+			wantOutcome(t, err, engine.SearchUnavailable)
+		})
+	}
+	t.Run("a later page", func(t *testing.T) {
+		for body, want := range map[string]engine.SearchOutcome{notSupported: engine.SearchUnsupported, "": engine.SearchFailed} {
+			p := newPagedServer(t, func(p *pagedServer, w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("page") == "" {
+					_, _ = w.Write([]byte(searchPage(nextURL(p.srv.URL, 1), "", obs("o1"))))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(body))
+			})
+			_, err := p.sor().SearchPatientContext(context.Background(), "Observation", "p1")
+			wantOutcome(t, err, want)
+		}
+	})
 }
 
 // escapedI is the JSON escape for "i", built at run time so no tool can

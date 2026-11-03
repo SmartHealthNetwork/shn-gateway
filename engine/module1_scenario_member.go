@@ -16,10 +16,11 @@ import (
 // unknown personaSet value or a member with no twin: a typo silently running
 // the demo personas is exactly the collision the twins exist to prevent.
 //
-// The request must name that member ("member" in its body): the claim facts a
-// request states are its persona's statement, so a request naming another
-// member — or none — is refused before anything is read or sent
-// (requestNamesMember). ok=false means the response is already written.
+// The member the request names ("member" in its body) selects nothing here:
+// the claim facts a request states are its persona's statement, so the member
+// it names is checked against this one at the build of the leg that consumes
+// those facts (statedMemberFault, at the PAS claim), and not at all on a route
+// that consumes none. ok=false means the response is already written.
 func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, scenario string) (string, bool) {
 	m, known := personas.ScenarioMembers(scenario)
 	if !known {
@@ -38,9 +39,6 @@ func (g *Gateway) scenarioMember(w http.ResponseWriter, r *http.Request, scenari
 		member = twin
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown personaSet " + ps})
-		return "", false
-	}
-	if !requestNamesMember(w, r, member) {
 		return "", false
 	}
 	return member, true

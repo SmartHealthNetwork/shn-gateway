@@ -11,7 +11,8 @@ import (
 )
 
 // Per-level rows for a dependent's PAS answer: the Coverage it carries names
-// the parent as a contained Patient (answer_party_test.go). At every level the
+// the parent as a contained Patient, or as a Patient entry of its own
+// (answer_party_test.go). At every level the
 // answer is read and bound, relayed exactly, and written from as any readable
 // answer is, at the payer's egress and at the provider's ingress, for $submit
 // and $inquire. Each refusal row is that answer with one mutation, judged by
@@ -240,6 +241,82 @@ func TestLevelInquireIngress_DependentAnswerPatientLinkage(t *testing.T) {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				env, rec, ev := levelInquireRow(t, level, body, answer)
 				wantAnswerLevelOutcome(t, "pas-claim-inquire", level, env, rec, ev, answer, RulePatientAnswer, http.StatusBadGateway, "PAS inquiry answer has inconsistent patient linkage")
+			})
+		}
+	}
+}
+
+// A dependent's answer whose parent rides as a Patient entry of its own,
+// named only by the Coverage's slots, is read and bound at every level,
+// strict included, at the payer's egress and the provider's ingress, for
+// $submit and $inquire: relayed exactly, written from, and recording nothing.
+// The request is a dependent's whose parent rides as an entry too.
+func TestLevelDependentEntryParentAnswer(t *testing.T) {
+	t.Parallel()
+	entryRequest := func(t *testing.T, bundle []byte) []byte {
+		out, _ := withEntryParent(t, bundle, entryParent{ref: byFullURL})
+		return out
+	}
+	for name, edit := range entryParentAnswerAccepts {
+		for _, level := range allLevels {
+			t.Run("payer submit/"+name+"/"+level.String(), func(t *testing.T) {
+				answer := dependentAnswerOf(t, []byte(assemblyRealPending), edit)
+				request := entryRequest(t, originatorBuiltConformantBundle(t, "MBR-COVERED"))
+				p := newLevelPayer(t, level)
+				p.partner.respByPath[pasSubmitPath] = answer
+				got := p.send(t, "pas-claim", "", request)
+				if got.status != http.StatusOK || !got.framed || !bytes.Equal(got.body, answer) {
+					t.Fatalf("the payer's answer must be relayed exactly: %d %s", got.status, got.body)
+				}
+				if rec, found := p.pendOf(t, got.corr); !found || rec.State != PendStatePended {
+					t.Fatalf("the pend must be recorded, got found=%v %+v", found, rec)
+				}
+				if len(p.skipped) != 0 || len(p.content()) != 0 {
+					t.Fatalf("a readable answer records and skips nothing: %+v %+v", findingsText(p.content()), p.skipped)
+				}
+			})
+			t.Run("payer inquiry/"+name+"/"+level.String(), func(t *testing.T) {
+				answer := dependentAnswerOf(t, decidedAnswer(t), edit)
+				request := entryRequest(t, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"))
+				p := newLevelPayer(t, level)
+				p.seedInquiryPend(t, "corr-submit-1")
+				p.partner.respByPath[pasInquirePath] = answer
+				got := p.send(t, "pas-claim-inquire", "", request)
+				if got.status != http.StatusOK || !bytes.Equal(got.body, answer) {
+					t.Fatalf("answer %d %s", got.status, got.body)
+				}
+				if rec, _ := p.pendOf(t, "corr-submit-1"); rec.State != PendStateDecided || len(p.skipped) != 0 || len(p.content()) != 0 {
+					t.Fatalf("a readable answer decides: %+v, skipped %+v, findings %v", rec, p.skipped, findingsText(p.content()))
+				}
+			})
+			t.Run("provider submit/"+name+"/"+level.String(), func(t *testing.T) {
+				answer := dependentAnswerOf(t, []byte(assemblyRealPending), edit)
+				body := string(entryRequest(t, []byte(pasIngressBundle("00001", ""))))
+				env, rec, ev := levelPASRow(t, level, body, answer)
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
+					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+				}
+				wantCarriedExactly(t, env, body)
+				if o := lastLegOutcome(t, env.originator); o != "pended" {
+					t.Fatalf("the leg outcome is read from the decision, got %q", o)
+				}
+				if len(ev.findings) != 0 || len(ev.skipped) != 0 {
+					t.Fatalf("a readable answer records nothing and skips nothing: %+v %+v", ev.findings, ev.skipped)
+				}
+			})
+			t.Run("provider inquiry/"+name+"/"+level.String(), func(t *testing.T) {
+				answer := dependentAnswerOf(t, levelInquiryPayerAnswer(t), edit)
+				body := string(entryRequest(t, []byte(levelInquiry(t, "MBR-COVERED", ""))))
+				env, rec, ev := levelInquireRow(t, level, body, answer)
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
+					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+				}
+				if o := lastLegOutcome(t, env.originator); o != "ok" {
+					t.Fatalf("a readable answer is recorded ok, got %q", o)
+				}
+				if len(ev.findings) != 0 || len(ev.skipped) != 0 {
+					t.Fatalf("a readable answer records nothing and skips nothing: %+v %+v", ev.findings, ev.skipped)
+				}
 			})
 		}
 	}

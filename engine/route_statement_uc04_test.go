@@ -15,8 +15,11 @@ import (
 // The UC-04 in-flow amendment: /scenario/uc04 submits, the payer pends, and the
 // same request then sends the amendment carrying the operative report. Its
 // certificationType is the one the request to the route states — never a
-// constant — so a request stating none is refused at 2.1/2.2 before the
-// amendment leaves, and a stated one is carried on the amending Claim.
+// constant — so a request stating none is refused at 2.1/2.2 at the
+// amendment's build, after the submission the payer pended, which stands, and
+// a stated one is carried on the amending Claim. The member and order the
+// request names are checked at the submission's build, after the coverage
+// check and the questionnaire.
 
 func uc04RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate) {
 	t.Helper()
@@ -37,7 +40,7 @@ func uc04RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 
 func runUC04(gw *Gateway, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	gw.handleUC04(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(body))))
+	gw.handleUC04(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(body)))))
 	return rec
 }
 
@@ -49,12 +52,12 @@ func TestUC04InFlowAmendment_CertificationTypeStatedOrRefused(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 				t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
 			}
-			// Refused before any leg: not the coverage check, not the
-			// questionnaire fetch, not the submission the amendment would
-			// follow.
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+			// Refused at the amendment's build: the coverage check, the
+			// questionnaire fetch and the submission were carried and stand.
+			if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "pas-claim-update") {
+				t.Fatalf("legs %v: want the submission sent and no amendment", stub.legTypes)
 			}
+			wantCarried(t, rec.Body.String(), stub.legTypes...)
 		})
 		t.Run(line+"/stated", func(t *testing.T) {
 			const stated = `{"system":"https://codesystem.x12.org/005010/1322","code":"I","display":"as stated for uc04"}`
@@ -89,9 +92,10 @@ func TestUC04Route_NamesItsMemberAndOrder(t *testing.T) {
 			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("%d %s, want %d naming %q", rec.Code, rec.Body.String(), tc.status, tc.want)
 			}
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+			if !legAttempted(stub.legTypes, "crd-order-select") || legAttempted(stub.legTypes, "pas-claim") {
+				t.Fatalf("legs %v: want the coverage check sent and no claim", stub.legTypes)
 			}
+			wantCarried(t, rec.Body.String(), stub.legTypes...)
 		})
 	}
 }

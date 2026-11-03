@@ -140,7 +140,7 @@ func serveAmendment(t *testing.T, gw *Gateway, path string, serve func(*Gateway,
 	x := &exchangeRecorder{}
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(editBody(t, testRouteBody(gw, path, ""), edit)))
 	rec := httptest.NewRecorder()
-	serve(gw, rec, withOriginationClaimInput(req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x))))
+	serve(gw, rec, withOriginationClaimInput(withLegsTracked(req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x)))))
 	return rec, x
 }
 
@@ -253,10 +253,13 @@ func pendAsksForQuestionnaire(t *testing.T, pend []byte) []byte {
 	return out
 }
 
-// A malformed statement is refused before any leg, at every conformance level
-// and at every line, like the facts the amendment is built from: at /complete
-// before the amendment, and on the single call before the submission.
-func TestAmendmentRoute_MalformedReportTypeRefusedBeforeAnyLeg(t *testing.T) {
+// A malformed statement is refused at the amendment's build, the leg that
+// consumes it, at every conformance level and at every line, like the facts
+// the amendment is built from: at /complete before the amendment (after
+// UC-07's patient-DTR exchange, which needs none of it), and on the single call
+// after the submission and every leg before the amendment, which were carried
+// and stand, as the refusal says.
+func TestAmendmentRoute_MalformedReportTypeRefusedAtTheAmendment(t *testing.T) {
 	bad := func(m map[string]json.RawMessage) {
 		m["reportType"] = json.RawMessage(`{"system":"http://loinc.org","code":"PY"}`)
 	}
@@ -269,6 +272,7 @@ func TestAmendmentRoute_MalformedReportTypeRefusedBeforeAnyLeg(t *testing.T) {
 			if legAttempted(stub.legTypes, "pas-claim-update") {
 				t.Fatal("an amendment with a malformed report type was sent")
 			}
+			wantCarried(t, rec.Body.String())
 		})
 	}
 	for _, level := range allLevels {
@@ -276,9 +280,10 @@ func TestAmendmentRoute_MalformedReportTypeRefusedBeforeAnyLeg(t *testing.T) {
 			name            string
 			fixture         func(*testing.T, string) (*Gateway, *pendResumeSubstrate)
 			start, complete func(*Gateway, http.ResponseWriter, *http.Request)
+			before          []string // the legs /complete sends before its amendment
 		}{
-			{"uc06", uc06RouteFixture, (*Gateway).handleUC06Start, (*Gateway).handleUC06Complete},
-			{"uc07", uc07RouteFixture, (*Gateway).handleUC07Start, (*Gateway).handleUC07Complete},
+			{"uc06", uc06RouteFixture, (*Gateway).handleUC06Start, (*Gateway).handleUC06Complete, nil},
+			{"uc07", uc07RouteFixture, (*Gateway).handleUC07Start, (*Gateway).handleUC07Complete, []string{"patient-dtr"}},
 		} {
 			t.Run(level.String()+"/"+resume.name+" complete", func(t *testing.T) {
 				gw, stub := resume.fixture(t, "2.2")
@@ -293,13 +298,14 @@ func TestAmendmentRoute_MalformedReportTypeRefusedBeforeAnyLeg(t *testing.T) {
 				before := len(stub.legTypes)
 				body := editBody(t, testRouteBody(gw, path+"/complete", `"resumeToken":"`+started.ResumeToken+`"`), bad)
 				rec := httptest.NewRecorder()
-				resume.complete(gw, rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, path+"/complete", strings.NewReader(body))))
+				resume.complete(gw, rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path+"/complete", strings.NewReader(body)))))
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ReportType") {
 					t.Fatalf("%d %s, want 422 naming ReportType", rec.Code, rec.Body.String())
 				}
-				if sent := stub.legTypes[before:]; len(sent) != 0 {
-					t.Fatalf("legs sent before the refusal: %v", sent)
+				if sent := stub.legTypes[before:]; !slices.Equal(sent, resume.before) {
+					t.Fatalf("legs sent before the refusal: %v, want %v", sent, resume.before)
 				}
+				wantCarried(t, rec.Body.String(), resume.before...)
 			})
 		}
 		for _, site := range amendmentSites {
@@ -310,9 +316,10 @@ func TestAmendmentRoute_MalformedReportTypeRefusedBeforeAnyLeg(t *testing.T) {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ReportType") {
 					t.Fatalf("%d %s, want 422 naming ReportType", rec.Code, rec.Body.String())
 				}
-				if len(stub.legTypes) != 0 {
-					t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+				if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "pas-claim-update") {
+					t.Fatalf("legs %v: want the submission sent and no amendment", stub.legTypes)
 				}
+				wantCarried(t, rec.Body.String(), stub.legTypes...)
 			})
 		}
 	}

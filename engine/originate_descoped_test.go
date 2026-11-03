@@ -49,8 +49,8 @@ func TestHandleUC02_ProviderData_NoSeededOrder_FailsClosed(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/scenario/uc02", strings.NewReader(testRouteBody(g, "/scenario/uc02", "")))
 	g.handleUC02(rec, req)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("UC-02 provider-data, no seeded order: status=%d (%s), want 502 — must fail closed, never originate a literal order", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("UC-02 provider-data, no seeded order: status=%d (%s), want 422 — must fail closed, never originate a literal order", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), "no draft order for member in system of record") {
 		t.Fatalf("UC-02 provider-data no-draft-order body=%q, want the no-draft-order fail-closed reason", rec.Body.String())

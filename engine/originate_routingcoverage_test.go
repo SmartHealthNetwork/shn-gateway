@@ -123,7 +123,7 @@ func dispatchDriveObserved(t *testing.T, sor coveragesOriginSoR, observer func(O
 	})
 	g.cfg.Observer = observer
 	rec := httptest.NewRecorder()
-	g.runCRDDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testOrderBody(order, ""))), prefetchMember,
+	g.runCRDDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testOrderBody(order, ""))), prefetchMember, "",
 		dispatchOrder{orderJSON: order, supplierJSON: supplier, orderRef: "DeviceRequest/dr-ox", performerRef: performer})
 	return rec, payer
 }

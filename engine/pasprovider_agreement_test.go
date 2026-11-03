@@ -132,7 +132,7 @@ func TestSeededPersona_SubmitAndInquiryNameTheSameProvider(t *testing.T) {
 			// The submission, built exactly as every shipped originator lane
 			// builds it (those lanes all relay reference-payer bytes).
 			submit, err := buildPASSubmitBundle("2.0", true, order, nil, provider, coverage, insurer, shnsdk.MemberSystem,
-				"Patient/"+member, "Coverage/"+member, member, "corr-"+member, created, shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+				"Patient/"+member, "Coverage/"+member, member, "corr-"+member, created, shnsdk.CMSPayerIdentity, testClaimFacts(), nil, nil)
 			if err != nil {
 				t.Fatalf("build the submission: %v", err)
 			}

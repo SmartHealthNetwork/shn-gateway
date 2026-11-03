@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -400,9 +401,17 @@ func foldedDuplicateMember(v any) bool {
 // derivation reads a member-bearing Patient only when the walk can decide it
 // is the member: once a Coverage's party slot may name a Patient (its
 // undecided, pinned by the derivation rows), only a Patient that Coverage's
-// beneficiary names is read, and the probe is none.
+// beneficiary names is read, and the probe is none. A row whose request
+// repeats a member name under case folding is read by no deciding reader, so
+// the involved list names no one in it, on every leg.
 func TestCoverageParty_WalkersAgree(t *testing.T) {
 	t.Parallel()
+	var refused atomic.Int32
+	t.Cleanup(func() {
+		if refused.Load() == 0 {
+			t.Error("no row repeats a member name under case folding: the involved list's refusal is not exercised")
+		}
+	})
 	for _, r := range sdkCoveragePartyRows(t) {
 		t.Run(r.Name, func(t *testing.T) {
 			cov := walkerVariant(t, r)
@@ -417,7 +426,22 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 				// when the rule names it no party. The PAS submit and update
 				// legs name a contained Patient "#<id>", the others its id.
 				id := candidatePatientID(t, r)
-				for _, leg := range []string{"crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"} {
+				legs := []string{"crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"}
+				// The only refusal a row may meet is its own repeat: one refused
+				// for any other reason would skip the checks below unseen.
+				if repeats := foldedDuplicateMember(cov); (scanMessage(payload) != nil) != repeats {
+					t.Fatalf("%s: the strict scan refuses %v, the row repeats a member name under case folding %v", shape, scanMessage(payload) != nil, repeats)
+				}
+				if scanMessage(payload) != nil {
+					refused.Add(1)
+					for _, leg := range legs {
+						if members := carriedMembers(payload, leg); members != nil {
+							t.Fatalf("%s, carriedMembers on %s: a request that repeats a member name names %v, want no one", shape, leg, members)
+						}
+					}
+					legs = nil
+				}
+				for _, leg := range legs {
 					members := carriedMembers(payload, leg)
 					if !slices.Contains(members, "zz-probe") {
 						t.Fatalf("%s, carriedMembers on %s: the probe was not reached (party %v)", shape, leg, r.Party)

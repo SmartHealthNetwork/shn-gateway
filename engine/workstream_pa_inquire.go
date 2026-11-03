@@ -143,6 +143,13 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 		claimSeen bool
 		members   = map[string]bool{}
 	)
+	// A Coverage's party carried as a Patient entry of its own (a dependent's
+	// parent, shnsdk.CoverageEntryParties, read once for the Bundle) is another
+	// person: its own identity names no member of the inquiry. A Bundle that
+	// does not decode whole has none.
+	var doc map[string]any
+	_ = decodeMessage(bundleJSON, &doc)
+	entryParties := shnsdk.CoverageEntryParties(doc)
 	note := func(ref string) {
 		if m := patientMemberFromRef(ref); m != "" {
 			members[m] = true
@@ -169,8 +176,9 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 		}); err != nil {
 			return pasInquiryFacts{}, http.StatusBadRequest, "parse inquiry bundle entry failed"
 		}
-		if head.ResourceType == "Patient" {
-			// A Patient entry IS a patient reference target: its own identity counts.
+		if head.ResourceType == "Patient" && !entryParties[e.FullURL] {
+			// A Patient entry IS a patient reference target: its own identity
+			// counts, unless it is a Coverage's party.
 			if head.ID != "" {
 				members[head.ID] = true
 			} else {

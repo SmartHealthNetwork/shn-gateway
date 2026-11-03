@@ -467,6 +467,7 @@ func TestSoRSearch_Outcomes(t *testing.T) {
 		"connector bound":         {searchingSoR{censusSoR: newCensusSoR(), err: &SearchError{Outcome: SearchBound, Reason: "time bound"}}, SearchBound},
 		"connector unavailable":   {searchingSoR{censusSoR: newCensusSoR(), err: &SearchError{Outcome: SearchUnavailable, Reason: "x"}}, SearchUnavailable},
 		"connector unsupported":   {searchingSoR{censusSoR: newCensusSoR(), err: &SearchError{Outcome: SearchUnsupported, Reason: "x"}}, SearchUnsupported},
+		"connector failed":        {searchingSoR{censusSoR: newCensusSoR(), err: &SearchError{Outcome: SearchFailed, Reason: "x"}}, SearchFailed},
 		"unclassified error":      {searchingSoR{censusSoR: newCensusSoR(), err: errors.New("private-upstream-sentinel")}, SearchUnavailable},
 		"no pages":                {searchingSoR{censusSoR: newCensusSoR(), res: SearchResult{}}, SearchMalformed},
 		"not a searchset":         {searchingSoR{censusSoR: newCensusSoR(), res: SearchResult{Pages: [][]byte{[]byte(`{"resourceType":"Bundle","type":"collection"}`)}}}, SearchMalformed},
@@ -638,6 +639,23 @@ func TestSoRSearch_RepeatedMemberIsStructural(t *testing.T) {
 			if s.Outcome != SearchMalformed || s.repeated != row.repeated {
 				t.Errorf("%s, %s: %s repeated=%v, want malformed repeated=%v", name, how, s.Outcome, s.repeated, row.repeated)
 			}
+		}
+	}
+}
+
+// A search the system answered with an error that does not say it cannot
+// run the search is a backend failure of class http-4xx; a definite
+// not-supported answer is an answer, never a backend failure.
+func TestSearchClass_FailedAndUnsupported(t *testing.T) {
+	for outcome, want := range map[SearchOutcome]string{
+		SearchFailed:      BackendHTTP4xx,
+		SearchUnsupported: "",
+		SearchMalformed:   BackendMalformed,
+		SearchUnavailable: ExchangeOther,
+		SearchBound:       "",
+	} {
+		if got := searchClass(nil, sorSearchset{Outcome: outcome}); got != want {
+			t.Errorf("searchClass(%s) = %q, want %q", outcome, got, want)
 		}
 	}
 }

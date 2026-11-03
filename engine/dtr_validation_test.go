@@ -177,10 +177,18 @@ func TestDTRResumeValidationAndRefusals(t *testing.T) {
 				}
 				if mode == "missing lane" {
 					// Without the pinned line's lane the amendment has no route:
-					// the resume refuses that (422, the route refusal) before it
-					// builds, validates or sends anything — the UC-07 patient-DTR
-					// exchange included.
+					// UC-06's resume refuses that (422, the route refusal) before
+					// it builds, validates or sends anything. UC-07's resume
+					// checks the amendment's route at the amendment's build, after
+					// the patient-DTR exchange, which needs none of it; the first
+					// thing that reads the missing lane is then the validation of
+					// the patient's answer at the pinned line, and that is this
+					// gateway's own configuration failing (500), never a refusal.
+					// Either way no amendment is sent.
 					want = 422
+					if scenario == "uc07" {
+						want = 500
+					}
 				}
 				if mode == "target missing" {
 					want = 422

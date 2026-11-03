@@ -3,7 +3,7 @@
 package engine
 
 import (
-	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -76,14 +76,20 @@ func (paWorkstream) requestMembers(leg string, payload []byte) []namedMember {
 //   - a urn:uuid: or #contained reference names a Patient only when the
 //     request carries it, and then names what that Patient names; a
 //     Coverage's party (a contained Patient its subscriber or policyHolder
-//     names, shnsdk.CoverageParty) is no member, but a patient the party
-//     names is.
+//     names, shnsdk.CoverageParty, or a Patient entry of the request Bundle
+//     that only the subscriber or policyHolder of its Coverage entries name,
+//     shnsdk.CoverageEntryParties) is no member, and neither it nor the slot's
+//     reference to it names one; but a patient the party names is.
 //
 // A Patient's member identifier is never read: the subject is bound by the id
-// its request uses. An unreadable request names none.
+// its request uses. An unreadable request names none. The request is read as
+// the leg's deciding readers read it (decodeMessage): one that repeats a
+// member name, exactly or in another case, can be read two ways, so it too
+// names none, and the Hub never records an exchange under a patient those
+// readers did not see.
 func carriedMembers(payload []byte, leg string) []string {
 	var doc any
-	if len(payload) == 0 || json.Unmarshal(payload, &doc) != nil {
+	if len(payload) == 0 || decodeMessage(payload, &doc) != nil {
 		return nil
 	}
 	read := func(ref string) (string, bool) {
@@ -98,6 +104,7 @@ func carriedMembers(payload []byte, leg string) []string {
 	// Only the PAS binding names a carried Patient by the reference to it; the
 	// others (CRD, the DTR package, the inquiry) name it by its id.
 	byReference := leg == "pas-claim" || leg == "pas-claim-update"
+	partyEntries, partySlots := entryPartyReads(doc)
 	set := map[string]bool{}
 	pointers := map[string]string{} // a carried Patient's fullUrl or #id → what it names
 	var refs []string
@@ -105,6 +112,16 @@ func carriedMembers(payload []byte, leg string) []string {
 	walk = func(node any, fullURL string, contained bool) {
 		switch v := node.(type) {
 		case map[string]any:
+			if partyEntries[reflect.ValueOf(v).Pointer()] {
+				// A Coverage's party carried as an entry of its own: only its
+				// own identity is passed over. Its elements are walked as any
+				// resource's are, so a patient it names is involved, as for a
+				// contained party.
+				for _, member := range v {
+					walk(member, "", false)
+				}
+				return
+			}
 			if v["resourceType"] == "Patient" {
 				id, _ := v["id"].(string)
 				names := id
@@ -127,7 +144,7 @@ func carriedMembers(payload []byte, leg string) []string {
 					set[names] = true
 				}
 			}
-			if ref, ok := v["reference"].(string); ok {
+			if ref, ok := v["reference"].(string); ok && !partySlots[reflect.ValueOf(v).Pointer()] {
 				refs = append(refs, ref)
 			}
 			entryURL, _ := v["fullUrl"].(string)
@@ -187,4 +204,39 @@ func carriedMembers(payload []byte, leg string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// entryPartyReads are, when doc is a Bundle, the resources of its Patient
+// entries that are a Coverage's party (shnsdk.CoverageEntryParties, read once
+// for the Bundle), and the subscriber and policyHolder of its Coverage entries
+// whose reference resolves to one from the Coverage's entry
+// (shnsdk.BundleReferenceURL), each by its identity in doc.
+func entryPartyReads(doc any) (parties, slots map[uintptr]bool) {
+	bundle, _ := doc.(map[string]any)
+	set := shnsdk.CoverageEntryParties(bundle)
+	if len(set) == 0 {
+		return nil, nil
+	}
+	parties, slots = map[uintptr]bool{}, map[uintptr]bool{}
+	entries, _ := bundle["entry"].([]any)
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		res, ok := em["resource"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if fullURL, _ := em["fullUrl"].(string); set[fullURL] {
+			parties[reflect.ValueOf(res).Pointer()] = true
+		}
+		if res["resourceType"] != "Coverage" {
+			continue
+		}
+		for _, k := range []string{"subscriber", "policyHolder"} {
+			slot, ok := res[k].(map[string]any)
+			if ref, _ := slot["reference"].(string); ok && ref != "" && set[shnsdk.BundleReferenceURL(em, ref)] {
+				slots[reflect.ValueOf(slot).Pointer()] = true
+			}
+		}
+	}
+	return parties, slots
 }

@@ -410,7 +410,14 @@ filter would hand the payer records the template excludes. The built-in FHIR con
 searches through `engine.SoRSearchQuery`: it refuses
 redirects, follows `next` links only on the configured server and under its base path,
 stops on a repeated page, and stops at fixed bounds (10 pages, 200 entries, 4 MiB,
-5 seconds). It returns each page's bytes unchanged. The gateway sends the result as a
+5 seconds). It returns each page's bytes unchanged. It answers `engine.SearchUnsupported`
+only when your server says definitely that it cannot run the search (`501`, or an
+`OperationOutcome` with at least one error issue, every one of them `not-supported`), and `engine.SearchFailed` for
+any other error answer (see [System-of-record search
+errors](CONFIGURATION.md#system-of-record-search-errors)). A connector that searches its own
+way must do the same: `SearchUnsupported` tells the gateway that your system cannot supply
+the value, so a request that needs it is refused (`422`), while `SearchFailed` is a backend
+failure (`502`). The gateway sends the result as a
 searchset it writes, however many pages there were: each matching and included record is a
 byte-for-byte copy of your server's record, under an entry `fullUrl` the gateway assigns;
 your server's links, entry addresses, search messages and `Bundle.total` are not used.
@@ -445,8 +452,9 @@ A facility gateway answers a clinical data request (CDex) from the same search:
   is `502`.
 - **Checks.** Each record must name that patient; a record about anyone else, or the same
   record returned twice, stops the answer with `502`.
-- **Connectors without search.** A connector without `SearchSystemOfRecord` is read through
-  `FacilityRecordsContext` (one record per type, sent as returned).
+- **Connectors without search.** A connector without `SearchSystemOfRecord`, or one whose
+  search answers `SearchUnsupported`, is read through `FacilityRecordsContext` (one record per
+  type, sent as returned). A search answered `SearchFailed` is `502`, never that read.
 
 Return records as your system holds them; do not rewrite their `subject`.
 

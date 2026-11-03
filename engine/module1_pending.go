@@ -48,9 +48,13 @@ type pendState struct {
 	// requester is the records the pended order's requester leads to, read once
 	// at origination: the resume ClaimUpdate carries the same records rather
 	// than reading the clinician a second time.
-	requester   [][]byte
-	patientRef  string
-	coverageRef string
+	requester [][]byte
+	// coverageParties are the records of the people the member's Coverage
+	// names beside the member, read with requester: the resume ClaimUpdate is
+	// made under the same Coverage, so it carries the same people.
+	coverageParties [][]byte
+	patientRef      string
+	coverageRef     string
 	// coverage is the member's OWN Coverage record the pended submit named, pinned
 	// at run-to-PENDED: the resume ClaimUpdate is made under the SAME policy, and a
 	// payer that stored the authorization under one coverage and is amended under

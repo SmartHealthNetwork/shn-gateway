@@ -135,6 +135,85 @@ func fhirServerCoverageValue(answer, payor []byte, base string, fence patientFen
 	return value, 0, ""
 }
 
+// fhirServerFencedValue is what the patient fence reads of a fhirServer
+// coverage answer: a searchset the gateway writes of its Coverages, its
+// Organizations and each Patient entry a Coverage's beneficiary names as the
+// fence reads it (namesPatientEntry), each under the fullUrl the server gave it, so a reference
+// resolves in it as in the answer. Any other Patient entry, one the server
+// returned unasked (the parent a dependent's Coverage names as its subscriber,
+// say), is dropped: the read carries no Patient (fhirServerCarriedEntries), so
+// what it reads and then discards is not refused. The server's messages
+// (OperationOutcome entries) name no patient and are left out. ok is false for
+// an answer that cannot be read as the read read it, or that repeats a fullUrl.
+func fhirServerFencedValue(answer []byte, fence patientFence) ([]byte, bool) {
+	doc, err := relay.Doc(relay.NewBody(answer, relay.OriginUpstreamResponse))
+	if err != nil || doc.Kind(doc.Root()) != relay.KindObject {
+		return nil, false
+	}
+	list, _ := doc.Member(doc.Root(), "entry")
+	type located struct {
+		typ, id, fullURL string
+		span             EntrySpan
+	}
+	var all []located
+	var beneficiaries []string
+	seen := map[string]bool{}
+	for _, e := range doc.Elems(list) {
+		res, ok := doc.Member(e, "resource")
+		if !ok || doc.Kind(res) != relay.KindObject {
+			return nil, false
+		}
+		typ, _ := stringMember(doc, res, "resourceType")
+		id, _ := stringMember(doc, res, "id")
+		fullURL, _ := stringMember(doc, e, "fullUrl")
+		// A repeated fullUrl is refused over the whole answer, as when the
+		// fence read it whole, whichever entries are then left out.
+		if fullURL != "" {
+			if seen[fullURL] {
+				return nil, false
+			}
+			seen[fullURL] = true
+		}
+		s, end := doc.Span(res)
+		if typ == "Coverage" {
+			var c struct {
+				Beneficiary struct {
+					Reference string `json:"reference"`
+				} `json:"beneficiary"`
+			}
+			if decodeMessage(answer[s:end], &c) == nil && c.Beneficiary.Reference != "" {
+				beneficiaries = append(beneficiaries, c.Beneficiary.Reference)
+			}
+		}
+		all = append(all, located{typ, id, fullURL, EntrySpan{Page: 0, Start: s, End: end}})
+	}
+	var entries []assemblyEntry
+	total := 0
+	for _, l := range all {
+		switch l.typ {
+		case "Coverage":
+			entries = append(entries, assemblyEntry{res: l.span, mode: "match", fullURL: l.fullURL})
+			total++
+		case "Patient":
+			named := false
+			for _, ref := range beneficiaries {
+				named = named || fence.namesPatientEntry(ref, l.fullURL, l.id)
+			}
+			if named {
+				entries = append(entries, assemblyEntry{res: l.span, mode: "include", fullURL: l.fullURL})
+			}
+		case "OperationOutcome":
+		default:
+			entries = append(entries, assemblyEntry{res: l.span, mode: "include", fullURL: l.fullURL})
+		}
+	}
+	value, _, err := assembleSoRSearchset([][]byte{answer}, entries, total)
+	if err != nil {
+		return nil, false
+	}
+	return value, true
+}
+
 // fhirServerCarriedEntries locates, in the read's own bytes, the records
 // fhirServerCoverageValue carries, and the number of matches. ok is false for
 // an answer that holds no Coverage or cannot be read as the read read it.

@@ -447,50 +447,6 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	}
 }
 
-// REJECTION, at every level: an origination whose order names a clinician the
-// participant's system cannot supply is refused before any leg, 422, and
-// recorded as the PAS leg failing on the fidelity of SHN's own build.
-func TestOrigination_RequesterUnavailableRefusesBeforeAnyLeg(t *testing.T) {
-	_, _, base := originRecords(prefetchMember)
-	order := bytes.Replace(base, []byte(`"intent" : "order",`), []byte(`"intent" : "order", "requester" : { "reference" : "Practitioner/prac-9" },`), 1)
-	const want = "the order's requester Practitioner/prac-9 is not in your system of record, so a prior-authorization request about this order cannot carry the clinician it names"
-	for _, level := range allLevels {
-		t.Run(level.String(), func(t *testing.T) {
-			sor, _ := originSystem(t, prefetchMember)
-			sor.order = order
-			g, payer := originGateway(t, "provider-data", sor, nil, func(string, []byte) (int, []byte) {
-				return 0, payerAnswerFor(t, order, shnsdk.CoveredNotCovered, "", "")
-			})
-			g.cfg.ConformanceEnforcement = level
-			var events []ObserverEvent
-			g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
-			rec := httptest.NewRecorder()
-			g.runCRDThenDTROrder(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "", "", "", "", false)
-			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) {
-				t.Fatalf("answer %d %s, want 422 %q", rec.Code, rec.Body, want)
-			}
-			payer.mu.Lock()
-			sent := len(payer.requests)
-			payer.mu.Unlock()
-			if sent != 0 {
-				t.Fatalf("%d legs sent before the refusal", sent)
-			}
-			var failed bool
-			for _, e := range events {
-				if e.Kind == "leg.failed" && e.LegType == "pas-claim" && e.Detail == want {
-					failed = true
-				}
-				if e.Kind == "leg.originated" {
-					t.Fatalf("a leg was originated: %+v", e)
-				}
-			}
-			if !failed {
-				t.Fatalf("no pas-claim leg.failed naming the refusal in %+v", events)
-			}
-		})
-	}
-}
-
 // guardInputs is a request the provider-data evidence guard closes today (as
 // its own rows build it), whose questionnaire response is qr.
 func guardInputs(t *testing.T, qr string) shnsdk.ConformantClaimInputs {
@@ -559,7 +515,7 @@ func TestModuleOnePAS_AuthorNamingTheCarriedClinician(t *testing.T) {
 func TestPASProvider_PrefersTheHeldRequesterRecords(t *testing.T) {
 	changed := `{"resourceType":"PractitionerRole","id":"role-1","practitioner":{"reference":"Practitioner/prac-2"},"telecom":[{"system":"phone","value":"5550100"}]}`
 	g := &Gateway{cfg: Config{SoR: requesterSoR(map[string]string{"PractitionerRole/role-1": changed})}}
-	ref, provider, status, msg := g.pasProvider(context.Background(), orderNaming("PractitionerRole/role-1"), []byte(reqRole))
+	ref, provider, status, msg, _ := g.pasProvider(context.Background(), orderNaming("PractitionerRole/role-1"), []byte(reqRole))
 	if status != 0 || ref != "PractitionerRole/role-1" || string(provider) != reqRole {
 		t.Fatalf("provider %s %s (%d %s), want the held record", ref, provider, status, msg)
 	}

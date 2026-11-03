@@ -522,7 +522,7 @@ func TestSoRRequesterReadsRepeatingAMember(t *testing.T) {
 			return answer{status, msg}
 		}},
 		"supplemental report": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
-			_, status, msg := g.supplementalReport(context.Background(), "MBR-COVERED", "MBR-COVERED")
+			_, status, msg, _ := g.supplementalReport(context.Background(), "MBR-COVERED", "MBR-COVERED")
 			return answer{status, msg}
 		}},
 		"scenario origination": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {

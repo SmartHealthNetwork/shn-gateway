@@ -170,7 +170,7 @@ func TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded(t *testing.T) 
 			coverage := seededProviderCoverage(t, member)
 			// The payer organization, read the way every originated leg reads it:
 			// out of the record that contains it, never minted.
-			insurer, status, msg := (&Gateway{}).memberPayerOrganization(context.Background(), coverage)
+			insurer, status, msg, _ := (&Gateway{}).memberPayerOrganization(context.Background(), coverage)
 			if status != 0 {
 				t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 			}

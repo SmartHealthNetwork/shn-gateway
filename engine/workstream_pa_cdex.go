@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
@@ -384,7 +383,7 @@ func (n *nativeResponder) cdexSubmitURL() string {
 		base = u
 	}
 	n.evMu.RUnlock()
-	return strings.TrimRight(base, "/") + "/$submit-attachment"
+	return publishedOperationURL(base, "/$submit-attachment")
 }
 
 // forwardCDexSubmit sends a submission to the payer's own $submit-attachment

@@ -1,7 +1,7 @@
 {
-  "name": "inq-mixed-parent-entry",
+  "name": "inq-mixed-parent-entry-other-slot",
   "family": "inquiry-bind",
-  "description": "A dependent's Coverage names the parent, its subscriber, as a Patient entry of its own: only a contained Patient is a Coverage's party, so the parent's entry is another patient.",
+  "description": "The subscriber names the parent's Patient entry by a relative reference that resolves to it, and the policyHolder names another member by a literal reference: only the slot naming the party is exempt, so the other slot names another patient.",
   "expect": "reject",
   "rejectContains": "inconsistent patient in PAS inquiry",
   "rejectStatus": 403,
@@ -113,6 +113,9 @@
               "reference": "Organization/org-cms-payer"
             }
           ],
+          "policyHolder": {
+            "reference": "Patient/MBR-NOTCOVERED"
+          },
           "relationship": {
             "coding": [
               {

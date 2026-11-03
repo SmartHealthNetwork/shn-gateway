@@ -50,28 +50,51 @@ func routingCoverageChoice(coverages [][]byte) []int {
 // gateway originates carries (originCRDRecords): the gateway's own request,
 // nothing filled into a partner's message.
 //
-// Every record the search returned is fenced. The value returned is the
-// searchset the gateway writes (assembleSoRSearchset) of the Coverages
-// routingCoverageChoice picks (the active ones, else all of them) and the
-// records the search included, in the server's order, less an included record
-// that only a Coverage not chosen references (the payor of a stale coverage).
+// Every record the search returned is fenced, but for an included Patient no
+// Coverage's beneficiary names, which is dropped (withoutUnboundPatientIncludes).
+// The value returned is the searchset the gateway writes (assembleSoRSearchset)
+// of the Coverages routingCoverageChoice picks (the active ones, else all of
+// them) and the records the search included, in the server's order, less an
+// included record that only a Coverage not chosen references (the payor of a
+// stale coverage).
 // Whether the chosen Coverages name one payer is the router's to decide.
 // observe is handed the search as run, before anything is decided from it, so
 // the caller records it as its workstream does; the read returns as
-// obtainPrefetch does.
-func (g *Gateway) obtainRoutingCoverage(ctx context.Context, sorID string, fence patientFence, observe func(sorSearchset)) ([]byte, SearchOutcome, int, string) {
+// obtainPrefetch does, except that a search the system failed to answer (it
+// was unavailable, answered with something the gateway could not read, or
+// answered with an error that does not say it cannot run the search) also
+// returns its read error, with status 0, so a caller that must tell a
+// backend failure from a coverage the system cannot supply can.
+func (g *Gateway) obtainRoutingCoverage(ctx context.Context, sorID string, fence patientFence, observe func(sorSearchset)) ([]byte, SearchOutcome, int, string, error) {
 	s := runSoRSearch(ctx, g.cfg.SoR, "Coverage", sorID, true)
 	observe(s)
 	switch s.Outcome {
 	case SearchOK:
 	case SearchZero:
-		return []byte("null"), SearchZero, 0, ""
+		return []byte("null"), SearchZero, 0, "", nil
+	case SearchUnsupported:
+		// The connector cannot search, or the system said definitely that it
+		// does not support the search: the system, as connected, cannot
+		// supply the coverage.
+		return nil, s.Outcome, 0, "", nil
+	case SearchUnavailable, SearchMalformed, SearchFailed:
+		// The system failed to answer, or answered with an error that does
+		// not say it cannot run the search: unknown, never empty. Its read
+		// error says how (readError).
+		return nil, s.Outcome, 0, "", s.readError()
 	default:
-		return nil, s.Outcome, 0, ""
+		return nil, s.Outcome, 0, "", nil
+	}
+	// An included Patient no Coverage's beneficiary names is neither carried
+	// nor fenced (withoutUnboundPatientIncludes).
+	s, err := s.withoutUnboundPatientIncludes(fence)
+	if err != nil {
+		// An answer the gateway cannot read: the system failed to answer.
+		return nil, SearchMalformed, 0, "", &SoRReadError{Kind: SoRInvalidResponse}
 	}
 	if err := fence.check(s.Value); err != nil {
 		status, msg := fillFenceRefusal(err)
-		return nil, "", status, msg
+		return nil, "", status, msg, err
 	}
 	record := func(m searchMatch) []byte { return s.pages[m.page][m.start:m.end] }
 	covs := make([][]byte, len(s.matches))
@@ -120,9 +143,9 @@ func (g *Gateway) obtainRoutingCoverage(ctx context.Context, sorID string, fence
 	}
 	value, _, err := assembleSoRSearchset(s.pages, assembly, len(chosen))
 	if err != nil {
-		return nil, SearchMalformed, 0, ""
+		return nil, SearchMalformed, 0, "", &SoRReadError{Kind: SoRInvalidResponse}
 	}
-	return value, SearchOK, 0, ""
+	return value, SearchOK, 0, "", nil
 }
 
 // payorReferences are the payor references a Coverage names.

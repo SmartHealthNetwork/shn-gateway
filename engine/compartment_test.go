@@ -380,6 +380,74 @@ func TestPatientFence_CoverageParty(t *testing.T) {
 	}
 }
 
+// entrySearchset is a Coverage searchset from the member's system of record
+// carrying, as entries of their own, the member's Patient and the parent the
+// Coverage's subscriber names; extra entries are appended.
+func entrySearchset(extra ...string) string {
+	b := `{"resourceType":"Bundle","type":"searchset","entry":[` +
+		`{"fullUrl":"` + fenceBase + `/Coverage/c","resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/p1"},"subscriber":{"reference":"Patient/parent"},"relationship":{"coding":[{"code":"child"}]},"payor":[{"reference":"Organization/payer"}]},"search":{"mode":"match"}},` +
+		`{"fullUrl":"` + fenceBase + `/Patient/p1","resource":{"resourceType":"Patient","id":"p1","identifier":[{"system":"urn:shn:member","value":"MBR-1"}]},"search":{"mode":"include"}},` +
+		`{"fullUrl":"` + fenceBase + `/Patient/parent","resource":{"resourceType":"Patient","id":"parent","identifier":[{"system":"urn:oid:1.2.3.4.5","value":"MRN-9"}],"name":[{"family":"Parent"}]},"search":{"mode":"include"}}`
+	for _, e := range extra {
+		b += "," + e
+	}
+	return b + `]}`
+}
+
+// A Coverage's party carried as a Patient entry of its own is carried as one
+// contained in the Coverage is: exactly the entries shnsdk.CoverageEntryParties
+// names for the Bundle, the rule the PAS walks use. Every other Patient entry
+// is still the bound patient or refused.
+func TestPatientFence_CoverageEntryParty(t *testing.T) {
+	allows := map[string]string{
+		"the parent the subscriber names":   entrySearchset(),
+		"the parent the policyHolder names": strings.Replace(entrySearchset(), `"subscriber":{"reference":"Patient/parent"}`, `"policyHolder":{"reference":"Patient/parent"}`, 1),
+		"named by its fullUrl":              strings.Replace(entrySearchset(), `"subscriber":{"reference":"Patient/parent"}`, `"subscriber":{"reference":"`+fenceBase+`/Patient/parent"}`, 1),
+		"in a nested Bundle":                `{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + entrySearchset() + `}]}`,
+	}
+	for name, value := range allows {
+		t.Run("allows/"+name, func(t *testing.T) {
+			if err := testFence().forPrefetch().check([]byte(value)); err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+		})
+	}
+	other := `{"fullUrl":"` + fenceBase + `/Patient/other","resource":{"resourceType":"Patient","id":"other","identifier":[{"system":"urn:shn:member","value":"MBR-2"}]},"search":{"mode":"include"}}`
+	refuses := map[string]string{
+		// The rejection row: a second Patient no Coverage names as its party.
+		"a second, unrelated Patient entry":              entrySearchset(other),
+		"an unrelated Patient with no member identifier": entrySearchset(strings.Replace(other, `"identifier":[{"system":"urn:shn:member","value":"MBR-2"}]`, `"name":[{"family":"Else"}]`, 1)),
+		// The rule's limits, kept: the beneficiary's own Patient is not an
+		// entry (a search that does not include it), something else refers to
+		// the parent, or the parent is the beneficiary.
+		"the beneficiary not an entry":               strings.Replace(entrySearchset(), `{"fullUrl":"`+fenceBase+`/Patient/p1","resource":{"resourceType":"Patient","id":"p1","identifier":[{"system":"urn:shn:member","value":"MBR-1"}]},"search":{"mode":"include"}},`, "", 1),
+		"another resource refers to the parent":      entrySearchset(`{"fullUrl":"` + fenceBase + `/Observation/o","resource":{"resourceType":"Observation","id":"o","subject":{"reference":"Patient/p1"},"performer":[{"reference":"Patient/parent"}]}}`),
+		"a Provenance targets the parent":            entrySearchset(`{"fullUrl":"` + fenceBase + `/Provenance/pv","resource":{"resourceType":"Provenance","id":"pv","target":[{"reference":"Patient/parent"}]}}`),
+		"a Provenance targets the parent by fullUrl": entrySearchset(`{"fullUrl":"` + fenceBase + `/Provenance/pv","resource":{"resourceType":"Provenance","id":"pv","target":[{"reference":"` + fenceBase + `/Patient/parent"}]}}`),
+		// A binding reference to the parent: the reference itself is checked
+		// for the bound patient, whatever the entry is.
+		"an Observation about the parent": entrySearchset(`{"fullUrl":"` + fenceBase + `/Observation/o","resource":{"resourceType":"Observation","id":"o","subject":{"reference":"Patient/parent"}}}`),
+		"the parent is the beneficiary":   strings.Replace(entrySearchset(), `"beneficiary":{"reference":"Patient/p1"}`, `"beneficiary":{"reference":"Patient/parent"}`, 1),
+		"no slot names the parent":        strings.Replace(entrySearchset(), `"subscriber":{"reference":"Patient/parent"},`, "", 1),
+		"the parent entry has no fullUrl": strings.Replace(entrySearchset(), `"fullUrl":"`+fenceBase+`/Patient/parent",`, "", 1),
+		"the parent contains a resource":  strings.Replace(entrySearchset(), `"name":[{"family":"Parent"}]}`, `"name":[{"family":"Parent"}],"contained":[{"resourceType":"Observation","id":"x","subject":{"reference":"Patient/p2"}}]}`, 1),
+	}
+	for name, value := range refuses {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			if err := testFence().forPrefetch().check([]byte(value)); err == nil {
+				t.Fatal("allowed")
+			}
+		})
+	}
+	// The records fences carry no party, an entry party included.
+	if err := testFence().withoutParties().check([]byte(entrySearchset())); err == nil {
+		t.Fatal("a records fence carried a Coverage's entry party")
+	}
+	if err := requesterRecordsFence("p1").check([]byte(entrySearchset())); err == nil {
+		t.Fatal("the requester's records fence carried a Coverage's entry party")
+	}
+}
+
 // A facility's disclosed records are fenced without the party rule: a
 // Coverage's contained parent there is another patient, as before.
 func TestPatientFence_RecordsFencesCarryNoParty(t *testing.T) {
@@ -392,5 +460,99 @@ func TestPatientFence_RecordsFencesCarryNoParty(t *testing.T) {
 	}
 	if err := requesterRecordsFence("p1").check([]byte(dep)); err == nil {
 		t.Fatal("the requester's records fence carried a Coverage's contained parent")
+	}
+}
+
+// namesPatientEntry names a Patient entry as the fence resolves a binding
+// reference to it: by its fullUrl (with or without an id), or by
+// Patient/<id> in any version, relative or absolute on a fence base; nothing
+// else.
+func TestPatientFence_NamesPatientEntry(t *testing.T) {
+	f := testFence()
+	for _, row := range []struct {
+		ref, fullURL, id string
+		want             bool
+	}{
+		{"Patient/p9", "", "p9", true},
+		{"Patient/p9/_history/2", "", "p9", true},
+		{fenceBase + "/Patient/p9", "", "p9", true},
+		{fenceBase + "/Patient/p9/_history/2", "", "p9", true},
+		{"urn:uuid:4f1c2a9e-0000-4000-8000-000000000001", "urn:uuid:4f1c2a9e-0000-4000-8000-000000000001", "", true},
+		{"https://other.example/fhir/Patient/p9", "https://other.example/fhir/Patient/p9", "p9", true},
+		{"https://other.example/fhir/Patient/p9", "", "p9", false},
+		{"Patient/p8", "", "p9", false},
+		{"RelatedPerson/p9", "", "p9", false},
+		{"Patient/p9", "", "", false},
+		{"", "", "p9", false},
+		{"#p9", "", "p9", false},
+	} {
+		if got := f.namesPatientEntry(row.ref, row.fullURL, row.id); got != row.want {
+			t.Errorf("namesPatientEntry(%q, %q, %q) = %t, want %t", row.ref, row.fullURL, row.id, got, row.want)
+		}
+	}
+}
+
+// checkEntries fences only the entries it names, each read against the whole
+// Bundle: a reference from a named entry resolves through any entry, and the
+// Patient it reaches is checked. An entry it does not name is not fenced. No
+// position, or one with no entry, is refused.
+func TestPatientFence_CheckEntries(t *testing.T) {
+	b := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` +
+		`{"fullUrl":"urn:uuid:pat","resource":{"resourceType":"Patient","id":"pat-local","identifier":[{"system":"urn:shn:member","value":"MBR-1"}]}},` +
+		`{"resource":{"resourceType":"DiagnosticReport","id":"dr-mine","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/pat-local"}}},` +
+		`{"resource":{"resourceType":"Observation","id":"obs-other","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/MBR-2"}}},` +
+		`{"resource":{"resourceType":"Patient","id":"other-local","identifier":[{"system":"urn:shn:member","value":"MBR-2"}]}},` +
+		`{"resource":{"resourceType":"DiagnosticReport","id":"dr-other","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/other-local"}}},` +
+		// A named entry that is itself a Bundle is fenced whole: positions
+		// name only the top-level Bundle's entries.
+		`{"resource":{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Patient","id":"MBR-1"}},{"resource":{"resourceType":"Observation","id":"o2","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/MBR-2"}}}]}}` +
+		`]}`)
+	fence := requesterRecordsFence("MBR-1")
+	if err := fence.check(b); err == nil {
+		t.Fatal("the whole Bundle passed with another patient's records in it")
+	}
+	if err := fence.checkEntries(b, 1); err != nil {
+		t.Fatalf("a report about the member, through the member's Patient entry, refused: %v", err)
+	}
+	if err := fence.checkEntries(b, 0, 1); err != nil {
+		t.Fatalf("the member's Patient and report refused: %v", err)
+	}
+	for name, positions := range map[string][]int{
+		"a named record about another patient":                  {1, 2},
+		"a named report whose Patient entry is another patient": {4},
+		"a named Patient entry that is another patient":         {3},
+		"no position": nil,
+		"a named Bundle holding another patient's record past its first entry": {5},
+		"a position past the last entry":                                       {6},
+		"a negative position":                                                  {-1},
+	} {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			if err := fence.checkEntries(b, positions...); err == nil {
+				t.Fatal("allowed")
+			}
+		})
+	}
+	if err := fence.checkEntries([]byte(`{"resourceType":"Bundle","type":"searchset"}`), 0); err == nil {
+		t.Fatal("a Bundle with no entries passed a check of its first entry")
+	}
+	// Positions name only the top-level Bundle's entries: a named entry that
+	// is itself a Bundle has every one of its entries fenced, whatever the
+	// positions, here one the named position would also pick inside it.
+	nested := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Patient","id":"MBR-1"}},` +
+		`{"resource":{"resourceType":"Observation","id":"o3","status":"final","code":{"text":"x"},"subject":{"reference":"Patient/MBR-2"}}}]}},` +
+		`{"resource":{"resourceType":"Patient","id":"MBR-1"}}]}`)
+	if err := fence.checkEntries(nested, 0); err == nil {
+		t.Fatal("a named nested Bundle's record about another patient passed")
+	}
+	if err := fence.checkEntries(nested, 1); err != nil {
+		t.Fatalf("the member's Patient beside a nested Bundle refused: %v", err)
+	}
+	// What a named entry's check reads is unchanged by the others: the run
+	// that fenced nothing else still refuses a report about another patient
+	// that is named.
+	if err := fence.checkEntries(b, 4, 1); err == nil {
+		t.Fatal("a named report about another patient passed beside one about the member")
 	}
 }

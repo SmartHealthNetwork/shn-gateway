@@ -229,7 +229,11 @@ func (e *recordsBoundError) Error() string {
 }
 
 // facilityRecordReader reads one member's records of each type, preferring
-// the system's search and falling back, once, to FacilityRecordsContext.
+// the system's search and falling back, once, to FacilityRecordsContext when
+// the connector cannot search or the system said definitely that it does not
+// support the search (SearchUnsupported). A search the system answered with
+// any other error (SearchFailed) is a backend failure, never a fallback: what
+// the search would have found is unknown.
 type facilityRecordReader struct {
 	g             *Gateway
 	sorID, member string

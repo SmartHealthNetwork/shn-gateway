@@ -50,7 +50,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("DeviceRequest (HomeOxygen) -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailDeviceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil, nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -77,7 +77,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 
 	t.Run("ServiceRequest single-shot -> byte-identical, no infoChanged", func(t *testing.T) {
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+		got, err := buildPASSubmitBundle("2.0", true, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil, nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -108,7 +108,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		// it is what keeps a lane that does NOT relay reference-payer bytes byte-identical — this
 		// row pins that the SHN-native shape it would produce keeps its pre-existing bytes.
 		order := pasTailServiceRequest()
-		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+		got, err := buildPASSubmitBundle("2.0", false, order, qr, testRequestingProvider(), testMemberCoverage(member), testPayerOrganization(shnsdk.CMSPayerIdentity), shnsdk.MemberSystem, patientRef, coverageRef, member, corr, pasTailClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil, nil)
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
@@ -198,7 +198,7 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)
-	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
 	if status != 0 {
 		t.Fatalf("originCRDRecords: %d %s", status, msg)
 	}
@@ -206,12 +206,12 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	if status != 0 || !found {
 		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
 	}
-	realPayerOrg, status, msg := env.originator.memberPayerOrganization(env.ctx, realCov)
+	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
 	order := pasTailServiceRequest()
-	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, "pci-1", order, nil, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	sub, status, msg, err := env.originator.submitPASClaim(env.ctx, env.req, pasFollowInputs{pci: "pci-1", orderJSON: order, coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
 	respJSON := sub.respJSON
 	if err != nil {
 		t.Fatalf("submitPASClaim: unexpected error (want a clean 422 refusal, not an error path): %v", err)
@@ -234,9 +234,9 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 
 // The waiting tail's own build refuses a claim fact the line requires and
 // the request does not state as the single-shot routes do: 422 naming the
-// element, recorded as a fidelity refusal at the build stage. A route's
-// preflight (claimFactsBeforeAnyLeg) refuses it first, so this row calls the
-// tail directly.
+// element, recorded as a fidelity refusal at the build stage. This row calls
+// the tail directly; the routes that reach it are
+// TestDispatchRoutes_RefuseUnstatedFactsAtThePASBuild's.
 func TestSubmitPASClaim_UnstatedClaimFactIsBuildStage(t *testing.T) {
 	env := newInProcessExchange(t)
 	const (
@@ -244,7 +244,7 @@ func TestSubmitPASClaim_UnstatedClaimFactIsBuildStage(t *testing.T) {
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)
-	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
 	if status != 0 {
 		t.Fatalf("originCRDRecords: %d %s", status, msg)
 	}
@@ -252,14 +252,14 @@ func TestSubmitPASClaim_UnstatedClaimFactIsBuildStage(t *testing.T) {
 	if status != 0 || !found {
 		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
 	}
-	realPayerOrg, status, msg := env.originator.memberPayerOrganization(env.ctx, realCov)
+	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
 	x := &exchangeRecorder{}
 	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
 	req := claimRequest(claimBodyWithout(t, "claimType")).WithContext(ctx)
-	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, realPayerOrg, patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	_, status, msg, err := env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: pasTailServiceRequest(), coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
 	if err != nil || status != http.StatusUnprocessableEntity || !strings.Contains(msg, "Claim.type") {
 		t.Fatalf("submitPASClaim = %d %q %v, want 422 naming Claim.type", status, msg, err)
 	}
@@ -278,7 +278,7 @@ func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
 		patientRef  = "Patient/" + member
 		coverageRef = "Coverage/" + member
 	)
-	recs, status, msg := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
 	if status != 0 {
 		t.Fatalf("originCRDRecords: %d %s", status, msg)
 	}
@@ -292,7 +292,7 @@ func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
 	req := claimRequest(testOrderBody(pasFollowSubmit(0).orderJSON, "")).WithContext(ctx)
 	// A record that is no Organization: the builder refuses it, a failure of
 	// this gateway's own assembly, not a fact the caller left out.
-	_, status, msg, err := env.originator.submitPASClaim(ctx, req, "pci-1", pasTailServiceRequest(), nil, nil, nil, realCov, []byte(`{"resourceType":"Patient","id":"p"}`), patientRef, coverageRef, member, recs.memberSystem, shnsdk.CMSPayerIdentity, env.payerID)
+	_, status, msg, err := env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: pasTailServiceRequest(), coverage: realCov, insurer: []byte(`{"resourceType":"Patient","id":"p"}`), patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
 	if err != nil || status != http.StatusInternalServerError || !strings.HasPrefix(msg, "build bundle failed") {
 		t.Fatalf("submitPASClaim = %d %q %v, want the 500 build bundle failed", status, msg, err)
 	}

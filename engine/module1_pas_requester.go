@@ -50,6 +50,9 @@ type requesterRefusal struct {
 	status   int
 	msg      string
 	fidelity bool
+	// readErr is the system of record's failure behind a refusal that is not
+	// fidelity, recorded as a backend failure (sorFailure).
+	readErr error
 }
 
 // orderRequesterRecords reads the records the order's requester leads to
@@ -102,7 +105,7 @@ func (g *Gateway) orderRequesterRecords(ctx context.Context, order []byte) ([][]
 		raw, found, err := sor.ResolveByReferenceContext(ctx, next.ref)
 		if err != nil {
 			status, msg := SoRFailureResponse(err)
-			return nil, &requesterRefusal{status: status, msg: msg}
+			return nil, &requesterRefusal{status: status, msg: msg, readErr: err}
 		}
 		if !found && next.depth == 0 {
 			return refuse(fmt.Sprintf("the order's requester %s is not in your system of record, so a prior-authorization request about this order cannot carry the clinician it names", next.ref))
@@ -115,14 +118,16 @@ func (g *Gateway) orderRequesterRecords(ctx context.Context, order []byte) ([][]
 			ID           string `json:"id"`
 		}
 		if decodeMessage(raw, &head) != nil || head.ResourceType != typ || head.ID != id {
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-			return nil, &requesterRefusal{status: status, msg: msg}
+			bad := &SoRReadError{Kind: SoRInvalidResponse}
+			status, msg := SoRFailureResponse(bad)
+			return nil, &requesterRefusal{status: status, msg: msg, readErr: bad}
 		}
 		records = append(records, raw)
 		var tree map[string]any
 		if decodePASObject(raw, &tree) != nil {
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-			return nil, &requesterRefusal{status: status, msg: msg}
+			bad := &SoRReadError{Kind: SoRInvalidResponse}
+			status, msg := SoRFailureResponse(bad)
+			return nil, &requesterRefusal{status: status, msg: msg, readErr: bad}
 		}
 		for _, ref := range resourceReferences(tree) {
 			if strings.HasPrefix(ref, "#") || seen[ref] {

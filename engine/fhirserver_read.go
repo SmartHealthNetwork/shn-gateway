@@ -454,6 +454,10 @@ func (r fhirServerReader) read(ctx context.Context, req fhirServerRead) (value [
 		case "Coverage":
 			coverages++
 		case "Organization":
+		case "Patient":
+			// The beneficiary's own record, or one the server returned
+			// unasked (a dependent's parent): fenced only when a Coverage's
+			// beneficiary names it, and never carried (fhirServerFencedValue).
 		case "OperationOutcome":
 			// A searchset may carry the server's warnings: not routed by.
 		default:

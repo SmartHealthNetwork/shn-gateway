@@ -30,17 +30,18 @@ const (
 //   - 422 when the report names no subject.reference, names any other
 //     subject, or carries a signature over the subject;
 //   - 502 when the report cannot be read as a resource;
-//   - the system-of-record failure when the read fails.
-func (g *Gateway) supplementalReport(ctx context.Context, member, sorID string) ([]byte, int, string) {
+//   - the system-of-record failure when the read fails, with its error.
+func (g *Gateway) supplementalReport(ctx context.Context, member, sorID string) ([]byte, int, string, error) {
 	report, found, err := ReadSystemOfRecord(g.cfg.SoR).SupplementalReportContext(ctx, member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
-		return nil, status, msg
+		return nil, status, msg, err
 	}
 	if !found {
-		return nil, http.StatusInternalServerError, "no supplemental report"
+		return nil, http.StatusInternalServerError, "no supplemental report", nil
 	}
-	return rekeySupplementalSubject(report, "Patient/"+sorID, member)
+	out, status, msg := rekeySupplementalSubject(report, "Patient/"+sorID, member)
+	return out, status, msg, nil
 }
 
 // rekeySupplementalSubject applies E-06 to report: its subject.reference,

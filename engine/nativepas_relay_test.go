@@ -371,7 +371,7 @@ func TestNoInfoChangedInjectedOnFreshSubmit(t *testing.T) {
 				built, err := buildPASSubmitBundle("2.0", brPayer, row.order, nil,
 					testRequestingProvider(), testMemberCoverage("MBR-COVERED"), testPayerOrganization(shnsdk.CMSPayerIdentity),
 					shnsdk.MemberSystem, "Patient/MBR-COVERED", "Coverage/MBR-COVERED", "MBR-COVERED",
-					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil)
+					"corr-fresh", fixedClock(), shnsdk.CMSPayerIdentity, testClaimFacts(), nil, nil)
 				if err != nil {
 					t.Fatalf("build: %v", err)
 				}

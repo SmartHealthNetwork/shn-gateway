@@ -938,7 +938,7 @@ func (g *Gateway) routes() *http.ServeMux {
 				h = g.requireScenarioCaller(h)
 			}
 			if rt.exchangeRoute != "" {
-				h = g.recordExchange(rt.exchangeRoute, DirectionIngress, h)
+				h = g.recordExchange(rt.exchangeRoute, DirectionIngress, tracksLegsCarried(h))
 			}
 			limit := rt.bodyLimit
 			if limit == 0 {
@@ -1803,6 +1803,7 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	})
 	g.diagnosticStage(ctx, "leg.response", txType, respPayload, 200, "")
 	g.legMetric(LegOutcomeAnswered)
+	carriedLeg(ctx, txType)
 	return respPayload, nil
 }
 

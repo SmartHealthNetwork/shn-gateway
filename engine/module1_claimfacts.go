@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
-	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -179,9 +178,8 @@ func claimInputOf(r *http.Request) (originationClaimInput, error) {
 // a submitted Claim. Any other build failure stays an internal error under
 // fallback: this gateway's own fault, not a refusal.
 func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback string) {
-	if errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) ||
-		errors.Is(err, shnsdk.ErrPASPriorClaimNotCarried) {
-		refuseBuilder(w, err.Error())
+	if isPASBuildFidelity(err) {
+		refuseBuilder(w, withCarriedLegs(r.Context(), err.Error()))
 		return
 	}
 	// This gateway's own failure, never a refusal.
@@ -189,12 +187,22 @@ func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fallback})
 }
 
+// isPASBuildFidelity reports whether a PAS builder refused the request on
+// the fidelity of SHN's own build: a claim fact the request does not state or
+// states invalidly, a submitted Claim an amendment cannot carry as submitted,
+// or a person the member's Coverage names whose record cannot be carried. Every
+// site that answers a PAS build's failure decides by it, so they cannot drift.
+func isPASBuildFidelity(err error) bool {
+	return errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) ||
+		errors.Is(err, shnsdk.ErrPASPriorClaimNotCarried) || errors.Is(err, shnsdk.ErrPASCoveragePartyNotCarried)
+}
+
 // pasSubmitBuildFailure answers a PAS submit's build failure to recipient: a
 // payer no record names is the fidelity of SHN's own build (errNoPayerRecord),
 // and anything else is pasBuildFailure's.
 func (g *Gateway) pasSubmitBuildFailure(w http.ResponseWriter, r *http.Request, recipient string, err error, fallback string) {
 	if errors.Is(err, errNoPayerRecord) {
-		g.refuseOwnBuild(w, recipient, "pas-claim", msgNoPayerRecord)
+		g.refuseOwnBuild(r.Context(), w, recipient, "pas-claim", msgNoPayerRecord)
 		return
 	}
 	pasBuildFailure(w, r, err, fallback)
@@ -295,83 +303,48 @@ func recordPASSubmission(bundle []byte) (pasSubmissionRecord, error) {
 	return pasSubmissionRecord{prior: prior}, nil
 }
 
-// requestNamesMember checks the member the request names against the member
-// the route resolves for this scenario, lane and persona set. A request that
-// names none is refused 400; one that names another member is refused 422: the
-// claim facts it states are that member's statement, not this one's.
-func requestNamesMember(w http.ResponseWriter, r *http.Request, resolved string) bool {
-	in, ok := claimInputOrFail(w, r)
-	if !ok {
-		return false
-	}
+// statedMemberFault checks the member the request names against the member
+// the route resolves for this scenario, lane and persona set (scenarioMember,
+// which never reads the stated member: it vouches only for the claim facts the
+// request states, and selects nothing). It returns why they differ, or "":
+// the claim facts a request states are its persona's statement, so a PAS leg
+// built from a request naming another member, or none, would carry one
+// member's facts for another. A route checks it at the build of the leg that
+// consumes those facts (pasClaimSourcesAt), never before an earlier leg.
+func statedMemberFault(in originationClaimInput, resolved string) string {
 	named := strings.TrimSpace(in.Member)
 	if named == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `the request names no "member": an origination route takes the member it originates for in its request body`})
-		return false
+		return `the request names no "member": the claim facts it states are a member's statement, and an origination route takes the member it originates for in its request body`
 	}
 	if named != resolved {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("this route originates for %s; the request names %s", resolved, named)})
-		return false
+		return fmt.Sprintf("this route originates for %s; the request names %s, and SHN does not build a claim carrying the facts it states for another member (fidelity of SHN's own build)", resolved, named)
 	}
-	return true
+	return ""
 }
 
-// statedOrderCheck compares the order the request states its claim facts for
+// statedOrderFault compares the order the request states its claim facts for
 // with the order the member holds (the product coding of the order read from
-// the system of record). Returns (status, msg); status 0 == the same order.
-//
-// A request stating facts for an order the member does not hold is refused
-// 422 before anything is built. That is the fidelity of SHN's own build: a
-// claim SHN builds would carry one order's facts on another order. It is
-// recorded on the call's exchange record as a fidelity refusal at
-// recording.RefusalStageBuild; the request's other faults (no order named, an order
-// with no product coding) are not fidelity refusals.
-func statedOrderCheck(ctx context.Context, in originationClaimInput, order []byte) (int, string) {
+// the system of record), and returns why they differ, or "". The PAS leg is the
+// first that consumes the stated order: CRD and DTR carry the member's order
+// of record, so a route checks it at the PAS build (pasClaimSourcesAt). A
+// request stating no order, stating facts for an order the member does not
+// hold, or an order of record with no product coding the PAS item can name, is
+// refused there: the fidelity of SHN's own build, since a claim SHN builds
+// would carry one order's facts on another order, or name no product.
+func statedOrderFault(in originationClaimInput, order []byte) string {
 	if in.Order == nil || strings.TrimSpace(in.Order.System) == "" || strings.TrimSpace(in.Order.Code) == "" {
-		return http.StatusBadRequest, `the request names no "order" ({"system","code"}): the claim facts it states are stated for an order`
+		return `the request names no "order" ({"system","code"}): the claim facts it states are stated for an order`
 	}
 	system, code, _, err := shnsdk.ParseOrderProductCoding(order)
 	if err != nil {
-		return http.StatusBadGateway, "open order has no recognized product coding"
+		return "the member's open order has no recognized product coding, which the claim's item names (fidelity of SHN's own build)"
 	}
 	if system != in.Order.System || code != in.Order.Code {
-		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-		return http.StatusUnprocessableEntity, fmt.Sprintf(
+		return fmt.Sprintf(
 			"the request states its claim facts for order %s|%s and the member's open order is %s|%s: SHN does not build a claim carrying facts stated for an order the member does not hold (fidelity of SHN's own build)",
 			in.Order.System, in.Order.Code, system, code)
 	}
-	return 0, ""
-}
-
-// claimInputForOrder is the claim input the request stated, checked to be
-// stated for order (statedOrderCheck); on a refusal it writes the response
-// and returns ok=false.
-func claimInputForOrder(w http.ResponseWriter, r *http.Request, order []byte) (originationClaimInput, bool) {
-	in, ok := claimInputOrFail(w, r)
-	if !ok {
-		return originationClaimInput{}, false
-	}
-	if status, msg := statedOrderCheck(r.Context(), in, order); status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
-		return originationClaimInput{}, false
-	}
-	return in, true
-}
-
-type sendsAmendmentKey struct{}
-
-// routeSendsAmendment marks an origination request whose route sends, in the
-// same request, an amendment after its submission (the UC-04 in-flow
-// amendment, UC-05, and the single-call UC-06/UC-07): the amendment's facts and
-// its certificationType are then checked before the first leg too
-// (claimFactsBeforeAnyLeg).
-func routeSendsAmendment(r *http.Request) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), sendsAmendmentKey{}, true))
-}
-
-func sendsAmendment(r *http.Request) bool {
-	v, _ := r.Context().Value(sendsAmendmentKey{}).(bool)
-	return v
+	return ""
 }
 
 type amendsItsOwnClaimKey struct{}
@@ -421,95 +394,241 @@ func amendedClaimCarriesItsFacts(w http.ResponseWriter, r *http.Request, line st
 	return true
 }
 
-// claimFactsBeforeAnyLeg refuses, before the first leg of an origination is
-// sent, a request whose stated facts the PAS build at the routed line would
-// refuse: the submission's facts and, on a route that also sends an
-// amendment, the amendment's certificationType. It asks the SDK builder's own
-// rule (CheckPASClaimFactsAtLine / CheckPASUpdateFactsAtLine, the resolver the
-// builders run), so the check and the build cannot drift, and answers exactly
-// as the build would (pasBuildFailure: 422 naming the element). A request it
-// passes is built at its own site as before; a pas-claim route this gateway
-// cannot select is refused there, unchanged.
-//
-// The line is the one the submission's own selection picks (selectLegRoute, a
-// pure read of the declared lines): the submission pins it, and an amendment
-// in the same request is built at the line the resume's selection picks for
-// that pin (selectResumeRoute). Within one request both selections read the
-// same declared, lane and narrowing state, and in every state a gateway boots
-// in they pick the same build line or the resume refuses the route outright
-// (it never carries away from a pin it was just given); that is pinned over
-// every such state by TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine.
-//
-// A route reaches it through pasOriginationBeforeAnyLeg, never directly.
-func (g *Gateway) claimFactsBeforeAnyLeg(w http.ResponseWriter, r *http.Request, recipient string) bool {
-	in, ok := claimInputOrFail(w, r)
-	if !ok {
-		return false
-	}
-	route, err := g.routeFor("pas-claim", recipient, relay.BuilderSDKPASSubmit)
-	if err != nil || route.BuildLine == "" {
-		return true
-	}
-	if err := shnsdk.CheckPASClaimFactsAtLine(route.BuildLine, in.facts()); err != nil {
-		pasBuildFailure(w, r, err, "build bundle failed: "+err.Error())
-		return false
-	}
-	if sendsAmendment(r) {
-		if err := shnsdk.CheckPASUpdateFactsAtLine(route.BuildLine, in.facts(), in.CertificationType); err != nil {
-			pasBuildFailure(w, r, err, "build update bundle failed")
-			return false
-		}
-		if err := shnsdk.CheckPASReportType(in.ReportType); err != nil {
-			pasBuildFailure(w, r, err, "build update bundle failed")
-			return false
-		}
-	}
-	return true
+// pasOriginationRequestOrFail is the one check of a PAS origination's request
+// that stays before its first leg: the body states its claim input readably
+// (claimInputOrFail). A body this gateway cannot read is the caller's request
+// to its own gateway malformed, and no leg built from it can succeed. What the
+// claim input states is checked at the build of the leg that consumes it
+// (pasClaimSourcesAt), so a request that can still succeed without that leg (a
+// not-covered CRD answer) is carried. On a refusal it writes the response and
+// returns false.
+func pasOriginationRequestOrFail(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := claimInputOrFail(w, r)
+	return ok
 }
 
-// pasOriginationBeforeAnyLeg is the one check every route that builds a PAS
-// claim passes before its first leg: the request states its claim facts for
-// order, the order the member holds (claimInputForOrder), and states every fact
-// the PAS build at the line routed to recipient requires, the amendment's too
-// on a route that sends one (claimFactsBeforeAnyLeg). It also reads the
-// records the order's requester leads to (orderRequesterRecords), which every
-// PAS request about the order carries: read once, here, so a clinician the
-// participant's system cannot supply is refused before anything is sent. Both
-// prefixes a PAS origination runs, order-select (runCRDThenDTROrder) and
-// order-dispatch (runCRDDispatch), call it once the recipient is resolved and
-// before their first leg; TestPASOriginationsCheckFactsBeforeAnyLeg pins that
-// statically. On a refusal it writes the response and returns false.
-func (g *Gateway) pasOriginationBeforeAnyLeg(w http.ResponseWriter, r *http.Request, recipient string, order []byte) ([][]byte, bool) {
-	if _, ok := claimInputForOrder(w, r, order); !ok {
-		return nil, false
-	}
-	if !g.claimFactsBeforeAnyLeg(w, r, recipient) {
-		return nil, false
-	}
-	requester, refusal := g.orderRequesterRecords(r.Context(), order)
-	switch {
-	case refusal != nil && refusal.fidelity:
-		// The PAS leg this origination would end in cannot be built
-		// faithfully, so nothing is sent: the fidelity of SHN's own build.
-		g.refuseOwnBuild(w, recipient, "pas-claim", refusal.msg)
-		return nil, false
-	case refusal != nil:
-		writeJSON(w, refusal.status, map[string]string{"error": refusal.msg})
-		return nil, false
-	}
-	// An origination that attests with a clinician NPI and holds every source
-	// of it now (attestsBeforeAnyLeg) resolves the attesting clinician here,
-	// from the records just read: no source naming one refuses before any leg.
-	if attestsBeforeAnyLeg(r.Context()) {
-		if _, status, msg := g.attestingNPI(r.Context(), order, requester); status == http.StatusUnprocessableEntity {
-			g.refuseOwnBuild(w, recipient, "pas-claim", msg)
-			return nil, false
-		} else if status != 0 {
-			writeJSON(w, status, map[string]string{"error": msg})
-			return nil, false
+// pasDeferred is what a PAS origination read of the participant's records
+// before its first leg and could not supply, kept for the build of the leg
+// that consumes it: the PAS claim. Nothing earlier carries it, so the request
+// is refused there, after the legs it could send, never before them.
+type pasDeferred struct {
+	// payerOrgStatus and payerOrgMsg are the refusal memberPayerOrganization
+	// answered for the payer's Organization record: 422 for a record the
+	// member's Coverage names and the system of record cannot supply (the
+	// fidelity of SHN's own build), or a read failure's status. 0 when it
+	// supplied the record or the Coverage names none.
+	payerOrgStatus int
+	payerOrgMsg    string
+	// payerOrgErr is the read's failure when the system did not answer, which
+	// is recorded as a backend failure, never a refusal (sorFailure).
+	payerOrgErr error
+	// supplierStatus, supplierMsg and supplierErr are the same for the
+	// supplier's record a dispatched order names as its performer
+	// (dispatchOrder).
+	supplierStatus int
+	supplierMsg    string
+	supplierErr    error
+}
+
+// pasBuildRefusal is a refusal of a PAS leg's build: fidelity says it is the
+// fidelity of SHN's own build (422, recorded at the build stage); otherwise it
+// is answered status as it stands (a read failure of the participant's own
+// system).
+type pasBuildRefusal struct {
+	status   int
+	msg      string
+	fidelity bool
+	// readErr is the system of record's failure behind a refusal that is not
+	// fidelity: recorded as what it is (sorFailure), never as a refusal.
+	readErr error
+}
+
+func fidelityRefusal(msg string) *pasBuildRefusal {
+	return &pasBuildRefusal{status: http.StatusUnprocessableEntity, msg: msg, fidelity: true}
+}
+
+// pasClaimSourcesAt reads and checks, at the build of a PAS claim, what that
+// build needs of the request and of the participant's records and no earlier
+// leg consumed, in this order:
+//   - the request names the member the route originates for
+//     (statedMemberFault);
+//   - the payer's Organization record the member's Coverage names, which the
+//     claim names as its insurer (deferred.payerOrgStatus);
+//   - the request states its claim facts for the order the member holds, and
+//     that order names a product (statedOrderFault);
+//   - the supplier's record a dispatched order names (deferred.supplierStatus);
+//   - the records the order's requester leads to, which every PAS request
+//     about the order carries (orderRequesterRecords);
+//   - the records of the people the member's Coverage names beside the member
+//     (coveragePartyRecords), which every PAS request under that Coverage
+//     carries.
+//
+// The facts the build at the routed line requires are the build's own to
+// refuse (pasBuildFailure), as is a payer no record names (errNoPayerRecord).
+// member is the route's resolved member, or "" on a route whose member the
+// request itself names (dispatch: there the member addresses the request).
+// It returns what it read, or the refusal.
+func (g *Gateway) pasClaimSourcesAt(ctx context.Context, in originationClaimInput, member string, order, coverage []byte, deferred pasDeferred) (pasClaimSources, *pasBuildRefusal) {
+	if member != "" {
+		if why := statedMemberFault(in, member); why != "" {
+			return pasClaimSources{}, fidelityRefusal(why)
 		}
 	}
-	return requester, true
+	switch {
+	case deferred.payerOrgStatus == http.StatusUnprocessableEntity:
+		return pasClaimSources{}, fidelityRefusal(deferred.payerOrgMsg)
+	case deferred.payerOrgStatus != 0:
+		return pasClaimSources{}, &pasBuildRefusal{status: deferred.payerOrgStatus, msg: deferred.payerOrgMsg, readErr: deferred.payerOrgErr}
+	}
+	if why := statedOrderFault(in, order); why != "" {
+		return pasClaimSources{}, fidelityRefusal(why)
+	}
+	switch {
+	case deferred.supplierStatus == http.StatusUnprocessableEntity:
+		return pasClaimSources{}, fidelityRefusal(deferred.supplierMsg)
+	case deferred.supplierStatus != 0:
+		return pasClaimSources{}, &pasBuildRefusal{status: deferred.supplierStatus, msg: deferred.supplierMsg, readErr: deferred.supplierErr}
+	}
+	requester, refusal := g.orderRequesterRecords(ctx, order)
+	switch {
+	case refusal != nil && refusal.fidelity:
+		return pasClaimSources{}, fidelityRefusal(refusal.msg)
+	case refusal != nil:
+		return pasClaimSources{}, &pasBuildRefusal{status: refusal.status, msg: refusal.msg, readErr: refusal.readErr}
+	}
+	parties, partyRefusal := g.coveragePartyRecords(ctx, coverage)
+	if partyRefusal != nil {
+		return pasClaimSources{}, partyRefusal
+	}
+	return pasClaimSources{requester: requester, coverageParties: parties}, nil
+}
+
+// pasClaimSources is what pasClaimSourcesAt read of the participant's records
+// for a PAS claim's build: the records the order's requester leads to, and the
+// records of the people the member's Coverage names beside the member.
+type pasClaimSources struct {
+	requester       [][]byte
+	coverageParties [][]byte
+}
+
+// coveragePartyRecords reads, from the participant's own system, the Patient
+// record of each person the member's Coverage names as its subscriber or
+// policyHolder by a literal Patient reference other than its beneficiary's (a
+// dependent's parent, the PAS IG's subscriber), for the PAS builders to carry
+// as a Patient entry of its own (shnsdk.ConformantClaimInputs.CoverageParties).
+// Which of them rides, and how, is the builder's rule: a person whose record
+// the system does not hold is not supplied, so the builder refuses the request
+// as the fidelity of SHN's own build (shnsdk.ErrPASCoveragePartyNotCarried,
+// isPASBuildFidelity); it never makes the record up. A read the system fails
+// to answer is the refusal returned, a backend failure, and so is a record
+// that is not the Patient asked for (an invalid response). A Coverage naming
+// no such person, or whose beneficiary names no literal Patient (the builder
+// carries no party then), needs no read.
+func (g *Gateway) coveragePartyRecords(ctx context.Context, coverage []byte) ([][]byte, *pasBuildRefusal) {
+	// Each slot's reference is read by its exact member names, as the SDK
+	// builder reads them: a member spelled in another case names nothing here.
+	var slots map[string]json.RawMessage
+	if json.Unmarshal(coverage, &slots) != nil {
+		return nil, nil
+	}
+	reference := func(slot string) string {
+		var members map[string]json.RawMessage
+		var ref string
+		if json.Unmarshal(slots[slot], &members) != nil || json.Unmarshal(members["reference"], &ref) != nil {
+			return ""
+		}
+		return ref
+	}
+	member := literalPatientKey(reference("beneficiary"))
+	if member == "" {
+		return nil, nil
+	}
+	var out [][]byte
+	seen := map[string]bool{}
+	for _, ref := range []string{reference("subscriber"), reference("policyHolder")} {
+		key := literalPatientKey(ref)
+		if key == "" || key == member || seen[key] {
+			continue
+		}
+		seen[key] = true
+		id := strings.TrimPrefix(key, "Patient/")
+		if !fhirIDRE.MatchString(id) {
+			// No record can carry this id: the builder refuses the slot.
+			continue
+		}
+		record, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, key)
+		if err == nil && found {
+			var head struct {
+				ResourceType string `json:"resourceType"`
+				ID           string `json:"id"`
+			}
+			if json.Unmarshal(record, &head) != nil || head.ResourceType != "Patient" || head.ID != id {
+				err = &SoRReadError{Kind: SoRInvalidResponse}
+			}
+		}
+		if err != nil {
+			status, msg := SoRFailureResponse(err)
+			return nil, &pasBuildRefusal{status: status, msg: msg, readErr: err}
+		}
+		if found {
+			out = append(out, record)
+		}
+	}
+	return out, nil
+}
+
+// literalPatientKey is "Patient/<id>" for a relative or absolute reference
+// to a Patient record, and "" when ref names no Patient (a contained #id, a
+// urn:uuid, another type, none). It is the SDK PAS builder's own rule for a
+// Coverage slot's Patient (shn-sdk's patientKey): the last "Patient/" that
+// starts the reference or follows a "/", and the segment after it, whatever
+// follows that segment (/_history/<version>, a trailing slash). Reading by
+// another rule would leave unread a record the builder then refuses as not
+// supplied.
+func literalPatientKey(ref string) string {
+	i := strings.LastIndex(ref, "Patient/")
+	if i < 0 || (i > 0 && ref[i-1] != '/') {
+		return ""
+	}
+	id := ref[i+len("Patient/"):]
+	if j := strings.Index(id, "/"); j >= 0 {
+		id = id[:j]
+	}
+	if id == "" {
+		return ""
+	}
+	return "Patient/" + id
+}
+
+// writePASBuildRefusal answers a PAS leg's build refusal to recipient, saying
+// which legs the request already sent were carried (withCarriedLegs): a
+// fidelity refusal through refuseOwnBuild, anything else with its own status.
+func (g *Gateway) writePASBuildRefusal(ctx context.Context, w http.ResponseWriter, recipient, leg string, ref *pasBuildRefusal) {
+	if ref.fidelity {
+		g.refuseOwnBuild(ctx, w, recipient, leg, ref.msg)
+		return
+	}
+	if ref.readErr != nil {
+		exchangeOf(ctx).sorFailure(ref.readErr)
+	}
+	writeJSON(w, ref.status, map[string]string{"error": withCarriedLegs(ctx, ref.msg)})
+}
+
+// pasClaimInputOrRefuse is pasClaimSourcesAt for a route's own pas-claim
+// build: the claim input the request states, with res.requester read. On a
+// refusal it writes the response and returns ok=false.
+func (g *Gateway) pasClaimInputOrRefuse(w http.ResponseWriter, r *http.Request, res *crdDtrResult) (originationClaimInput, bool) {
+	in, ok := claimInputOrFail(w, r)
+	if !ok {
+		return originationClaimInput{}, false
+	}
+	read, refusal := g.pasClaimSourcesAt(r.Context(), in, res.member, res.srJSON, res.coverage, res.pasDeferred)
+	if refusal != nil {
+		g.writePASBuildRefusal(r.Context(), w, res.recipient, "pas-claim", refusal)
+		return originationClaimInput{}, false
+	}
+	res.requester, res.coverageParties = read.requester, read.coverageParties
+	return in, true
 }
 
 // resumeAmendment is what a resume (/complete, or the single call's resume
@@ -522,19 +641,26 @@ type resumeAmendment struct {
 	reportType        json.RawMessage
 }
 
-// resumeAmendmentOrFail reads and checks, before the resume sends any leg (the
-// patient-DTR exchange of UC-07 included), everything the amendment's build
-// needs from the resume request: it names the pend's member, states its facts
-// for the pended order, and states the facts and certificationType the build
-// at the pinned line requires — the facts the resume request states, or when
-// it states none the ones the pended submission's request stated. Refusals
-// answer as the build would; on one it writes the response and ok=false.
+// resumeAmendmentOrFail reads and checks, at the amendment's build (just
+// before its pas-claim-update leg, after any leg the resume sends first, the
+// patient-DTR exchange of UC-07 included), everything that build needs from
+// the resume request: it names the pend's member, states its facts for the
+// pended order, and states the facts and certificationType the build at the
+// pinned line requires — the facts the resume request states, or when it
+// states none the ones the pended submission's request stated. Refusals answer
+// as the build would, saying which legs were carried; on one it writes the
+// response and ok=false.
 func (g *Gateway) resumeAmendmentOrFail(w http.ResponseWriter, r *http.Request, st pendState) (resumeAmendment, bool) {
-	if !requestNamesMember(w, r, st.member) {
+	in, ok := claimInputOrFail(w, r)
+	if !ok {
 		return resumeAmendment{}, false
 	}
-	in, ok := claimInputForOrder(w, r, st.srJSON)
-	if !ok {
+	why := statedMemberFault(in, st.member)
+	if why == "" {
+		why = statedOrderFault(in, st.srJSON)
+	}
+	if why != "" {
+		g.refuseOwnBuild(r.Context(), w, st.recipient, "pas-claim-update", why)
 		return resumeAmendment{}, false
 	}
 	// Resume RE-RUNS arm selection with the TARGET FIXED to the pin

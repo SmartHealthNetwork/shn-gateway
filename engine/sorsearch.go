@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -74,9 +75,18 @@ const (
 	// SearchMalformed: the answer is not JSON, not a searchset Bundle, repeats
 	// a member name, redirects, or pages outside the system of record.
 	SearchMalformed SearchOutcome = "malformed"
-	// SearchUnsupported: the connector cannot search, or the server does not
-	// support the search.
+	// SearchUnsupported: the connector cannot search, or the server said
+	// definitely that it does not support the search. A connector decides
+	// that by structure, never by message text: the built-in FHIR connector
+	// reads it from 501 Not Implemented, or from an error status whose
+	// OperationOutcome has at least one error or fatal issue, every one with
+	// the code not-supported. The system, as connected, cannot supply the value.
 	SearchUnsupported SearchOutcome = "unsupported"
+	// SearchFailed: the server answered the search with an error status that
+	// does not say it cannot run the search (a 400, 404 or 422 without a
+	// definite not-supported, for example). What the system holds is
+	// unknown, never empty.
+	SearchFailed SearchOutcome = "failed"
 	// SearchNotRun: the gateway did not run the search (the reason says
 	// why); it is never a connector's answer.
 	SearchNotRun SearchOutcome = "not-run"
@@ -319,6 +329,11 @@ type sorSearchset struct {
 	// repeated: the search failed because the system's answer repeats a
 	// member name (relay.ErrDuplicateKey), so it can be read two ways.
 	repeated bool
+	// noSearch: the connector cannot search, so no request was made
+	// (errNoSearch). Like a search its system answered definitely
+	// unsupported, the system, as connected, cannot supply the value; unlike
+	// it, no read of the system was made.
+	noSearch bool
 	Query    string
 	Pages    int
 	Count    int
@@ -356,7 +371,7 @@ func runSoRSearch(ctx context.Context, sor SystemOfRecord, resourceType, sorPati
 	out := sorSearchset{Query: query}
 	searcher, ok := sor.(SearchSystemOfRecord)
 	if !ok {
-		out.Outcome, out.Reason = SearchUnsupported, searchReasonNoSearch
+		out.Outcome, out.Reason, out.noSearch = SearchUnsupported, searchReasonNoSearch, true
 		return out
 	}
 	// On a leg this gateway answers, the search is a read of its
@@ -397,8 +412,10 @@ var errNoSearch = &SearchError{Outcome: SearchUnsupported, Reason: searchReasonN
 // context; a connector's own cancellation, with the request still live, is
 // its system not answering. A search out of time is a timeout; else it is
 // classed by what it answered, a search that could not answer being other,
-// as an unavailable read is, and one whose answer could not be read
-// malformed.
+// as an unavailable read is, one whose answer could not be read malformed,
+// and one answered with an error status that does not say the search is
+// unsupported (SearchFailed) http-4xx. A definite not-supported answer is
+// an answer, not a backend failure.
 func searchClass(err error, s sorSearchset) string {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -409,13 +426,16 @@ func searchClass(err error, s sorSearchset) string {
 		return ExchangeOther
 	case s.Outcome == SearchMalformed:
 		return BackendMalformed
+	case s.Outcome == SearchFailed:
+		return BackendHTTP4xx
 	}
 	return ""
 }
 
 // readError is the system-of-record read error a search that failed is: its
-// system unavailable, or an answer it could not read, which says so when that
-// answer repeats a member name (SoRRepeatedMember).
+// system unavailable, or an answer it could not read or that is an error
+// (SearchFailed), which says so when that answer repeats a member name
+// (SoRRepeatedMember).
 func (s sorSearchset) readError() error {
 	switch {
 	case s.Outcome == SearchUnavailable:
@@ -429,7 +449,7 @@ func (s sorSearchset) readError() error {
 func failedSearch(query string, err error) sorSearchset {
 	var se *SearchError
 	if errors.As(err, &se) {
-		return sorSearchset{Query: query, Outcome: se.Outcome, Reason: se.Reason, repeated: errors.Is(err, relay.ErrDuplicateKey)}
+		return sorSearchset{Query: query, Outcome: se.Outcome, Reason: se.Reason, repeated: errors.Is(err, relay.ErrDuplicateKey), noSearch: errors.Is(err, errNoSearch)}
 	}
 	return sorSearchset{Query: query, Outcome: SearchUnavailable, Reason: "search failed"}
 }
@@ -511,6 +531,88 @@ func classifySearch(query, resourceType string, res SearchResult, assemble bool)
 
 func (s sorSearchset) withPages(n int) sorSearchset { s.Pages = n; return s }
 
+// withoutUnboundPatientIncludes is s less every Patient the search included
+// that no matched Coverage's beneficiary names as fence reads it
+// (namesPatientEntry), with s.Value
+// re-assembled without them when s was assembled. A Coverage search asks for
+// a Coverage's payor, and a system may include a Patient besides: the parent
+// a dependent's Coverage names as its subscriber, or a Patient a payor names
+// (R4 lets Coverage.payor name one). The gateway's own Coverage fills carry
+// the Coverages, their payors and the Patient a Coverage's beneficiary names
+// (the member's own record, under the id the Coverage uses), so any other
+// included Patient is dropped before the fence and before the carry. Nothing
+// about another patient is carried, and a record read and then discarded is
+// not refused. A Patient the beneficiary names is kept, so it binds that
+// Coverage and is fenced as before: it must be the patient. An include whose
+// type cannot be read is kept, for the fence to judge.
+func (s sorSearchset) withoutUnboundPatientIncludes(fence patientFence) (sorSearchset, error) {
+	var beneficiaries []string
+	for _, m := range s.matches {
+		var c struct {
+			Beneficiary struct {
+				Reference string `json:"reference"`
+			} `json:"beneficiary"`
+		}
+		if decodeMessage(s.pages[m.page][m.start:m.end], &c) == nil && c.Beneficiary.Reference != "" {
+			beneficiaries = append(beneficiaries, c.Beneficiary.Reference)
+		}
+	}
+	named := func(id string) bool {
+		for _, ref := range beneficiaries {
+			// The assembled value's entries carry urn:uuid fullUrls, so a
+			// reference names an included Patient by its type and id.
+			if fence.namesPatientEntry(ref, "", id) {
+				return true
+			}
+		}
+		return false
+	}
+	var kept []searchMatch
+	for _, m := range s.includes {
+		var head struct {
+			ResourceType string `json:"resourceType"`
+			ID           string `json:"id"`
+		}
+		if decodeMessage(s.pages[m.page][m.start:m.end], &head) == nil && head.ResourceType == "Patient" && !named(head.ID) {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return s.withIncludes(kept)
+}
+
+// withIncludes is s with includes in place of its own, and s.Value
+// re-assembled from its matches and those includes, in the server's order,
+// when s was assembled.
+func (s sorSearchset) withIncludes(includes []searchMatch) (sorSearchset, error) {
+	if len(includes) == len(s.includes) {
+		return s, nil
+	}
+	s.includes = includes
+	if s.Value == nil {
+		return s, nil
+	}
+	entries := make([]assemblyEntry, 0, len(s.matches)+len(includes))
+	for _, m := range s.matches {
+		entries = append(entries, assemblyEntry{res: EntrySpan{Page: m.page, Start: m.start, End: m.end}, mode: "match"})
+	}
+	for _, m := range includes {
+		entries = append(entries, assemblyEntry{res: EntrySpan{Page: m.page, Start: m.start, End: m.end}, mode: "include"})
+	}
+	slices.SortStableFunc(entries, func(a, b assemblyEntry) int {
+		if a.res.Page != b.res.Page {
+			return a.res.Page - b.res.Page
+		}
+		return a.res.Start - b.res.Start
+	})
+	value, payload, err := assembleSoRSearchset(s.pages, entries, s.Count)
+	if err != nil {
+		return s, err
+	}
+	s.Value, s.Payload = value, payload
+	return s, nil
+}
+
 const fhirJSON = "application/fhir+json"
 
 // assembleFaultHook, when set by a test, changes the assembled bytes before
@@ -520,10 +622,11 @@ var assembleFaultHook func([]byte)
 // assemblyEntry is one record an assembled searchset carries: the span of
 // its resource in the search's pages, and its search mode ("match" or
 // "include"). fullURL, when set, is the entry's fullUrl in place of the
-// urn:uuid entryURN derives; only the coverage carry (E-07) sets it, for an
+// urn:uuid entryURN derives. The coverage carry (E-07) sets it for an
 // included Organization a carried Coverage names by an absolute reference on
-// the request's own fhirServer (fhirServerCarriedEntries). Every other path
-// leaves it empty, so its bytes are unchanged.
+// the request's own fhirServer (fhirServerCarriedEntries), and the value the
+// fhirServer read's fence reads sets it for every entry (fhirServerFencedValue,
+// never sent). Every other path leaves it empty, so its bytes are unchanged.
 type assemblyEntry struct {
 	res     EntrySpan
 	mode    string
@@ -546,9 +649,11 @@ type assemblyEntry struct {
 // explicit fullUrl, below, is a reference a carried record already holds).
 // Each entry's fullUrl is a urn:uuid the gateway derives from the record and
 // its position (the same search answer gives the same bytes), unless the
-// entry names its own (assemblyEntry.fullURL: only the coverage carry, E-07,
-// for an included Organization a carried Coverage already names by that
-// absolute reference). total is the number of match entries.
+// entry names its own (assemblyEntry.fullURL): the coverage carry (E-07), for
+// an included Organization a carried Coverage already names by that absolute
+// reference, and the value the fhirServer read's fence reads
+// (fhirServerFencedValue), which is never sent. total is the number of match
+// entries.
 func assembleSoRSearchset(pages [][]byte, entries []assemblyEntry, total int) (value []byte, sealed relay.Payload, err error) {
 	bodies := make([]relay.Body, len(pages))
 	for i, p := range pages {

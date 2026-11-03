@@ -200,9 +200,24 @@ type pasFollowInputs struct {
 	orderJSON    []byte
 	supplierJSON []byte
 	// requester is the records the order's requester leads to, read from the
-	// participant's own system once, before any leg (pasOriginationBeforeAnyLeg).
-	// Every PAS request about the order carries them (carryOrderRequester).
+	// participant's own system once, at the PAS claim's build
+	// (pasClaimSourcesAt). Every PAS request about the order carries them
+	// (carryOrderRequester). A caller that already read them there sets
+	// sourcesRead.
 	requester [][]byte
+	// coverageParties are the participant's own records of the people the
+	// member's Coverage names beside the member (a dependent's parent), read
+	// with requester (coveragePartyRecords). Every PAS request under that
+	// Coverage carries them.
+	coverageParties [][]byte
+	// sourcesRead says the caller already ran pasClaimSourcesAt for this
+	// claim (UC-03's oxygen arm, which needs the requester's records for its
+	// attestation): the tail does not run it again.
+	sourcesRead bool
+	// pasDeferred and statedMember are what pasClaimSourcesAt checks at the
+	// claim's build (crdDtrResult.pasDeferred, dispatchResult.statedMember).
+	pasDeferred  pasDeferred
+	statedMember string
 	// memberSystem is the namespace the participant's own system names this
 	// member under, carried from the one reading of their Patient.
 	memberSystem string
@@ -223,7 +238,7 @@ type pasFollowInputs struct {
 // read as a prior-authorization answer at all. An approval, a denial and a pend
 // all come back as a PASDecision with status 0.
 func (g *Gateway) submitClaimAndFollow(ctx context.Context, r *http.Request, in pasFollowInputs) (PASDecision, int, string, error) {
-	sub, status, msg, err := g.submitPASClaim(ctx, r, in.pci, in.orderJSON, in.supplierJSON, in.requester, in.source, in.coverage, in.insurer, in.patientRef, in.coverageRef, in.member, in.memberSystem, in.payer, in.recipient)
+	sub, status, msg, err := g.submitPASClaim(ctx, r, in)
 	if status != 0 {
 		return PASDecision{}, status, msg, err
 	}
@@ -247,9 +262,9 @@ func (g *Gateway) followDecision(ctx context.Context, r *http.Request, sub pasSu
 	if decision != PASDecisionPended {
 		return out, 0, "", nil
 	}
-	cont, status, msg := g.recordContinuation(ctx, in, sub)
+	cont, status, msg, err := g.recordContinuation(ctx, in, sub)
 	if status != 0 {
-		return out, status, msg, nil
+		return out, status, msg, err
 	}
 	out.Continuation, out.ContinuationDurable = cont.ID, g.continuationsAreDurable()
 	return g.followPended(ctx, out, in.wait, g.inquiryFor(r, cont))
@@ -285,23 +300,27 @@ func pasContractToken(line string) string { return "pa.pas@" + line }
 // re-read here rather than carried down from the scenario: the inquiry re-reads
 // the patient by that reference, and a reference that only resolves inside this
 // gateway's own vocabulary would resolve to nothing months later.
-func (g *Gateway) recordContinuation(ctx context.Context, in pasFollowInputs, sub pasSubmission) (Continuation, int, string) {
+//
+// A read of the participant's system that fails to answer returns its error,
+// so the caller answers it as the backend failure it is.
+func (g *Gateway) recordContinuation(ctx context.Context, in pasFollowInputs, sub pasSubmission) (Continuation, int, string, error) {
 	store, ok := g.continuations()
 	if !ok {
 		// Unreachable in every shipped wiring (the in-memory Store ships one),
 		// and still not something to paper over: without a continuation there is
 		// nothing to continue, and saying so is better than answering "pended"
 		// with a capability that names nothing.
-		return Continuation{}, http.StatusInternalServerError, "this gateway keeps no prior-authorization continuations"
+		return Continuation{}, http.StatusInternalServerError, "this gateway keeps no prior-authorization continuations", nil
 	}
 	facts, err := shnsdk.NewPriorAuthContinuation(shnsdk.LineOf(sub.route.Token), in.recipient, in.member,
 		sub.bundleJSON, sub.respJSON)
 	if err != nil {
-		return Continuation{}, http.StatusBadGateway, "read the continuation facts of the submitted request: " + err.Error()
+		return Continuation{}, http.StatusBadGateway, "read the continuation facts of the submitted request: " + err.Error(), nil
 	}
 	patientRef, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, in.member)
 	if err != nil {
-		return Continuation{}, http.StatusBadGateway, "read the patient reference from the system of record: " + err.Error()
+		status, msg := SoRFailureResponse(err)
+		return Continuation{}, status, "read the patient reference from the system of record: " + msg, err
 	}
 	if !found {
 		patientRef = in.patientRef
@@ -328,9 +347,9 @@ func (g *Gateway) recordContinuation(ctx context.Context, in pasFollowInputs, su
 	}
 	stored, err := store.PutContinuation(cont)
 	if err != nil {
-		return Continuation{}, http.StatusBadGateway, "record the prior-authorization continuation: " + err.Error()
+		return Continuation{}, http.StatusBadGateway, "record the prior-authorization continuation: " + err.Error(), nil
 	}
-	return stored, 0, ""
+	return stored, 0, "", nil
 }
 
 // followPended runs the bounded wait: at most pasInquireMax inquiries, none of
@@ -403,6 +422,19 @@ func pasWaitOf(r *http.Request) (time.Duration, bool) {
 		return 0, false
 	}
 	return clampPASWait(time.Duration(secs) * time.Second), true
+}
+
+// waitOrFail refuses, before a route's first leg, a request whose `wait` is not
+// a whole number of seconds (pasWaitOf): the request to this gateway is
+// malformed, and no exchange it asks for can be followed as asked. A route
+// that reads the wait calls it on entry; the later read of the same value
+// cannot fail. On a refusal it writes 400 and returns false.
+func waitOrFail(w http.ResponseWriter, r *http.Request) bool {
+	if _, ok := pasWaitOf(r); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wait must be a whole number of seconds"})
+		return false
+	}
+	return true
 }
 
 // continuationsAreDurable reports whether a continuation this gateway mints
@@ -606,7 +638,8 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// is how a changed order is detected rather than followed.
 	order, found, err := sor.ResolveByReferenceContext(ctx, cont.OrderRef)
 	if err != nil {
-		return out, http.StatusBadGateway, "read the order from the system of record: " + err.Error(), nil
+		status, msg := SoRFailureResponse(err)
+		return out, status, "read the order from the system of record: " + msg, err
 	}
 	if !found {
 		return out, http.StatusConflict, ErrOrderChanged.Error() + ": the order is no longer in the system of record", nil
@@ -616,7 +649,8 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	}
 
 	if out.Patient, found, err = sor.ResolveByReferenceContext(ctx, cont.SoRPatientID); err != nil {
-		return out, http.StatusBadGateway, "read the patient from the system of record: " + err.Error(), nil
+		status, msg := SoRFailureResponse(err)
+		return out, status, "read the patient from the system of record: " + msg, err
 	} else if !found {
 		return out, http.StatusBadGateway, "the system of record has no patient " + cont.SoRPatientID, nil
 	}
@@ -661,8 +695,8 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// The provider and the payer organization are named BY the participant's own
 	// records — the order names its provider, the coverage names its payer — and
 	// each is then read from the same system. No identity is chosen here.
-	if _, out.Provider, status, msg = g.pasProvider(ctx, order); status != 0 {
-		return out, status, msg, nil
+	if _, out.Provider, status, msg, err = g.pasProvider(ctx, order); status != 0 {
+		return out, status, msg, err
 	}
 
 	// Through memberPayerOrganization, the ONE reader of "which organization is
@@ -674,9 +708,9 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	if coveragePayorRef(out.Coverage) == "" {
 		return out, http.StatusBadGateway, "the coverage names no payer organization, and an inquiry must name one", nil
 	}
-	insurer, status, msg := g.memberPayerOrganization(ctx, out.Coverage)
+	insurer, status, msg, err := g.memberPayerOrganization(ctx, out.Coverage)
 	if status != 0 {
-		return out, status, msg, nil
+		return out, status, msg, err
 	}
 	out.Insurer = insurer
 	return out, 0, "", nil
@@ -793,19 +827,30 @@ func orderServiceDate(order []byte) string {
 // it names is the record it carries, not a second reading of it. Looking there
 // first is not a fallback identity: the reference must still name that record,
 // and anything else goes to the participant's system as before.
-func (g *Gateway) pasProvider(ctx context.Context, order []byte, held ...[]byte) (ref string, resource []byte, status int, msg string) {
+//
+// A read of the participant's system that failed to answer is returned as
+// readErr, with the status SoRFailureResponse gives it.
+func (g *Gateway) pasProvider(ctx context.Context, order []byte, held ...[]byte) (ref string, resource []byte, status int, msg string, readErr error) {
 	ref, resource, err := shnsdk.SelectPASProvider(order, func(reference string) ([]byte, bool, error) {
 		for _, rec := range held {
 			if len(rec) > 0 && shnsdk.PASResourceTypeOf(rec)+"/"+pasResourceID(rec) == reference {
 				return rec, true, nil
 			}
 		}
-		return ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, reference)
+		res, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, reference)
+		if err != nil {
+			readErr = err
+		}
+		return res, found, err
 	})
-	if err != nil {
-		return "", nil, http.StatusBadGateway, err.Error()
+	if readErr != nil {
+		status, msg := SoRFailureResponse(readErr)
+		return "", nil, status, msg, readErr
 	}
-	return ref, resource, 0, ""
+	if err != nil {
+		return "", nil, http.StatusBadGateway, err.Error(), nil
+	}
+	return ref, resource, 0, "", nil
 }
 
 // pasMemberSystem reads the namespace the PARTICIPANT'S OWN system names this
@@ -874,13 +919,44 @@ func pasResourceID(resource []byte) string {
 	return probe.ID
 }
 
-// pasProviderOrFail is pasProvider for a scenario handler: it writes the refusal
-// itself, so every originator flow refuses an order naming no carryable provider
-// in the same words rather than each inventing its own.
-func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, order []byte, held ...[]byte) ([]byte, bool) {
-	_, provider, status, msg := g.pasProvider(r.Context(), order, held...)
-	if status != 0 {
-		writeJSON(w, status, map[string]string{"error": msg})
+// pasProviderOf is the requesting provider a PAS claim or amendment SHN builds
+// names (pasProvider), read at that build: the order names none the
+// participant's records can supply as a provider the request can carry is the
+// fidelity of SHN's own build (422); a read of those records the system failed
+// to answer is a backend failure (its own status, with the read's error),
+// never a refusal. The two are told apart by the error, never the message.
+func (g *Gateway) pasProviderOf(ctx context.Context, order []byte, held ...[]byte) ([]byte, *pasBuildRefusal) {
+	var readErr error
+	_, provider, err := shnsdk.SelectPASProvider(order, func(reference string) ([]byte, bool, error) {
+		for _, rec := range held {
+			if len(rec) > 0 && shnsdk.PASResourceTypeOf(rec)+"/"+pasResourceID(rec) == reference {
+				return rec, true, nil
+			}
+		}
+		res, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, reference)
+		if err != nil {
+			readErr = err
+		}
+		return res, found, err
+	})
+	switch {
+	case readErr != nil:
+		status, msg := SoRFailureResponse(readErr)
+		return nil, &pasBuildRefusal{status: status, msg: msg, readErr: readErr}
+	case err != nil:
+		return nil, fidelityRefusal(err.Error())
+	}
+	return provider, nil
+}
+
+// pasProviderOrFail is pasProviderOf for a scenario handler's pas-claim build:
+// it writes the refusal itself (writePASBuildRefusal), so every originator flow
+// refuses an order naming no carryable provider in the same words rather than
+// each inventing its own.
+func (g *Gateway) pasProviderOrFail(w http.ResponseWriter, r *http.Request, recipient, leg string, order []byte, held ...[]byte) ([]byte, bool) {
+	provider, refusal := g.pasProviderOf(r.Context(), order, held...)
+	if refusal != nil {
+		g.writePASBuildRefusal(r.Context(), w, recipient, leg, refusal)
 		return nil, false
 	}
 	return provider, true
@@ -973,10 +1049,7 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 	}
 	out, status, msg, err := g.inquireContinuation(r.Context(), r, cont)
 	if status != 0 {
-		if g.relayOriginationError(w, err) {
-			return
-		}
-		writeJSON(w, status, map[string]string{"error": msg})
+		g.answerFollowFailure(r.Context(), w, status, msg, err)
 		return
 	}
 	out.Continuation, out.ContinuationDurable = cont.ID, DurableContinuations(store)
@@ -986,10 +1059,7 @@ func (g *Gateway) handlePAInquire(w http.ResponseWriter, r *http.Request) {
 		// under the same bounds the submit's own wait runs under.
 		out, status, msg, err = g.followPended(r.Context(), out, wait, g.inquiryFor(r, cont))
 		if status != 0 {
-			if g.relayOriginationError(w, err) {
-				return
-			}
-			writeJSON(w, status, map[string]string{"error": msg})
+			g.answerFollowFailure(r.Context(), w, status, msg, err)
 			return
 		}
 	}

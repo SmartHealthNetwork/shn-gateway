@@ -28,18 +28,6 @@ func safeSoRError(err error) *SoRReadError {
 	return &SoRReadError{Kind: SoRInvalidResponse}
 }
 
-// writeSoRFailure answers a failed system-of-record read on a request this
-// participant sent (an ingress or origination route). A leg received from the
-// network answers through refuseSoRFailure instead.
-func writeSoRFailure(w http.ResponseWriter, err error) bool {
-	if err == nil {
-		return false
-	}
-	status, msg := SoRFailureResponse(err)
-	writeJSON(w, status, map[string]string{"error": msg})
-	return true
-}
-
 // refuseSoRFailure answers a failed system-of-record read on an inbound leg as
 // this participant's answer: framed to the requester with the safe
 // status and message, never the read error's own text.
@@ -125,9 +113,10 @@ func (g *Gateway) memberCoverage(ctx context.Context, member string) (coverage [
 // the same coverage.
 //
 // Coverage records that do not name one payer are also handed on as
-// errAmbiguousCoverage.
+// errAmbiguousCoverage, and a read the system failed to answer as its error.
 func (g *Gateway) memberRoutingCoverage(ctx context.Context, member string) (coverage []byte, found bool, status int, msg string, err error) {
-	coverage, found, ambiguous, status, msg := g.readMemberCoverage(ctx, member, routingCoverageChoice)
+	coverage, found, ambiguous, status, msg, readErr := g.readMemberCoverage(ctx, member, routingCoverageChoice)
+	err = readErr
 	if ambiguous {
 		err = errAmbiguousCoverage
 	}
@@ -137,14 +126,15 @@ func (g *Gateway) memberRoutingCoverage(ctx context.Context, member string) (cov
 // chosenMemberCoverage is the one read of a member's Coverage records: of
 // those choose picks (every one when choose is nil), the one to route on.
 func (g *Gateway) chosenMemberCoverage(ctx context.Context, member string, choose func([][]byte) []int) (coverage []byte, found bool, status int, msg string) {
-	coverage, found, _, status, msg = g.readMemberCoverage(ctx, member, choose)
+	coverage, found, _, status, msg, _ = g.readMemberCoverage(ctx, member, choose)
 	return coverage, found, status, msg
 }
 
 // originCoverage reads the Coverage a call this gateway originates for member
 // routes on (memberCoverage's read, or memberRoutingCoverage's when routing),
 // and answers the call itself when there is none to route on, returning
-// false: a system-of-record failure with its own status, and, as this
+// false: a system-of-record failure with its own status, recorded as one
+// (sorFailure) and saying which legs were carried, and, as this
 // gateway's routing refusal (no one payer can be addressed), Coverage
 // records that do not name one payer (422 ambiguous coverage) or no Coverage
 // at all (422 no coverage on file for member). The same read elsewhere (the
@@ -155,14 +145,18 @@ func (g *Gateway) originCoverage(ctx context.Context, w http.ResponseWriter, mem
 	if routing {
 		choose = routingCoverageChoice
 	}
-	coverage, found, ambiguous, status, msg := g.readMemberCoverage(ctx, member, choose)
+	coverage, found, ambiguous, status, msg, readErr := g.readMemberCoverage(ctx, member, choose)
 	switch {
 	case ambiguous:
 		exchangeOf(ctx).refused(RefusalRouting)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return nil, false
 	case status != 0:
-		writeJSON(w, status, map[string]string{"error": msg})
+		// The system failed to answer: a backend failure, never a refusal
+		// (an answer repeating a member name is recorded as message
+		// integrity, as on every leg).
+		exchangeOf(ctx).sorFailure(readErr)
+		writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 		return nil, false
 	case !found:
 		exchangeOf(ctx).refused(RefusalRouting)
@@ -183,11 +177,11 @@ var errAmbiguousCoverage = errors.New(msgAmbiguousCoverage)
 
 // readMemberCoverage is chosenMemberCoverage reporting, by structure, a 422
 // for Coverage records that do not name one payer (ambiguous).
-func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose func([][]byte) []int) (coverage []byte, found, ambiguous bool, status int, msg string) {
+func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose func([][]byte) []int) (coverage []byte, found, ambiguous bool, status int, msg string, readErr error) {
 	covs, err := ReadSystemOfRecord(g.cfg.SoR).OpenCoverageContext(ctx, member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
-		return nil, false, false, status, msg
+		return nil, false, false, status, msg, err
 	}
 	if choose != nil {
 		all := covs
@@ -198,9 +192,9 @@ func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose 
 	}
 	switch len(covs) {
 	case 0:
-		return nil, false, false, 0, ""
+		return nil, false, false, 0, "", nil
 	case 1:
-		return covs[0], true, false, 0, ""
+		return covs[0], true, false, 0, "", nil
 	}
 	var first shnsdk.PayerIdentifier
 	for i, c := range covs {
@@ -208,21 +202,22 @@ func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose 
 		pid, parseErr := shnsdk.ParseCoveragePayer(c, resolve)
 		if *readErr != nil {
 			status, msg := SoRFailureResponse(*readErr)
-			return nil, false, false, status, msg
+			return nil, false, false, status, msg, *readErr
 		}
 		if parseErr != nil || (i > 0 && pid != first) {
-			return nil, false, true, http.StatusUnprocessableEntity, msgAmbiguousCoverage
+			return nil, false, true, http.StatusUnprocessableEntity, msgAmbiguousCoverage, nil
 		}
 		first = pid
 	}
-	return covs[0], true, false, 0, ""
+	return covs[0], true, false, 0, "", nil
 }
 
 // recipientForSoR resolves the payer holder from the member's own Coverage,
 // the participant's system resolving its references. A coverage that names no
 // payer this gateway can route to (no payer router, no payer identifier, or
 // one no participant registers) is a routing refusal, recorded so on the
-// call's exchange record; a failed read of the system is that read's answer.
+// call's exchange record; a failed read of the system is that read's answer,
+// recorded as a backend failure.
 func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string, shnsdk.PayerIdentifier, int, string) {
 	if g.cfg.PayerRouter == nil {
 		exchangeOf(ctx).refused(RefusalRouting)
@@ -231,6 +226,9 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 	resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
 	parsed, ok := shnsdk.ParsePayerIdentifier(coverage, resolve)
 	if *readErr != nil {
+		// The system failed to answer for the payer the Coverage names: a
+		// backend failure, recorded as one, never a refusal.
+		exchangeOf(ctx).sorFailure(*readErr)
 		status, msg := SoRFailureResponse(*readErr)
 		return "", shnsdk.PayerIdentifier{}, status, msg
 	}
@@ -264,10 +262,14 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 // not carry a payer organization, and only the prior-authorization leg does, so
 // that absence surfaces where it matters, at the request builder, with its own
 // named reason (errNoPayerRecord). Nothing is minted either way.
-func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) ([]byte, int, string) {
+//
+// A read the system of record failed to answer returns its error too, beside
+// the status it is answered with: a backend failure, never a refusal, which
+// a caller that answers it later records as such (sorFailure).
+func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) ([]byte, int, string, error) {
 	payorRef := coveragePayorRef(coverage)
 	if payorRef == "" {
-		return nil, 0, ""
+		return nil, 0, "", nil
 	}
 	// A coverage may carry its payer organization INSIDE itself. That is still the
 	// participant's own record — read it where the record put it rather than asking
@@ -275,19 +277,19 @@ func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) 
 	if strings.HasPrefix(payorRef, "#") {
 		org, ok := containedResource(coverage, strings.TrimPrefix(payorRef, "#"))
 		if !ok {
-			return nil, http.StatusUnprocessableEntity, "the member's coverage names contained payer organization " + payorRef + " and does not contain it"
+			return nil, http.StatusUnprocessableEntity, "the member's coverage names contained payer organization " + payorRef + " and does not contain it", nil
 		}
-		return org, 0, ""
+		return org, 0, "", nil
 	}
 	org, found, err := ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext(ctx, payorRef)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
-		return nil, status, msg
+		return nil, status, msg, err
 	}
 	if !found {
-		return nil, http.StatusUnprocessableEntity, "the system of record has no payer organization " + payorRef
+		return nil, http.StatusUnprocessableEntity, "the system of record has no payer organization " + payorRef, nil
 	}
-	return org, 0, ""
+	return org, 0, "", nil
 }
 
 // containedResource lifts a resource a record contains, by its local id, and

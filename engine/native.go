@@ -73,7 +73,9 @@ type nativeResponder struct {
 	// construction-time-only field like the options above.
 	evMu sync.RWMutex
 	// endpointEvidence is "<contract>@<line>" -> the partner's published
-	// per-version operation URL, ALREADY same-origin-validated at set time
+	// per-version base (HRex 1.2.0: the base its operations are invoked on;
+	// publishedOperationURL adds the operation's path), ALREADY
+	// same-origin-validated at set time
 	// (SetEndpointEvidence drops anything else). nil/absent-token ⇒
 	// resolvedURL falls back to the configured base+path — the fence
 	// (TestNativeForwardSelectsLineEndpoint's byte-identical case).

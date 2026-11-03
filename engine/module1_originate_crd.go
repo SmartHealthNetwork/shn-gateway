@@ -87,52 +87,74 @@ func (r crdOriginRecords) renamed() bool { return r.sorID != r.member }
 // read is recorded as a PrefetchObtainedEvent, and every value is fenced to
 // the member before it is used. A non-zero status refuses the request:
 //   - 422 when the system of record holds no Patient or no Coverage for the
-//     member, or cannot search for coverage;
-//   - 503 when the system of record is unavailable;
-//   - 502 when it answers about another patient.
-func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crdOriginRecords, int, string) {
+//     member, or its connector cannot search for coverage, or it says
+//     definitely that it cannot run that search, or answers it past the
+//     gateway's bounds, or a record cannot be named by the member (the
+//     fidelity of SHN's own build);
+//   - 502 with the fill fence's own refusal, and its *CompartmentError, when
+//     it answers about another patient (the fidelity of SHN's own edit);
+//   - 503 when the system of record is unavailable, and 502 when its answer
+//     is unusable or an error that does not say it cannot run the search
+//     (SearchFailed), with the read's error (a backend failure).
+//
+// The caller answers it through refuseOriginRecord, which tells the three
+// apart by the error, never the message.
+func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crdOriginRecords, int, string, error) {
 	out := crdOriginRecords{member: member, history: map[string][]byte{}}
 	ref, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
-		return out, status, msg
+		return out, status, msg, err
 	}
 	if !found {
-		return out, http.StatusUnprocessableEntity, "patient not found in system of record"
+		return out, http.StatusUnprocessableEntity, "patient not found in system of record", nil
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
 	if !ok || !fhirIDRE.MatchString(sorID) {
-		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-		return out, status, msg
+		bad := &SoRReadError{Kind: SoRInvalidResponse}
+		status, msg := SoRFailureResponse(bad)
+		return out, status, msg, bad
 	}
 	out.sorID = sorID
 	fence := newPatientFence(shnsdk.MemberSystem, member, nil, sorID, member).forPrefetch()
 
-	patient, _, status, msg := g.obtainPrefetch(ctx, leg, prefetchPatientKey, sorID, fence)
+	patient, _, status, msg, err := g.obtainPrefetchRead(ctx, leg, prefetchPatientKey, sorID, fence)
 	if status != 0 {
-		return out, status, msg
+		return out, status, msg, err
 	}
 	// The coverage the request carries is the one it is routed by
 	// (memberRoutingCoverage's choice): every Coverage, the active ones when any
 	// is active, else the others. It is this gateway's own request, so the
 	// coverage template's status filter does not apply; every leg of the
 	// exchange names the same coverage.
-	coverage, outcome, status, msg := g.obtainRoutingCoverage(ctx, sorID, fence, g.coveragePrefetchRecorder(leg))
+	coverage, outcome, status, msg, err := g.obtainRoutingCoverage(ctx, sorID, fence, g.coveragePrefetchRecorder(leg))
 	switch {
 	case status != 0:
-		return out, status, msg
+		return out, status, msg, err
+	case coverage == nil && err != nil:
+		// The system failed to answer the search: a backend failure, with the
+		// status its read error answers (refuseOriginRecord), never a refusal.
+		status, _ := SoRFailureResponse(err)
+		msg := "coverage unreadable from system of record"
+		switch outcome {
+		case SearchUnavailable:
+			msg = "coverage unavailable from system of record"
+		case SearchFailed:
+			msg = coverageSearchAnsweredError
+		}
+		return out, status, msg, err
 	case coverage == nil:
 		status, msg := coverageOmitted(outcome)
-		return out, status, msg
+		return out, status, msg, nil
 	case string(coverage) == "null":
-		return out, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR
+		return out, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR, nil
 	}
 	if out.renamed() {
 		if patient, err = namePatientByMember(patient, sorID, member); err != nil {
-			return out, http.StatusBadGateway, "name the patient in the system of record's Patient: " + err.Error()
+			return out, http.StatusUnprocessableEntity, "name the patient in the system of record's Patient: " + err.Error(), nil
 		}
 		if coverage, err = namePatientByMember(coverage, sorID, member); err != nil {
-			return out, http.StatusBadGateway, "name the patient in the system of record's coverage: " + err.Error()
+			return out, http.StatusUnprocessableEntity, "name the patient in the system of record's coverage: " + err.Error(), nil
 		}
 	}
 	out.patient, out.coverage = patient, coverage
@@ -153,15 +175,15 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchNotRun, Reason: historyNamedDifferently})
 			continue
 		}
-		value, _, status, msg := g.obtainPrefetch(ctx, leg, key, sorID, fence)
+		value, _, status, msg, err := g.obtainPrefetchRead(ctx, leg, key, sorID, fence)
 		if status != 0 {
-			return out, status, msg
+			return out, status, msg, err
 		}
 		if value != nil {
 			out.history[key] = value
 		}
 	}
-	return out, 0, ""
+	return out, 0, "", nil
 }
 
 // originOrder names the patient by the member id in an order read from the
@@ -271,31 +293,31 @@ const msgNoAttestingClinician = "attestation names no clinician NPI: the request
 // attestation is refused (422). The requester's records are read from held,
 // the records the origination already read (orderRequesterRecords), and from
 // the system of record only when held lacks one; a failed read is the system
-// of record's failure.
-func (g *Gateway) attestingNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string) {
+// of record's failure, returned with its error.
+func (g *Gateway) attestingNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string, error) {
 	sent, verified := statedClinician(ctx)
 	if verified && sent != "" {
-		return sent, 0, ""
+		return sent, 0, "", nil
 	}
-	npi, status, msg := g.requesterNPI(ctx, order, held)
+	npi, status, msg, err := g.requesterNPI(ctx, order, held)
 	switch {
 	case status != 0:
-		return "", status, msg
+		return "", status, msg, err
 	case npi != "":
-		return npi, 0, ""
+		return npi, 0, "", nil
 	case g.cfg.NPI != "":
-		return g.cfg.NPI, 0, ""
+		return g.cfg.NPI, 0, "", nil
 	case sent != "":
-		return sent, 0, ""
+		return sent, 0, "", nil
 	}
-	return "", http.StatusUnprocessableEntity, msgNoAttestingClinician
+	return "", http.StatusUnprocessableEntity, msgNoAttestingClinician, nil
 }
 
 // requesterNPI is the NPI of the order's requester in the participant's own
 // records: a Practitioner's us-npi identifier, or a PractitionerRole's
 // practitioner's. It is "" when the order names no requester, or the
 // requester's records carry no NPI.
-func (g *Gateway) requesterNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string) {
+func (g *Gateway) requesterNPI(ctx context.Context, order []byte, held [][]byte) (string, int, string, error) {
 	read := func(ref string) ([]byte, bool, error) {
 		for _, rec := range held {
 			if shnsdk.PASResourceTypeOf(rec)+"/"+pasResourceID(rec) == ref {
@@ -309,10 +331,10 @@ func (g *Gateway) requesterNPI(ctx context.Context, order []byte, held [][]byte)
 		rec, found, err := read(ref)
 		if err != nil {
 			status, msg := SoRFailureResponse(err)
-			return "", status, msg
+			return "", status, msg, err
 		}
 		if !found {
-			return "", 0, ""
+			return "", 0, "", nil
 		}
 		var r struct {
 			ResourceType string `json:"resourceType"`
@@ -325,23 +347,23 @@ func (g *Gateway) requesterNPI(ctx context.Context, order []byte, held [][]byte)
 			} `json:"practitioner"`
 		}
 		if decodeMessage(rec, &r) != nil {
-			return "", 0, ""
+			return "", 0, "", nil
 		}
 		switch {
 		case r.ResourceType == "Practitioner" && strings.HasPrefix(ref, "Practitioner/"):
 			for _, id := range r.Identifier {
 				if id.System == npiSystem && id.Value != "" {
-					return id.Value, 0, ""
+					return id.Value, 0, "", nil
 				}
 			}
-			return "", 0, ""
+			return "", 0, "", nil
 		case r.ResourceType == "PractitionerRole" && strings.HasPrefix(ref, "PractitionerRole/") && strings.HasPrefix(r.Practitioner.Reference, "Practitioner/"):
 			ref = r.Practitioner.Reference
 		default:
-			return "", 0, ""
+			return "", 0, "", nil
 		}
 	}
-	return "", 0, ""
+	return "", 0, "", nil
 }
 
 // collectionBundle wraps resources in a collection Bundle, each entry's
@@ -872,23 +894,32 @@ func setAt(v any, path []any, value string) bool {
 // ServiceRequest whose status is draft — found by the system of record's
 // bounded patient search and returned exactly as the system holds it. The
 // network never changes an order's status. A non-zero status refuses:
-//   - 422 when the connector cannot search, or several draft orders exist;
-//   - 502 when there is no draft order, or it carries no product coding, or
-//     the search answer is unusable;
-//   - 503 when the system of record is unavailable.
-func (g *Gateway) draftOrderContext(ctx context.Context, member string) ([]byte, int, string) {
+//   - 422 when the system holds no Patient for the member, the connector
+//     cannot search or the system says definitely that it cannot run the
+//     search, or there is no draft order or several (a record the
+//     order-select leg carries that the system cannot supply: the fidelity of
+//     SHN's own build, refuseOriginRecord);
+//   - 502 when the search answer is unusable or an error that does not say
+//     the search cannot run (SearchFailed), 503 when the system of record is
+//     unavailable (a backend failure, never a refusal).
+//
+// The draft order's product coding is not read: the order-select leg carries
+// the order as the system holds it, and nothing this request sends names the
+// product apart from it.
+func (g *Gateway) draftOrderContext(ctx context.Context, member string) ([]byte, int, string, error) {
 	ref, found, err := ReadSystemOfRecord(g.cfg.SoR).PatientFHIRRefContext(ctx, member)
 	if err != nil {
 		status, msg := SoRFailureResponse(err)
-		return nil, status, msg
+		return nil, status, msg, err
 	}
 	if !found {
-		return nil, http.StatusUnprocessableEntity, "patient not found in system of record"
+		return nil, http.StatusUnprocessableEntity, "patient not found in system of record", nil
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
 	if !ok || !fhirIDRE.MatchString(sorID) {
-		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-		return nil, status, msg
+		bad := &SoRReadError{Kind: SoRInvalidResponse}
+		status, msg := SoRFailureResponse(bad)
+		return nil, status, msg, bad
 	}
 	var drafts [][]byte
 	for _, rt := range []string{"DeviceRequest", "ServiceRequest"} {
@@ -906,24 +937,23 @@ func (g *Gateway) draftOrderContext(ctx context.Context, member string) ([]byte,
 			}
 		case SearchZero:
 		case SearchUnsupported:
-			return nil, http.StatusUnprocessableEntity, "the system of record cannot search for the member's draft order"
+			return nil, http.StatusUnprocessableEntity, "the system of record cannot search for the member's draft order", nil
 		case SearchUnavailable:
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRUnavailable})
-			return nil, status, msg
+			bad := &SoRReadError{Kind: SoRUnavailable}
+			status, msg := SoRFailureResponse(bad)
+			return nil, status, msg, bad
 		default:
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-			return nil, status, msg
+			bad := &SoRReadError{Kind: SoRInvalidResponse}
+			status, msg := SoRFailureResponse(bad)
+			return nil, status, msg, bad
 		}
 	}
 	switch len(drafts) {
 	case 0:
-		return nil, http.StatusBadGateway, "no draft order for member in system of record"
+		return nil, http.StatusUnprocessableEntity, "no draft order for member in system of record", nil
 	case 1:
 	default:
-		return nil, http.StatusUnprocessableEntity, "several draft orders for member in system of record"
+		return nil, http.StatusUnprocessableEntity, "several draft orders for member in system of record", nil
 	}
-	if _, _, _, err := shnsdk.ParseOrderProductCoding(drafts[0]); err != nil {
-		return nil, http.StatusBadGateway, "draft order has no recognized product coding"
-	}
-	return append([]byte(nil), drafts[0]...), 0, ""
+	return append([]byte(nil), drafts[0]...), 0, "", nil
 }

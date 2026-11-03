@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestOrderSource_ReadsTheMembersOpenOrder(t *testing.T) {
 	sor := newCensusSoR()
 	for _, profile := range []string{"demo", "provider-data", "some-other-lane"} {
 		g := &Gateway{cfg: Config{OriginationProfile: profile, SoR: sor}}
-		got, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC04", "", "")
+		got, status, msg, _ := g.orderSourceContext(context.Background(), "MBR-D-UC04", "", "")
 		if status != 0 {
 			t.Fatalf("%s: orderSource status=%d msg=%q, want 0", profile, status, msg)
 		}
@@ -45,39 +46,43 @@ func TestOrderSource_ReadsTheMembersOpenOrder(t *testing.T) {
 	}
 }
 
-// A member whose system of record holds no open order is REFUSED. Nothing is
-// authored to stand in for it.
+// A member whose system of record holds no open order is REFUSED, 422: the
+// order every leg carries is a record the system cannot supply (the fidelity
+// of SHN's own build, refuseOriginRecord). Nothing is authored to stand in for
+// it.
 func TestOrderSource_NoOpenOrderRefused(t *testing.T) {
 	for _, profile := range []string{"demo", "provider-data"} {
 		g := &Gateway{cfg: Config{OriginationProfile: profile, SoR: newCensusSoR()}}
-		_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "", "")
-		if status != 502 {
-			t.Fatalf("%s: orderSource(no order) status=%d msg=%q, want 502", profile, status, msg)
+		_, status, msg, _ := g.orderSourceContext(context.Background(), "MBR-X", "", "")
+		if status != http.StatusUnprocessableEntity || msg != "no open order for member in SoR" {
+			t.Fatalf("%s: orderSource(no order) status=%d msg=%q, want 422", profile, status, msg)
 		}
 	}
 }
 
 // noCodingSoR embeds the standard stub and overrides OpenOrder to return a ServiceRequest whose
 // code is in a NON-{CPT,HCPCS} system — so ParseOrderProductCoding finds no recognized product
-// coding. Proves orderSource fails closed (502) rather than originating an order whose code does
-// not trace to a recognized product coding (the provider-data honesty guard).
+// coding. Such an order is still the member's order: orderSource returns it exactly as the
+// system holds it, for CRD and DTR to carry, and the PAS claim, whose item names the product,
+// is where it is refused (statedOrderFault; TestStatedOrderFault_RefusesAnOrderWithoutProductCoding).
 type noCodingSoR struct {
 	*censusSoR
 }
 
+const noCodingOrder = `{"resourceType":"ServiceRequest","id":"sr-nocode","status":"active","intent":"order","code":{"coding":[{"system":"http://snomed.info/sct","code":"123456","display":"not a product code"}]},"subject":{"reference":"Patient/MBR-X"}}`
+
 func (s *noCodingSoR) OpenOrder(memberID string) ([]byte, bool) {
 	// A syntactically valid ServiceRequest whose only coding is SNOMED (not CPT/HCPCS).
-	return []byte(`{"resourceType":"ServiceRequest","id":"sr-nocode","status":"active","intent":"order","code":{"coding":[{"system":"http://snomed.info/sct","code":"123456","display":"not a product code"}]},"subject":{"reference":"Patient/MBR-X"}}`), true
+	return []byte(noCodingOrder), true
 }
 
-func TestOrderSource_OrderNoRecognizedCoding(t *testing.T) {
-	g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noCodingSoR{newCensusSoR()}}}
-	_, status, msg := g.orderSourceContext(context.Background(), "MBR-X", "", "")
-	if status != 502 {
-		t.Fatalf("orderSource(order w/ no recognized coding) status=%d msg=%q, want 502", status, msg)
-	}
-	if !strings.Contains(msg, "no recognized product coding") {
-		t.Fatalf("orderSource msg=%q, want it to mention 'no recognized product coding'", msg)
+func TestOrderSource_OrderNoRecognizedCodingIsCarried(t *testing.T) {
+	for _, want := range []struct{ system, code string }{{"", ""}, {"http://www.ama-assn.org/go/cpt", "72148"}} {
+		g := &Gateway{cfg: Config{OriginationProfile: "provider-data", SoR: &noCodingSoR{newCensusSoR()}}}
+		order, status, msg, _ := g.orderSourceContext(context.Background(), "MBR-X", want.system, want.code)
+		if status != 0 || string(order) != noCodingOrder {
+			t.Fatalf("orderSource(order w/ no recognized coding, scenario %q) = %d %q, %s; want the system's order, carried", want.code, status, msg, order)
+		}
 	}
 }
 
@@ -89,16 +94,16 @@ func TestOrderSource_RefusesAnOrderForAnotherProduct(t *testing.T) {
 	g := &Gateway{cfg: Config{OriginationProfile: "demo", SoR: newCensusSoR()}}
 	c := DemoOrderCodes()
 	// MBR-D-UC04's open order is the UC-04 product; ask about UC-08's.
-	_, status, msg := g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC08.System, c.UC08.Code)
-	if status != 502 {
-		t.Fatalf("orderSource(mismatched product) status=%d msg=%q, want 502", status, msg)
+	_, status, msg, _ := g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC08.System, c.UC08.Code)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("orderSource(mismatched product) status=%d msg=%q, want 422", status, msg)
 	}
 	if !strings.Contains(msg, c.UC08.Code) || !strings.Contains(msg, c.UC04.Code) {
 		t.Fatalf("orderSource msg=%q, want it to name both the product asked about and the one on file", msg)
 	}
 	// …and the matching product is accepted, so the row above is about the
 	// disagreement and not about the check refusing everything.
-	if _, status, msg = g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC04.System, c.UC04.Code); status != 0 {
+	if _, status, msg, _ = g.orderSourceContext(context.Background(), "MBR-D-UC04", c.UC04.System, c.UC04.Code); status != 0 {
 		t.Fatalf("orderSource(matching product) status=%d msg=%q, want 0", status, msg)
 	}
 }

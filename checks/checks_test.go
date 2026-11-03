@@ -940,7 +940,7 @@ func TestVersionDriftClassification(t *testing.T) {
 // ContractVersions and EndpointURLs, exactly as before this change.
 func TestProbeRetainsEndpointURLs(t *testing.T) {
 	wellKnown := `{"endpoints":{
-		"davinci_pas_submission_endpoint#2.2":"https://p.example/fhir/Claim/$submit",
+		"davinci_pas_submission_endpoint#2.2":"https://p.example/fhir",
 		"malformed_no_hash":"https://p.example/ignored",
 		"something_else#2.0":"https://p.example/ignored-unknown-code"}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -958,7 +958,7 @@ func TestProbeRetainsEndpointURLs(t *testing.T) {
 	if res.Capability == nil {
 		t.Fatal("want Capability evidence, got nil")
 	}
-	want := map[string]string{"pa.pas@2.2": "https://p.example/fhir/Claim/$submit"}
+	want := map[string]string{"pa.pas@2.2": "https://p.example/fhir"}
 	if len(res.Capability.EndpointURLs) != len(want) || res.Capability.EndpointURLs["pa.pas@2.2"] != want["pa.pas@2.2"] {
 		t.Fatalf("EndpointURLs = %+v, want %+v (malformed/unknown codes must be discarded)", res.Capability.EndpointURLs, want)
 	}

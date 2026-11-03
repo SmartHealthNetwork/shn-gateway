@@ -15,21 +15,29 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
-// cdexEvidence picks the requester's supplemental evidence from a facility's
-// records Bundle: the DiagnosticReport with the latest clinical date
-// (recordClinicalDate, compared as instants by fhirInstant; a report without a
-// readable date comes before any dated one, and of equal instants the later
-// entry wins),
-// and the Provenance that attributes it (targets it by Type/id). Both are the
-// bytes the Bundle holds.
-func cdexEvidence(bundle []byte) (report, provenance []byte, err error) {
+// cdexEvidenceFound is the evidence cdexEvidenceEntries picks, with the
+// positions of the Bundle's entries that hold it.
+type cdexEvidenceFound struct {
+	report, provenance           []byte
+	reportEntry, provenanceEntry int
+}
+
+// cdexEvidenceEntries picks the requester's supplemental evidence from a
+// facility's records Bundle: the DiagnosticReport with the latest clinical
+// date (recordClinicalDate, compared as instants by fhirInstant; a report
+// without a readable date comes before any dated one, and of equal instants
+// the later entry wins), and the Provenance that attributes it (targets it by
+// Type/id). Both are the bytes the Bundle holds. It also names the entries
+// they are: what the requester builds into its own message, which the fence
+// reads apart from the rest of the answer (patientFence.checkEntries).
+func cdexEvidenceEntries(bundle []byte) (cdexEvidenceFound, error) {
 	var b struct {
 		Entry []struct {
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
 	if err := decodeMessage(bundle, &b); err != nil {
-		return nil, nil, fmt.Errorf("records Bundle is not readable: %w", err)
+		return cdexEvidenceFound{}, fmt.Errorf("records Bundle is not readable: %w", err)
 	}
 	type head struct {
 		ResourceType string `json:"resourceType"`
@@ -39,22 +47,24 @@ func cdexEvidence(bundle []byte) (report, provenance []byte, err error) {
 		} `json:"target"`
 	}
 	heads := make([]head, len(b.Entry))
+	var report, provenance []byte
+	reportPos, provenancePos := -1, -1
 	reportRef := ""
 	var reportAt time.Time
 	reportDated := false
 	for i, e := range b.Entry {
 		if json.Unmarshal(e.Resource, &heads[i]) != nil {
-			return nil, nil, errors.New("records Bundle entry is not readable")
+			return cdexEvidenceFound{}, errors.New("records Bundle entry is not readable")
 		}
 		if heads[i].ResourceType == "DiagnosticReport" && heads[i].ID != "" {
 			at, dated := fhirInstant(recordClinicalDate(e.Resource))
 			if report == nil || (dated && (!reportDated || !at.Before(reportAt))) || (!dated && !reportDated) {
-				report, reportRef, reportAt, reportDated = e.Resource, "DiagnosticReport/"+heads[i].ID, at, dated
+				report, reportRef, reportAt, reportDated, reportPos = e.Resource, "DiagnosticReport/"+heads[i].ID, at, dated, i
 			}
 		}
 	}
 	if report == nil {
-		return nil, nil, errors.New("records Bundle holds no report")
+		return cdexEvidenceFound{}, errors.New("records Bundle holds no report")
 	}
 	for i, e := range b.Entry {
 		if heads[i].ResourceType != "Provenance" {
@@ -62,14 +72,14 @@ func cdexEvidence(bundle []byte) (report, provenance []byte, err error) {
 		}
 		for _, t := range heads[i].Target {
 			if t.Reference == reportRef {
-				provenance = e.Resource
+				provenance, provenancePos = e.Resource, i
 			}
 		}
 	}
 	if provenance == nil {
-		return nil, nil, errors.New("records Bundle has no Provenance for its report")
+		return cdexEvidenceFound{}, errors.New("records Bundle has no Provenance for its report")
 	}
-	return report, provenance, nil
+	return cdexEvidenceFound{report: report, provenance: provenance, reportEntry: reportPos, provenanceEntry: provenancePos}, nil
 }
 
 // fhirInstant reads a FHIR date or dateTime as an instant: a year, a

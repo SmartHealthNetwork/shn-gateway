@@ -51,13 +51,13 @@ RUN igfetch() { if [ -f "/igcache/$1" ]; then cp "/igcache/$1" "$1"; elif [ "$IG
 # /etc/ssl/certs/java/cacerts, and the runtime stage copies this edited store
 # over it. The store comes from the same pinned base as the runtime stage.
 FROM eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7 AS truststore
-COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e /etc/ssl/certs/java/cacerts /in/cacerts
+COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d /etc/ssl/certs/java/cacerts /in/cacerts
 COPY validator/truststore/drop-emsign-roots.sh /truststore/drop-emsign-roots.sh
 RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacerts
 
 # The backported WAR on the pinned distroless Java base upstream builds HAPI on
 # (same JRE and env), without upstream's unused bundled jars.
-FROM gcr.io/distroless/java21-debian13:nonroot@sha256:0a1f5a75661918de9c0813f287f651c3bf2d6dd752eada5f084eb0c1f14ced9e
+FROM gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d
 USER 65532:65532
 COPY --from=truststore /out/cacerts /etc/ssl/certs/java/cacerts
 WORKDIR /app

@@ -51,16 +51,35 @@ JAVA = ["java", "--class-path", "/app/main.war", "-Dloader.path=main.war!/WEB-IN
 PAS_VERSIONS = {"2.0": "2.0.1", "2.1": "2.1.0", "2.2": "2.2.1"}
 
 
-def image(base, built, line):
-    b, i = base[0]["Config"], built[0]["Config"]
+def feature_release(version):
+    """The Java feature release a JAVA_VERSION names: 21 in 21.0.13, 21.0.13+9, 21+35 or jdk-21.0.13+9."""
+    m = re.match(r"(?:jdk-)?(\d+)(?:[.+]|$)", version)
+    assert m, "unreadable JRE version"
+    return m.group(1)
+
+
+def image(engine, runtime, built, line):
+    """The built image against the engine image its WAR comes from (the pinned
+    hapiproject/hapi) and the runtime base it runs on (the pinned distroless Java base).
+    The engine fixes the argv, user and workdir. The runtime base must set the same
+    variables as the engine, to the same values, apart from the JRE's version, which may
+    differ only within the same Java feature release: any other difference is a review.
+    The image keeps the runtime base's environment, so it reports the JRE it runs, not
+    the one the engine was built on."""
+    b, r, i = engine[0]["Config"], runtime[0]["Config"], built[0]["Config"]
     assert b["Entrypoint"] == JAVA, "pinned base argv changed: review required"
     assert i["Entrypoint"] == ["/healthcheck", "supervise"] + JAVA, "image does not supervise exact base argv"
     assert b["User"] == i["User"] == "65532:65532", "base user changed"
     assert b["WorkingDir"] == i["WorkingDir"] == "/app", "base workdir changed"
     assert not b.get("Cmd") and not i.get("Cmd"), "unexpected appended command"
-    base_env = dict(x.split("=", 1) for x in b["Env"])
+    engine_env = dict(x.split("=", 1) for x in b["Env"])
+    runtime_env = dict(x.split("=", 1) for x in r["Env"])
     image_env = dict(x.split("=", 1) for x in i["Env"])
-    assert all(image_env.get(k) == v for k, v in base_env.items()), "base environment changed"
+    assert set(runtime_env) == set(engine_env), "runtime base sets other variables than the engine's: review required"
+    assert all(runtime_env[k] == v for k, v in engine_env.items() if k != "JAVA_VERSION"), "runtime base environment differs from the engine's: review required"
+    assert "JAVA_VERSION" in engine_env, "JRE version not stated"
+    assert feature_release(runtime_env["JAVA_VERSION"]) == feature_release(engine_env["JAVA_VERSION"]), "runtime JRE is another Java feature release than the engine's: review required"
+    assert all(image_env.get(k) == v for k, v in runtime_env.items()), "runtime base environment changed"
     assert image_env["SHN_IG_LINE"] == line, "wrong IG line"
     assert image_env["hapi.fhir.implementationguides.pas.version"] == PAS_VERSIONS[line], "wrong PAS version"
 
@@ -91,7 +110,7 @@ def logs(text, line):
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "image":
-        image(json.load(open(sys.argv[2])), json.load(open(sys.argv[3])), sys.argv[4])
+        image(json.load(open(sys.argv[2])), json.load(open(sys.argv[3])), json.load(open(sys.argv[4])), sys.argv[5])
     elif action == "ready":
         ready(json.load(sys.stdin), sys.argv[2])
     elif action == "logs":

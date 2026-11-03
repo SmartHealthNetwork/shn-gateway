@@ -129,15 +129,22 @@ build_line() {
   fi
   docker build --build-arg "SHN_IG_LINE=${line}" --build-arg "IG_PACKAGES_OFFLINE=${IG_PACKAGES_OFFLINE:-}" \
     ${ig[@]+"${ig[@]}"} -t "${image}" "${DIR}"
-  local base platform
+  local base runtime platform
+  # The engine image the WAR comes from, and the runtime base the image runs on (the
+  # hapi-runtime stage's FROM): the engine fixes argv, user and workdir; the runtime base
+  # fixes the environment it sets, the JRE's own among it.
   base="$(awk '/^FROM hapiproject\/hapi@/{print $2; exit}' "${DIR}/Dockerfile")"
+  runtime="$(awk '$1 == "FROM" && $(NF-1) == "AS" && $NF == "hapi-runtime" {print $2; exit}' "${DIR}/Dockerfile")"
+  [ -n "${base}" ] && [ -n "${runtime}" ] || { echo "verify: the engine or runtime base is not found in the Dockerfile" >&2; return 1; }
   docker image inspect "${image}" >"${RUN_DIR}/image.json"
   platform="$(python3 -c 'import json,sys; i=json.load(open(sys.argv[1]))[0]; print(i["Os"]+"/"+i["Architecture"]+("/"+i["Variant"] if i.get("Variant") else ""))' "${RUN_DIR}/image.json")"
-  # BuildKit may retain FROM only in its build cache. Load the immutable base
+  # BuildKit may retain FROM only in its build cache. Load the immutable bases
   # into the image store for inspection, matching the built image's platform.
   docker pull --platform "${platform}" "${base}" >/dev/null
   docker image inspect "${base}" >"${RUN_DIR}/base.json"
-  python3 "${DIR}/verify-state.py" image "${RUN_DIR}/base.json" "${RUN_DIR}/image.json" "${line}"
+  docker pull --platform "${platform}" "${runtime}" >/dev/null
+  docker image inspect "${runtime}" >"${RUN_DIR}/runtime.json"
+  python3 "${DIR}/verify-state.py" image "${RUN_DIR}/base.json" "${RUN_DIR}/runtime.json" "${RUN_DIR}/image.json" "${line}"
   echo "built line=${line} image=${image} id=$(docker image inspect -f '{{.Id}}' "${image}")"
 }
 

@@ -44,8 +44,12 @@ func (e *CompartmentError) Error() string {
 //   - The one other person's record the fence carries is a Coverage's
 //     party: a Patient contained in a Coverage that only the Coverage's
 //     subscriber or policyHolder names, by the slot's own reference
-//     (shnsdk.CoverageParty). The Coverage is still bound by its beneficiary like
-//     any other; a standalone entry for another Patient is still refused.
+//     (shnsdk.CoverageParty), or a Patient entry of a Bundle that the Bundle's
+//     Coverages name as their party (shnsdk.CoverageEntryParties: among
+//     other things, nothing else in the Bundle refers to it, and the
+//     Coverage's beneficiary is another Patient entry of the same Bundle).
+//     The Coverage is still bound by its beneficiary like any other; any
+//     other entry for another Patient is still refused.
 //   - A resource of any other R4 type is allowed; an unknown type is refused.
 //
 // A binding reference resolves as:
@@ -69,10 +73,14 @@ type patientFence struct {
 	ids          map[string]bool
 	// refuseOpaque refuses every Binary resource (forPrefetch).
 	refuseOpaque bool
-	// noParties fences a Coverage's party like any other contained Patient
-	// (withoutParties).
+	// noParties fences a Coverage's party like any other Patient, contained
+	// or an entry (withoutParties).
 	noParties bool
-	run       *fenceRun
+	// onlyEntries, when set, are the positions of the top-level Bundle's
+	// entries that are fenced (checkEntries); every entry still resolves a
+	// reference.
+	onlyEntries map[int]bool
+	run         *fenceRun
 }
 
 // fenceAnotherPatientReference is the refusal of a reference that names
@@ -92,7 +100,8 @@ func (f patientFence) forPrefetch() patientFence {
 }
 
 // withoutParties is the fence that carries no Coverage's party: every
-// contained Patient must be the bound patient, as before the party rule. It
+// Patient, contained or an entry, must be the bound patient, as before the
+// party rules. It
 // is the requester's fence over a facility's disclosed records
 // (requesterRecordsFence), which the party rule does not cover. (A facility's
 // own fence reads only the member's Patient and the records queried, never a
@@ -162,6 +171,26 @@ func newPatientFence(memberSystem, member string, bases []string, ids ...string)
 func (f patientFence) check(value []byte) error {
 	_, err := f.checkCounting(value)
 	return err
+}
+
+// checkEntries fences only the entries at positions of the Bundle bundle,
+// each read against the whole Bundle: a reference resolves to any of its
+// entries as check resolves it, and no other entry is fenced. It is how a
+// requester checks the records it builds into a message of its own, apart
+// from the rest of the answer they came in.
+//
+// Naming no position, or one the Bundle has no entry at, is refused: a check
+// that fenced nothing would pass anything. A value that is not a Bundle is
+// fenced whole, as check fences it.
+func (f patientFence) checkEntries(bundle []byte, positions ...int) error {
+	if len(positions) == 0 {
+		return &CompartmentError{ResourceType: "Bundle", Reason: "no entry to check"}
+	}
+	f.onlyEntries = map[int]bool{}
+	for _, p := range positions {
+		f.onlyEntries[p] = true
+	}
+	return f.check(bundle)
 }
 
 // checkCounting is check, also reporting the Provenance target resolutions
@@ -335,11 +364,21 @@ func (f patientFence) resourceOnce(res map[string]any, entries *docIndex, parent
 func (f patientFence) bundle(b map[string]any, depth int) error {
 	raw, ok := b["entry"]
 	if !ok {
+		if depth == 0 && f.onlyEntries != nil {
+			return &CompartmentError{ResourceType: "Bundle", Reason: "no entry at a position to check"}
+		}
 		return nil
 	}
 	list, ok := raw.([]any)
 	if !ok {
 		return &CompartmentError{ResourceType: "Bundle", Reason: "entry is not a list"}
+	}
+	// The Bundle's entry parties, by fullUrl: one walk of the Bundle, by the
+	// rule the PAS walks use. The mark the run put on b is no reference, and
+	// the rule ignores it.
+	var parties map[string]bool
+	if !f.noParties {
+		parties = shnsdk.CoverageEntryParties(b)
 	}
 	entries := &docIndex{fullURL: map[string]map[string]any{}, typeID: map[string]map[string]any{}, ambiguous: map[string]bool{}}
 	var resources []map[string]any
@@ -352,11 +391,21 @@ func (f patientFence) bundle(b map[string]any, depth int) error {
 		if !ok {
 			return &CompartmentError{ResourceType: "Bundle", Reason: "entry has no resource"}
 		}
-		if full, _ := eo["fullUrl"].(string); full != "" {
+		full, _ := eo["fullUrl"].(string)
+		if full != "" {
 			if entries.fullURL[full] != nil {
 				return &CompartmentError{ResourceType: "Bundle", Reason: "repeated fullUrl"}
 			}
 			entries.fullURL[full] = res
+		}
+		if rt, _ := res["resourceType"].(string); rt == "Patient" && parties[full] {
+			// A Coverage's party is another person, so its identity is not
+			// checked. shnsdk.CoverageEntryParties names it only when it
+			// contains nothing and nothing else in the Bundle refers to it,
+			// so no binding reference reaches it; one that did would still
+			// be refused, since a reference to a Patient is checked for the
+			// bound patient whatever this entry is.
+			f.run.state[f.run.mark(res)] = fenceDone
 		}
 		rt, _ := res["resourceType"].(string)
 		if id, _ := res["id"].(string); rt != "" && id != "" {
@@ -368,7 +417,17 @@ func (f patientFence) bundle(b map[string]any, depth int) error {
 		}
 		resources = append(resources, res)
 	}
-	for _, res := range resources {
+	if depth == 0 && f.onlyEntries != nil {
+		for p := range f.onlyEntries {
+			if p < 0 || p >= len(resources) {
+				return &CompartmentError{ResourceType: "Bundle", Reason: "no entry at a position to check"}
+			}
+		}
+	}
+	for i, res := range resources {
+		if depth == 0 && f.onlyEntries != nil && !f.onlyEntries[i] {
+			continue
+		}
 		if err := f.resource(res, entries, nil, depth+1); err != nil {
 			return err
 		}
@@ -647,6 +706,38 @@ func (f patientFence) reference(v any, sc fenceScope) (bool, *refError) {
 		return false, &refError{fenceAnotherPatientReference}
 	}
 	return true, nil
+}
+
+// namesPatientEntry reports whether ref, read as the fence reads a binding
+// reference, names the Patient entry with fullURL and id: that fullUrl, or
+// Patient/<id> in any version, relative or absolute on one of the fence's
+// bases. A rule that drops a Patient entry before the fence keeps every entry
+// this names, so it drops no Patient the fence would read through ref.
+func (f patientFence) namesPatientEntry(ref, fullURL, id string) bool {
+	if ref == "" {
+		return false
+	}
+	if fullURL != "" && ref == fullURL {
+		return true
+	}
+	if id == "" {
+		return false
+	}
+	path := ref
+	if strings.Contains(ref, ":") {
+		matched := false
+		for _, b := range f.bases {
+			if rest, ok := strings.CutPrefix(ref, b+"/"); ok {
+				path, matched = rest, true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	m := relativeRef.FindStringSubmatch(path)
+	return m != nil && m[1] == "Patient" && m[2] == id
 }
 
 // requesterRecordsFence is the fence a requester applies to the records a

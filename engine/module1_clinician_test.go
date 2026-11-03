@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // The verified caller reaches the route: scenario caller authentication puts
@@ -58,14 +57,20 @@ func TestScenarioCaller_CarriesTheVerifiedCaller(t *testing.T) {
 	}
 }
 
-// REJECTION, at every level: an origination that holds every source of its
-// clinician up front and finds none is refused before any leg, 422, recorded
-// as the leg it would have sent failing. The CRD build refuses the same way
-// when no source names the ordering clinician.
-func TestOrigination_NoClinicianRefusesBeforeAnyLeg(t *testing.T) {
+// REJECTION, at every level: an origination whose attesting clinician no
+// source names is refused at the build of the leg that carries the
+// attestation, 422, recorded as that leg failing, after the legs before it,
+// which were carried and stand. UC-03's oxygen order attests item 6.1 of its
+// PAS claim, after the order-dispatch and questionnaire legs. A request no
+// source names even the ordering clinician for is refused at the first leg
+// that names one, the CRD request itself, with no leg sent (UC-06's single
+// call and UC-02's order-select). UC-06's amendment refusing for its attesting
+// clinician is TestUC06TwoPhase_TheClinicianIsResolvedAtComplete's.
+func TestOrigination_NoClinicianRefusedAtTheLegThatNamesIt(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run("uc03 oxygen attestation/"+level.String(), func(t *testing.T) {
-			gw, stub, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
+			fix := uc03DemoOxygenFixture(t)
+			gw, stub := fix.gw, fix.stub
 			gw.cfg.NPI, gw.cfg.ConformanceEnforcement = "", level
 			var events []ObserverEvent
 			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
@@ -74,9 +79,10 @@ func TestOrigination_NoClinicianRefusesBeforeAnyLeg(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), msgNoAttestingClinician) {
 				t.Fatalf("%d %s, want 422 %q", rec.Code, rec.Body, msgNoAttestingClinician)
 			}
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+			if !legAttempted(stub.legTypes, "crd-order-dispatch") || legAttempted(stub.legTypes, "pas-claim") {
+				t.Fatalf("legs %v: want the order-dispatch leg sent and no claim", stub.legTypes)
 			}
+			wantCarried(t, rec.Body.String(), stub.legTypes...)
 			wantOwnBuildRefusal(t, events, msgNoAttestingClinician)
 		})
 		t.Run("uc06 single call/"+level.String(), func(t *testing.T) {
@@ -85,14 +91,15 @@ func TestOrigination_NoClinicianRefusesBeforeAnyLeg(t *testing.T) {
 			var events []ObserverEvent
 			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 			rec := httptest.NewRecorder()
-			gw.handleUC06(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", "")))))
-			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), msgNoAttestingClinician) {
-				t.Fatalf("%d %s, want 422 %q", rec.Code, rec.Body, msgNoAttestingClinician)
+			gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", ""))))))
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), errNoOrderingClinician.Error()) {
+				t.Fatalf("%d %s, want 422 %q", rec.Code, rec.Body, errNoOrderingClinician)
 			}
 			if len(stub.requests) != 0 {
 				t.Fatalf("legs sent before the refusal: %v", stub.requests)
 			}
-			wantOwnBuildRefusal(t, events, msgNoAttestingClinician)
+			wantCarried(t, rec.Body.String())
+			wantOwnBuildRefusal(t, events, errNoOrderingClinician.Error())
 		})
 		t.Run("uc02 order-select/"+level.String(), func(t *testing.T) {
 			sor, _ := originSystem(t, prefetchMember)
@@ -195,9 +202,11 @@ func testUC06TwoPhase(t *testing.T, level ConformanceEnforcement) {
 }
 
 // REJECTION: an attestation route whose request states no answer is refused
-// before any leg (the single calls) or before its own legs (/complete, where
-// UC-07's patient-DTR exchange is one), and the pend stays parked: the answer
-// is the participant's, and the gateway supplies none.
+// at the leg that carries the answer — UC-06's amendment, UC-07's patient-DTR
+// exchange — after the legs before it, which were carried and stand (on the
+// single calls, the coverage check, the questionnaire and the submission the
+// payer pended), and the pend stays parked: the answer is the participant's,
+// and the gateway supplies none.
 func TestAttestation_AnswerIsRequired(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) { testAnswerIsRequired(t, level) })
@@ -216,10 +225,14 @@ func testAnswerIsRequired(t *testing.T, level ConformanceEnforcement) {
 		gw, stub := uc06RouteFixture(t, "2.0")
 		events := observe(gw)
 		rec := httptest.NewRecorder()
-		gw.handleUC06(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", testNoAnswer)))))
-		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) || len(stub.requests) != 0 {
-			t.Fatalf("%d %s with %d legs, want 422 and none", rec.Code, rec.Body, len(stub.requests))
+		gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", testNoAnswer))))))
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("%d %s, want 422", rec.Code, rec.Body)
 		}
+		if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "pas-claim-update") {
+			t.Fatalf("legs %v: want the submission sent and no amendment", stub.legTypes)
+		}
+		wantCarried(t, rec.Body.String(), stub.legTypes...)
 		wantOwnBuildRefusal(t, *events, want)
 	})
 	t.Run("uc07 single call", func(t *testing.T) {
@@ -227,10 +240,14 @@ func testAnswerIsRequired(t *testing.T, level ConformanceEnforcement) {
 			extraRoles: map[string]string{"phg": "phg"}})
 		events := observe(gw)
 		rec := httptest.NewRecorder()
-		gw.handleUC07(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc07", strings.NewReader(testRouteBody(gw, "/scenario/uc07", testNoAnswer)))))
-		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) || len(stub.requests) != 0 {
-			t.Fatalf("%d %s with %d legs, want 422 and none", rec.Code, rec.Body, len(stub.requests))
+		gw.handleUC07(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07", strings.NewReader(testRouteBody(gw, "/scenario/uc07", testNoAnswer))))))
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("%d %s, want 422", rec.Code, rec.Body)
 		}
+		if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "patient-dtr") || legAttempted(stub.legTypes, "pas-claim-update") {
+			t.Fatalf("legs %v: want the submission sent and no patient-DTR exchange or amendment", stub.legTypes)
+		}
+		wantCarried(t, rec.Body.String(), stub.legTypes...)
 		wantOwnBuildRefusal(t, *events, want)
 	})
 	t.Run("uc06 complete", func(t *testing.T) {
@@ -336,4 +353,24 @@ func TestUC06SingleCall_TheStatedClinician(t *testing.T) {
 			t.Fatalf("%d %s with %d legs, want 400 and none", rec.Code, rec.Body, len(stub.requests))
 		}
 	})
+}
+
+// uc03DemoOxygenFixture is UC-03's demo persona (MBR-D-UC03) with its oxygen
+// order (E1390) dispatched to a supplier, on the order-dispatch fixture, so
+// /scenario/uc03 carries its order-dispatch and questionnaire legs.
+func uc03DemoOxygenFixture(t *testing.T) *dispatchFixture {
+	t.Helper()
+	const member = "MBR-D-UC03"
+	const performerRef = "Organization/org-dme-uc03"
+	orderJSON, err := buildDispatchDeviceRequest("dr-uc03", "Patient/"+member, performerRef, "E1390", DemoDisplayE1390UC03, DemoDxE1390UC03)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supplierJSON, err := buildHomeOxygenSupplier("org-dme-uc03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix := newDispatchFixture(t, member, Demo{BirthDate: "1979-09-02", FamilyName: "Whitfield"}, orderJSON, performerRef, supplierJSON)
+	declareOriginationProfile(fix.gw, "demo")
+	return fix
 }

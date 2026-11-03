@@ -133,6 +133,75 @@ identifier alone, so your system of record supplies no payer Organization for a 
 request to name`, recorded as `fidelity` at stage `build`, at every conformance level. It never
 mints the record. Point the Coverage's `payor` at an Organization your system holds.
 
+**Where a request your gateway builds is refused.** A request your gateway builds for you
+(`ORIGINATION_PROFILE`, the `/scenario/*` routes) is refused at the first leg that cannot be built,
+never earlier, so a request that can still succeed without a later leg is carried: a payer's
+not-covered answer, the no-PA coverage check, and UC-05 when the disclosure is denied all
+answer as usual, whatever a later leg would have needed. From the release that carries this:
+- **Before the first leg**, only what no leg can be sent without:
+  - the request to your gateway malformed: an unreadable body (`400`), a `wait` that is not a
+    whole number of seconds (`400`), a sent `npi` that is no NPI (`400`);
+  - a leg that cannot be addressed, recorded as `routing`: a member your system does not hold
+    (`400 unknown member`), no Coverage on file or several that name different payers, no payer
+    router, a Coverage naming no payer identifier, or no participant registering the payer (`422`);
+  - a record the first leg carries that your system cannot supply: no Patient, no open or draft
+    order (or several drafts), an open order about another product than the route originates
+    for, a dispatched order with no id or performer, a connector that
+    cannot search for coverage, or a record the gateway cannot name the member in (`422`,
+    recorded as `fidelity` at stage `build`), and, behind a connector whose coverage read is not
+    the Coverage search, a coverage search your system answers past the gateway's bounds or
+    says definitely that it cannot run (the same);
+  - a record your system returns about another patient (`422`, recorded as `fidelity` at stage
+    `verify`).
+- **At the questionnaire leg:** a payer that declares no framed DTR operations (`422`, recorded
+  as `routing`).
+- **At UC-07's patient questionnaire exchange:** no patient health gateway registered (`422`,
+  recorded as `routing`), and, on a lane whose patient answers a score, an answer that is no
+  score (`400`).
+- **At the leg that consumes it**, everything only a later leg carries, refused `422` and recorded
+  as `fidelity` at stage `build`:
+  - at the PAS claim:
+    - the member and the order the request states its claim facts for;
+    - the claim facts themselves;
+    - the payer's Organization record;
+    - the records the order's requester leads to;
+    - the requesting provider;
+    - a dispatched order's supplier record;
+    - the record of a person the member's Coverage names as its `subscriber` or `policyHolder`
+      by a reference to another `Patient` record (a dependent's parent): the claim carries it
+      as a `Patient` entry of its own, and refuses a Coverage naming a person your system does
+      not hold or whose record cannot be carried as it is;
+    - an order with no product coding the claim's item can name;
+    - UC-03's oxygen attestation clinician;
+  - at the amendment: its `certificationType` and `reportType`, its attesting clinician and
+    UC-06's answer, and, on `/scenario/uc06/complete` and `/scenario/uc07/complete`, the member
+    and order the request names;
+  - on `/scenario/uc05`, the facility's report the amendment carries as evidence, and the
+    `Provenance` that attributes it, when either is about another patient: refused once the
+    report's `federated-query` leg is answered, before the next leg is sent;
+  - at the patient's questionnaire exchange: UC-07's answer.
+
+  `/scenario/uc07/complete` sends the patient's questionnaire exchange before it checks the
+  amendment's member, order and facts.
+- **Your system failing to answer** a read of a record, or your operated `$populate` engine
+  failing to answer, is a backend failure, never a refusal: `503` or `502`, recorded as one, at
+  the first leg that needs the record. The coverage is read
+  before any leg, to route by, and is first carried by the coverage check. Behind the built-in
+  FHIR connector both are one Coverage search, so any failure of that search fails before any
+  leg: `503` when your system does not answer, and `502` for anything else, including an answer
+  past the gateway's bounds and an answer saying your system does not support the search (that
+  read reports only whether your system answered). An answer that repeats a member name is
+  recorded as `integrity`. The payer Organization record is first needed at the questionnaire request when
+  the coverage check asks for a questionnaire, and otherwise at the PAS claim. The record of a
+  dependent's parent is first needed at the PAS claim.
+
+Each of the refusals and backend failures above that comes at or after a leg's build, and each
+routing refusal of an unknown member, ends with a sentence saying which legs the request sent:
+`The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand.`,
+or `No leg of this request was sent.` The payer holds whatever those legs asked of it: a
+submission refused at its amendment leaves the payer's pend in place, for a corrected `/complete`
+or an inquiry to continue.
+
 **A PAS Bundle's payor.** On `Claim/$submit` and `Claim/$inquire`, the gateway routes by the first
 Coverage's first `payor`: an identifier it carries routes first; otherwise its reference resolves
 among the Bundle's own entries, and the gateway never reads the payor from outside the Bundle. An
@@ -1009,6 +1078,31 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 | `SHN_STORE_MAX_CONNS` | Maximum connections in the shared-state pool (default `8`; a `MinConns` floor of 2 is kept warm). Four consumers share this one pool — claim state, one-time-use records, ingress signing key, exchange correlation — and an exchange append holds a connection for its transaction, so the default is sized for concurrency rather than for the host's CPU count. Size it against your database's connection limit divided by the number of gateways sharing the DSN: the fleet's ceiling is this value multiplied by that count, and it has to stay under the limit. Count replicas, not deployments: the draw is replicas × gateways sharing the DSN × this value, and that product is what has to stay under the limit (each replica also holds the warm floor open whether or not it is serving). Overrides any `pool_max_conns` in the DSN. Must be an integer in `[1, 2147483647]` (the pool field's own width); anything else is a boot error naming the variable. |
 | `EXCHANGE_TTL` | Lifetime of an exchange correlation record as a Go duration (default `168h`). Applies to exchanges begun after the change — existing records keep the expiry they were written with. Must be positive; an unparsable or non-positive value is a boot error naming the variable. |
 
+### System-of-record search errors
+
+When your FHIR server answers one of the gateway's searches (the coverage read to route by,
+the prefetch values, an originated request's draft order, a federated query's records) with an
+error status, the built-in FHIR connector tells two answers apart, by the status and the
+answer's `OperationOutcome` alone (`diagnostics` and other text are never read):
+
+- **Your server cannot run the search:** `501 Not Implemented`, or a `4xx` other than `401`,
+  `403` and `429` whose `OperationOutcome` has at least one issue of severity `error` or `fatal`,
+  every one of them with the code `not-supported`. Your system, as connected, cannot supply
+  the value, as for a connector that cannot search: a request that needs it is refused `422`,
+  a prefetch key is left out, and a federated query reads the connector's own records
+  (`FacilityRecordsContext`).
+- **Any other error answer** (`400`, `404` or `422` without that `OperationOutcome`, or one
+  that pairs `not-supported` with an error of another code): what your system holds is
+  unknown, so the gateway never reads it as nothing. A request that needs the value fails
+  `502`, a backend failure, never a refusal; a prefetch key is left out, as for any search
+  your server cannot answer.
+
+`401`, `403`, `429` and `5xx` (other than `501`) are your server not answering (`503`).
+
+One read does not yet tell the two apart: a request your gateway originates
+(`ORIGINATION_PROFILE`) first reads the coverage to route by, and behind the built-in FHIR
+connector that read answers `502` for both, as for an answer past the gateway's bounds.
+
 ### How long a prior authorization stays answerable
 
 A payer gateway keeps a ledger row for every prior authorization it pends or
@@ -1457,7 +1551,9 @@ included, then in your system of record. It refuses instead when that system doe
 patient (`422 no coverage to route by: send the coverage parameter (this gateway's records
 name no patient for this member)`), holds no Coverage
 (422), when the Coverages it chooses (the active ones, else the others) name different payers
-(422), cannot search (422) or is unavailable (503). A Coverage that references its payor
+(422), cannot search, including a server that says definitely that it cannot run the search
+(422), answers the search with any other error (502, see [System-of-record search
+errors](#system-of-record-search-errors)) or is unavailable (503). A Coverage that references its payor
 Organization is resolved among the request's own resources and the records the search
 included, then by one read from your system of record, with or without the opt-in below;
 records that answer the reference without naming one payer are refused (422), as for the CDS
@@ -1724,6 +1820,20 @@ the template's search (below), and the request is routed on it when it finds a C
 this read when it finds none or your system of record cannot answer it. A member with no
 active coverage is therefore routed as without the opt-in, and its request carries `null`
 coverage.
+
+A `Patient` your system includes in a coverage search the gateway runs, other than the one
+a Coverage's `beneficiary` names, is dropped from what the gateway reads: it is neither
+checked against the patient nor sent to the payer. The usual one is the parent a dependent's
+Coverage names as its `subscriber` or `policyHolder`; R4 also lets a Coverage's `payor` name a
+Patient. The Patient a `beneficiary` names is kept: it must be the patient, and it is carried
+as before. Each Coverage is still checked against the patient by its `beneficiary`. Earlier
+gateways refused a search that included another person's Patient (`502`, at every level): the
+routing read, the coverage `ENRICH_NATIVE_REQUESTS` adds, and the coverage of a CRD request the
+gateway originates. The `fhirServer` read does the same with a `Patient` entry your EHR's
+server returns: one a Coverage's `beneficiary` names is checked to be the patient, any other is
+dropped, and neither is sent to the payer
+([Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)).
+
 For each key:
 
 - **Your EHR sent it** (a resource, a Bundle, or `null`): it is sent unchanged.
@@ -1735,7 +1845,9 @@ For each key:
   added to the request. Coverages naming more than one payer (among the active ones, or,
   when none is active, among all of them) are refused with `422 ambiguous coverage for
   routing`. A request whose coverage your system of
-  record cannot supply is refused as below (`422`, or `503` when your server is unavailable);
+  record cannot supply is refused as below (`422`; `502` when your server answers the search
+  with an error that does not say it cannot run it, see [System-of-record search
+  errors](#system-of-record-search-errors); or `503` when your server is unavailable);
   one whose `prefetch.coverage` is `null`, or for whose member your system holds no Coverage,
   is refused `412 no coverage in request or system of record`. One that leaves out the coverage
   of a member your system does not hold has nothing there to be routed by: by default its
@@ -1782,8 +1894,10 @@ For each key:
     searchset, or over the bounds) leaves the key out. For `coverage` the request is still
     routed by the read that chooses the payer (every Coverage, active first, not added), as
     without the opt-in; only when that read fails too is it refused, at every level: `503
-    coverage unavailable from system of record` when your server is unavailable, otherwise a
-    `422`. A missing history key is left for the payer to decide on. When your system of
+    coverage unavailable from system of record` when your server is unavailable, `502 the
+    system of record answered the coverage search with an error` when it answers with an error
+    that does not say it cannot run the search (see [System-of-record search
+    errors](#system-of-record-search-errors)), otherwise a `422`. A missing history key is left for the payer to decide on. When your system of
     record cannot answer for the patient at all, a request that carries no coverage is
     refused with that failure at every level; one that carries its own coverage is refused at
     `strict` and, below `strict`, sent with its own values and nothing obtained. A connector
@@ -1942,9 +2056,11 @@ otherwise send `patient` and `coverage` (and any history your EHR has) in the re
 is your system of record's order, with its own status — the gateway never changes it. The
 `order-select` coverage check (`provider-data`) carries your member's one **draft** order
 (`DeviceRequest` or `ServiceRequest` with `status` `draft`, found with the patient search
-above): no draft order is `502 no draft order for member in system of record`, several are
-`422 several draft orders for member in system of record`, and a connector that cannot search
-is `422`. `order-sign` (a signed order going to prior authorization) and `order-dispatch`
+above): no draft order is `422 no draft order for member in system of record`, several are
+`422 several draft orders for member in system of record`, and a connector that cannot search,
+or a system that says definitely that it does not support the search, is `422`. A search your
+system answers with any other error is `502` (see [System-of-record search
+errors](#system-of-record-search-errors)). `order-sign` (a signed order going to prior authorization) and `order-dispatch`
 carry your member's **active** order as your system holds it, at every CRD line; the network
 never changes its status. CRD 2.1.0 and 2.2.1's order profiles fix no status. CRD 2.0.1's
 `profile-devicerequest` and `profile-servicerequest` fix `status` to `draft`, so at CRD 2.0
@@ -2090,8 +2206,12 @@ never read `fhirServer`.
   one on your server included) is carried as written. Nothing else of your server's answer
   is carried: not its links, its entry addresses (`fullUrl`s on your server), its Bundle `id` or
   `meta`, nor its `OperationOutcome` entries, nor a Coverage that was not chosen or an
-  Organization only such a Coverage names. Everything carried passes the same patient check as
-  the read: another patient's record is never carried. The rest of the request is your EHR's,
+  Organization only such a Coverage names, nor any `Patient` entry. A `Patient` entry a
+  Coverage's `beneficiary` names is checked with the Coverages and must be the patient; any
+  other `Patient` entry your server returns, such as the parent a dependent's Coverage names as
+  its `subscriber`, is dropped before the check (earlier gateways refused the answer, `412`).
+  Everything carried passes the same patient check as the read: another patient's record is
+  never carried. The rest of the request is your EHR's,
   byte for byte, with `fhirServer` and `fhirAuthorization` still removed. A request refused
   while routing carries nothing and is not sent. A request that carries a `coverage` prefetch
   key, even `null`, is never given another, and a coverage your system of record supplied, or
@@ -2158,7 +2278,7 @@ Organization by reference alone`):
 | `fhirServer's answer exceeds 512 KiB` | 412 |
 | `fhirServer refused the fhirAuthorization token` (a `401` or `403`) | 412 |
 | `fhirServer answered with an error` (any other status but `200`, a `404` on the Coverage search included) | 412 |
-| `fhirServer's answer is not a Coverage searchset` (not JSON, not a `searchset` Bundle, an entry that is not a Coverage, Organization or OperationOutcome, or one the patient check cannot use, such as a repeated `fullUrl`, a contained resource with no `id`, or a patient it cannot identify as the request's; from shn-gateway v0.61.0 a dependent's Coverage naming the parent as a contained `Patient` in its `subscriber` or `policyHolder` only is used) | 412 |
+| `fhirServer's answer is not a Coverage searchset` (not JSON, not a `searchset` Bundle, an entry that is not a Coverage, Organization, Patient or OperationOutcome, or one the patient check cannot use, such as a repeated `fullUrl`, a contained resource with no `id`, or a patient it cannot identify as the request's; from shn-gateway v0.61.0 a dependent's Coverage naming the parent as a contained `Patient` in its `subscriber` or `policyHolder` only is used; a `Patient` entry no Coverage's `beneficiary` names, such as the parent returned as an entry of its own, is dropped and not checked, and a repeated `fullUrl` is refused across every entry) | 412 |
 | `fhirServer holds no Coverage for the patient` | 412 |
 | `fhirServer holds no Organization for the coverage's payor` (a `404` or `410` on the Organization read) | 412 |
 | `fhirServer returned another patient's coverage` (a Coverage whose patient reference names another patient: another `Patient` id, or the member identifier with another member's value) | 502 |
@@ -2191,14 +2311,15 @@ A sent `npi` that is not a valid NPI is refused (`400 npi must be a ten-digit NP
 digit`). With no source, the gateway does not build the request, and answers `422`:
 - a CDS Hooks request: `build order-sign request failed: order <ref> names no ordering
   clinician: …` (or `order-select`), before any leg;
-- an attestation: `attestation names no clinician NPI: …`. That comes before any leg where the
-  request holds every source (`/scenario/uc06`, and UC-03's oxygen attestation); at
-  `/scenario/uc06/complete` it comes before the amendment is sent, and the pend stays parked
-  for a corrected request.
+- an attestation: `attestation names no clinician NPI: …`, at the leg that carries it, after the
+  legs before it, which stand: UC-03's oxygen attestation at its PAS claim, and UC-06's at its
+  amendment (`/scenario/uc06` after the submission the payer pended, `/scenario/uc06/complete`
+  before the amendment is sent), where the pend stays parked for a corrected request.
 
 An eligibility request names `NPI` as its provider when it is set, and no provider otherwise.
 The answer a UC-06 or UC-07 attestation states is the request's own: a request that states none
-is refused (`422 answer is required: …`) rather than built with an answer the gateway chose.
+is refused (`422 answer is required: …`) rather than built with an answer the gateway chose, at
+the leg that carries it (UC-06's amendment, UC-07's patient questionnaire exchange).
 
 ## Native-forward payer mode (`PAYER_DAVINCI_*`)
 
@@ -2230,7 +2351,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
 
-**Where each operation goes.** For every forward the gateway resolves the URL in this order: the endpoint your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then the per-operation base if you set one, then `PAYER_DAVINCI_BASE_URL`. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its endpoints win and the bases are only the fallback. For the other operations a published endpoint is used as published, as the operation's URL. A CDex `$submit-attachment` is resolved differently, because HRex defines the published CDex value as a base, not the operation's URL: it goes under the CDex base your partner publishes (`davinci_cdex_attachsubmit_endpoint#2.1`), honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and otherwise to `PAYER_DAVINCI_BASE_URL`, with `/$submit-attachment` appended either way, as the CDex guide dictates; there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
+**Where each operation goes.** For every PAS, DTR and CDex forward the gateway resolves the URL in this order: under the base your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then under the per-operation base if you set one, then under `PAYER_DAVINCI_BASE_URL`. HRex 1.2.0 defines each published value as the base an operation is invoked on, not the operation's URL, so the gateway always adds the operation's path to it: `davinci_pas_submission_endpoint#<line>` is the base for `/Claim/$submit` (submit and update) and `/Claim/$inquire`, `davinci_dtr_qpackage_endpoint#<line>` the base for `/Questionnaire/$questionnaire-package` (the gateway sends `/Questionnaire/$next-question` under the same base), and `davinci_cdex_attachsubmit_endpoint#2.1` the base for `/$submit-attachment`. The operation's path is added where the published base's path ends, before any query or fragment: the slashes that end the published path are dropped first, so none is doubled, and the rest of the URL the gateway builds is the published value as written, sent as any URL the gateway calls is. Nothing is read from how a published path ends: a value that already names an operation is still a base, so the operation's path is added to it and your system answers that URL; publish the base. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its bases win and the configured bases are only the fallback. The published CDex base is honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
 
 | Env var | Description |
 |---|---|
@@ -2562,7 +2683,8 @@ answered: an answer that repeats a member name (`403`, at every level), and at e
 `strict` a PAS response whose patient linkage is inconsistent or that names another
 patient (`403`; from v0.61.0 the parent a dependent's Coverage entry names as a contained
 `Patient` in its `subscriber` or `policyHolder` is part of that Coverage, not another
-patient), a questionnaire package that carries a subject (`403`), or an answer that
+patient, and from the next shn-gateway release so is the parent carried as a `Patient`
+entry of its own that only a Coverage's `subscriber` or `policyHolder` names), a questionnaire package that carries a subject (`403`), or an answer that
 fails validation (`422`) — the recipient's gateway will not relay it, and the requester
 reads why. Below `strict` those answers are relayed as sent (recorded as a finding at
 `observe`). As of v0.54.0 so are the recipient gateway's **own failures** once the leg is

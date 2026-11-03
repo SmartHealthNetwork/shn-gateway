@@ -71,7 +71,7 @@ func reportGateway(sor SystemOfRecord) *Gateway { return &Gateway{cfg: Config{So
 func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/pat-7")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-	got, status, msg := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+	got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 	if status != 0 {
 		t.Fatalf("refused: %d %s", status, msg)
 	}
@@ -86,7 +86,7 @@ func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 func TestSupplementalReport_MemberNamedReportExact(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/MBR-UC04")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "MBR-UC04", report: []byte(held)})
-	got, status, msg := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
+	got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
 	if status != 0 || string(got) != held {
 		t.Fatalf("want the report exactly as held: %d %s\n got %s", status, msg, got)
 	}
@@ -124,7 +124,7 @@ func TestSupplementalReport_Refusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(tc.report)})
-			got, status, msg := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 			if status != tc.status || msg != tc.msg || got != nil {
 				t.Fatalf("got %d %q %s, want %d %q", status, msg, got, tc.status, tc.msg)
 			}
@@ -154,7 +154,7 @@ func TestSupplementalReport_SignatureCoveringOnlyAContainedResource(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			held := strings.Replace(supplementalReportAsHeld("Patient/pat-7"), `"status":"final"`, `"status":"final","contained":[`+tc.contained+`]`, 1)
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-			got, status, msg := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 			if status != 0 {
 				t.Fatalf("refused: %d %s", status, msg)
 			}
@@ -179,7 +179,7 @@ func TestSupplementalReport_SystemOfRecordFailures(t *testing.T) {
 		{"no report", &failingReportSoR{prefetchSoR: newPrefetchSoR(), noReport: true}, http.StatusInternalServerError, "no supplemental report"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, status, msg := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
+			_, status, msg, _ := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
 			if status != tc.status || msg != tc.msg {
 				t.Fatalf("got %d %q, want %d %q", status, msg, tc.status, tc.msg)
 			}

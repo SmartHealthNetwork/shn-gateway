@@ -124,6 +124,9 @@ func TestCDexPayer_ResolvesTheSubmitAttachmentURL(t *testing.T) {
 		"none published":         {nil, cdexSubmitPath},
 		"published same-origin":  {map[string]string{"pa.cdex@2.1": "{base}/cdex/attachments"}, "/cdex/attachments/$submit-attachment"},
 		"published with a slash": {map[string]string{"pa.cdex@2.1": "{base}/cdex/attachments/"}, "/cdex/attachments/$submit-attachment"},
+		// The query does not swallow the operation's path, which goes under
+		// the base's path (TestPublishedOperationURL pins the query itself).
+		"published with a query": {map[string]string{"pa.cdex@2.1": "{base}/cdex/attachments?t=7"}, "/cdex/attachments/$submit-attachment"},
 		"published elsewhere":    {map[string]string{"pa.cdex@2.1": "https://elsewhere.example/fhir"}, cdexSubmitPath},
 		// Evidence for another contract never addresses the submission.
 		"another contract's": {map[string]string{"pa.pas@2.2": "{base}/pas/$submit-attachment"}, cdexSubmitPath},

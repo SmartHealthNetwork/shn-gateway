@@ -225,13 +225,43 @@ func pasCarriesIdentifier(p map[string]any, id any) bool {
 	return false
 }
 
-// pasPartySlotsRead is cov, a Coverage entry's resource, as the walk reads
-// it: a subscriber or policyHolder naming the Coverage's contained party
-// (shnsdk.CoverageParty) names that person, not the member, so an identifier beside
-// the slot's reference that the party carries is the party's and is not read;
-// the rest of the slot is, its local reference included (which names no
-// patient).
-func pasPartySlotsRead(cov map[string]any) map[string]any {
+// pasPartySlotMark is the member pasPartySlotsRead adds to its read of a
+// slot naming an entry party, by which the walk knows that slot's reference
+// names the party. Its name holds a byte that is not UTF-8, so no decoded
+// document carries it: a decoder refuses or replaces such a byte.
+const pasPartySlotMark = "\xffpas-party-slot"
+
+// pasEntryParties is each Patient entry of doc that is a Coverage's party
+// (shnsdk.CoverageEntryParties: a dependent's parent carried as an entry of its
+// own), by its fullUrl. The rule is read once per Bundle.
+func pasEntryParties(doc map[string]any) map[string]map[string]any {
+	set := shnsdk.CoverageEntryParties(doc)
+	if len(set) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]any, len(set))
+	entries, _ := doc["entry"].([]any)
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		fullURL, _ := em["fullUrl"].(string)
+		if res, ok := em["resource"].(map[string]any); ok && set[fullURL] {
+			out[fullURL] = res
+		}
+	}
+	return out
+}
+
+// pasPartySlotsRead is cov, the resource of entry (a Coverage entry), as the
+// walk reads it: a subscriber or policyHolder naming the Coverage's party
+// names that person, not the member, so an identifier beside the slot's
+// reference that the party carries is the party's and is not read; the rest
+// of the slot is. The party is a Patient contained in the Coverage
+// (shnsdk.CoverageParty), named by a local reference, which names no patient; or a
+// Patient entry of the Bundle (one of entryParties), named by a reference
+// that resolves to its fullUrl from entry (shnsdk.BundleReferenceURL): each such
+// slot, as read, carries pasPartySlotMark, and its reference names the party,
+// not a patient.
+func pasPartySlotsRead(entry, cov map[string]any, entryParties map[string]map[string]any) map[string]any {
 	out := make(map[string]any, len(cov))
 	for k, v := range cov {
 		out[k] = v
@@ -246,6 +276,11 @@ func pasPartySlotsRead(cov map[string]any) map[string]any {
 				party = cr
 			}
 		}
+		entryParty := false
+		if party == nil && ref != "" {
+			party = entryParties[shnsdk.BundleReferenceURL(entry, ref)]
+			entryParty = party != nil
+		}
 		if party == nil {
 			continue
 		}
@@ -255,6 +290,9 @@ func pasPartySlotsRead(cov map[string]any) map[string]any {
 				continue
 			}
 			read[m] = v
+		}
+		if entryParty {
+			read[pasPartySlotMark] = true
 		}
 		out[k] = read
 	}
@@ -291,11 +329,13 @@ func pasMemberIdentifiers(p map[string]any, member string) (mine, another bool) 
 //     contained one by the member identifier (its id is local).
 //   - a Coverage's party is another person the Coverage names (a dependent's
 //     parent), so its own identity is not checked; what it names is. It is a
-//     contained Patient that a Coverage entry's subscriber or policyHolder
-//     names (shnsdk.CoverageParty; a Coverage carried inside another
-//     resource has none). That slot's reference, and an identifier the party
-//     carries beside it, name the party. A Patient entry of its own is never
-//     a party: the parent carried as an entry is another patient.
+//     Patient contained in a Coverage entry that the Coverage's subscriber or
+//     policyHolder names (shnsdk.CoverageParty; a Coverage carried inside another resource
+//     has none), or a Patient entry of its own that only such slots name
+//     (shnsdk.CoverageEntryParties, by its exact fullUrl or a relative reference
+//     resolving to it from the Coverage entry, never by id alone). That
+//     slot's reference, and an identifier the party carries beside it, name
+//     the party; any other reference to the party names another patient.
 //   - a reference whose identifier is in the member system names that member,
 //     in any element, of any type and beside a literal reference or not;
 //   - a reference whose reference names "Patient/<id>" names that member
@@ -324,11 +364,15 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 		mine, another := pasMemberIdentifiers(p, member)
 		return mine && !another
 	}
+	// A Coverage's party carried as an entry of its own is another person:
+	// neither its identity nor its identifiers are the member's.
+	entryParties := pasEntryParties(doc)
 	own := map[[2]string]bool{{shnsdk.MemberSystem, member}: true}
 	for _, e := range entries {
 		em, _ := e.(map[string]any)
 		res, _ := em["resource"].(map[string]any)
-		if res["resourceType"] != "Patient" || !isMemberEntry(res) {
+		fullURL, _ := em["fullUrl"].(string)
+		if res["resourceType"] != "Patient" || entryParties[fullURL] != nil || !isMemberEntry(res) {
 			continue
 		}
 		ids, _ := res["identifier"].([]any)
@@ -352,6 +396,11 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 			return true
 		}
 		if literal, ok := ref["reference"].(string); ok && literal != "" {
+			// A slot's reference to the Coverage's entry party names that
+			// person, not a patient.
+			if _, party := ref[pasPartySlotMark]; party {
+				return false
+			}
 			return strings.Contains(literal, "Patient/") && pasMemberFromRef(literal) != member
 		}
 		if id, ok := ref["identifier"].(map[string]any); ok && id["system"] == shnsdk.MemberSystem {
@@ -396,14 +445,17 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 	for _, e := range entries {
 		em, _ := e.(map[string]any)
 		res, _ := em["resource"].(map[string]any)
-		if res["resourceType"] == "Patient" && !isMemberEntry(res) {
+		fullURL, _ := em["fullUrl"].(string)
+		// A Coverage's party carried as an entry of its own is another person,
+		// so its identity is not checked; what it names is, below.
+		if res["resourceType"] == "Patient" && entryParties[fullURL] == nil && !isMemberEntry(res) {
 			return true
 		}
 		if res["resourceType"] == "Coverage" {
 			// Only a Bundle entry's own Coverage has a party (shnsdk.CoverageParty),
 			// as the answer's check reads it: a Coverage carried inside another
 			// resource has none, so every Patient it contains is read.
-			res = pasPartySlotsRead(res)
+			res = pasPartySlotsRead(em, res, entryParties)
 			if list, ok := res["contained"].([]any); ok {
 				for _, cr := range list {
 					crm, _ := cr.(map[string]any)

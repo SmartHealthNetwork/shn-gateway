@@ -195,6 +195,9 @@ type homeOxygenSubstrate struct {
 	canonical      string
 
 	legTypes []string
+	// pendFor, when non-empty, has the payer pend the PAS claim about that
+	// patient reference instead of approving it.
+	pendFor string
 
 	// frameErrLeg, when non-empty, puts the substrate into v1-frame mode:
 	// the named leg answers a FRAMED non-2xx (frameErrStatus/frameErrBody/frameErrCT) while
@@ -280,6 +283,13 @@ func (s *homeOxygenSubstrate) handleRoute(body []byte) (*http.Response, error) {
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
 		respPayload = homeOxygenApprovedClaimResponse()
+		if s.pendFor != "" {
+			pended, perr := testPendedResponse(s.pendFor, corrID, "operative-diagnostic-report", s.clock())
+			if perr != nil {
+				return errResp("stub: pend: " + perr.Error()), nil
+			}
+			respPayload = pended
+		}
 		respOp, respFrame = "pas-response", "payer-coverage"
 	default:
 		return errResp("stub: unexpected leg " + txType), nil

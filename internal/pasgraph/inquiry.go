@@ -558,11 +558,15 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 	// Parameters return that is not a Bundle), so nothing it holds is an
 	// entry of the answer and a Coverage it is has no party.
 	lone := false
-	// role is what v is to an entry-level Coverage's party rule
-	// (EntryCoverageParties), as in the submission walk: a party is another
-	// person, so it names no patient here (the rule itself requires that it
-	// holds as a contained resource); the slot naming it is the one typed
-	// Patient reference that names no patient.
+	// role is what v is to a Coverage's party rules (EntryCoverageParties,
+	// shnsdk.CoverageEntryParties), as in the submission walk: a party is
+	// another person, so it names no patient here (each rule itself requires
+	// that it holds as a contained resource would); the slot naming it is the
+	// one typed Patient reference that names no patient. entryParties are the
+	// Bundle's parties carried as entries of their own, read once for it, and
+	// entry is the entry walked.
+	entryParties := shnsdk.CoverageEntryParties(bundle)
+	var entry map[string]any
 	var walk func(v any, owner string, depth int, role CoveragePartyRole)
 	walk = func(v any, owner string, depth int, role CoveragePartyRole) {
 		switch v := v.(type) {
@@ -596,7 +600,7 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 			}
 			var parties EntryParties
 			if depth == 0 && !lone && isResource && rt == "Coverage" {
-				parties = EntryCoverageParties(v)
+				parties = EntryCoverageParties(v).WithEntryParties(entry, entryParties)
 			}
 			for key, val := range v {
 				if inquirySubjectFields[key] {
@@ -633,22 +637,23 @@ func (s *inquiryPatientScope) collect(bundle map[string]any, members map[string]
 	}
 	entries, _ := bundle["entry"].([]any)
 	for _, e := range entries {
-		entry, ok := e.(map[string]any)
+		em, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		res, ok := entry["resource"].(map[string]any)
+		res, ok := em["resource"].(map[string]any)
 		if !ok {
 			continue
 		}
-		fullURL, _ := entry["fullUrl"].(string)
+		fullURL, _ := em["fullUrl"].(string)
 		owner := fullURL
 		if owner == "" {
 			typ, _ := res["resourceType"].(string)
 			id, _ := res["id"].(string)
 			owner = typ + "/" + id
 		}
-		walk(res, owner, 0, RoleNone)
+		entry = em
+		walk(res, owner, 0, EntryRole(entryParties, fullURL))
 	}
 	// A document that is not a Bundle (a lone ClaimResponse) has no entries; walk
 	// it as its own owner so its references are still read.
@@ -692,18 +697,23 @@ func (s *inquiryPatientScope) referenceIdentity(ref map[string]any, owner string
 	return ""
 }
 
-// A dependent's Coverage names the parent as its subscriber or policyHolder,
-// often as a Patient contained in the Coverage, carrying only an MRN. A PAS
-// answer (a $submit response, an inquiry's answer) carries the Coverage the
-// payer answered for, so the subject rules over it (the engine's
-// pasGraphSubjectMismatch, inquiryPatientScope.collect) read the parent as the Coverage's party,
-// another person, rather than as a second patient. They decide it as the
-// sdk's PAS response check does: by shnsdk.CoverageParty, for the contained
-// list of a Coverage that is itself an entry of the answer. The rule also
-// requires that the party holds as a contained resource (it contains
-// nothing, its identifier is a list, and it spells the members the rule
-// reads exactly), so a contained Patient that does not is no party and is
-// read as the patient.
+// A dependent's Coverage names the parent as its subscriber or policyHolder:
+// a Patient contained in the Coverage, often carrying only an MRN, or a
+// Patient entry of its own. A PAS answer (a $submit response, an inquiry's
+// answer) carries the Coverage the payer answered for, so the subject rules
+// over it (the engine's pasGraphSubjectMismatch, inquiryPatientScope.collect)
+// read the parent as the Coverage's party, another person, rather than as a
+// second patient. They decide it as the sdk's PAS response check does: by
+// shnsdk.CoverageParty, for the contained list of a Coverage that is itself an
+// entry of the answer, and by shnsdk.CoverageEntryParties, read once for the
+// answer's Bundle, for a Patient entry that only the subscriber or
+// policyHolder of its Coverage entries name, by its fullUrl or a relative
+// reference that resolves to it from the Coverage's entry
+// (shnsdk.BundleReferenceURL), never by id alone. Both rules also require
+// that the party holds as a contained resource would (it contains nothing,
+// its identifier is a list, and it spells the members the rule reads
+// exactly), so a Patient that does not is no party and is read as the
+// patient.
 
 // CoveragePartyRole is what an object is to an entry-level Coverage's party
 // rule.
@@ -711,8 +721,9 @@ type CoveragePartyRole uint8
 
 const (
 	RoleNone CoveragePartyRole = iota
-	// RoleCoverageParty is a Coverage's party: its identity is not read as
-	// the patient's. Its references are read as any other resource's.
+	// RoleCoverageParty is a Coverage's party, contained in it or an entry
+	// of its own: its identity is not read as the patient's. Its references
+	// are read as any other resource's.
 	RoleCoverageParty
 	// RoleCoveragePartySlot is the Coverage's subscriber or policyHolder
 	// whose own reference names its party: the one typed Patient reference
@@ -721,10 +732,24 @@ const (
 )
 
 // EntryParties are an entry-level Coverage's parties: by index into its
-// contained list, and the local references naming them.
+// contained list, the local references naming them, and, for a party that
+// is an entry of the Bundle, the Coverage's own entry and the Bundle's entry
+// parties (WithEntryParties).
 type EntryParties struct {
 	byIndex []bool
 	refs    map[string]bool
+	entry   map[string]any
+	bundle  map[string]bool
+}
+
+// EntryRole is the role of the resource of a Bundle entry at fullURL, given
+// the Bundle's entry parties (shnsdk.CoverageEntryParties): a party's is
+// RoleCoverageParty.
+func EntryRole(parties map[string]bool, fullURL string) CoveragePartyRole {
+	if parties[fullURL] {
+		return RoleCoverageParty
+	}
+	return RoleNone
 }
 
 // EntryCoverageParties returns the parties of cov, an entry-level Coverage:
@@ -750,8 +775,20 @@ func EntryCoverageParties(cov map[string]any) EntryParties {
 	return p
 }
 
-// Any reports whether the Coverage has a party.
-func (p EntryParties) Any() bool { return p.refs != nil }
+// WithEntryParties is p for the Coverage that is the resource of entry, in a
+// Bundle whose entry parties (shnsdk.CoverageEntryParties, read once for the
+// Bundle) are parties: a subscriber or policyHolder whose reference resolves
+// from entry to one of them (shnsdk.BundleReferenceURL) is that party's slot.
+func (p EntryParties) WithEntryParties(entry map[string]any, parties map[string]bool) EntryParties {
+	if len(parties) > 0 {
+		p.entry, p.bundle = entry, parties
+	}
+	return p
+}
+
+// Any reports whether the Coverage has a party, or the Bundle it is an entry
+// of has one an entry of its own.
+func (p EntryParties) Any() bool { return p.refs != nil || p.bundle != nil }
 
 // RoleOf is the role of the contained resource at index i.
 func (p EntryParties) RoleOf(i int) CoveragePartyRole {
@@ -762,20 +799,22 @@ func (p EntryParties) RoleOf(i int) CoveragePartyRole {
 }
 
 // SlotRole is the role of the Coverage's member field, value v: a
-// subscriber or policyHolder whose own reference names a party is that
-// party's slot.
+// subscriber or policyHolder whose own reference names a party, contained or
+// an entry of its own, is that party's slot.
 //
 // The field check is redundant, kept as defence in depth: shnsdk.CoverageParty
-// names a party only when nothing in the Coverage but its subscriber or
-// policyHolder references it, so no other member's own reference can name a
-// party here. No row can tell the check apart, so none pins it; were the rule
-// to loosen, the check still keeps the exemption to the two slots.
+// and shnsdk.CoverageEntryParties name a party only when nothing but a
+// Coverage's subscriber or policyHolder references it, so no other member's
+// own reference can name a party here. No row can tell the check apart, so
+// none pins it; were the rules to loosen, the check still keeps the exemption
+// to the two slots.
 func (p EntryParties) SlotRole(field string, v any) CoveragePartyRole {
-	if p.refs == nil || (field != "subscriber" && field != "policyHolder") {
+	if !p.Any() || (field != "subscriber" && field != "policyHolder") {
 		return RoleNone
 	}
 	slot, _ := v.(map[string]any)
-	if ref, _ := slot["reference"].(string); p.refs[ref] {
+	ref, _ := slot["reference"].(string)
+	if p.refs[ref] || (ref != "" && p.bundle[shnsdk.BundleReferenceURL(p.entry, ref)]) {
 		return RoleCoveragePartySlot
 	}
 	return RoleNone

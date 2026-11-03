@@ -43,14 +43,19 @@ func matchOf(res string) string { return `{"resource":` + res + `,"search":{"mod
 // found by searching the system of record — never the member's active order,
 // and never an order whose status the network changed.
 func TestOriginatedCRD_OrderSelectCarriesTheDraftOrder(t *testing.T) {
-	uc02 := func(t *testing.T, sor SystemOfRecord) (*httptest.ResponseRecorder, *originPayer) {
+	uc02At := func(t *testing.T, sor SystemOfRecord, level ConformanceEnforcement) (*httptest.ResponseRecorder, *originPayer) {
 		t.Helper()
 		g, payer := originGateway(t, "provider-data", sor, nil, func(_ string, req []byte) (int, []byte) {
 			return 0, payerAnswerFor(t, []byte(draftOrder("sr-d", "Practitioner/dr-1")), shnsdk.CoveredCovered, shnsdk.PANeededNoAuth, "")
 		})
+		g.cfg.ConformanceEnforcement = level
 		rec := httptest.NewRecorder()
 		g.originateNoPACRD(rec, httptest.NewRequest(http.MethodPost, "/", nil), prefetchMember)
 		return rec, payer
+	}
+	uc02 := func(t *testing.T, sor SystemOfRecord) (*httptest.ResponseRecorder, *originPayer) {
+		t.Helper()
+		return uc02At(t, sor, ConformanceEnforcement(0))
 	}
 	t.Run("the draft order is carried exactly", func(t *testing.T) {
 		sor, _ := originSystem(t, prefetchMember)
@@ -80,7 +85,7 @@ func TestOriginatedCRD_OrderSelectCarriesTheDraftOrder(t *testing.T) {
 			sor, _ := originSystem(t, prefetchMember)
 			sor.answer(t, "ServiceRequest", searchsetOf(activeOrderEntry("sr-a")))
 			return sor
-		}, http.StatusBadGateway, "no draft order for member in system of record"},
+		}, http.StatusUnprocessableEntity, "no draft order for member in system of record"},
 		"several draft orders": {func(t *testing.T) SystemOfRecord {
 			sor, _ := originSystem(t, prefetchMember)
 			sor.answer(t, "ServiceRequest", searchsetOf(matchOf(draftOrder("sr-d", "")), matchOf(draftOrder("sr-e", ""))))
@@ -95,16 +100,31 @@ func TestOriginatedCRD_OrderSelectCarriesTheDraftOrder(t *testing.T) {
 			sor, _ := originSystem(t, prefetchMember)
 			return noSearchOrigin{sor}
 		}, http.StatusUnprocessableEntity, "the system of record cannot search for the member's draft order"},
+		// The system says definitely that it does not support the search: it
+		// cannot supply the order, as a connector that cannot search.
+		"a definite not-supported answer": {func(t *testing.T) SystemOfRecord {
+			sor, _ := originSystem(t, prefetchMember)
+			sor.searches["ServiceRequest"] = searchAnswer{err: &SearchError{Outcome: SearchUnsupported, Reason: "search not supported"}}
+			return sor
+		}, http.StatusUnprocessableEntity, "the system of record cannot search for the member's draft order"},
+		// Any other error answer: what the system holds is unknown.
+		"an error answer": {func(t *testing.T) SystemOfRecord {
+			sor, _ := originSystem(t, prefetchMember)
+			sor.searches["ServiceRequest"] = searchAnswer{err: &SearchError{Outcome: SearchFailed, Reason: "search answered with an error status"}}
+			return sor
+		}, http.StatusBadGateway, "system of record returned an invalid response"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			rec, payer := uc02(t, row.sor(t))
-			if rec.Code != row.status || !strings.Contains(rec.Body.String(), row.msg) {
-				t.Fatalf("got %d %s, want %d %q", rec.Code, rec.Body, row.status, row.msg)
-			}
-			if n := len(payer.sent("crd-order-select")); n != 0 {
-				t.Fatalf("%d requests sent", n)
-			}
-		})
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				rec, payer := uc02At(t, row.sor(t), level)
+				if rec.Code != row.status || !strings.Contains(rec.Body.String(), row.msg) {
+					t.Fatalf("got %d %s, want %d %q", rec.Code, rec.Body, row.status, row.msg)
+				}
+				if n := len(payer.sent("crd-order-select")); n != 0 {
+					t.Fatalf("%d requests sent", n)
+				}
+			})
+		}
 	}
 }
 
@@ -231,7 +251,7 @@ func TestAttestingNPI(t *testing.T) {
 			s.reads["Practitioner/dr-2"] = []byte(noNPI)
 			s.reads["PractitionerRole/role-1"] = []byte(role)
 			g := &Gateway{cfg: Config{SoR: s, NPI: row.cfg}}
-			got, status, msg := g.attestingNPI(clinicianCtx(row.sent, row.verified), row.order, nil)
+			got, status, msg, _ := g.attestingNPI(clinicianCtx(row.sent, row.verified), row.order, nil)
 			if got != row.want || status != row.status {
 				t.Fatalf("got %q %d %q, want %q %d", got, status, msg, row.want, row.status)
 			}
@@ -248,7 +268,7 @@ func TestAttestingNPI_ReadsTheHeldRecords(t *testing.T) {
 	held := `{"resourceType":"Practitioner","id":"dr-1","identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1500000009"}]}`
 	s := newPrefetchSoR()
 	g := &Gateway{cfg: Config{SoR: s}}
-	got, status, _ := g.attestingNPI(context.Background(), []byte(draftOrder("sr-1", "Practitioner/dr-1")), [][]byte{[]byte(held)})
+	got, status, _, _ := g.attestingNPI(context.Background(), []byte(draftOrder("sr-1", "Practitioner/dr-1")), [][]byte{[]byte(held)})
 	if got != "1500000009" || status != 0 || len(s.read) != 0 {
 		t.Fatalf("got %q %d with %d system-of-record reads, want the held record's NPI and none", got, status, len(s.read))
 	}
@@ -286,5 +306,17 @@ func TestEligibilityRequestProvider(t *testing.T) {
 	g := &Gateway{cfg: Config{NPI: "1234567893", Clock: fixedClock}}
 	if b, err := g.eligibilityRequest("MBR-1", shnsdk.PayerIdentifier{}); !errors.Is(err, shnsdk.ErrPayerRecordAbsent) || b != nil {
 		t.Fatalf("no payer: err=%v built=%s, want a refusal", err, b)
+	}
+}
+
+// A requester the origination does not hold, whose read the system fails to
+// answer, is that read's failure, returned with its error so the caller
+// answers it as a backend failure, never an attesting clinician left unread.
+func TestAttestingNPI_ReadFailureReturnsItsError(t *testing.T) {
+	g := &Gateway{cfg: Config{SoR: refReadFails{newPrefetchSoR(), "Practitioner/dr-9", false}}}
+	_, status, _, err := g.attestingNPI(context.Background(), []byte(draftOrder("sr-1", "Practitioner/dr-9")), nil)
+	var readErr *SoRReadError
+	if status != http.StatusServiceUnavailable || !errors.As(err, &readErr) {
+		t.Fatalf("status %d err %v, want 503 with the read's error", status, err)
 	}
 }

@@ -103,7 +103,8 @@ type Capability struct {
 	// EndpointURLs is the davinci-configuration probe's per-token endpoint
 	// evidence: "<contract>@<line>" → the
 	// peer-published URL for that version-coded HRex endpoint (e.g.
-	// "pa.pas@2.2" → the partner's $submit URL at 2.2). Same key set as
+	// "pa.pas@2.2" → the partner's PAS base at 2.2, which HRex 1.2.0 defines
+	// as the base $submit and $inquire are invoked on). Same key set as
 	// ContractVersions (1:1, same cap/dedup) — populated only by the
 	// davinci-config probe (fhir-metadata carries no per-endpoint URLs).
 	// app.go's checks-runner wiring feeds this into

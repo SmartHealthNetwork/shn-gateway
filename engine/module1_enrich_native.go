@@ -45,9 +45,19 @@ func (e onBehalfEnrichment) dtrPatient(ctx context.Context, member string, fence
 // search outcome when the key is left out; a non-zero status refuses the
 // request.
 func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string) {
-	refused := func(err error) ([]byte, SearchOutcome, int, string) {
+	value, outcome, status, msg, _ := g.obtainPrefetchRead(ctx, leg, key, sorID, fence)
+	return value, outcome, status, msg
+}
+
+// obtainPrefetchRead is obtainPrefetch with the error behind a non-zero
+// status: the fill fence's own (*CompartmentError) when it refused a record,
+// the system of record's read failure when the system did not answer, nil
+// when the system answered and holds no such record. A caller tells the three
+// apart by it (refuseOriginRecord), never by the message.
+func (g *Gateway) obtainPrefetchRead(ctx context.Context, leg, key, sorID string, fence patientFence) ([]byte, SearchOutcome, int, string, error) {
+	refused := func(err error) ([]byte, SearchOutcome, int, string, error) {
 		status, msg := fillFenceRefusal(err)
-		return nil, "", status, msg
+		return nil, "", status, msg, err
 	}
 	if key == prefetchPatientKey {
 		query := "Patient/" + sorID
@@ -59,29 +69,30 @@ func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fe
 				outcome = SearchUnavailable
 			}
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: outcome, Reason: string(safeSoRError(err).Kind)})
-			return nil, "", status, msg
+			return nil, "", status, msg, err
 		}
 		if !found {
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchZero})
-			return nil, "", http.StatusUnprocessableEntity, "patient not found in system of record"
+			return nil, "", http.StatusUnprocessableEntity, "patient not found in system of record", nil
 		}
 		var head struct {
 			ResourceType string `json:"resourceType"`
 		}
 		if decodeMessage(patient, &head) != nil || head.ResourceType != "Patient" {
 			g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchMalformed, Reason: "not a Patient"})
-			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
-			return nil, "", status, msg
+			bad := &SoRReadError{Kind: SoRInvalidResponse}
+			status, msg := SoRFailureResponse(bad)
+			return nil, "", status, msg, bad
 		}
 		g.recordPrefetch(leg, prefetchObtained{Key: key, Query: query, Outcome: SearchOK, Count: 1})
 		if err := fence.check(patient); err != nil {
 			return refused(err)
 		}
-		return patient, SearchOK, 0, ""
+		return patient, SearchOK, 0, "", nil
 	}
 	resourceType, ok := prefetchSearchTypes[key]
 	if !ok {
-		return nil, SearchUnsupported, 0, ""
+		return nil, SearchUnsupported, 0, "", nil
 	}
 	// The search is narrowed as the advertised template for the value narrows
 	// it (prefetchSearchFilters).
@@ -89,14 +100,22 @@ func (g *Gateway) obtainPrefetch(ctx context.Context, leg, key, sorID string, fe
 	g.recordPrefetch(leg, prefetchObtained{Key: key, Query: s.Query, Outcome: s.Outcome, Reason: s.Reason, Count: s.Count, Pages: s.Pages})
 	switch s.Outcome {
 	case SearchOK:
+		if resourceType == "Coverage" {
+			// An included Patient no Coverage's beneficiary names is neither
+			// carried nor fenced (withoutUnboundPatientIncludes).
+			var err error
+			if s, err = s.withoutUnboundPatientIncludes(fence); err != nil {
+				return nil, SearchMalformed, 0, "", nil
+			}
+		}
 		if err := fence.check(s.Value); err != nil {
 			return refused(err)
 		}
-		return s.Value, SearchOK, 0, ""
+		return s.Value, SearchOK, 0, "", nil
 	case SearchZero:
-		return []byte("null"), SearchZero, 0, ""
+		return []byte("null"), SearchZero, 0, "", nil
 	}
-	return nil, s.Outcome, 0, ""
+	return nil, s.Outcome, 0, "", nil
 }
 
 // obtainDTRPatient reads the Patient a request carrying none is sent with

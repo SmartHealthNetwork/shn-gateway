@@ -2149,7 +2149,7 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 		if r.URL.Path == "/.well-known/davinci-configuration" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"endpoints":{"davinci_dtr_qpackage_endpoint#2.2":%q}}`,
-				payerURL+"/Questionnaire/$questionnaire-package-v22")
+				payerURL+"/dtr22")
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -2226,7 +2226,7 @@ func TestProbeEvidenceReachesResponder(t *testing.T) {
 		t.Fatalf("POST /internal/checks status = %d, want 200", resp.StatusCode)
 	}
 
-	want := payerURL + "/Questionnaire/$questionnaire-package-v22"
+	want := payerURL + "/dtr22"
 	got := reader.EndpointEvidenceForTest()
 	if got["pa.dtr@2.2"] != want {
 		t.Fatalf("evidence after the checks cycle = %v, want pa.dtr@2.2 -> %q", got, want)

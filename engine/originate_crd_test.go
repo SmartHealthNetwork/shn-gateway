@@ -342,7 +342,7 @@ func TestOriginatedCRD_NoCallbackFields(t *testing.T) {
 			g, payer := originGateway(t, "provider-data", dsor, nil, func(string, []byte) (int, []byte) {
 				return 0, payerAnswerFor(t, dorder, shnsdk.CoveredNotCovered, "", "")
 			})
-			g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
+			g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "")
 			return payer.sent("crd-order-dispatch")
 		},
 	} {
@@ -393,7 +393,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 		g, payer := originGateway(t, "provider-data", dsor, nil, func(string, []byte) (int, []byte) {
 			return 0, payerAnswerFor(t, dorder, shnsdk.CoveredNotCovered, "", "")
 		})
-		g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
+		g.originateDispatch(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "")
 		sent := decodeSent(t, payer.sent("crd-order-dispatch")[0])
 		if sent.Hook != "order-dispatch" || len(sent.Context.DispatchedOrders) != 1 || sent.Context.DispatchedOrders[0] != "DeviceRequest/dr-5" || sent.Context.Performer != "Organization/sup-1" {
 			t.Fatalf("request %+v", sent.Context)
@@ -416,7 +416,7 @@ func TestOriginatedCRD_HookMatchesWorkflow(t *testing.T) {
 			return 0, payerAnswerFor(t, horder, shnsdk.CoveredNotCovered, "", "")
 		})
 		rec := httptest.NewRecorder()
-		g.originateDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember)
+		g.originateDispatch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false))), prefetchMember, "")
 		if rec.Code != http.StatusUnprocessableEntity || !bytes.Contains(rec.Body.Bytes(), []byte("the system of record's device history does not hold the dispatched order DeviceRequest/dr-5 at a status the device history selects (active, on-hold, completed)")) {
 			t.Fatalf("got %d %s", rec.Code, rec.Body)
 		}

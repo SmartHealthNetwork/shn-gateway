@@ -195,6 +195,58 @@ func TestCarriedMembers_ReadsMembersAsEachLegsSubjectBindingDoes(t *testing.T) {
 	}
 }
 
+// The involved list reads a request as the leg's deciding readers do: a
+// request that repeats a member name, exactly or in another case, can be
+// read two ways, so it names no member, as an unreadable request names none.
+// A lax reading would keep the last of two repeated names, or read a
+// case-variant name as another member, and so name a patient the strict
+// readers never saw. Each row's control, the same request without the
+// repeat, names the member, so the refusal is the repeat's alone.
+func TestCarriedMembers_ARequestThatRepeatsANameNamesNoMember(t *testing.T) {
+	legs := []string{"pas-claim", "pas-claim-update", "pas-claim-inquire", "crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch"}
+	for _, tc := range []struct {
+		name, repeated, control, member string
+	}{
+		{"a reference repeated",
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-OX","reference":"Patient/MBR-PAYERB"}}}]}`,
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-PAYERB"}}}]}`,
+			"MBR-PAYERB"},
+		{"a subject repeated",
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-OX"},"subject":{"reference":"Patient/MBR-PAYERB"}}}]}`,
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-PAYERB"}}}]}`,
+			"MBR-PAYERB"},
+		{"a Patient id repeated",
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-OX","id":"MBR-PAYERB"}}]}`,
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-PAYERB"}}]}`,
+			"MBR-PAYERB"},
+		{"a reference beside one in another case",
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-PAYERB","Reference":"Patient/MBR-OX"}}}]}`,
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/MBR-PAYERB"}}}]}`,
+			"MBR-PAYERB"},
+		{"a Patient id beside one in another case",
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-PAYERB","ID":"MBR-OX"}}]}`,
+			`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Patient","id":"MBR-PAYERB"}}]}`,
+			"MBR-PAYERB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := scanMessage([]byte(tc.repeated)); err == nil {
+				t.Fatal("the deciding readers accept the repeated request: the row tests nothing")
+			}
+			for _, leg := range legs {
+				if got := carriedMembers([]byte(tc.repeated), leg); got != nil {
+					t.Errorf("%s: a request that repeats a name names %v, want no member", leg, got)
+				}
+				if got := (paWorkstream{}).requestMembers(leg, []byte(tc.repeated)); got != nil {
+					t.Errorf("%s: the leg names %d members of a request that repeats a name, want none", leg, len(got))
+				}
+				if got := carriedMembers([]byte(tc.control), leg); !slices.Contains(got, tc.member) {
+					t.Errorf("%s: control names %v, want %s among them", leg, got, tc.member)
+				}
+			}
+		})
+	}
+}
+
 // However a request refers to its own patient — by urn:uuid: to its entry, by
 // #id to a contained Patient, or (on the DTR package) by a versioned
 // reference beside an unversioned one — every reference reads as the subject

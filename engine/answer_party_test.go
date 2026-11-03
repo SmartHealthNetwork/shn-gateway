@@ -14,11 +14,13 @@ import (
 
 // A dependent's PAS answer carries the Coverage the payer answered for, and
 // that Coverage names the parent as its subscriber or policyHolder: a Patient
-// contained in the Coverage, carrying only an MRN. The answer's subject rules
-// (the $submit response's subjectMismatch, the inquiry answer's subjects)
-// read that parent as the Coverage's party, another person, and still fence
-// it as a contained resource; every other contained Patient, and every other
-// reference to the parent, binds as before.
+// contained in the Coverage, carrying only an MRN, or a Patient entry of the
+// answer's Bundle that only the Coverage's slots name
+// (shnsdk.CoverageEntryParties). The answer's subject rules (the $submit
+// response's subjectMismatch, the inquiry answer's subjects) read that parent
+// as the Coverage's party, another person, and still fence it as a contained
+// resource; every other Patient, and every other reference to the parent,
+// binds as before.
 
 // answerParent is the parent a dependent's Coverage contains.
 func answerParent() map[string]any {
@@ -123,6 +125,83 @@ var dependentAnswerAccepts = map[string]func(*testing.T, map[string]any){
 	}),
 }
 
+// entryParentAnswerAccepts are the edits that carry the parent as a Patient
+// entry of its own that only the Coverage's slots name
+// (shnsdk.CoverageEntryParties): the Coverage's party, as a contained parent
+// is. They are dependentAnswerAccepts too.
+var entryParentAnswerAccepts = map[string]func(*testing.T, map[string]any){
+	"the parent an entry of its own, named by a relative reference that resolves": entryParentAnswerEdit("", relativeParent, nil),
+	"the parent an entry of its own, both slots typed Patient naming its fullUrl": entryParentAnswerEdit("", nil,
+		func(_ *testing.T, _, _, cov map[string]any, parentURL string) {
+			cov["subscriber"] = map[string]any{"reference": parentURL, "type": "Patient", "display": "Parent"}
+			cov["policyHolder"] = map[string]any{"reference": parentURL, "type": "http://hl7.org/fhir/StructureDefinition/Patient"}
+		}),
+	// Each slot names a party of its own kind: a contained parent and a
+	// parent entry. Neither is another patient.
+	"a contained parent in the subscriber, a parent entry in the policyHolder": entryParentAnswerEdit("", nil,
+		func(_ *testing.T, _, _, cov map[string]any, _ string) {
+			cov["contained"] = []any{answerParent()}
+			cov["subscriber"] = map[string]any{"reference": "#parent"}
+			cov["policyHolder"] = map[string]any{"type": "Patient", "reference": "Patient/Parent"}
+		}),
+}
+
+func init() {
+	for name, edit := range entryParentAnswerAccepts {
+		dependentAnswerAccepts[name] = edit
+	}
+	for name, row := range entryParentAnswerRefusals {
+		dependentAnswerRefusals[name] = row
+	}
+}
+
+// relativeParent names the parent's entry by "Patient/Parent".
+func relativeParent(string) string { return "Patient/Parent" }
+
+// entryParentAnswerEdit makes the parent the answer's first Coverage entry
+// contains a Patient entry of its own in the Bundle holding that Coverage, at
+// base (the Coverage entry's own base when "") under Patient/Parent. The
+// subscriber names it by ref, given its fullUrl (no subscriber when ref is
+// nil), and more, when set, changes the answer further.
+func entryParentAnswerEdit(base string, ref func(parentURL string) string, more func(t *testing.T, doc, b, cov map[string]any, parentURL string)) func(*testing.T, map[string]any) {
+	return func(t *testing.T, doc map[string]any) {
+		cov := answerEntryOf(t, doc, "Coverage")
+		b := answerBundleHolding(t, doc, cov)
+		at := base
+		if at == "" {
+			at = answerEntryBase(t, b, cov)
+		}
+		parentURL := at + "/Patient/Parent"
+		delete(cov, "contained")
+		delete(cov, "subscriber")
+		if ref != nil {
+			cov["subscriber"] = map[string]any{"reference": ref(parentURL)}
+		}
+		parent := answerParent()
+		parent["id"] = "Parent"
+		b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": parentURL, "resource": parent})
+		if more != nil {
+			more(t, doc, b, cov, parentURL)
+		}
+	}
+}
+
+// answerEntryBase is the RESTful base of the fullUrl of res's entry in b.
+func answerEntryBase(t *testing.T, b, res map[string]any) string {
+	t.Helper()
+	for _, e := range b["entry"].([]any) {
+		em := e.(map[string]any)
+		if r, _ := em["resource"].(map[string]any); r != nil && fmt.Sprintf("%p", r) == fmt.Sprintf("%p", res) {
+			full, _ := em["fullUrl"].(string)
+			if base, ok := strings.CutSuffix(full, "/"+res["resourceType"].(string)+"/"+res["id"].(string)); ok && strings.HasPrefix(full, "http") {
+				return base
+			}
+		}
+	}
+	t.Fatal("fixture: the resource is no entry of b under a RESTful fullUrl")
+	return ""
+}
+
 // dependentAnswerRefusals are the edits that make a dependent's answer bind
 // to more than one patient (or to a party that is not fenced), each one
 // mutation from an accepted answer. shape marks the ones the answer's graph
@@ -175,14 +254,6 @@ var dependentAnswerRefusals = map[string]struct {
 		cov["contained"] = append(cov["contained"].([]any), map[string]any{"resourceType": "Organization", "id": "parent", "name": "Employer"})
 	})},
 	"a nested Coverage containing its parent": {shape: true, edit: nestedCoverageWithItsParent},
-	// The parent as an entry of its own: another patient's record, as before.
-	"a standalone parent entry": {edit: func(t *testing.T, doc map[string]any) {
-		cov := answerEntryOf(t, doc, "Coverage")
-		delete(cov, "contained")
-		cov["subscriber"] = map[string]any{"reference": "Patient/Parent"}
-		b := answerBundleHolding(t, doc, cov)
-		b["entry"] = append(b["entry"].([]any), map[string]any{"fullUrl": answerBase(t, doc) + "/Patient/Parent", "resource": map[string]any{"resourceType": "Patient", "id": "Parent"}})
-	}},
 	// A Coverage that is not itself an entry has no party: the Claim's
 	// contained Coverage and the parent beside it.
 	"a nested Coverage's parent": {edit: func(t *testing.T, doc map[string]any) {
@@ -197,6 +268,52 @@ var dependentAnswerRefusals = map[string]struct {
 		}
 		holder["insurance"] = []any{map[string]any{"sequence": 1, "focal": true, "coverage": map[string]any{"reference": "#nested"}}}
 	}},
+}
+
+// entryParentAnswerRefusals are the edits that carry the parent as a Patient
+// entry of its own that is no party (shnsdk.CoverageEntryParties), or beside
+// another patient: the answer binds to more than one patient. They are
+// dependentAnswerRefusals too.
+var entryParentAnswerRefusals = map[string]struct {
+	edit  func(*testing.T, map[string]any)
+	shape bool
+}{
+	"a parent entry no Coverage names": {edit: entryParentAnswerEdit("", nil, nil)},
+	// A relative reference resolves against the Coverage entry's base only,
+	// never by id alone: a $submit answer's graph closure refuses the
+	// reference to no entry first; the inquiry answer's subject rule reads
+	// the parent's entry as a second patient.
+	"a parent entry the subscriber names by a relative reference that does not resolve": {shape: true, edit: entryParentAnswerEdit("https://elsewhere.test/fhir", relativeParent, nil)},
+	"a parent entry also named from the Coverage's extension": {edit: entryParentAnswerEdit("", byFullURL,
+		func(_ *testing.T, _, _, cov map[string]any, parentURL string) {
+			cov["extension"] = []any{map[string]any{"url": "http://example.org/x", "valueReference": map[string]any{"reference": parentURL}}}
+		})},
+	"a parent entry another patient's Coverage names": {edit: entryParentAnswerEdit("", nil,
+		func(t *testing.T, _, b, cov map[string]any, parentURL string) {
+			base := strings.TrimSuffix(parentURL, "/Patient/Parent")
+			b["entry"] = append(b["entry"].([]any),
+				map[string]any{"fullUrl": base + "/Patient/Other", "resource": map[string]any{"resourceType": "Patient", "id": "Other",
+					"identifier": []any{map[string]any{"system": "urn:shn:member", "value": "MBR-2"}}}},
+				map[string]any{"fullUrl": base + "/Coverage/other", "resource": map[string]any{"resourceType": "Coverage", "id": "other", "status": "active",
+					"beneficiary": map[string]any{"reference": "Patient/Other"}, "subscriber": map[string]any{"reference": "Patient/Parent"},
+					"payor": []any{map[string]any{"display": "Payer"}}}})
+		})},
+	// Only the slot naming the party is exempt: the other slot, typed
+	// Patient, names another member beside a parent entry that is the party.
+	"a parent entry, the other slot a typed Patient naming another member": {edit: entryParentAnswerEdit("", relativeParent,
+		func(_ *testing.T, _, _, cov map[string]any, _ string) {
+			cov["policyHolder"] = map[string]any{"type": "Patient", "identifier": map[string]any{"system": "urn:shn:member", "value": "MBR-2"}}
+		})},
+	// A $submit answer's graph closure refuses a reference to no entry first;
+	// the inquiry answer's subject rule reads the other slot as another patient.
+	"a parent entry, the other slot a typed Patient naming another patient by a relative reference": {shape: true, edit: entryParentAnswerEdit("", relativeParent,
+		func(_ *testing.T, _, _, cov map[string]any, _ string) {
+			cov["policyHolder"] = map[string]any{"type": "Patient", "reference": "Patient/Other"}
+		})},
+	"a parent entry, the other slot a typed Patient naming another patient by an absolute reference": {shape: true, edit: entryParentAnswerEdit("", relativeParent,
+		func(_ *testing.T, _, _, cov map[string]any, _ string) {
+			cov["policyHolder"] = map[string]any{"type": "Patient", "reference": "https://elsewhere.test/fhir/Patient/Other"}
+		})},
 }
 
 // nestedCoverageWithItsParent makes the answer's ClaimResponse contain a
@@ -236,21 +353,6 @@ func answerBundleHolding(t *testing.T, doc, res map[string]any) map[string]any {
 	}
 	t.Fatal("fixture: the resource is no entry of the answer")
 	return nil
-}
-
-// answerBase is the base of the answer's ClaimResponse entry's fullUrl.
-func answerBase(t *testing.T, doc map[string]any) string {
-	t.Helper()
-	for _, e := range answerEntries(doc) {
-		if res, _ := e["resource"].(map[string]any); res != nil && res["resourceType"] == "ClaimResponse" {
-			full, _ := e["fullUrl"].(string)
-			if i := strings.Index(full, "/ClaimResponse/"); i > 0 {
-				return full[:i]
-			}
-		}
-	}
-	t.Fatal("fixture: no RESTful ClaimResponse entry")
-	return ""
 }
 
 func TestDependentSubmitAnswer_PartyIsNoSecondPatient(t *testing.T) {

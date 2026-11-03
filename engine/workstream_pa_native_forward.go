@@ -247,10 +247,14 @@ func (n *nativeResponder) contractBase(contract string) string {
 }
 
 // resolvedURL is the per-line endpoint resolution: the post URL for a leg
-// routed at contract@line, preferring same-origin-validated probe evidence
-// over the configured base+path. contract == "" (version-neutral leg) or no
-// answer line resolved on ctx, or no evidence for that exact token, all fall
-// back to base+path UNCHANGED — the fence (TestNativeForwardSelectsLineEndpoint's
+// routed at contract@line. A same-origin-validated value the payer publishes
+// for that exact token is the base the operation is invoked on (HRex 1.2.0:
+// davinci_pas_submission_endpoint is the base for $submit and $inquire,
+// davinci_dtr_qpackage_endpoint the base for $questionnaire-package), so the
+// operation's path goes under it (publishedOperationURL), whatever the
+// published path holds. contract == "" (version-neutral leg) or no answer line
+// resolved on ctx, or no evidence for that exact token, all fall back to
+// base+path UNCHANGED — the fence (TestNativeForwardSelectsLineEndpoint's
 // byte-identical case). Read under RLock; SetEndpointEvidence is the sole
 // writer (wholesale replace under Lock) — concurrency-clean under -race.
 func (n *nativeResponder) resolvedURL(ctx context.Context, contract, base, path string) string {
@@ -268,7 +272,27 @@ func (n *nativeResponder) resolvedURL(ctx context.Context, contract, base, path 
 	if !ok {
 		return def
 	}
-	return u
+	return publishedOperationURL(u, path)
+}
+
+// publishedOperationURL is the URL of the operation at path (it begins with
+// "/") under base, a value a payer publishes in its davinci-configuration:
+// HRex 1.2.0 publishes the base an operation is invoked on, never the
+// operation's own URL, so path always goes under it. path is added where the
+// base's path ends, which RFC 3986's generic syntax places at its first "?" or
+// "#" (neither may appear in the scheme, authority or path): the slashes
+// that end the base's path are dropped before path, a query or fragment stays
+// after the path, and every other byte of the URL it builds is the published
+// value's, never cleaned, re-escaped or re-cased. (The HTTP client then sends that URL as it sends
+// any URL the gateway posts to; how it writes it on the wire is its own.)
+// Nothing is read from how the base's path ends: a value whose path already
+// names the operation still has it added, as the IG defines the value.
+func publishedOperationURL(base, path string) string {
+	beforeQuery, rest := base, ""
+	if i := strings.IndexAny(base, "?#"); i >= 0 {
+		beforeQuery, rest = base[:i], base[i:]
+	}
+	return strings.TrimRight(beforeQuery, "/") + path + rest
 }
 
 // forwardDTROperation sends a framed DTR operation's own input to the payer's

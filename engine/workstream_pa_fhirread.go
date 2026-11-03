@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // ParseCoverageEligibilityResponsePatient extracts patient.reference from a
@@ -296,9 +297,11 @@ func consistentPASGraphSubjects(g *pasGraph, expected string) bool {
 
 // pasGraphSubjectMismatch is the first subject in g, in Bundle order, that does
 // not bind to expected — nil when every subject does and a Patient entry is that
-// patient. An entry-level Coverage's party (pasgraph.EntryCoverageParties) is another
-// person: its identity is not checked, and only that Coverage's subscriber or
-// policyHolder naming it is exempt from binding as a typed Patient reference.
+// patient. A Coverage's party (pasgraph.EntryCoverageParties, contained in an
+// entry-level Coverage, or shnsdk.CoverageEntryParties, a Patient entry of its
+// own) is another person: its identity is not checked, and only a Coverage's
+// subscriber or policyHolder naming it is exempt from binding as a typed
+// Patient reference.
 // A subject under an entry identified by a URN is read by the same identity
 // rule as the closure walk (Graph.SubjectIdentity), so a ClaimResponse that
 // names its patient "Patient/x" from under a urn:uuid binds to the Bundle's one
@@ -355,11 +358,14 @@ func pasGraphSubjectMismatch(g *pasGraph, expected string) *pasSubjectRefusal {
 	}
 
 	found := false
-	// role is what v is to an entry-level Coverage's party rule
-	// (pasgraph.EntryCoverageParties): a party is another person, so its identity is
-	// not checked (the rule itself requires that it holds as a contained
-	// resource); the slot naming it is the one typed Patient reference that
-	// names someone other than the patient.
+	// role is what v is to a Coverage's party rules (pasgraph.EntryCoverageParties
+	// for a party contained in an entry-level Coverage, shnsdk.CoverageEntryParties
+	// for one carried as a Patient entry of its own, read once for the Bundle): a
+	// party is another person, so its identity is not checked (each rule itself
+	// requires that it holds as a contained resource would); the slot naming it
+	// is the one typed Patient reference that names someone other than the
+	// patient.
+	entryParties := shnsdk.CoverageEntryParties(g.Bundle)
 	var visit func(v any, owner *pasGraphEntry, depth int, path string, role pasgraph.CoveragePartyRole) *pasSubjectRefusal
 	visit = func(v any, owner *pasGraphEntry, depth int, path string, role pasgraph.CoveragePartyRole) *pasSubjectRefusal {
 		switch x := v.(type) {
@@ -402,7 +408,11 @@ func pasGraphSubjectMismatch(g *pasGraph, expected string) *pasSubjectRefusal {
 			}
 			var parties pasgraph.EntryParties
 			if depth == 0 && isResource && rt == "Coverage" {
-				parties = pasgraph.EntryCoverageParties(x)
+				var from map[string]any
+				if owner.Index < len(g.Entries) {
+					from, _ = g.Entries[owner.Index].(map[string]any)
+				}
+				parties = pasgraph.EntryCoverageParties(x).WithEntryParties(from, entryParties)
 			}
 			for _, field := range pasSortedKeys(x) {
 				fieldPath := pasReferencePath(path, field)
@@ -428,7 +438,7 @@ func pasGraphSubjectMismatch(g *pasGraph, expected string) *pasSubjectRefusal {
 		return nil
 	}
 	for _, entry := range g.Ordered() {
-		if r := visit(entry.Resource, entry, 0, "", pasgraph.RoleNone); r != nil {
+		if r := visit(entry.Resource, entry, 0, "", pasgraph.EntryRole(entryParties, entry.FullURL)); r != nil {
 			return r
 		}
 	}

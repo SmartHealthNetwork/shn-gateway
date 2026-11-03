@@ -103,9 +103,122 @@ func TestFHIRServerReadRoutesAndCarriesADependentsCoverage(t *testing.T) {
 	}
 }
 
+// withPatientEntries is base's answer with a dependent's Coverage (the
+// parent in its subscriber) and the Patient entries given before its
+// OperationOutcome.
+func withPatientEntries(t *testing.T, base string, entries ...string) string {
+	t.Helper()
+	a := serverAnswer(base)
+	b := beneficiaryOf(t, a, strangerMember)
+	a = strings.Replace(a, b, `"subscriber":{"reference":"Patient/parent"},`+b, 1)
+	i := strings.Index(a, `{"resource":{"resourceType":"OperationOutcome"`)
+	return a[:i] + strings.Join(entries, ",") + "," + a[i:]
+}
+
+// A Patient entry the EHR's server returns on the fhirServer read, which asks
+// for none, is dropped when no Coverage's beneficiary names it: the read
+// carries no Patient, so it is not refused either. The beneficiary's own
+// entry is kept for the fence and must be the patient: as another member it
+// is refused (502). At every level; what is carried is the Coverage and its
+// payor.
+func TestFHIRServerReadDropsAPatientNoBeneficiaryNames(t *testing.T) {
+	t.Parallel()
+	parent := func(base string) string {
+		return `{"fullUrl":"` + base + `/Patient/parent","resource":` + dependentParent + `,"search":{"mode":"include"}}`
+	}
+	beneficiary := func(base, identifier string) string {
+		return `{"fullUrl":"` + base + `/Patient/` + strangerMember + `","resource":{"resourceType":"Patient","id":"` + strangerMember + `","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"` + identifier + `"}]},"search":{"mode":"include"}}`
+	}
+	routes := map[string]func(t *testing.T, base string) string{
+		"the parent beside the beneficiary's own entry": func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, beneficiary(base, strangerMember), parent(base))
+		},
+		"the parent alone": func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, parent(base))
+		},
+		"the parent with no fullUrl": func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, `{"resource":`+dependentParent+`,"search":{"mode":"include"}}`)
+		},
+		"an unrelated Patient": func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, strings.ReplaceAll(parent(base), "parent", "stranger"))
+		},
+	}
+	for name, answer := range routes {
+		for _, level := range allLevels {
+			t.Run("routes/"+name+"/"+level.String(), func(t *testing.T) {
+				e := newEHRServer(t, nil)
+				e.handler = ehrAnswer(200, "application/fhir+json", answer(t, e.base))
+				env, _ := fhirServerEnv(t, e, "")
+				env.originator.cfg.ConformanceEnforcement = level
+				rec := httptest.NewRecorder()
+				env.originator.handleCRDIngress(rec, crdIngressPost(fhirServerRequest(e.base)))
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
+				}
+				got := carriedSearchsetOf(t, sentRequest(t, env))
+				carriedPatient := strings.Contains(string(sentRequest(t, env)), "MRN-9")
+				for _, inc := range got.includes {
+					carriedPatient = carriedPatient || strings.Contains(inc, `"resourceType":"Patient"`)
+				}
+				if len(got.matches) != 1 || len(got.includes) != 1 || carriedPatient {
+					t.Fatalf("carried %+v: want the Coverage and its payor, no Patient", got)
+				}
+			})
+		}
+	}
+	// The beneficiary's own entry is kept for the fence however the fence
+	// reads the reference to it, so another member's record is refused.
+	other := func(base string) string { return beneficiary(base, "MBR-OTHER") }
+	refuses := map[string]struct {
+		answer func(t *testing.T, base string) string
+		status int
+		msg    string
+	}{
+		"the beneficiary's entry another member": {func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, other(base), parent(base))
+		}, http.StatusBadGateway, fhirServerOtherPatient},
+		"another member under a versioned reference": {func(t *testing.T, base string) string {
+			a := withPatientEntries(t, base, other(base), parent(base))
+			return strings.Replace(a, beneficiaryOf(t, a, strangerMember), `"beneficiary" : { "reference" : "Patient/`+strangerMember+`/_history/3" }`, 1)
+		}, http.StatusBadGateway, fhirServerOtherPatient},
+		"another member under an absolute reference, its entry with no fullUrl": {func(t *testing.T, base string) string {
+			entry := strings.Replace(other(base), `"fullUrl":"`+base+`/Patient/`+strangerMember+`",`, "", 1)
+			a := withPatientEntries(t, base, entry, parent(base))
+			return strings.Replace(a, beneficiaryOf(t, a, strangerMember), `"beneficiary" : { "reference" : "`+base+`/Patient/`+strangerMember+`" }`, 1)
+		}, http.StatusBadGateway, fhirServerOtherPatient},
+		// A fullUrl repeated across the answer is refused even when one of
+		// the two is an entry the check leaves out.
+		"a fullUrl repeated by a dropped Patient": {func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, strings.Replace(parent(base), base+"/Patient/parent", base+"/Coverage/c9", 1))
+		}, fhirServerRefused, fhirServerNotSearchset},
+		// Patients and no Coverage: nothing to route by.
+		"Patients and no Coverage": {func(t *testing.T, base string) string {
+			return `{"resourceType":"Bundle","type":"searchset","entry":[` + parent(base) + `]}`
+		}, fhirServerRefused, fhirServerNoCoverage},
+		// Only a Patient entry is read and dropped: an entry of another type
+		// is not a Coverage searchset.
+		"a RelatedPerson about another patient": {func(t *testing.T, base string) string {
+			return withPatientEntries(t, base, `{"fullUrl":"`+base+`/RelatedPerson/r1","resource":{"resourceType":"RelatedPerson","id":"r1","patient":{"reference":"Patient/someone-else"}},"search":{"mode":"include"}}`)
+		}, fhirServerRefused, fhirServerNotSearchset},
+	}
+	for name, row := range refuses {
+		for _, level := range allLevels {
+			t.Run("refuses/"+name+"/"+level.String(), func(t *testing.T) {
+				e := newEHRServer(t, nil)
+				e.handler = ehrAnswer(200, "application/fhir+json", row.answer(t, e.base))
+				env, _ := fhirServerEnv(t, e, "")
+				env.originator.cfg.ConformanceEnforcement = level
+				rec := httptest.NewRecorder()
+				env.originator.handleCRDIngress(rec, crdIngressPost(fhirServerRequest(e.base)))
+				refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
+			})
+		}
+	}
+}
+
 // The read through fhirServer still refuses: a parent referenced from
-// anywhere but the party slots, a standalone entry for another Patient (412),
-// and a beneficiary naming another patient (502), at every level.
+// anywhere but the party slots (412), and a beneficiary naming another patient
+// (502), at every level.
 func TestFHIRServerReadRefusesWhatIsNotADependentsCoverage(t *testing.T) {
 	t.Parallel()
 	rows := map[string]struct {
@@ -115,13 +228,6 @@ func TestFHIRServerReadRefusesWhatIsNotADependentsCoverage(t *testing.T) {
 	}{
 		"the parent referenced from another element": {func(t *testing.T, base string) string {
 			return alsoFromPayor(dependentOf(t, serverAnswer(base), strangerMember, []string{"subscriber"}))
-		}, fhirServerRefused, fhirServerNotSearchset},
-		"a standalone entry for the parent": {func(t *testing.T, base string) string {
-			a := serverAnswer(base)
-			b := beneficiaryOf(t, a, strangerMember)
-			a = strings.Replace(a, b, `"subscriber":{"reference":"Patient/parent"},`+b, 1)
-			i := strings.LastIndex(a, "]}")
-			return a[:i] + `,{"resource":` + dependentParent + `,"search":{"mode":"include"}}` + a[i:]
 		}, fhirServerRefused, fhirServerNotSearchset},
 		"the beneficiary naming another patient": {func(t *testing.T, base string) string {
 			a := dependentOf(t, serverAnswer(base), strangerMember, []string{"subscriber", "policyHolder"})

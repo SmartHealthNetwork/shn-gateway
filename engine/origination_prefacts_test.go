@@ -17,11 +17,14 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The order-dispatch routes (HomeOxygen, /scenario/dispatch, UC-03 on provider
-// data, and UC-03's demo default arm) build the PAS claim after their CRD and
-// DTR legs, so a claim fact the build at the routed line would refuse is
-// refused before the first of them, exactly as the order-select routes refuse
-// it (claimFactsBeforeAnyLeg): 422 naming the element, and no leg sent.
+// The order-dispatch routes (HomeOxygen, /scenario/dispatch and UC-03 on
+// provider data) build the PAS claim in the shared tail (submitPASClaim), after
+// their order-dispatch and questionnaire legs, so a claim fact the build at the
+// routed line would refuse is refused there, as the order-select routes refuse
+// it: 422 naming the element, with no claim sent, and the legs before it, which
+// were carried and stand, named in the answer. UC-03's demo default arm builds
+// its claim in the same tail after attesting item 6.1; its own check before
+// that attestation is TestOrigination_NoClinicianRefusedAtTheLegThatNamesIt's.
 
 // uc03ProviderDataFixture is the MBR-PD-UC03 / E1390 order-dispatch persona
 // UC-03 originates for on provider data.
@@ -40,7 +43,7 @@ func uc03ProviderDataFixture(t *testing.T) *dispatchFixture {
 	return newDispatchFixture(t, member, Demo{BirthDate: "1962-03-02", FamilyName: "Delgado-Dispatch"}, orderJSON, performerRef, supplierJSON)
 }
 
-func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
+func TestDispatchRoutes_RefuseUnstatedFactsAtThePASBuild(t *testing.T) {
 	t.Parallel()
 	type route struct {
 		name string
@@ -56,7 +59,7 @@ func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
 				body = editBody(t, body, edit)
 			}
 			rec := httptest.NewRecorder()
-			run(fix.gw, rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))))
+			run(fix.gw, rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))))
 			return rec, fix.stub.legTypes
 		}
 	}
@@ -67,16 +70,6 @@ func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
 			func(g *Gateway, w http.ResponseWriter, r *http.Request) { g.handleDispatch(w, r) })},
 		{"uc03 provider-data", dispatchDrive(uc03ProviderDataFixture, "/scenario/uc03", "",
 			func(g *Gateway, w http.ResponseWriter, r *http.Request) { g.handleUC03(w, r) })},
-		{"uc03 demo default arm", func(t *testing.T, edit func(map[string]json.RawMessage)) (*httptest.ResponseRecorder, []string) {
-			gw, stub, _ := uc03HandlerSystem(t, shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded})
-			body := testRouteBody(gw, "/scenario/uc03", `"branch":""`)
-			if edit != nil {
-				body = editBody(t, body, edit)
-			}
-			rec := httptest.NewRecorder()
-			gw.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/scenario/uc03", strings.NewReader(body)))
-			return rec, stub.legTypes
-		}},
 	}
 	for _, rt := range routes {
 		// The control: the full statement reaches the order-dispatch leg.
@@ -97,27 +90,35 @@ func TestDispatchRoutes_RefuseUnstatedFactsBeforeAnyLeg(t *testing.T) {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), element) {
 					t.Fatalf("%d %s, want 422 naming %s", rec.Code, rec.Body.String(), element)
 				}
-				if len(legs) != 0 {
-					t.Fatalf("legs sent before the refusal: %v", legs)
+				if !legAttempted(legs, "crd-order-dispatch") || legAttempted(legs, "pas-claim") {
+					t.Fatalf("legs %v: want the order-dispatch leg sent and no claim", legs)
 				}
+				wantCarried(t, rec.Body.String(), legs...)
 			})
 		}
 	}
 }
 
-// TestPASOriginationsCheckFactsBeforeAnyLeg is the static guard on the rule
-// above, over every non-test file of this package:
+// TestPASOriginationsCheckSourcesAtTheClaimsBuild is the static guard on
+// where a PAS origination checks what its claim consumes (a refusal sits at
+// the build of the first leg that cannot succeed), over every
+// non-test file of this package:
 //
-//  1. each origination prefix (runCRDThenDTROrder, runCRDDispatch) calls
-//     pasOriginationBeforeAnyLeg, and calls it before any call that sends a
-//     leg (OriginateLeg, or a function of this package that reaches it);
-//  2. every other function that builds a PAS claim or amendment, or sends a
-//     pas-claim or pas-claim-update leg, calls a prefix (or, for a resume,
-//     resumeAmendmentOrFail) before any call that sends a leg — unless it is
-//     one of the PAS tail helpers, whose callers this rule checks in turn.
+//  1. each origination prefix (runCRDThenDTROrder, runCRDDispatch) checks only
+//     the request's shape before its first leg (pasOriginationRequestOrFail,
+//     before any call that sends a leg: OriginateLeg, or a function of this
+//     package that reaches it), and never what the claim consumes
+//     (pasClaimSourcesAt, pasClaimInputOrRefuse), which a not-covered CRD
+//     answer would never need;
+//  2. every function that builds a PAS claim or amendment checks what that
+//     build consumes (pasClaimInputOrRefuse, pasClaimSourcesAt or, for an
+//     amendment, resumeAmendmentOrFail) before the build — the PAS builders
+//     themselves excepted, and the shared tail's caller-checked path
+//     (sourcesRead), whose callers this rule checks in turn.
 //
-// A new route that builds a claim without passing the check fails here.
-func TestPASOriginationsCheckFactsBeforeAnyLeg(t *testing.T) {
+// A new route that builds a claim without the check, or hoists it before the
+// first leg, fails here.
+func TestPASOriginationsCheckSourcesAtTheClaimsBuild(t *testing.T) {
 	t.Parallel()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -195,75 +196,97 @@ func TestPASOriginationsCheckFactsBeforeAnyLeg(t *testing.T) {
 		return token.NoPos
 	}
 
+	sourceChecks := map[string]bool{"pasClaimSourcesAt": true, "pasClaimInputOrRefuse": true}
 	prefixes := map[string]bool{"runCRDThenDTROrder": true, "runCRDDispatch": true}
 	for name := range prefixes {
 		fn, ok := funcs[name]
 		if !ok {
 			t.Fatalf("the prefix %s is gone; the guard no longer reads the origination paths", name)
 		}
-		check := firstCall(fn, map[string]bool{"pasOriginationBeforeAnyLeg": true})
+		check := firstCall(fn, map[string]bool{"pasOriginationRequestOrFail": true})
 		if check == token.NoPos {
-			t.Errorf("%s does not call pasOriginationBeforeAnyLeg", name)
+			t.Errorf("%s does not call pasOriginationRequestOrFail", name)
 			continue
 		}
 		if send := firstSend(fn, nil); send != token.NoPos && send < check {
-			t.Errorf("%s: a leg is sent at %s before pasOriginationBeforeAnyLeg at %s", name, fset.Position(send), fset.Position(check))
+			t.Errorf("%s: a leg is sent at %s before pasOriginationRequestOrFail at %s", name, fset.Position(send), fset.Position(check))
+		}
+		if hoisted := firstCall(fn, sourceChecks); hoisted != token.NoPos {
+			t.Errorf("%s checks what the claim consumes at %s, before its first leg", name, fset.Position(hoisted))
 		}
 	}
 
 	builds := map[string]bool{
-		"buildAuthoredPASSubmit": true, "buildAuthoredPASUpdate": true, "buildPASSubmitBundle": true,
-		"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true,
-		"submitPASClaim": true, "submitClaimAndFollow": true,
+		"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true, "buildPASSubmitBundle": true,
 	}
-	tails := map[string]bool{
-		"buildAuthoredPASSubmit": true, "buildAuthoredPASUpdate": true, "buildPASSubmitBundle": true,
-		"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true,
-		"submitPASClaim": true, "submitClaimAndFollow": true,
-	}
-	entries := map[string]bool{"runCRDThenDTROrder": true, "runCRDDispatch": true, "resumeAmendmentOrFail": true}
+	builders := map[string]bool{"buildModuleOnePASSubmit": true, "buildModuleOnePASUpdate": true, "buildPASSubmitBundle": true}
+	checks := map[string]bool{"pasClaimSourcesAt": true, "pasClaimInputOrRefuse": true, "resumeAmendmentOrFail": true}
 	var checked []string
 	for name, fn := range funcs {
-		if prefixes[name] || tails[name] {
+		if builders[name] {
 			continue
 		}
-		originates := false
-		for _, c := range callsOf(fn) {
-			if builds[c.name] {
-				originates = true
-			}
-			if c.name == "OriginateLeg" && len(c.call.Args) > 3 {
-				if lit, ok := c.call.Args[3].(*ast.BasicLit); ok && (lit.Value == `"pas-claim"` || lit.Value == `"pas-claim-update"`) {
-					originates = true
-				}
-			}
-		}
-		if !originates {
+		build := firstCall(fn, builds)
+		if build == token.NoPos {
 			continue
 		}
 		checked = append(checked, name)
-		entry := firstCall(fn, entries)
-		if entry == token.NoPos {
-			t.Errorf("%s (%s) builds or sends a PAS claim without passing a prefix or resumeAmendmentOrFail", name, fset.Position(fn.Pos()))
-			continue
-		}
-		if send := firstSend(fn, entries); send != token.NoPos && send < entry {
-			t.Errorf("%s: a leg is sent at %s before the facts check at %s", name, fset.Position(send), fset.Position(entry))
+		check := firstCall(fn, checks)
+		// An amendment built in the same request as its submission rides
+		// the submission's check (UC-04's in-flow amendment, UC-05): the
+		// function's first build is the submission's, after the check.
+		if check == token.NoPos || check > build {
+			t.Errorf("%s (%s) builds a PAS request at %s without first checking what it consumes", name, fset.Position(fn.Pos()), fset.Position(build))
 		}
 	}
 	if len(checked) < 8 {
-		t.Fatalf("the guard checked %d PAS-originating functions (%v); it no longer reads the origination paths", len(checked), checked)
+		t.Fatalf("the guard checked %d PAS-building functions (%v); it no longer reads the origination paths", len(checked), checked)
+	}
+	// The shared tail checks what the claim consumes for its caller unless
+	// the caller already did: every call hands it the route's member to check
+	// the request's against (statedMember), or says it checked (sourcesRead).
+	tailCalls := 0
+	for name, fn := range funcs {
+		for _, c := range callsOf(fn) {
+			if c.name != "submitClaimAndFollow" {
+				continue
+			}
+			for _, arg := range c.call.Args {
+				lit, ok := arg.(*ast.CompositeLit)
+				if !ok {
+					continue
+				}
+				if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "pasFollowInputs" {
+					continue
+				}
+				tailCalls++
+				states := false
+				for _, el := range lit.Elts {
+					if kv, ok := el.(*ast.KeyValueExpr); ok {
+						if k, ok := kv.Key.(*ast.Ident); ok && (k.Name == "statedMember" || k.Name == "sourcesRead") {
+							states = true
+						}
+					}
+				}
+				if !states {
+					t.Errorf("%s (%s) calls the shared tail without statedMember or sourcesRead", name, fset.Position(c.call.Pos()))
+				}
+			}
+		}
+	}
+	if tailCalls < 3 {
+		t.Fatalf("the guard read %d calls of the shared tail; it no longer reads them", tailCalls)
 	}
 	slices.Sort(checked)
-	t.Logf("PAS-originating functions checked: %v", checked)
+	t.Logf("PAS-building functions checked: %v", checked)
 }
 
-// TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine pins what
-// claimFactsBeforeAnyLeg relies on for a single call that also amends (UC-04's
-// in-flow amendment, UC-05, UC-06/UC-07): it checks the amendment's facts at
-// the line the submission's selection builds at (selectLegRoute), and the
-// amendment is built at the line the resume's selection picks for the
-// submission's pin (selectResumeRoute). Within one request both read the same
+// TestSingleCallAmendmentLine_IsTheSubmissionsBuildLine pins, for a single
+// call that also amends (UC-04's in-flow amendment, UC-05, UC-06/UC-07), that
+// the amendment is built at the line its submission was: the submission at
+// the line its selection builds at (selectLegRoute), the amendment at the line
+// the resume's selection picks for the submission's pin (selectResumeRoute),
+// where the amendment's facts are checked. Within one request both read the same
 // declared, lane and narrowing state, so over every state a gateway can boot
 // in (gateway/app refuses a declared line with no lane at every level that
 // checks) the two build lines are the same line, or the resume refuses the

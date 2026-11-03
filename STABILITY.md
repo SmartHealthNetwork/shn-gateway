@@ -426,6 +426,19 @@ members the system of record does not hold on the CRD, DTR and PAS legs
 `observe` (the default when unset before v1.0.0), `structural` or `strict` (see
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
 
+**Behavior change in the next shn-gateway release: a Coverage's party may be a `Patient` entry
+of its own.** A dependent's parent that a PAS request or answer carries as a `Patient` entry of
+its own that only a Coverage's `subscriber` or `policyHolder` names (by its exact `fullUrl`, or
+by a relative reference that resolves to it against the Coverage entry's base, never by id
+alone) is the Coverage's party, as a parent contained in the Coverage already is.
+shn-sdk's `CoverageEntryParties` decides it. It does not check that the Coverage's
+`beneficiary` is the member: the checks below do, and refuse another member as before. The
+request's check for another patient (`patient.mixed`, the inquiry's member check included) and the answer's
+(`patient.answer`) do not read it as a second patient, and the patients a request involves (below)
+do not include it. Such a request or answer was refused at `strict` and recorded at `observe` and
+`structural`; it is now carried and read at every level. Any other `Patient` entry is read as
+before.
+
 **Behavior change in v1.0.0: an unset level is `none`.** A gateway that leaves
 `CONFORMANCE_ENFORCEMENT` unset runs no payload conformance check, records no
 finding and needs no validator to boot, exactly as at `none`; before v1.0.0 it
@@ -1154,12 +1167,14 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   other patients it involves, each with its own token, so the network records
   the exchange under each of them as well as the leg's own patient:
   - on a request, every other member the request carries, identified through
-    your system of record as the leg's subject is (`request-named`);
-    a Coverage's party (a dependent's parent its `subscriber` or `policyHolder`
-    names) is not one, but from the next shn-gateway release a patient the party
-    names is, wherever the request is carried: gateways v0.61.0 to v1.2.0 left
-    such a patient out, so the network had no record of the exchange under them
-    (at `strict` the PAS legs refuse such a request first, under `patient.mixed`);
+    your system of record as the leg's subject is (`request-named`). A Coverage's
+    party, a contained Patient or (from the next shn-gateway release) a
+    `Patient` entry of its own that only a Coverage's `subscriber` or
+    `policyHolder` names, is no member, and neither is the slot naming it; but
+    from the next shn-gateway release a patient the party names is, wherever the
+    request is carried: gateways v0.61.0 to v1.2.0 left such a patient out, so
+    the network had no record of the exchange under them (at `strict` the PAS
+    legs refuse such a request first, under `patient.mixed`);
   - on a payer's answer, the payer's own binding of the member, when it differs
     from the patient the leg's token names (`payer-held` or `payer-derived`).
 - It runs at every conformance level, `none` included: it is the network's

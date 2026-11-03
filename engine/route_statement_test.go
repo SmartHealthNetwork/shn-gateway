@@ -4,8 +4,10 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -66,10 +68,15 @@ func dropFact(t *testing.T, fact string) func(map[string]json.RawMessage) {
 
 func startUC06(gw *Gateway, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	gw.handleUC06Start(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc06/start", strings.NewReader(body))))
+	gw.handleUC06Start(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/start", strings.NewReader(body)))))
 	return rec
 }
 
+// The member a request names and the order it states its facts for vouch for
+// the claim facts it states, which the PAS claim is the first leg to consume:
+// a request naming no member, another member, no order or another order is
+// refused at that claim's build, 422, the fidelity of SHN's own build, after
+// the coverage check and questionnaire legs, which were carried and stand.
 func TestOriginationRoute_NamesItsMemberAndOrder(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -78,13 +85,13 @@ func TestOriginationRoute_NamesItsMemberAndOrder(t *testing.T) {
 		status int
 		want   string
 	}{
-		{"no member", func(m map[string]json.RawMessage) { delete(m, "member") }, 400, `names no \"member\"`},
+		{"no member", func(m map[string]json.RawMessage) { delete(m, "member") }, 422, `names no \"member\"`},
 		{"another member", func(m map[string]json.RawMessage) { m["member"] = json.RawMessage(`"MBR-UC07"`) }, 422,
 			"this route originates for MBR-UC06; the request names MBR-UC07"},
 		{"facts stated for another order", func(m map[string]json.RawMessage) {
 			m["order"] = json.RawMessage(`{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"J3490"}`)
 		}, 422, "fidelity of SHN's own build"},
-		{"no order", func(m map[string]json.RawMessage) { delete(m, "order") }, 400, `names no \"order\"`},
+		{"no order", func(m map[string]json.RawMessage) { delete(m, "order") }, 422, `names no \"order\"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gw, stub := uc06RouteFixture(t, "2.0")
@@ -92,9 +99,10 @@ func TestOriginationRoute_NamesItsMemberAndOrder(t *testing.T) {
 			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("%d %s, want %d naming %q", rec.Code, rec.Body.String(), tc.status, tc.want)
 			}
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+			if !legAttempted(stub.legTypes, "crd-order-select") || legAttempted(stub.legTypes, "pas-claim") {
+				t.Fatalf("legs %v: want the coverage check sent and no claim", stub.legTypes)
 			}
+			wantCarried(t, rec.Body.String(), stub.legTypes...)
 		})
 	}
 	// The control: the route's member and the order it holds start the flow.
@@ -116,11 +124,12 @@ func TestOriginationRoute_RefusesUnstatedFactsAtEveryLine(t *testing.T) {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), element) {
 					t.Fatalf("%d %s, want 422 naming %s", rec.Code, rec.Body.String(), element)
 				}
-				// Refused before any leg: not the coverage check, not the
-				// questionnaire fetch, not the claim.
-				if len(stub.legTypes) != 0 {
-					t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+				// Refused at the claim's build: the coverage check and the
+				// questionnaire fetch were carried and stand; no claim.
+				if !legAttempted(stub.legTypes, "crd-order-select") || legAttempted(stub.legTypes, "pas-claim") {
+					t.Fatalf("legs %v: want the coverage check sent and no claim", stub.legTypes)
 				}
+				wantCarried(t, rec.Body.String(), stub.legTypes...)
 			})
 		}
 	}
@@ -141,7 +150,7 @@ func pendThenComplete(t *testing.T, line, startBody string, completeEdit func(ma
 	}
 	body := editBody(t, testRouteBody(gw, "/scenario/uc06/complete", `"resumeToken":"`+started.ResumeToken+`"`), completeEdit)
 	rec := httptest.NewRecorder()
-	gw.handleUC06Complete(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(body))))
+	gw.handleUC06Complete(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(body)))))
 	return rec, stub
 }
 
@@ -229,12 +238,14 @@ func TestUC07Pending_CarriesThePendsMemberAndOrder(t *testing.T) {
 	}
 }
 
-// TestSingleCallAmendment_CertificationTypeRefusedBeforeAnyLeg: the single
+// TestSingleCallAmendment_CertificationTypeRefusedAtTheAmendment: the single
 // call (/scenario/uc06, /scenario/uc07) submits, pends and amends in one
 // request, so a request stating no amendment certificationType at 2.1/2.2 is
-// refused before its first leg, never after its submission went out. The
-// start route (/start), which sends no amendment, does not need one.
-func TestSingleCallAmendment_CertificationTypeRefusedBeforeAnyLeg(t *testing.T) {
+// refused at the amendment's build, the leg that consumes it: the submission
+// the payer pended, and every leg before it (UC-07's patient-DTR exchange
+// too), were carried and stand, and the answer says so. The start route
+// (/start), which sends no amendment, does not need one.
+func TestSingleCallAmendment_CertificationTypeRefusedAtTheAmendment(t *testing.T) {
 	noCert := func(m map[string]json.RawMessage) { delete(m, "certificationType") }
 	nullCert := func(m map[string]json.RawMessage) { m["certificationType"] = json.RawMessage("null") }
 	for _, line := range []string{"2.1", "2.2"} {
@@ -242,27 +253,29 @@ func TestSingleCallAmendment_CertificationTypeRefusedBeforeAnyLeg(t *testing.T) 
 			t.Run(line+"/uc06/"+name, func(t *testing.T) {
 				gw, stub := uc06RouteFixture(t, line)
 				rec := httptest.NewRecorder()
-				gw.handleUC06(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc06",
-					strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc06", ""), edit)))))
+				gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06",
+					strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc06", ""), edit))))))
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 					t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
 				}
-				if len(stub.legTypes) != 0 {
-					t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+				if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "pas-claim-update") {
+					t.Fatalf("legs %v: want the submission sent and no amendment", stub.legTypes)
 				}
+				wantCarried(t, rec.Body.String(), stub.legTypes...)
 			})
 		}
 		t.Run(line+"/uc07/absent", func(t *testing.T) {
 			gw, stub := uc07RouteFixture(t, line)
 			rec := httptest.NewRecorder()
-			gw.handleUC07(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
-				strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc07", ""), noCert)))))
+			gw.handleUC07(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
+				strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc07", ""), noCert))))))
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 				t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
 			}
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
+			if !legAttempted(stub.legTypes, "pas-claim") || !legAttempted(stub.legTypes, "patient-dtr") || legAttempted(stub.legTypes, "pas-claim-update") {
+				t.Fatalf("legs %v: want the submission and the patient-DTR exchange sent and no amendment", stub.legTypes)
 			}
+			wantCarried(t, rec.Body.String(), stub.legTypes...)
 		})
 		t.Run(line+"/start needs none", func(t *testing.T) {
 			gw, stub := uc06RouteFixture(t, line)
@@ -279,11 +292,12 @@ func uc07RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 		extraRoles: map[string]string{"phg": "phg"}}, line)
 }
 
-// TestUC07Complete_RefusesBeforeThePatientDTRLeg: /scenario/uc07/complete
-// checks the member, the order and the amendment's facts before it sends any
-// leg — the PHG patient-DTR exchange included. A completion the amendment
-// cannot be built for sends nothing; the control completes through both legs.
-func TestUC07Complete_RefusesBeforeThePatientDTRLeg(t *testing.T) {
+// TestUC07Complete_RefusesAtTheAmendment: /scenario/uc07/complete checks the
+// member, the order and the amendment's facts at the amendment's build, the
+// leg that consumes them: the PHG patient-DTR exchange, which needs none of
+// them, is sent first and stands, and the answer says it was carried. The
+// control completes through both legs.
+func TestUC07Complete_RefusesAtTheAmendment(t *testing.T) {
 	for _, tc := range []struct {
 		name, line string
 		edit       func(map[string]json.RawMessage)
@@ -319,7 +333,7 @@ func TestUC07Complete_RefusesBeforeThePatientDTRLeg(t *testing.T) {
 			before := len(stub.legTypes)
 			body := editBody(t, testRouteBody(gw, "/scenario/uc07/complete", `"resumeToken":"`+started.ResumeToken+`"`), tc.edit)
 			rec := httptest.NewRecorder()
-			gw.handleUC07Complete(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(body))))
+			gw.handleUC07Complete(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(body)))))
 			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("%d %s, want %d naming %q", rec.Code, rec.Body.String(), tc.status, tc.want)
 			}
@@ -330,41 +344,61 @@ func TestUC07Complete_RefusesBeforeThePatientDTRLeg(t *testing.T) {
 				}
 				return
 			}
-			if len(sent) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", sent)
+			if !slices.Equal(sent, []string{"patient-dtr"}) {
+				t.Fatalf("legs sent before the refusal: %v, want the patient-DTR exchange alone", sent)
 			}
+			wantCarried(t, rec.Body.String(), "patient-dtr")
 		})
 	}
 }
 
-// TestUC05_AmendmentCertificationTypeRefusedBeforeAnyLeg: the consented UC-05
-// amends with the federated evidence in the same request, so at 2.1/2.2 a
-// request stating no amendment certificationType is refused before its first
-// leg (no coverage check, no federated query, no submission).
-func TestUC05_AmendmentCertificationTypeRefusedBeforeAnyLeg(t *testing.T) {
+// TestUC05_AmendmentCertificationTypeRefusedAtTheAmendment: the consented
+// UC-05 amends with the federated evidence in the same request, so at 2.1/2.2
+// a request stating no amendment certificationType is refused at the
+// amendment's build, after the coverage check, the questionnaire, the
+// submission and the federated query, which were carried and stand. When the
+// Authorization Framework denies the disclosure, the request ends at the pend
+// with no amendment, a 200: it needed no certificationType, and is carried.
+func TestUC05_AmendmentCertificationTypeRefusedAtTheAmendment(t *testing.T) {
 	for _, line := range []string{"2.1", "2.2"} {
-		t.Run(line, func(t *testing.T) {
-			opts := pendFixtureOpts{member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
-				pendedItem: "operative-diagnostic-report", extraRoles: map[string]string{"facility": "metro-spine"}}
-			if line == "2.1" {
-				opts.declared = []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21}
-			} else {
-				opts.declared = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
-			}
-			gw, stub := newPendResumeFixture(t, opts)
-			declareOriginationProfile(gw, "demo")
-			gw.cfg.Validator = NewLineFakeValidator("2.0")
-			gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
-			body := editBody(t, testRouteBody(gw, "/scenario/uc05", ""), func(m map[string]json.RawMessage) { delete(m, "certificationType") })
-			rec := httptest.NewRecorder()
-			gw.handleUC05(rec, withOriginationClaimInput(httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(body))))
-			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
-				t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
-			}
-			if len(stub.legTypes) != 0 {
-				t.Fatalf("legs sent before the refusal: %v", stub.legTypes)
-			}
-		})
+		for _, denied := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/consent denied %v", line, denied), func(t *testing.T) {
+				opts := pendFixtureOpts{member: "MBR-D-UC05", birthDate: "1968-03-12", familyName: "Johansson-Demo",
+					pendedItem: "operative-diagnostic-report", extraRoles: map[string]string{"facility": "metro-spine"}}
+				if line == "2.1" {
+					opts.declared = []string{shnsdk.ContractPACRD21, shnsdk.ContractPADTR21, shnsdk.ContractPAPAS21}
+				} else {
+					opts.declared = []string{shnsdk.ContractPACRD22, shnsdk.ContractPADTR22, shnsdk.ContractPAPAS22}
+				}
+				gw, stub := newPendResumeFixture(t, opts)
+				declareOriginationProfile(gw, "demo")
+				gw.cfg.Validator = NewLineFakeValidator("2.0")
+				gw.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": NewLineFakeValidator("2.0"), line: NewLineFakeValidator(line)})
+				if denied {
+					stub.denyOperation = "federated-query-submit"
+				}
+				body := editBody(t, testRouteBody(gw, "/scenario/uc05", ""), func(m map[string]json.RawMessage) { delete(m, "certificationType") })
+				rec := httptest.NewRecorder()
+				gw.handleUC05(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(body)))))
+				if denied {
+					var got uc05Resp
+					if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || !got.ConsentDenied {
+						t.Fatalf("%d %s, want 200 consentDenied", rec.Code, rec.Body.String())
+					}
+					if legAttempted(stub.legTypes, "pas-claim-update") {
+						t.Fatalf("legs %v: an amendment was sent", stub.legTypes)
+					}
+					return
+				}
+				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
+					t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
+				}
+				if !legAttempted(stub.legTypes, "pas-claim") || legAttempted(stub.legTypes, "pas-claim-update") {
+					t.Fatalf("legs %v: want the submission sent and no amendment", stub.legTypes)
+				}
+				wantCarried(t, rec.Body.String(), stub.legTypes...)
+			})
+		}
 	}
 }
 

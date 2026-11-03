@@ -26,24 +26,36 @@ func (s payorByIdentifier) OpenCoverage(member string) ([]byte, bool) {
 	if !found {
 		return raw, found
 	}
+	return s.byIdentifier(raw), found
+}
+
+// byIdentifier is coverage naming its payer by identifier alone.
+func (s payorByIdentifier) byIdentifier(raw []byte) []byte {
 	payer, err := shnsdk.ParseCoveragePayer(raw, s.ResolveByReference)
 	if err != nil {
-		return raw, found
+		return raw
 	}
 	var coverage map[string]any
 	if err := json.Unmarshal(raw, &coverage); err != nil {
-		return raw, found
+		return raw
 	}
 	coverage["payor"] = []any{map[string]any{"identifier": map[string]any{"system": payer.System, "value": payer.Value}}}
 	out, err := json.Marshal(coverage)
 	if err != nil {
-		return raw, found
+		return raw
 	}
-	return out, found
+	return out
 }
 
+// SearchPatientContext rewrites the Coverage search as the coverage read is
+// rewritten (coverageSearchRewritten): behind the built-in FHIR connector the
+// two are one search.
 func (s payorByIdentifier) SearchPatientContext(ctx context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
-	return s.SystemOfRecord.(SearchSystemOfRecord).SearchPatientContext(ctx, resourceType, id, dates...)
+	res, err := s.SystemOfRecord.(SearchSystemOfRecord).SearchPatientContext(ctx, resourceType, id, dates...)
+	if resourceType != "Coverage" {
+		return res, err
+	}
+	return coverageSearchRewritten(res, err, s.byIdentifier)
 }
 
 // REJECTION, at every level: a PAS submit whose payer no record names is refused
