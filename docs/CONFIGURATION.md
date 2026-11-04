@@ -137,7 +137,7 @@ mints the record. Point the Coverage's `payor` at an Organization your system ho
 (`ORIGINATION_PROFILE`, the `/scenario/*` routes) is refused at the first leg that cannot be built,
 never earlier, so a request that can still succeed without a later leg is carried: a payer's
 not-covered answer, the no-PA coverage check, and UC-05 when the disclosure is denied all
-answer as usual, whatever a later leg would have needed. From the release that carries this:
+answer as usual, whatever a later leg would have needed. From v1.4.0:
 - **Before the first leg**, only what no leg can be sent without:
   - the request to your gateway malformed: an unreadable body (`400`), a `wait` that is not a
     whole number of seconds (`400`), a sent `npi` that is no NPI (`400`);
@@ -158,7 +158,7 @@ answer as usual, whatever a later leg would have needed. From the release that c
 - **At UC-07's patient questionnaire exchange:** no patient health gateway registered (`422`,
   recorded as `routing`), and, on a lane whose patient answers a score, an answer that is no
   score (`400`).
-- **At the PAS claim, after the questionnaire is filled:** a filled QuestionnaireResponse about
+- **At the PAS claim, after the questionnaire is filled** (from v1.5.0): a filled QuestionnaireResponse about
   another patient than the request's or naming none, whether your operated `$populate` engine
   returned it or the gateway's own check finds it, or for another questionnaire than the one
   fetched or naming none (`422`, recorded as `fidelity` at stage `verify`): the fill is the
@@ -203,7 +203,7 @@ answer as usual, whatever a later leg would have needed. From the release that c
 Each of the refusals and backend failures above that comes at or after a leg's build, and each
 routing refusal of an unknown member, ends with a sentence saying which legs the request sent:
 `The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand.`,
-or `No leg of this request was sent.` Every other answer your gateway writes itself after a leg
+or `No leg of this request was sent.` From v1.5.0, every other answer your gateway writes itself after a leg
 of the request was carried ends with the same sentence, with its status and what it is recorded
 as unchanged: a questionnaire package with no Questionnaire, or one for another questionnaire
 than the coverage card names, a payer answer the gateway cannot read or that is not the pend the
@@ -273,6 +273,13 @@ Go-only) in-process alternative.
 A Da Vinci CRD, DTR or PAS request can name a member your system of record does not hold,
 a patient from the other participant's own environment, for example. By default your
 gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
+
+A provider's and a payer's gateway read the setting wherever they bind a patient a request
+names: the legs the table below lists, and also the federated query at a provider's ingress and
+the CDex attachment request on both sides. A facility's gateway answers only the federated
+query, and a PHG's only the patient's questionnaire package; on that leg each refuses a patient
+its system of record does not hold (`403`), at every level, whatever the setting: it changes
+nothing there. On every role, a value other than `true` or `false` refuses to boot.
 
 | Env var | Description |
 |---|---|
@@ -1243,7 +1250,17 @@ Who keeps what is needed to ask again depends on who is asking.
   submitted line. It stores **no clinical content**: at inquiry time the order is
   re-read from your own system of record, and a request that has since become a
   different one is reported (`409 order changed since submission`) rather than
-  followed.
+  followed. The patient, the coverage, the requesting provider and the payer
+  organization are read again too, and, from v1.6.0, so is the record of a person the
+  member's Coverage names as its `subscriber` or `policyHolder` by a reference to
+  another `Patient` record (a dependent's parent), by the submission's own rule: the
+  inquiry carries it as a `Patient` entry of its own, as the submission did. A person
+  your system does not hold, or whose record cannot ride the inquiry, refuses the
+  inquiry on `POST /scenario/pa/inquire` (`422`, recorded as `fidelity` at stage
+  `build`); your system failing to answer that read is a backend failure (`503`), and
+  so is its answering with another record than the person's (`502`). On a route's own
+  wait each keeps the pend: no inquiry is sent, and the observer event
+  `pa.inquiry-failed` names why.
 
 The continuation id **is** the capability, and it is bound to this holder. An id
 this gateway did not mint answers `404` and says nothing further.
@@ -1659,7 +1676,7 @@ authorization number alone is accepted here and answered by the payer.
 `POST /$submit-attachment` sends documentation for a prior authorization to a payer: a
 CDex 2.1.0 `$submit-attachment` (a `Parameters` with its `TrackingId`, `AttachTo`,
 `MemberId`, `PayerId`, `OrganizationId` or `ProviderId`, and one or more `Attachment`). From
-the release that adds it, it is in the evolving tier (see `STABILITY.md`). The submission is
+v1.1.0, it is in the evolving tier (see `STABILITY.md`). The submission is
 carried to the payer as your EHR sent it, and the payer's answer (its `OperationOutcome`,
 informational or an error) reaches your EHR exactly; an answer that repeats a member name,
 so it can be read two ways, is refused with 502 instead (message integrity). It is routed by its `PayerId` to the
@@ -2875,7 +2892,7 @@ answered: an answer that repeats a member name (`403`, at every level), and at e
 `strict` a PAS response whose patient linkage is inconsistent or that names another
 patient (`403`; from v0.61.0 the parent a dependent's Coverage entry names as a contained
 `Patient` in its `subscriber` or `policyHolder` is part of that Coverage, not another
-patient, and from the next shn-gateway release so is the parent carried as a `Patient`
+patient, and from v1.4.0 so is the parent carried as a `Patient`
 entry of its own that only a Coverage's `subscriber` or `policyHolder` names), a questionnaire package that carries a subject (`403`), or an answer that
 fails validation (`422`) — the recipient's gateway will not relay it, and the requester
 reads why. Below `strict` those answers are relayed as sent (recorded as a finding at

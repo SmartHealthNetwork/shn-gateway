@@ -35,6 +35,9 @@ const (
 	parentFound parentHeld = iota
 	parentNotHeld
 	parentReadFails
+	// parentAnotherRecord answers the read with a Patient other than the
+	// one asked for: an invalid response.
+	parentAnotherRecord
 )
 
 // dependentCoverageSoR is a system of record whose member Coverage names the
@@ -100,6 +103,8 @@ func (s dependentCoverageSoR) ResolveByReferenceContext(ctx context.Context, ref
 		return nil, false, nil
 	case parentReadFails:
 		return nil, false, &SoRReadError{Kind: SoRUnavailable}
+	case parentAnotherRecord:
+		return []byte(`{"resourceType":"Patient","id":"someone-else"}`), true, nil
 	}
 	return dependentParentRecord(), true, nil
 }

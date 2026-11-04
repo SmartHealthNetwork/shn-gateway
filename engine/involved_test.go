@@ -314,16 +314,20 @@ func TestRequestNamedPatients_ServerIDOfTheSubjectIsTheSubject(t *testing.T) {
 
 // Every other patient the request names is identified through the system of
 // record as the subject is (held, or derived from the Patient carried), and
-// the leg's own patient is not named.
+// the leg's own patient is not named. A patient named by an id alone, which
+// neither the system holds nor the request carries (ABSOLUTE), is unknown,
+// never named under an identifier derived from that id.
 func TestRequestNamedPatients_NamesEveryOtherPatient(t *testing.T) {
 	g, _, _, omitted := involvedGateway(t, true)
 	subject := heldPCI(t, "MBR-COVERED")
 	got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", involvedRequest(), subject)
+	// On PAS, a patient the system does not hold is unknown even when the
+	// request carries it with demographics (p-other): only the subject's own
+	// names are decided by the request's structure there, and every other name
+	// is named only under an identity the system holds.
 	want := []involvedPatient{
-		{pci: derivedPCI("ABSOLUTE", "", ""), involvement: shnsdk.InvolvementRequestNamed},
 		{pci: heldPCI(t, "MBR-OX"), involvement: shnsdk.InvolvementRequestNamed},
 		{pci: heldPCI(t, "MBR-PAYERB"), involvement: shnsdk.InvolvementRequestNamed},
-		{pci: derivedPCI("p-other", "1980-01-01", "Other"), involvement: shnsdk.InvolvementRequestNamed},
 	}
 	byPCI := func(a, b involvedPatient) int { return strings.Compare(a.pci, b.pci) }
 	slices.SortFunc(got, byPCI)
@@ -331,8 +335,8 @@ func TestRequestNamedPatients_NamesEveryOtherPatient(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("named %v, want %v", got, want)
 	}
-	if len(*omitted) != 0 {
-		t.Fatalf("nothing should be left out: %v", *omitted)
+	if !slices.Equal(*omitted, []string{involvedOmitUnknown, involvedOmitUnknown}) {
+		t.Fatalf("omitted %v, want ABSOLUTE and p-other, unknown", *omitted)
 	}
 }
 
@@ -402,7 +406,9 @@ func TestRequestNamedPatients_OwnVersionedReferenceNamesNoOne(t *testing.T) {
 			if len(*omitted) != 0 {
 				t.Fatalf("left out %v, want nothing", *omitted)
 			}
-			if sor.count() == 0 {
+			// On PAS submit and update the subject's own reference is the
+			// subject by the request's structure (Claim.patient), with no read.
+			if sor.count() == 0 && leg != "pas-claim" && leg != "pas-claim-update" {
 				t.Fatal("no system-of-record read: the row proves nothing")
 			}
 		})
@@ -419,7 +425,9 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		if got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", involvedRequest(), "pci:subject"); got != nil {
 			t.Fatalf("named %v, want none", got)
 		}
-		if want := []string{involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable}; !slices.Equal(*omitted, want) {
+		// Four: the subject's own name (Claim.patient) is the subject by the
+		// request's structure, with no read.
+		if want := []string{involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable, involvedOmitUnreadable}; !slices.Equal(*omitted, want) {
 			t.Fatalf("omitted %v, want %v", *omitted, want)
 		}
 	})
@@ -430,14 +438,16 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		 {"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/eFAM"},"subscriber":{"reference":"Patient/parent-x"}}},
 		 {"resource":{"resourceType":"Patient","id":"parent-x","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"eFAM"}],"birthDate":"1970-01-01","name":[{"family":"Parentname"}]}}
 		]}`)
-		// The party is named under its own identity, from its own record; the
-		// member whose number it carries cannot be identified and is left out.
+		// The member whose number the party carries cannot be identified,
+		// and the party itself, which the system does not hold, is not named
+		// on PAS under an identifier derived from its demographics: both are
+		// left out and counted, never named under another person's identity.
 		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", payload, heldPCI(t, "MBR-COVERED"))
-		if len(got) != 1 || got[0].pci != derivedPCI("parent-x", "1970-01-01", "Parentname") {
-			t.Fatalf("named %v, want only the party, under its own identity", got)
+		if got != nil {
+			t.Fatalf("named %v, want no one", got)
 		}
-		if !slices.Equal(*omitted, []string{involvedOmitUnknown}) {
-			t.Fatalf("omitted %v, want the member it cannot identify", *omitted)
+		if !slices.Equal(*omitted, []string{involvedOmitUnknown, involvedOmitUnknown}) {
+			t.Fatalf("omitted %v, want the member and the party, unknown", *omitted)
 		}
 	})
 	t.Run("a dependent's Coverage naming the parent", func(t *testing.T) {
@@ -447,9 +457,12 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		 {"resource":{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"},"subscriber":{"reference":"Patient/parent-x"}}},
 		 {"resource":{"resourceType":"Patient","id":"parent-x","birthDate":"1970-01-01","name":[{"family":"Parentname"}]}}
 		]}`)
+		// The subscriber element names no member; the parent's Patient, which
+		// the system does not hold, is not named on PAS under an identifier
+		// derived from its demographics: left out and counted.
 		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", payload, heldPCI(t, "MBR-COVERED"))
-		if len(got) != 1 || got[0].pci != derivedPCI("parent-x", "1970-01-01", "Parentname") || len(*omitted) != 0 {
-			t.Fatalf("named %v, omitted %v; want the parent named under its own identity", got, *omitted)
+		if got != nil || !slices.Equal(*omitted, []string{involvedOmitUnknown}) {
+			t.Fatalf("named %v, omitted %v; want no one, the parent counted unknown", got, *omitted)
 		}
 	})
 	t.Run("known members required", func(t *testing.T) {
@@ -474,15 +487,17 @@ func TestRequestNamedPatients_LeavesOutWhatCannotBeIdentified(t *testing.T) {
 		g, _, sor, omitted := involvedGateway(t, true)
 		var entries []string
 		for i := range maxInvolvedMembers + 3 {
-			entries = append(entries, fmt.Sprintf(`{"resource":{"resourceType":"Patient","id":"m%03d"}}`, i))
+			entries = append(entries, fmt.Sprintf(`{"resource":{"resourceType":"Patient","id":"m%03d","birthDate":"1970-01-01","name":[{"family":"Member"}]}}`, i))
 		}
 		payload := []byte(`{"resourceType":"Bundle","entry":[` + joinComma(entries) + `]}`)
-		got := g.requestNamedPatients(context.Background(), "pas-claim", "corr-1", payload, "pci:subject")
-		if len(got) != maxInvolvedMembers || sor.count() != maxInvolvedMembers {
-			t.Fatalf("named %d after %d reads, want %d each", len(got), sor.count(), maxInvolvedMembers)
+		// Only maxInvolvedMembers are read; the rest are overflow (and, not
+		// held, those read are unknown).
+		got := g.requestNamedPatients(context.Background(), "crd-order-select", "corr-1", payload, "pci:subject")
+		if len(got) != 0 || sor.count() != maxInvolvedMembers {
+			t.Fatalf("named %d after %d reads, want none after %d", len(got), sor.count(), maxInvolvedMembers)
 		}
-		if len(*omitted) != 3 || (*omitted)[0] != involvedOmitOverflow {
-			t.Fatalf("omitted %v, want three overflows", *omitted)
+		if len(*omitted) != maxInvolvedMembers+3 || !slices.Equal((*omitted)[:3], []string{involvedOmitOverflow, involvedOmitOverflow, involvedOmitOverflow}) {
+			t.Fatalf("omitted %v, want three overflows then %d unknown", *omitted, maxInvolvedMembers)
 		}
 	})
 }
@@ -800,7 +815,9 @@ func TestInvolvedForRequest_SlowSystemOfRecordStopsAtTheBudget(t *testing.T) {
 	g, authz, _, omitted := involvedGateway(t, true)
 	g.cfg.SoR = hangingSoR{prefetchSoR: newPrefetchSoR(), hang: "a-slow"}
 	g.cfg.InvolvedBudget = 50 * time.Millisecond
-	payload := []byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/a-slow"}}},{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/b-after"}}}]}`)
+	// The two members are other patients the request names (the operative
+	// Claim's patient is the subject by the request's structure, with no read).
+	payload := []byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim","patient":{"reference":"Patient/s-subject"}}},{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/a-slow"}}},{"resource":{"resourceType":"Observation","subject":{"reference":"Patient/b-after"}}}]}`)
 	start := time.Now()
 	got := g.involvedForRequest(context.Background(), httptest.NewRequest(http.MethodPost, "/", nil), "pas-claim", "provider-tpo", "pas-submit", "corr-1", "hash-1", payload, "pci:subject")
 	if elapsed := time.Since(start); elapsed > time.Second {

@@ -4,6 +4,136 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A prior-authorization inquiry your gateway builds carries a dependent's parent (v1.6.0)
+
+- **Behavior change (requester, `ORIGINATION_PROFILE`):** the inquiry the gateway builds to
+  continue a pended authorization (`POST /scenario/pa/inquire`, and a route's own `?wait`)
+  carries a dependent's parent as the submission does: a person the member's Coverage names as
+  its `subscriber` or `policyHolder` by a reference to a `Patient` record of its own. The gateway
+  reads that person's record from your system of record by the submission's rule, from the
+  Coverage it reads again for every inquiry, and the inquiry carries it as a `Patient` entry of
+  its own, your record's own bytes, the Coverage's party by shn-sdk's `CoverageEntryParties`
+  (shn-sdk v1.6.0's `PASInquiryRecords.CoverageParties`). Before, the inquiry carried the
+  Coverage alone, with a `subscriber` naming no entry of it, which a payer's gateway at `strict`
+  refused as `patient.mixed`.
+- **Refusals, on `POST /scenario/pa/inquire`, before the inquiry is sent:**
+  - a person the Coverage names whose record your system does not hold, or whose record cannot
+    ride the inquiry (shn-sdk's `ErrPASCoveragePartyNotCarried`, in its words): `422`, recorded
+    as `fidelity` at stage `build`;
+  - your system failing to answer the read, or answering with another record than the person's:
+    `503` or `502`, recorded as a backend failure.
+
+  On a route's own wait, either keeps the payer's pend and its continuation, as any inquiry that
+  cannot be made does: the inquiry is not sent, and the observer event `pa.inquiry-failed` names
+  why.
+- **Unchanged:** a member who is their own subscriber, or a Coverage naming its parent as a
+  contained `Patient`, is inquired about as before.
+- **Changed:** the gateway pins shn-sdk v1.6.0.
+
+## The integration guide covers the CDex documentation legs (v1.6.0)
+
+- **Documentation (`docs/INTEGRATION.md`, "Documentation for a prior authorization (CDex)"):**
+  the guide now says how a provider sends documentation to a payer (`$submit-attachment`, from
+  v1.1.0) and how a payer asks a provider for it (the CDex Task Attachment Request, from v1.5.0):
+  what each side sets, where a payer's system creates the Task, and what reaches a provider's
+  system, linking each to its section of `docs/CONFIGURATION.md`. The "Native Da Vinci ingress"
+  section's note that a signature inside a message travels untouched now names the re-keyed
+  documentation return address as the exception. Nothing a gateway does changes.
+
+## The stability promise and configuration guide name the release each statement applies to (v1.6.0)
+
+- **Documentation (`STABILITY.md`, `docs/CONFIGURATION.md`):** statements that named their
+  release relative to the reader, or named none, now name the release they apply to. Nothing a
+  gateway does changes.
+
+## A request your gateway builds names the member in a self-subscriber's Coverage slots (v1.6.0)
+
+- **Fix (requester, `ORIGINATION_PROFILE`):** when your system of record names the member's
+  `Patient` by its own record id rather than the member id, the requests the gateway builds name
+  the patient by the member id. That re-key now also covers a Coverage's `subscriber` and
+  `policyHolder` that name the member's own record, as well as its `beneficiary`. Before, such a
+  Coverage named the subscriber by your system's record id, a record the request did not carry:
+  - on the CRD request's prefetch `coverage`;
+  - on the questionnaire-package request's `coverage`;
+  - on the prior-authorization inquiry the gateway builds to continue a pend
+    (`POST /scenario/pa/inquire`, and a route's own `?wait`). With shn-sdk v1.6.0's inquiry
+    builder, such an inquiry would otherwise be refused as naming a person whose record was not
+    supplied.
+- **Unchanged:** the PAS submission and amendment, which already named the member in each slot;
+  a slot naming another person, such as a dependent's parent; and a system that names the
+  member's `Patient` by the member id.
+
+## Another patient a request names is recorded under an identity it binds to, or left out and counted (v1.6.0)
+
+- **Changed:** when the network reads the involved list, a patient a request names that your
+  system of record does not hold as a member is never recorded under an identifier derived from
+  its id alone: it is left out of the involved list (counted as `involvedOmitted`, reason
+  `unknown-member`). Before, it was recorded under such an identifier, which names no one the
+  network knows: a patient named by your system's record id, or by another server's, was
+  recorded under an identifier derived from that id. On coverage eligibility, a patient a
+  request carries as a Patient under that id or member identifier with a birth date and family
+  name of its own is still recorded under the identifier derived from them; on every other leg
+  it is left out and counted (below). A patient your system holds as a member is recorded under
+  its held identity, as before.
+- **Changed:** on PAS submit and update, the leg's own patient is decided by the request's
+  structure alone, from the operative (first) Claim, as the leg's own binding reads it: the name
+  its `patient` reference reads as, and, when that reference resolves to exactly one Patient
+  entry (by the entry's `fullUrl`, or a `Patient/<id>` reference to the entry's id), that
+  entry's `fullUrl`, id and member identifiers. None of these is recorded, or counted as left
+  out, as another patient, unless another Patient the request carries goes by it too. Every other patient a PAS request names is recorded
+  only under the identity your system of record holds for it, and is otherwise left out and
+  counted: on PAS a Patient carried with demographics but not held is no longer recorded under
+  an identifier derived from them.
+- **Changed:** on CRD, DTR and the PAS inquiry, another patient a request names is recorded only
+  under the identity your system of record holds for it (as on PAS submit and update, above), and
+  only when nothing the request carries ties that name to the leg's own patient: every other
+  patient is left out and counted (`unknown-member`), a Patient the request carries with a birth
+  date and family name of its own but not held included, so none is recorded under an identifier
+  derived from the request. A name is tied when some Patient the request carries, however it carries it
+  (contained, in a Bundle entry with or without an id of its own, or as a Coverage's party), goes
+  by it and by one of the leg's own patient's names, or by a name tied in turn: by its id, a
+  `fullUrl` naming its id, or an identifier's value in any system. The leg's own patient's names
+  are what the leg's binding reads it by: on CRD `context.patientId` (a `Patient/` prefix taken
+  off), whether or not another resource references it, and never recorded as another patient.
+  A name the request gives a patient that cannot be identified, or whose read fails, may be the
+  leg's own patient read another way, so names tied to it are left out too (for a failed read,
+  `system-of-record-unavailable`), and so are names tied to a member past the 32 members one
+  request's pass reads, which is never read (`overflow`). Each distinct Patient the request carries
+  under the leg's own patient's names beyond the first is counted too, never folded silently into
+  the leg's own patient. When the involved pass runs out of time before it has followed every
+  tie, no other patient is recorded for the request: each is counted (`budget`).
+- **Known omissions, accepted:** on those legs, another patient your system of record does not
+  hold, and a held one tied to the leg's own patient's names (its own member number on the leg's
+  own Patient, a second Patient under its name that agrees with the first, or a Coverage's party
+  that goes by the same name), are counted as left out. A single Patient the request carries under
+  the leg's own patient's name is the leg's own patient, as the leg's own binding reads it.
+- **Changed:** a Coverage's `subscriber` or `policyHolder` names no involved patient on any leg,
+  even when it names the person by a bare reference the request does not carry (a dependent's
+  parent, as a request your gateway builds sends it on CRD and DTR). A contained party, and on PAS
+  a party carried as an entry of its own, were already no member.
+- **Known omissions, accepted:** a recorded patient is never another person, so these are left
+  out and counted rather than risk a wrong name:
+  - on PAS, another patient carried with demographics that your system of record does not hold;
+  - on PAS, a name the leg's own patient goes by that another Patient the request carries goes
+    by too, `Claim.patient`'s own included;
+  - on PAS, the leg's own patient's entry names other than `Claim.patient`'s own, when
+    `Claim.patient` resolves to no entry or to several (for example, when it names the entry by
+    its member identifier rather than its id or `fullUrl`);
+  - on coverage eligibility, the leg's own patient named in a later request of a batch without
+    the Patient that request's binding reads.
+- The subject binding of every leg is unchanged: a member your system does not hold is bound as
+  before, from the member id and the Patient the request carries, unless `REQUIRE_KNOWN_MEMBERS`
+  is set.
+
+## The configuration docs say which gateways read REQUIRE_KNOWN_MEMBERS (v1.6.0)
+
+- **Documentation (`docs/CONFIGURATION.md`, "Members your system of record does not hold"):**
+  a provider's and a payer's gateway read `REQUIRE_KNOWN_MEMBERS` wherever they bind a patient a
+  request names, the federated query at a provider's ingress and the CDex attachment request
+  included. A facility's gateway answers only the federated query, and a PHG's only the
+  patient's questionnaire package; on that leg each refuses a patient its system of record does
+  not hold (`403`), at every level, whatever the setting. Nothing a gateway does changes.
+
 ## A provider's gateway carries the payer's attachment request to its own system (v1.5.0)
 
 - **Added (evolving):** from v1.5.0, `PROVIDER_CDEX_TASK_URL` names your system's own Task

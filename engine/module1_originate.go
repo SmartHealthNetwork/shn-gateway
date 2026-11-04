@@ -688,8 +688,13 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 
 	// realCov is the member's OWN open Coverage — the routing/identity SOURCE (FR-G40). Its parsed
 	// payer identity feeds the egress builders so the payload's payer derives from the patient's
-	// real Coverage, not a synthetic CMS literal. realCov stays a LOCAL (never an egress payload,
-	// never stored on crdDtrResult); the recipient is resolved from it inline at this site.
+	// real Coverage, not a synthetic CMS literal. It is the Coverage as the system holds it, before
+	// the member re-key (namePatientByMember re-keys recs.coverage, which the CRD and questionnaire
+	// requests carry): stored on crdDtrResult, it is the Coverage the PAS builds take (the
+	// questionnaire request reads only its payor from it, to choose the payer Organization
+	// it embeds), whose
+	// builder names the member in each slot that names the patient. The recipient is resolved from
+	// it inline at this site.
 	realCov, ok := g.originCoverage(ctx, w, member, true)
 	if !ok {
 		return crdDtrResult{}, false

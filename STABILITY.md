@@ -452,7 +452,7 @@ members the system of record does not hold on the CRD, DTR and PAS legs
 `observe` (the default when unset before v1.0.0), `structural` or `strict` (see
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
 
-**Behavior change in the next shn-gateway release: a Coverage's party may be a `Patient` entry
+**Behavior change in shn-gateway v1.4.0: a Coverage's party may be a `Patient` entry
 of its own.** A dependent's parent that a PAS request or answer carries as a `Patient` entry of
 its own that only a Coverage's `subscriber` or `policyHolder` names (by its exact `fullUrl`, or
 by a relative reference that resolves to it against the Coverage entry's base, never by id
@@ -1197,12 +1197,30 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   other patients it involves, each with its own token, so the network records
   the exchange under each of them as well as the leg's own patient:
   - on a request, every other member the request carries, identified through
-    your system of record as the leg's subject is (`request-named`). A Coverage's
-    party, a contained Patient or (from the next shn-gateway release) a
+    your system of record as the leg's subject is (`request-named`). From
+    shn-gateway v1.6.0, one your system does not hold as a member is
+    never recorded under an identifier derived from its id alone, and on every
+    leg but coverage eligibility it is left out and counted, a Patient carried
+    with demographics but not held included: every other patient is named only
+    under the identity your system holds for it. From shn-gateway v1.6.0, on
+    PAS submit and update the leg's own patient is decided by the request's
+    structure (the operative
+    Claim's `patient` and the one Patient entry it resolves to); on CRD, DTR
+    and the PAS inquiry a held patient is also left out and counted when a
+    Patient the request carries, however carried, ties its name to one of the
+    leg's own patient's names (on CRD `context.patientId`), to a name that
+    identifies no one or whose read fails, or to a name tied in turn, and each
+    distinct Patient under the leg's own patient's names beyond the first is
+    counted. A Coverage's
+    party, a contained Patient or (from shn-gateway v1.4.0) a
     `Patient` entry of its own that only a Coverage's `subscriber` or
-    `policyHolder` names, is no member, and neither is the slot naming it; but
-    from the next shn-gateway release a patient the party names is, wherever the
-    request is carried: gateways v0.61.0 to v1.2.0 left such a patient out, so
+    `policyHolder` names, is no member, and neither is the slot naming it (from
+    shn-gateway v1.6.0, also a slot naming the party by a bare
+    reference the request does not carry); but
+    from shn-gateway v1.3.0 a patient the party names is (for a party carried as a
+    `Patient` entry of its own, from v1.4.0), wherever the
+    request is carried: gateways v0.61.0 to v1.2.0 (to v1.3.0, for a party
+    carried as an entry of its own) left such a patient out, so
     the network had no record of the exchange under them (at `strict` the PAS
     legs refuse such a request first, under `patient.mixed`);
   - on a payer's answer, the payer's own binding of the member, when it differs
@@ -1216,7 +1234,8 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   time), so it cannot hold a leg past that.
 - A patient it cannot name is left out and the leg is sent as usual: past 16
   patients, a system-of-record read that fails, a member not held under
-  `REQUIRE_KNOWN_MEMBERS=true`, a token that is refused, cannot be obtained,
+  `REQUIRE_KNOWN_MEMBERS=true`, from shn-gateway v1.6.0 one it cannot
+  identify (above), a token that is refused, cannot be obtained,
   does not verify for this leg and patient (from v1.1.0), or does not carry the
   involvement asked for, or one not named before the 2 seconds run out. Each
   counts on the call's exchange record and access line (`involvedOmitted`, from

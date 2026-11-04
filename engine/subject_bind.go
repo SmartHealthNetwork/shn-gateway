@@ -47,14 +47,10 @@ func (g *Gateway) resolveSubjectBinding(ctx context.Context, member string, payl
 	return g.resolveBinding(ctx, member, payload, false)
 }
 
-// resolveInvolvedPCI is resolveSubjectPCI for another patient a request names by the id of
-// a Patient it carries (involved.go): that Patient is the record of the very person looked
-// up, so it is read as theirs though a Coverage names it as its party (ownRecord).
-func (g *Gateway) resolveInvolvedPCI(ctx context.Context, member string, payload []byte) (pci string, found bool, readErr error) {
-	pci, _, found, readErr = g.resolveBinding(ctx, member, payload, true)
-	return pci, found, readErr
-}
-
+// resolveBinding binds member as resolveSubjectBinding does. ownRecord reads a Patient the
+// request carries whose id is the member's as theirs though a Coverage names it as its party:
+// for another patient a request names by the id of a Patient it carries (identifyNamed,
+// involved.go), that Patient is the record of the very person looked up.
 func (g *Gateway) resolveBinding(ctx context.Context, member string, payload []byte, ownRecord bool) (pci string, held, found bool, readErr error) {
 	pci, _, found, readErr = ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
 	if readErr != nil || found || g.cfg.RequireKnownMembers {
@@ -142,7 +138,7 @@ func carriedPatientDemographics(payload []byte, member string) (Demo, bool) {
 }
 
 // carriedDemographics is carriedPatientDemographics, reading a Patient whose id is the
-// member's as theirs when ownRecord (resolveInvolvedPCI).
+// member's as theirs when ownRecord (identifyNamed).
 func carriedDemographics(payload []byte, member string, ownRecord bool) (Demo, bool) {
 	var demo Demo
 	var found, conflict bool

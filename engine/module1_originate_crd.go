@@ -618,8 +618,10 @@ var patientRefRE = regexp.MustCompile(`^Patient/([A-Za-z0-9\-.]{1,64})(?:/_histo
 //     sorID gets the id member (its links, which name other records, stay);
 //   - each relative Patient reference to sorID on another resource's binding
 //     path (patientBindingPaths: an order's subject, a Coverage's
-//     beneficiary, …) becomes "Patient/<member>", in contained resources too
-//     (a contained Patient's id is local to its container and stays).
+//     beneficiary, …), or on a Coverage's subscriber or policyHolder
+//     (rekeyCoverageSlots), becomes "Patient/<member>", in contained
+//     resources too (a contained Patient's id is local to its container and
+//     stays).
 //
 // Only those string values change; every other byte of the record is kept.
 // The result is checked independently of how it was made: outside the
@@ -651,6 +653,9 @@ func namePatientByMember(record []byte, sorID, member string) ([]byte, error) {
 		}
 		// A Patient is named by its id; its links name other records and stay.
 		paths := patientBindingPaths[rt]
+		if rt == "Coverage" {
+			paths = append(slices.Clone(paths), rekeyCoverageSlots...)
+		}
 		if rt == "Patient" {
 			paths = nil
 		}
@@ -710,6 +715,17 @@ func namePatientByMember(record []byte, sorID, member string) ([]byte, error) {
 	}
 	return out.Bytes(), nil
 }
+
+// rekeyCoverageSlots are the Coverage's other references to a person that
+// name the member when the member is their own subscriber or policyHolder.
+// They are not the Coverage's patient binding (patientBindingPaths, which
+// decides the compartment and must not change), but they name the same
+// record: renaming the beneficiary alone would leave the Coverage saying its
+// subscriber is someone other than the member, under the system's own record
+// id, a record the request does not carry: the PAS inquiry, which carries the
+// re-keyed Coverage as the participant's own bytes, would name a person beside
+// the member whose record was not supplied.
+var rekeyCoverageSlots = []string{"subscriber", "policyHolder"}
 
 // renameFaultHook, when set by a test, changes the renamed bytes before they
 // are checked, to prove the check catches it.

@@ -99,10 +99,18 @@ func failOriginReadErr(ctx context.Context, w http.ResponseWriter, err error) bo
 // a decision): a leg's or the network's
 // own failure as relayOriginationError answers it; a read of the
 // participant's system that failed to answer (a *SoRReadError, as the pend's
-// patient read) as the backend failure it is (failOriginRead); anything else
-// with its status. Each says which legs were carried.
+// patient read) as the backend failure it is (failOriginRead); a request this
+// gateway's PAS builder refused on the fidelity of its own build (an inquiry
+// whose Coverage names a person whose record cannot ride it,
+// isPASBuildFidelity) as that refusal, at the build stage; anything else with
+// its status. Each says which legs were carried.
 func (g *Gateway) answerFollowFailure(ctx context.Context, w http.ResponseWriter, status int, msg string, err error) {
 	if g.relayOriginationError(w, err) {
+		return
+	}
+	if isPASBuildFidelity(err) {
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
 		return
 	}
 	var readErr *SoRReadError

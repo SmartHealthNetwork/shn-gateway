@@ -468,6 +468,10 @@ func (g *Gateway) inquireContinuation(ctx context.Context, r *http.Request, cont
 	}
 	body, sealed, err := g.buildPASInquiry(route.BuildLine, cont, records, corr)
 	if err != nil {
+		// A person the Coverage names beside the member whose record cannot
+		// ride the inquiry is the fidelity of SHN's own build, the submission's
+		// own refusal: the inquire route answers it 422 at the build stage
+		// (answerFollowFailure, by isPASBuildFidelity on err). Nothing is sent.
 		return PASDecision{}, http.StatusBadGateway, "build the prior-authorization inquiry: " + err.Error(), err
 	}
 	adapted, _, recordWalk, aerr := g.egressWalk(route, body, ExchangeIdentity{CorrelationID: corr, LegType: "pas-claim-inquire", Counterpart: cont.PayerHolder})
@@ -606,7 +610,8 @@ func (g *Gateway) buildPASInquiry(line string, cont Continuation, records shnsdk
 }
 
 // inquiryRecordBody names the participant record an embed copied from. The set is
-// CLOSED: a builder that started copying a fifth input would be refused here
+// CLOSED: the four records, and each of the Coverage's parties by an index that
+// names one; a builder that started copying another input would be refused here
 // rather than sending an unverified span.
 func inquiryRecordBody(records shnsdk.PASInquiryRecords, input string) (relay.Body, bool) {
 	switch input {
@@ -619,11 +624,27 @@ func inquiryRecordBody(records shnsdk.PASInquiryRecords, input string) (relay.Bo
 	case "Insurer":
 		return relay.NewBody(records.Insurer, relay.OriginUpstreamResponse), true
 	}
+	// "CoverageParties[i]": the i-th of the records of the people the Coverage
+	// names beside the member, by an index that must name one of them.
+	if rest, ok := strings.CutPrefix(input, "CoverageParties["); ok {
+		digits, ok := strings.CutSuffix(rest, "]")
+		if !ok || digits == "" || (len(digits) > 1 && digits[0] == '0') || strings.Trim(digits, "0123456789") != "" {
+			return relay.Body{}, false
+		}
+		i, err := strconv.Atoi(digits)
+		if err != nil || i < 0 || i >= len(records.CoverageParties) {
+			return relay.Body{}, false
+		}
+		return relay.NewBody(records.CoverageParties[i], relay.OriginUpstreamResponse), true
+	}
 	return relay.Body{}, false
 }
 
-// inquiryRecords reads the four records an inquiry carries from the
-// PARTICIPANT'S OWN system of record, and runs the order-changed check on the way.
+// inquiryRecords reads the records an inquiry carries from the PARTICIPANT'S
+// OWN system of record: the patient, the coverage, the people the coverage
+// names beside the member (coveragePartyRecords, as the submission reads them),
+// the provider and the payer organization. It runs the order-changed check on
+// the way.
 //
 // Nothing here is minted. A record the participant's system cannot supply is a
 // refusal that NAMES the record, because an inquiry missing the patient, the
@@ -691,6 +712,19 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 			return out, http.StatusBadGateway, "name the patient in the coverage by the member id: " + err.Error(), nil
 		}
 	}
+
+	// The people the Coverage names beside the member (a dependent's parent),
+	// read by the submission's own rule from the Coverage as the submission
+	// read it, after the member's re-key: the inquiry carries what the
+	// submission carried about the same Coverage. The continuation keeps no
+	// record, so they are read again here. A person the system does not hold
+	// is not supplied, and the builder refuses the inquiry as the fidelity of
+	// SHN's own build; a read the system fails to answer is that failure.
+	parties, partyRefusal := g.coveragePartyRecords(ctx, out.Coverage)
+	if partyRefusal != nil {
+		return out, partyRefusal.status, "read the coverage's parties from the system of record: " + partyRefusal.msg, partyRefusal.readErr
+	}
+	out.CoverageParties = parties
 
 	// The provider and the payer organization are named BY the participant's own
 	// records — the order names its provider, the coverage names its payer — and

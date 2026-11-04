@@ -18,6 +18,7 @@ below, see [CONFIGURATION.md](CONFIGURATION.md).
 - [Provider-data origination](#provider-data-origination)
 - [Native Da Vinci ingress](#native-da-vinci-ingress)
   - [Calling the ingress from your EHR](#calling-the-ingress-from-your-ehr)
+- [Documentation for a prior authorization (CDex)](#documentation-for-a-prior-authorization-cdex)
 - [A non-FHIR backend (custom connector)](#a-non-fhir-backend-custom-connector)
 - [Payer decisioning](#payer-decisioning)
 - [Native-forward payer mode](#native-forward-payer-mode)
@@ -185,7 +186,8 @@ whatever the payer's own system answers for it (a payer's gateway carries it as 
 even one that maps its payer identity, from v0.60.0; earlier releases of that mapping
 refused it `400`). Send `prefetch.coverage`, with a payor that names the payer (its
 identifier, or a payor Organization carrying it in the same prefetch), when you want
-the payer to decide on the member's coverage. A signature inside a message travels untouched;
+the payer to decide on the member's coverage. A signature inside a message travels untouched, apart from
+the documentation return address re-keyed as [below](#documentation-for-a-prior-authorization-cdex);
 HTTP-level signatures are not carried, so sign inside the payload when you need an
 end-to-end signature. To have values added, the request's patient must be named by the
 network member id; see the member id limitation in
@@ -316,6 +318,51 @@ Token-endpoint errors are deliberately generic (`invalid_client`,
 `invalid_scope`, `unsupported_grant_type`, `invalid_request`) and never echo key
 or signature detail — check the assertion against the tables above rather than
 the response body.
+
+## Documentation for a prior authorization (CDex)
+
+Two legs carry documentation for a prior authorization, and a payer's request for it, between a
+provider and a payer, each as the CDex 2.1.0 IG's own message, and each in the evolving tier
+(see `STABILITY.md`). Each refusal, and the settings that change one, is in the sections of
+[CONFIGURATION.md](CONFIGURATION.md) linked below, and the size bounds on documentation are in
+[Documentation attachment size](CONFIGURATION.md#documentation-attachment-size-every-role).
+
+**A provider sends documentation** (from shn-gateway v1.1.0). Your EHR posts a CDex
+`$submit-attachment` to its gateway's Da Vinci ingress (`PROVIDER_DAVINCI_INGRESS=1`),
+`POST /$submit-attachment`, and it reaches the payer as your EHR sent it. The payer's gateway
+takes it with no setting and sends it to the payer's own `$submit-attachment` (see
+[Native-forward payer mode](#native-forward-payer-mode)). The payer's answer reaches your EHR
+exactly. When a payer the network lists as taking the submission pends a claim and asks for
+documentation, by default its Task's documentation return address (a `payer-url` given as a
+`valueUrl`) reaches your EHR re-keyed to your gateway's return path for that payer, so documentation sent there reaches that
+payer through the network. See
+[the provider's ingress in CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional).
+
+**A payer asks a provider for documentation** (from shn-gateway v1.5.0), by creating a CDex
+Task Attachment Request.
+
+- **On the payer's side,** set `PAYER_DAVINCI_INGRESS=1`, with the gateway's public base URL
+  (`PAYER_DAVINCI_INGRESS_BASE_URL`) and your system's registered clients
+  (`INGRESS_CLIENTS_FILE`). Your system gets a bearer from the gateway's own token endpoint
+  (SMART Backend Services, `system/Task.write`), lists the providers that take the request with
+  `GET /cdex/providers`, and creates the Task at a provider's base, `POST {base}/Task`. The base
+  names the provider, so the network routes the Task by the address alone. See
+  [the payer's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#ask-a-provider-for-documentation-the-payers-attachment-request-task-payer-optional).
+- **On the provider's side,** set `PROVIDER_CDEX_TASK_URL` to the endpoint your system takes the
+  Task at, with your gateway's Da Vinci ingress and its base URL (`PROVIDER_DAVINCI_INGRESS`,
+  `PROVIDER_DAVINCI_INGRESS_BASE_URL`), and the client your gateway authenticates to your system
+  as (`PROVIDER_CDEX_TOKEN_URL`, `PROVIDER_CDEX_CLIENT_ID`, `PROVIDER_CDEX_SCOPE`, and a key with
+  its algorithm or a secret). Until you set it, your gateway does not take the request, payers'
+  listings leave it out, and a payer's Task to it is refused by the network. A provider the
+  network's provisioning registers itself (a founding holder) cannot take it yet, whatever it
+  sets. The Task reaches
+  your system as the payer sent it, apart from its documentation return address: when the Task
+  names one `payer-url`, given as a `valueUrl`, and the network lists the payer as taking the
+  submission, that address is re-keyed to your gateway's return path for that payer, so documentation your system sends
+  there with `$submit-attachment` reaches that payer through the network. The forward says so in
+  an `X-SHN-Edited` header, and names the payer the network authenticated in an
+  `X-SHN-Requester` header. Your system's answer reaches the payer's system as it sent it. See
+  [the provider's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#take-a-payers-request-for-documentation-the-attachment-request-task-provider-optional).
 
 ## A non-FHIR backend (custom connector)
 

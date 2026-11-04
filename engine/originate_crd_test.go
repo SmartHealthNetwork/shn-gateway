@@ -241,6 +241,7 @@ func TestOriginatedCRD_UsesSoRPatientAndCoverage(t *testing.T) {
 				// The patient is named by the member id, and nothing else changes.
 				wantPatient = []byte(strings.Replace(string(patient), `"id" : "`+sorID+`"`, `"id" : "`+prefetchMember+`"`, 1))
 				wantCoverage = bytes.Replace(wantCoverage, []byte(`"beneficiary" : { "reference" : "Patient/`+sorID+`" }`), []byte(`"beneficiary" : { "reference" : "Patient/`+prefetchMember+`" }`), 1)
+				wantCoverage = bytes.Replace(wantCoverage, []byte(`"subscriber" : { "reference" : "Patient/`+sorID+`" }`), []byte(`"subscriber" : { "reference" : "Patient/`+prefetchMember+`" }`), 1)
 				wantOrder = bytes.Replace(wantOrder, []byte(`"reference" : "Patient/`+sorID+`"`), []byte(`"reference" : "Patient/`+prefetchMember+`"`), 1)
 				_ = coverage
 			}
@@ -257,9 +258,10 @@ func TestOriginatedCRD_UsesSoRPatientAndCoverage(t *testing.T) {
 				t.Errorf("patientId %q", sent.Context.PatientID)
 			}
 			if sorID != prefetchMember {
-				// A subscriber reference is not the Coverage's binding path: it stays as held.
-				if !bytes.Contains(sent.Prefetch["coverage"], []byte(`"subscriber" : { "reference" : "Patient/`+sorID+`" }`)) {
-					t.Errorf("subscriber changed: %s", sent.Prefetch["coverage"])
+				// The member is their own subscriber: the subscriber names the
+				// member as the beneficiary does, never the system's own id.
+				if !bytes.Contains(sent.Prefetch["coverage"], []byte(`"subscriber" : { "reference" : "Patient/`+prefetchMember+`" }`)) {
+					t.Errorf("the subscriber does not name the member: %s", sent.Prefetch["coverage"])
 				}
 				// History values are left out when the system names the patient differently.
 				for _, k := range []string{"serviceHistory", "deviceHistory", "medicationHistory", "questionnaireResponses"} {
@@ -508,7 +510,7 @@ func TestNamePatientByMember(t *testing.T) {
 	bs := string(rune(92))
 	record := []byte("{\"resourceType\":\"Bundle\",\"type\":\"searchset\",\"entry\":[\n" +
 		" {\"resource\":{\"resourceType\":\"Coverage\",\"id\":\"c\",\"beneficiary\":{\"reference\":\"https://sor.example/fhir/Patient/p-1/_history/2\",\"display\":\"x" + bs + "u00e9\"}," +
-		"\"subscriber\":{\"reference\":\"Patient/p-1\"},\"contained\":[{\"resourceType\":\"Patient\",\"id\":\"p-1\"},{\"resourceType\":\"Observation\",\"id\":\"co\",\"subject\":{\"reference\":\"Patient/p-1/_history/3\"},\"performer\":[{\"reference\":\"Patient/p-1\"}]}],\"payor\":[{\"reference\":\"Organization/o\"}],\"n\":1.50}},\n" +
+		"\"subscriber\":{\"reference\":\"Patient/p-1\"},\"policyHolder\":{\"reference\":\"Patient/p-2\"},\"contained\":[{\"resourceType\":\"Patient\",\"id\":\"p-1\"},{\"resourceType\":\"Observation\",\"id\":\"co\",\"subject\":{\"reference\":\"Patient/p-1/_history/3\"},\"performer\":[{\"reference\":\"Patient/p-1\"}]}],\"payor\":[{\"reference\":\"Organization/o\"}],\"n\":1.50}},\n" +
 		" {\"resource\":{\"resourceType\":\"ServiceRequest\",\"id\":\"s\",\"subject\":{\"reference\":\"Patient/p-1\"}}},\n" +
 		" {\"resource\":{\"resourceType\":\"Patient\",\"id\":\"p-1\",\"link\":[{\"other\":{\"reference\":\"Patient/p-1\"}}]}},\n" +
 		" {\"resource\":{\"resourceType\":\"Observation\",\"id\":\"o\",\"subject\":{\"reference\":\"Patient/p-10\"},\"performer\":[{\"reference\":\"Patient/p-1\"}]}}\n]}")
@@ -521,6 +523,9 @@ func TestNamePatientByMember(t *testing.T) {
 	// resource's binding reference is renamed, a contained Patient's local id
 	// is not.
 	want := bytes.Replace(record, []byte(`"subject":{"reference":"Patient/p-1/_history/3"}`), []byte(`"subject":{"reference":"Patient/MBR-1"}`), 1)
+	// The Coverage's subscriber naming the member's own record names the
+	// member; a policyHolder naming another person stays.
+	want = bytes.Replace(want, []byte(`"subscriber":{"reference":"Patient/p-1"}`), []byte(`"subscriber":{"reference":"Patient/MBR-1"}`), 1)
 	want = bytes.Replace(want, []byte(`{"resourceType":"ServiceRequest","id":"s","subject":{"reference":"Patient/p-1"}}`), []byte(`{"resourceType":"ServiceRequest","id":"s","subject":{"reference":"Patient/MBR-1"}}`), 1)
 	want = bytes.Replace(want, []byte(`{"resourceType":"Patient","id":"p-1","link"`), []byte(`{"resourceType":"Patient","id":"MBR-1","link"`), 1)
 	if !bytes.Contains(want, []byte(`"reference":"https://sor.example/fhir/Patient/p-1/_history/2"`)) || !bytes.Contains(want, []byte(`[{"resourceType":"Patient","id":"p-1"},`)) {
@@ -529,6 +534,25 @@ func TestNamePatientByMember(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
+	t.Run("a Coverage's slots naming the member's own record", func(t *testing.T) {
+		in := []byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/p-1"},` +
+			`"policyHolder":{"reference":"Patient/p-1/_history/4"},"subscriber":{"reference":"Organization/p-1"},` +
+			`"contained":[{"resourceType":"Coverage","id":"inner","beneficiary":{"reference":"Patient/p-1"},"subscriber":{"reference":"Patient/p-1"},"policyHolder":{"reference":"Patient/p-2"}}]}}]}`)
+		got, err := namePatientByMember(in, "p-1", "MBR-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A versioned policyHolder names the member, as a versioned
+		// beneficiary does; a slot naming an Organization stays; a contained
+		// Coverage's slots naming the member's record name the member, and one
+		// naming another person stays.
+		want := `{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Coverage","id":"c","beneficiary":{"reference":"Patient/MBR-1"},` +
+			`"policyHolder":{"reference":"Patient/MBR-1"},"subscriber":{"reference":"Organization/p-1"},` +
+			`"contained":[{"resourceType":"Coverage","id":"inner","beneficiary":{"reference":"Patient/MBR-1"},"subscriber":{"reference":"Patient/MBR-1"},"policyHolder":{"reference":"Patient/p-2"}}]}}]}`
+		if string(got) != want {
+			t.Fatalf("got\n%s\nwant\n%s", got, want)
+		}
+	})
 	if same, err := namePatientByMember(record, "MBR-1", "MBR-1"); err != nil || !bytes.Equal(same, record) {
 		t.Fatalf("same id changed the record: %v", err)
 	}
