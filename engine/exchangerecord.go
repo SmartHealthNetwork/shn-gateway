@@ -114,6 +114,20 @@ type ExchangeRecord struct {
 	// built failing its own verification. Each site that refuses on fidelity
 	// names its stage; empty for every other rule and outcome.
 	RefusalStage string
+	// RefusalReason is the reason a refusal this gateway made of its
+	// participant's call, before the request it refused reached the Hub, gave
+	// its participant (on a module's origination route, an earlier leg of the
+	// same call may have been sent): the gateway's own fixed refusal
+	// sentence, from the closed set refusalReasons, never a value read from
+	// the request, its body, a credential or a patient. Where the answer adds
+	// a detail read from the request (an identifier, a member name), the
+	// record keeps the sentence without it. A reason outside the set is
+	// recorded as ExchangeOther. Empty unless Outcome is ExchangeRefused and
+	// the refusing site named its reason (authentication and scope at an
+	// ingress, message integrity, authority read from the body, routing with
+	// no recipient, size). Not a metric dimension; a minor release may reword
+	// or add a sentence, so decide by Rule, never by this text.
+	RefusalReason string
 	// Status is the status the requester received: the HTTP status of an
 	// ingress answer; the application status inside an inbound answer's frame
 	// (the HTTP status to the Hub when the answer was not framed).
@@ -166,8 +180,10 @@ type ExchangeRecord struct {
 	// answered, with anything, or the connection failed after the request was
 	// written): a request refused before it was sent, or whose connection or
 	// bearer could not be obtained, names none, nor does one carried exactly.
-	// It also names the edits to the answer this gateway wrote (E-08):
-	// RequestEdits and AnswerEdits are the same ids by body. Metadata only
+	// A request this gateway built itself names first the edits made to a
+	// participant's record the build carries, before it was built (E-06; see
+	// Ownership). It also names the edits to the answer this gateway wrote
+	// (E-08): RequestEdits and AnswerEdits are the same ids by body. Metadata only
 	// (never a value an edit removed or wrote); not a metric dimension.
 	Edits []string
 	// Ownership is whose message the request this gateway sent on the leg is
@@ -177,7 +193,9 @@ type ExchangeRecord struct {
 	// with registered edits; authored, this gateway's own, from a registered
 	// builder (Builder), as a registered module ingress client's request is;
 	// edited with Builder set, this gateway's own carried to the peer's IG line
-	// by the registered transform (E-09 in Edits).
+	// by the registered transform (E-09 in Edits). Either may carry a
+	// participant's record a registered edit changed before the build (E-06):
+	// the message is still the builder's, and RequestEdits names the edit.
 	// Set once that request is sent, empty when none was. It says nothing of
 	// the answer, which AnswerOwnership describes: Edits may also name an edit
 	// to the answer (E-08). Content-free; Evolving until the Audit Plane
@@ -439,14 +457,18 @@ type exchangeRecorder struct {
 	// every other level.
 	tally *legTally
 	// outcome/party/rule are the settled outcome, set by decided;
-	// refusalStage is a settled fidelity refusal's stage.
+	// refusalStage is a settled fidelity refusal's stage; reason is a settled
+	// refusal's reason (refusedFor).
 	outcome, party, rule, refusalStage string
+	reason                             refusalReason
 	// appStatus is the status inside an inbound answer's frame.
 	appStatus int
 	// guardRule is the rule of a check that refused after the last decided
 	// outcome; it names the refusal when the answer written is non-2xx.
-	// guardStage is its stage when the rule is fidelity.
+	// guardStage is its stage when the rule is fidelity, and guardReason its
+	// reason when the site named one (refusingFor).
 	guardRule, guardStage string
+	guardReason           refusalReason
 	// self is the party this gateway is.
 	self string
 	// attested is set once a refusal has been attested to the Hub: the outcome
@@ -537,25 +559,34 @@ func (x *exchangeRecorder) responseHash(h string) {
 // decided settles the outcome. A refusal that names no rule takes the rule
 // (and the stage) of the check that refused since the last decided outcome.
 // by "" is this gateway.
-func (x *exchangeRecorder) decided(outcome, by, rule string) { x.settle(outcome, by, rule, "") }
+func (x *exchangeRecorder) decided(outcome, by, rule string, reason ...refusalReason) {
+	x.settle(outcome, by, rule, "", reason...)
+}
 
-// settle is decided with a fidelity refusal's stage.
-func (x *exchangeRecorder) settle(outcome, by, rule, stage string) {
+// settle is decided with a fidelity refusal's stage. A refusal that takes the
+// rule of the check that refused takes that check's reason too; any other
+// clears the reason (refusedFor names one).
+func (x *exchangeRecorder) settle(outcome, by, rule, stage string, named ...refusalReason) {
 	x.with(func() {
 		if x.attested {
 			return
 		}
+		var reason refusalReason
+		if len(named) == 1 {
+			reason = named[0]
+		}
 		if outcome == ExchangeRefused {
 			if rule == "" {
-				rule, stage = x.guardRule, x.guardStage
+				rule, stage, reason = x.guardRule, x.guardStage, x.guardReason
 			}
 			if by == "" {
 				by = x.self
 			}
 		} else {
-			by, rule, stage = "", "", ""
+			by, rule, stage, reason = "", "", "", ""
 		}
-		x.outcome, x.party, x.rule, x.refusalStage, x.guardRule, x.guardStage = outcome, by, rule, stage, "", ""
+		x.outcome, x.party, x.rule, x.refusalStage, x.reason = outcome, by, rule, stage, reason
+		x.guardRule, x.guardStage, x.guardReason = "", "", ""
 	})
 }
 
@@ -569,15 +600,25 @@ func (x *exchangeRecorder) answerLine(token string) {
 var ExchangeOwnerships = []string{relay.OwnershipRelayed.String(), relay.OwnershipEdited.String(), relay.OwnershipAuthored.String()}
 
 // sent records the message this gateway sent on the leg: whose it is, its
-// builder when it is the gateway's own, and the edits it carries.
+// builder when it is the gateway's own, and the edits it carries
+// (requestEdits).
 func (x *exchangeRecorder) sent(p relay.Payload) {
 	if own, builder, ok := ownedBy(p); ok {
+		edits := requestEdits(p)
 		x.with(func() {
 			x.rec.Ownership, x.rec.Builder = own, builder
-			x.rec.RequestEdits = addEdits(x.rec.RequestEdits, p.Edits())
-			x.rec.Edits = addEdits(x.rec.Edits, p.Edits())
+			x.rec.RequestEdits = addEdits(x.rec.RequestEdits, edits)
+			x.rec.Edits = addEdits(x.rec.Edits, edits)
 		})
 	}
+}
+
+// requestEdits are the registered edits a request this gateway sends
+// carries, in the order made: those made to a participant's record the
+// gateway's own build carries, before it was built (p.InputEdits: E-06), then
+// those made to the request itself (p.Edits).
+func requestEdits(p relay.Payload) []relay.EditID {
+	return append(p.InputEdits(), p.Edits()...)
 }
 
 // Why an edit was not made (ExchangeRecord.EditsNotMade).
@@ -620,11 +661,24 @@ const (
 	// known to take the documentation submission, so a return path (E-11) to
 	// it would always refuse.
 	EditNotMadeTaskPayerDoesNotTake = "E-11:payer-does-not-take"
+	// EditNotMadeAddressNotVerified: an adaptive address in the shape the
+	// re-key (E-12) writes, naming this payer, whose tag does not verify for
+	// the provider that sent it: not issued by this payer, or its base, line
+	// or key changed since. It is carried as sent (E-13).
+	EditNotMadeAddressNotVerified = "E-13:not-verified"
+	// EditNotMadeAddressUncleanRemainder: such an address whose remainder
+	// breaks the clean remainder rule, carried as sent (E-13).
+	EditNotMadeAddressUncleanRemainder = "E-13:unclean-remainder"
+	// EditNotMadeAddressUnreadableRequest: the request could not be read as
+	// JSON, so whether it carries an address to restore (E-13) is unknown, or
+	// an address found in it could not be rewritten.
+	EditNotMadeAddressUnreadableRequest = "E-13:unreadable-request"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
 var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
-	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake}
+	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake,
+	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).
@@ -691,9 +745,13 @@ func addEdits(list []string, ids []relay.EditID) []string {
 // coverage names no payer the network registers, and the 412 a CRD request is
 // answered when no coverage to route by could be obtained. Any other status is
 // left to the answer.
-func (x *exchangeRecorder) routed(status int) {
+func (x *exchangeRecorder) routed(status int) { x.routedFor(status, "") }
+
+// routedFor is routed for a routing answer whose fixed reason the resolver
+// that refused it named.
+func (x *exchangeRecorder) routedFor(status int, reason refusalReason) {
 	if status == http.StatusUnprocessableEntity || status == http.StatusPreconditionFailed {
-		x.refused(RefusalRouting)
+		x.refusedFor(RefusalRouting, reason)
 	}
 }
 
@@ -721,6 +779,12 @@ func (x *exchangeRecorder) ownFailure() { x.decided(ExchangeOther, "", "") }
 // settled by refusedFidelity, which names its stage.
 func (x *exchangeRecorder) refused(rule string) { x.decided(ExchangeRefused, "", rule) }
 
+// refusedFor settles a refusal by this gateway on rule, made before the request
+// reached the Hub, with the fixed reason its answer gives (refusalReasons).
+func (x *exchangeRecorder) refusedFor(rule string, reason refusalReason) {
+	x.decided(ExchangeRefused, "", rule, reason)
+}
+
 // refusedAttested settles a refusal this gateway has attested to the Hub: what
 // the wire said is final, so nothing that unwinds after it (a responder's
 // failure settling its own class) can make the record say otherwise.
@@ -732,9 +796,18 @@ func (x *exchangeRecorder) refusedAttested(by, rule string) {
 // refusing names the rule of a refusal about to be written, for the outcome
 // the refusal's answer settles. A fidelity refusal is named by
 // refusingFidelity, which names its stage.
-func (x *exchangeRecorder) refusing(rule string) {
-	x.with(func() { x.guardRule, x.guardStage = rule, "" })
+func (x *exchangeRecorder) refusing(rule string, reason ...refusalReason) {
+	var r refusalReason
+	if len(reason) == 1 {
+		r = reason[0]
+	}
+	x.with(func() { x.guardRule, x.guardStage, x.guardReason = rule, "", r })
 }
+
+// refusingFor names the rule and the fixed reason (refusalReasons) of a
+// refusal about to be written before the request reached the Hub, as refusing
+// names the rule alone.
+func (x *exchangeRecorder) refusingFor(rule string, reason refusalReason) { x.refusing(rule, reason) }
 
 // refusedFidelity settles a fidelity refusal by this gateway (the fidelity of
 // its own edits and builds) made at stage: recording.RefusalStageBuild or
@@ -748,7 +821,7 @@ func (x *exchangeRecorder) refusedFidelity(stage string) {
 // refusingFidelity names a fidelity refusal about to be written, made at
 // stage, as refusing names any other.
 func (x *exchangeRecorder) refusingFidelity(stage string) {
-	x.with(func() { x.guardRule, x.guardStage = RefusalFidelity, stage })
+	x.with(func() { x.guardRule, x.guardStage, x.guardReason = RefusalFidelity, stage, "" })
 }
 
 // frameRefusalRule names the rule behind a request-frame refusal: a line the
@@ -789,6 +862,7 @@ func (x *exchangeRecorder) checked(kind CheckKind, rule string, recorded, refuse
 		}
 		if refused {
 			x.guardRule, x.guardStage = refusalRuleFor(kind, rule)
+			x.guardReason = ""
 		}
 	})
 }
@@ -1574,6 +1648,7 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	hubOut, hubSince := x.hubOut, x.hubSince
 	outcome, by, rule, appStatus, guardRule := x.outcome, x.party, x.rule, x.appStatus, x.guardRule
 	stage, guardStage := x.refusalStage, x.guardStage
+	reason, guardReason := x.reason, x.guardReason
 	backendFailed := rec.Backend != nil && rec.Backend.ErrorClass != "" && rec.Backend.ErrorClass != BackendCancelled
 	backendCancelled := x.cut
 	x.mu.Unlock()
@@ -1615,20 +1690,20 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	ok := rec.Status/100 == 2
 	switch {
 	case panicked:
-		outcome, by, rule, stage = ExchangeOther, "", "", ""
+		outcome, by, rule, stage, reason = ExchangeOther, "", "", "", ""
 	case guardRule != "" && !ok:
 		// A check refused after the last settled outcome, and the answer
 		// says so.
-		outcome, by, rule, stage = ExchangeRefused, x.self, guardRule, guardStage
+		outcome, by, rule, stage, reason = ExchangeRefused, x.self, guardRule, guardStage, guardReason
 	case outcome == ExchangeAnswered && !ok:
 		// The leg was answered, and this gateway answered its caller with an
 		// error anyway: its own refusal, on a rule nothing named.
-		outcome, by, rule, stage = ExchangeRefused, x.self, ExchangeOther, ""
+		outcome, by, rule, stage, reason = ExchangeRefused, x.self, ExchangeOther, "", ""
 	case outcome != "":
 	case ok:
 		outcome = ExchangeAnswered
 	case rec.Status/100 == 4:
-		outcome, by, rule = ExchangeRefused, x.self, ExchangeOther
+		outcome, by, rule, reason = ExchangeRefused, x.self, ExchangeOther, ""
 	default:
 		outcome = ExchangeOther
 	}
@@ -1651,6 +1726,12 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 			// Only a fidelity refusal carries a stage; one whose site named
 			// none would be "other".
 			rec.RefusalStage = closed(vocab.RefusalStages, stage)
+		}
+		if reason != "" && rec.Direction == DirectionIngress && by == x.self {
+			// Only this gateway's own refusal of its participant's call,
+			// made before the request reached the Hub, carries its reason; a
+			// value outside the registered sentences is recorded as other.
+			rec.RefusalReason = closedReason(reason)
 		}
 	}
 	if rec.Backend != nil && rec.Backend.ErrorClass != "" {

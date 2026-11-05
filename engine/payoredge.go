@@ -187,11 +187,13 @@ func payorEdgeRefusal(own []shnsdk.PayerIdentifier, got shnsdk.PayerIdentifier, 
 // the payer-identity edit applied. A refusal is returned as a LegResult (Status set); a
 // gateway fault as an error. refusesInsurer decides a Claim insurer reference that does
 // not resolve (locatePayorEdge); nil refuses it, which is what a carrier with no Claim
-// passes.
-func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string, refusesInsurer func() bool) (relay.Payload, LegResult, error) {
+// passes. restore are the restore (E-13) operations for in (adaptiveRestore),
+// made in the same change as the mapping.
+func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string, refusesInsurer func() bool, restore []relay.Op) (relay.Payload, LegResult, error) {
 	var none relay.Payload
 	if n.payorEdgeOwn == nil {
-		return relay.Exact(in, contentType), LegResult{}, nil
+		p, err := restoredRequest(in, contentType, restore)
+		return p, LegResult{}, err
 	}
 	doc, err := relay.Doc(in)
 	if err != nil {
@@ -206,9 +208,14 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 		return none, LegResult{}, fmt.Errorf("engine: payor edge: %w", err)
 	}
 	if len(ops) == 0 {
-		return relay.Exact(in, contentType), LegResult{}, nil
+		p, err := restoredRequest(in, contentType, restore)
+		return p, LegResult{}, err
 	}
-	p, err := relay.Apply(in, contentType, relay.EditPayorEdgeRestamp, ops...)
+	changes := []relay.Change{{Edit: relay.EditPayorEdgeRestamp, Ops: ops}}
+	if len(restore) > 0 {
+		changes = append(changes, relay.Change{Edit: relay.EditDTRAdaptiveAddressRestore, Ops: restore})
+	}
+	p, err := relay.ApplyChanges(in, contentType, changes...)
 	var signed *relay.SignedContentError
 	if errors.As(err, &signed) {
 		return none, LegResult{Status: http.StatusUnprocessableEntity, Message: signed.Error()}, nil
@@ -217,4 +224,18 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 		return none, LegResult{}, fmt.Errorf("engine: payor edge: %w", err)
 	}
 	return p, LegResult{}, nil
+}
+
+// restoredRequest is in with the restore (E-13) operations applied, or in
+// exactly when there are none.
+func restoredRequest(in relay.Body, contentType string, restore []relay.Op) (relay.Payload, error) {
+	if len(restore) == 0 {
+		return relay.Exact(in, contentType), nil
+	}
+	p, err := relay.Apply(in, contentType, relay.EditDTRAdaptiveAddressRestore, restore...)
+	if err != nil {
+		var none relay.Payload
+		return none, fmt.Errorf("engine: adaptive address restore: %w", err)
+	}
+	return p, nil
 }

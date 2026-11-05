@@ -83,7 +83,10 @@ type AccessLine struct {
 	Findings        AccessFindings `json:"findings"`
 	// RelayEdits are the ids of the registered edits (E-01 …) the gateway
 	// applied to the bytes it sent on the leg, in transmit order, each once,
-	// named only once the bytes were sent (engine.ExchangeRecord.Edits). Ids only: never a value an edit
+	// named only once the bytes were sent (engine.ExchangeRecord.Edits). A
+	// request the gateway built names first an edit made to a record its
+	// build carries, before the build (E-06); the request is still the
+	// builder's own. Ids only: never a value an edit
 	// removed or wrote. Absent when the leg carried its message exactly.
 	RelayEdits []string `json:"relayEdits,omitempty"`
 	// Ownership is whose message the request the gateway sent on the leg was
@@ -160,11 +163,15 @@ type RelayEditsDetail struct {
 
 // AccessRefusal says who refused a call and on which network rule, and, for
 // a fidelity refusal, its stage (engine.ExchangeRecord.RefusalStage: build or
-// verify); absent for every other rule.
+// verify); absent for every other rule. Reason is the gateway's own fixed
+// refusal sentence for a refusal it made before the request reached the Hub
+// (engine.ExchangeRecord.RefusalReason), absent otherwise: never a value from
+// the request. Its wording may change in a minor release; decide by Rule.
 type AccessRefusal struct {
-	By    string `json:"by"`
-	Rule  string `json:"rule"`
-	Stage string `json:"stage,omitempty"`
+	By     string `json:"by"`
+	Rule   string `json:"rule"`
+	Stage  string `json:"stage,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // AccessBackend is the call to the participant's own system the answer came

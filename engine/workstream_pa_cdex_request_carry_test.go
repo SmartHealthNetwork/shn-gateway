@@ -14,6 +14,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/cdextask"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -125,6 +126,48 @@ func TestCDexRequest_CarriedToTheProvidersTaskEndpoint(t *testing.T) {
 	}
 }
 
+// The CDex 2.1.0 IG's own questionnaire-request Tasks (D128), at every level:
+// each reaches the provider's Task endpoint exactly as published but for its
+// one payer-url, re-keyed to this gateway's return path for the sending payer
+// (E-11) and disclosed. The questionnaire canonical, the signature-flag input
+// and everything else are carried as the payer wrote them.
+func TestCDexRequest_TheIGsQuestionnaireRequestsCarriedApartFromE11(t *testing.T) {
+	answer := []byte(`{"resourceType":"Task","id":"t-1","status":"requested","intent":"order"}`)
+	ret, err := cdexroute.ReturnBase(cdexIngressBase, "payer-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range cdexQuestionnaireTasks {
+		for _, level := range allLevels {
+			t.Run(f+"/"+level.String(), func(t *testing.T) {
+				sys := newProviderTaskSystem(t, http.StatusCreated, answer)
+				p := configuredProvider(t, level, sys)
+				sent := cdexFixture(t, f)
+				if n := bytes.Count(sent, []byte(example19PayerURL)); n != 1 {
+					t.Fatalf("fixture %s names its payer-url %d times, want once", f, n)
+				}
+				ans := p.send(t, sent)
+				if !ans.framed || ans.status != http.StatusCreated || !bytes.Equal(ans.body, answer) {
+					t.Fatalf("answer %d (framed %v) %s, want the provider's 201 as its system wrote it", ans.status, ans.framed, ans.body)
+				}
+				if sys.calls() != 1 {
+					t.Fatalf("the provider's Task endpoint was called %d times, want once", sys.calls())
+				}
+				got, h := sys.bodies[0], sys.header[0]
+				if back := bytes.Replace(got, []byte(`"`+ret+`"`), []byte(example19PayerURL), 1); !bytes.Equal(back, sent) {
+					t.Fatalf("the forwarded Task differs from the IG's beyond its payer-url:\n%s", got)
+				}
+				if v := h.Values(EditedHeader); len(v) != 1 || v[0] != "cdex-task-return-rekey" {
+					t.Errorf("%s = %q, want the re-key disclosed", EditedHeader, v)
+				}
+				if rec := p.got.only(t); rec.Outcome != ExchangeAnswered || rec.Exchange != legCDexRequest {
+					t.Fatalf("record %s %s, want the leg answered", rec.Outcome, rec.Exchange)
+				}
+			})
+		}
+	}
+}
+
 // The provider's own refusal of the Task reaches the payer as its system
 // wrote it, at every level: the network carries the answer, it never judges
 // it.
@@ -157,12 +200,15 @@ func TestCDexRequest_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 		"a repeated member": {func(t *testing.T) []byte {
 			return cdexRequestEdit(t, `"status" : "requested",`, `"status" : "requested", "status" : "requested",`)
 		}, http.StatusBadRequest, errCDexRequestTwoWays, RefusalIntegrity},
-		"not JSON":   {func(*testing.T) []byte { return []byte("not json") }, http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
-		"not a Task": {func(*testing.T) []byte { return []byte(`{"resourceType":"Parameters"}`) }, http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
-		"no code":    {func(t *testing.T) []byte { return cdexRequestEdit(t, `"code" : {`, `"codeX" : {`) }, http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
-		"another code": {func(t *testing.T) []byte {
-			return cdexRequestEdit(t, `"code" : "attachment-request-code"`, `"code" : "attachment-request-questionnaire"`)
-		}, http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"not JSON":                        {func(*testing.T) []byte { return []byte("not json") }, http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
+		"not a Task":                      {func(*testing.T) []byte { return []byte(`{"resourceType":"Parameters"}`) }, http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
+		"no code":                         {func(t *testing.T) []byte { return cdexRequestEdit(t, `"code" : {`, `"codeX" : {`) }, http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"a data request by query":         {cdexDataRequest(cdexTempCodes, "data-request-query"), http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"a data request by questionnaire": {cdexDataRequest(cdexTempCodes, "data-request-questionnaire"), http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"another PAS code":                {cdexDataRequest(cdextask.PASTempCodes, "data-request-code"), http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		// A taken code under another system is not that code.
+		"the code under another system":               {cdexDataRequest(cdexTempCodes, cdextask.CodeAttachmentRequest), http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"the questionnaire code under another system": {cdexDataRequest(cdexTempCodes, cdextask.CodeAttachmentRequestQuestionnaire), http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
 		"no member number": {func(t *testing.T) []byte {
 			return cdexRequestMutate(t, func(m map[string]any) { m["for"] = map[string]any{"display": "someone"} })
 		}, http.StatusUnprocessableEntity, errCDexRequestNoPatient, RefusalAuthority},

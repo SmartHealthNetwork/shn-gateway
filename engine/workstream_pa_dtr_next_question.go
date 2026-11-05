@@ -60,11 +60,21 @@ func parseNextQuestionResponse(body []byte) (qrJSON []byte, deliveredItems []jso
 // input, the SDC operation's own body: a bare QuestionnaireResponse, or a
 // Parameters with exactly one questionnaire-response parameter whose resource
 // is a QuestionnaireResponse. ok is false for any other body. The subject is
-// "" when the QuestionnaireResponse names none, which the bind refuses.
+// "" when the QuestionnaireResponse names none, or carries a subject with no
+// string reference (a logical identifier), which the bind refuses.
 func framedNextQuestionSubject(body []byte) (subject string, ok bool) {
+	subject, _, ok = framedNextQuestionSubjectNamed(body)
+	return subject, ok
+}
+
+// framedNextQuestionSubjectNamed is framedNextQuestionSubject, with named
+// true when the QuestionnaireResponse carries a subject at all: a subject
+// that is present but carries no string reference (a logical identifier)
+// is named and reads as "", which is not a Patient reference, not no subject.
+func framedNextQuestionSubjectNamed(body []byte) (subject string, named, ok bool) {
 	d, err := relay.Doc(relay.NewBody(body, relay.OriginPeerFrame))
 	if err != nil || d.Kind(d.Root()) != relay.KindObject {
-		return "", false
+		return "", false, false
 	}
 	qr := d.Root()
 	switch docText(d, qr, "resourceType") {
@@ -72,7 +82,7 @@ func framedNextQuestionSubject(body []byte) (subject string, ok bool) {
 	case "Parameters":
 		params, ok := d.Member(qr, "parameter")
 		if !ok || d.Kind(params) != relay.KindArray {
-			return "", false
+			return "", false, false
 		}
 		found := 0
 		for _, p := range d.Elems(params) {
@@ -85,13 +95,13 @@ func framedNextQuestionSubject(body []byte) (subject string, ok bool) {
 			}
 		}
 		if found != 1 || qr == d.Root() || docText(d, qr, "resourceType") != "QuestionnaireResponse" {
-			return "", false
+			return "", false, false
 		}
 	default:
-		return "", false
+		return "", false, false
 	}
 	if s, ok := d.Member(qr, "subject"); ok {
-		subject = docText(d, s, "reference")
+		subject, named = docText(d, s, "reference"), true
 	}
-	return subject, true
+	return subject, named, true
 }

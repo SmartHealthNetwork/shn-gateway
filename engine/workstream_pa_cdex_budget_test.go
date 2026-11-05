@@ -83,7 +83,9 @@ func TestCDexIngress_TheBudgetRefusesASubmissionThatDoesNotFit(t *testing.T) {
 				if env.lastRequestPayload() != nil {
 					t.Fatal("a refused submission was sent")
 				}
-				wantRefusal(t, got.only(t), http.StatusServiceUnavailable, RefusedByProviderGateway, RefusalRouting)
+				xr := got.only(t)
+				wantRefusal(t, xr, http.StatusServiceUnavailable, RefusedByProviderGateway, RefusalRouting)
+				wantReasonInAnswer(t, xr, rec.Body.String())
 			})
 		}
 	}

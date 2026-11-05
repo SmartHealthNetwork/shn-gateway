@@ -93,9 +93,7 @@ func TestStartCheckAcceptsOnlyANetworkThatAcceptsWhatItSends(t *testing.T) {
 		})
 	}
 	// An unreachable discovery refuses as unknown.
-	gone := httptest.NewServer(http.NotFoundHandler())
-	url := gone.URL
-	gone.Close()
+	url := downEndpoint(t)
 	if _, _, err := resolveDiscoveryWaiting(context.Background(), oneDiscoveryClient(&http.Client{Timeout: 5 * time.Second}), config{DiscoveryURL: url}); err == nil || !strings.Contains(err.Error(), unknown) {
 		t.Fatalf("unreachable: err %v, want a refusal naming %q", err, unknown)
 	}

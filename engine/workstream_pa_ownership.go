@@ -60,13 +60,13 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// A submission or update the gateway built is sent as built, or, built
 		// at this gateway's line and carried to the payer's through the
 		// registered transform (E-09), as the builder's message then that edit.
-		k("pas-claim", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated): {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASSubmit}},
+		k("pas-claim", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated): {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASSubmit}, InputEdits: paEvidenceInputEdits},
 		// An inquiry the requester's own workflow makes: the gateway asks a payer
 		// about an authorization it pended, on behalf of a participant whose
 		// system is not the one asking. The participant's own inquiry is carried,
 		// not authored, and has its own row above.
 		k("pas-claim-inquire", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated): {Allowed: paAuthored, Builders: []relay.BuilderID{relay.BuilderSDKPASInquiry}},
-		k("pas-claim-update", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):  {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASUpdate}},
+		k("pas-claim-update", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):  {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASUpdate}, InputEdits: paEvidenceInputEdits},
 
 		// Requester to its participant's system: the recipient's answer,
 		// exactly as it arrived, apart from one IG-line bridge.
@@ -97,25 +97,28 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
 		},
 		k("dtr-questionnaire-fetch", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
 		},
 		k("pas-claim", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
 		},
 		k("pas-claim-update", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
 		},
 		// An inquiry names an authorization; it is sent to the payer's own
 		// system exactly, or with only the payer identity mapped.
 		k("pas-claim-inquire", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
 		},
 		// A coverage-eligibility request goes to the payer's own system only when
 		// the payer declares its own eligibility endpoint, and then exactly.
 		k("coverage-eligibility", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 		// A CDex submission is sent to the payer's own $submit-attachment
-		// exactly.
-		k("cdex-attachment-submit", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		// exactly, or with the adaptive addresses this payer issued restored
+		// (E-13).
+		k("cdex-attachment-submit", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: []relay.EditID{relay.EditDTRAdaptiveAddressRestore},
+		},
 		// A payer's attachment-request Task goes to the provider's own Task
 		// endpoint exactly, or with its payer-url re-keyed (E-11).
 		k("cdex-attachment-request", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): paTaskRekeyed,
@@ -163,9 +166,18 @@ var (
 	// as built or carried to another IG line by the registered transform.
 	paAuthoredOrTransformed = []relay.Ownership{relay.OwnershipAuthored, relay.OwnershipEdited}
 	paTransform             = []relay.EditID{relay.EditRegisteredTransform}
+	// paEvidenceInputEdits: a PAS submission or update the gateway builds may
+	// carry a record from the participant's own system E-06 re-pointed
+	// (relay.InputEdited).
+	paEvidenceInputEdits = []relay.EditID{relay.EditEvidenceSubjectRekey}
 	// paPayerIdentityMapped is a request relayed exactly or with the payer
 	// identity mapped.
 	paPayerIdentityMapped = []relay.EditID{relay.EditPayorEdgeRestamp}
+	// paPayerIdentityMappedRestored is a request that can carry a
+	// questionnaire back to the payer: relayed exactly, with the payer
+	// identity mapped, or with the adaptive addresses this payer issued
+	// restored (E-13), or both.
+	paPayerIdentityMappedRestored = []relay.EditID{relay.EditPayorEdgeRestamp, relay.EditDTRAdaptiveAddressRestore}
 	// paPendRekeyed is a PAS answer relayed exactly or with a pend's
 	// payer-url re-keyed to the network return path.
 	paPendRekeyed = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},

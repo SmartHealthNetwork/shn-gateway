@@ -30,6 +30,10 @@ type workstream interface {
 	// name beside the leg (ExchangeRecord.Operation), or nil. The frame
 	// operations its legs declare come from its catalog.
 	ingressOperations() []string
+	// refusalReasons are the workstream's registered refusal reasons
+	// (refusalreason.go): the fixed sentences its ingress refusals before the
+	// request reaches the Hub record, or nil.
+	refusalReasons() []refusalReason
 	// canonicalContractVersion is the contract-version token the deployment's
 	// canonical validator (Config.Validator, FHIR_VALIDATE_URL) resolves for the
 	// workstream, or "" when the workstream names none.
@@ -138,12 +142,29 @@ type gatewayModule interface {
 	// from the same static table its routes are declared from, so the list is
 	// known at package init, before any gateway is built.
 	exchangeRoutes() []string
+	// refusalReasons are the module's registered refusal reasons
+	// (refusalreason.go), or nil.
+	refusalReasons() []refusalReason
 }
 
 // modules are the modules compiled into this build (zoneModules: on-behalf
 // building, none in the core-only profile). Only the lookups in this file
 // read it.
 var modules = zoneModules()
+
+// compiledRefusalReasons are the refusal reasons the compiled-in workstreams
+// and modules register (refusalreason.go's closedReason reads them beside the
+// core's).
+func compiledRefusalReasons() []refusalReason {
+	var out []refusalReason
+	for _, w := range workstreams {
+		out = append(out, w.refusalReasons()...)
+	}
+	for _, m := range modules {
+		out = append(out, m.refusalReasons()...)
+	}
+	return out
+}
 
 // catalogFor is the leg catalog of the compiled-in workstream whose content is
 // tagged workstreamType; ok is false when this build serves no such

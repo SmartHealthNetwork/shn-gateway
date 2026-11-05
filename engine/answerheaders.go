@@ -43,6 +43,11 @@ var AnswerHeaderNotCarriedValues = func() []string {
 	for _, name := range answerHeaderNames {
 		out = append(out, name+":"+AnswerHeaderValueNotCarriable, name+":"+AnswerHeaderOverFrameLimit, name+":"+AnswerHeaderOverAnswerLimit)
 	}
+	// The address headers a payer's gateway states on a DTR answer, framed
+	// for the requester's gateway alone, can be left out the same ways.
+	for _, name := range []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags} {
+		out = append(out, name+":"+AnswerHeaderValueNotCarriable, name+":"+AnswerHeaderOverFrameLimit, name+":"+AnswerHeaderOverAnswerLimit)
+	}
 	return out
 }()
 
@@ -73,6 +78,11 @@ func answerHeadersOf(resp *http.Response) (map[string]string, []string) {
 type statedAnswer struct {
 	status  int
 	headers map[string]string
+	// address are the address headers a DTR answer's frame states between
+	// the two gateways (operationBase, operationAddressTags): framed with the
+	// answer, read by the requester's gateway, and never written to a
+	// participant (about leaves them out).
+	address map[string]string
 }
 
 // builtAnswer is what an answer this gateway built states: 200 and no header.

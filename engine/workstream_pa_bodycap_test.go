@@ -141,7 +141,9 @@ func TestIngress_AnEnvelopeOverTheLimitIs413(t *testing.T) {
 			if env.substrate.authorizeHits != 0 {
 				t.Fatalf("the refused request was authorized (%d)", env.substrate.authorizeHits)
 			}
-			wantRefusal(t, got.only(t), http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalRouting)
+			xr := got.only(t)
+			wantRefusal(t, xr, http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalRouting)
+			wantReasonInAnswer(t, xr, rec.Body.String())
 		})
 	}
 }

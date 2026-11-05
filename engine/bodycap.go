@@ -64,12 +64,12 @@ func writeUnsupportedCoding(w http.ResponseWriter) {
 func readIngressBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	body, err := readCapped(r.Body, limit)
 	if isBodyTooLarge(err) {
-		exchangeOf(r.Context()).refusing(RefusalRouting)
+		exchangeOf(r.Context()).refusingFor(RefusalRouting, reasonRequestTooLarge)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": errRequestTooLarge})
 		return nil, false
 	}
 	if errors.Is(err, contentcoding.ErrUnsupported) {
-		exchangeOf(r.Context()).refusing(RefusalIntegrity)
+		exchangeOf(r.Context()).refusingFor(RefusalIntegrity, reasonUnsupportedCoding)
 		writeUnsupportedCoding(w)
 		return nil, false
 	}

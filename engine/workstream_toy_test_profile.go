@@ -52,6 +52,7 @@ func (toyProfileWorkstream) newNativeState(*nativeResponder) nativeState    { re
 func (toyProfileWorkstream) lineBridge() lineBridgeRows                     { return lineBridgeRows{} }
 func (toyProfileWorkstream) relayEdits() []relayEdit                        { return nil }
 func (toyProfileWorkstream) ingressOperations() []string                    { return nil }
+func (toyProfileWorkstream) refusalReasons() []refusalReason                { return nil }
 
 // forward: the toy has no native responder send; its recipient answers
 // through the Responder (answer).

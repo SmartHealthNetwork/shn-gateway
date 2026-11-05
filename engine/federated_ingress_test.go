@@ -184,6 +184,7 @@ func TestFederatedQueryIngress_UnroutableTaskIsRefused(t *testing.T) {
 					t.Fatalf("a refused query crossed the network (%d legs, %d authorizations)", env.routeHitCount(), env.substrate.authorizeHits)
 				}
 				wantRefusal(t, x, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+				wantReasonInAnswer(t, x, rec.Body.String())
 			})
 		}
 	}
@@ -238,6 +239,14 @@ func TestFederatedQueryIngress_RefusesWhatIsNoDataRequest(t *testing.T) {
 					t.Fatalf("a refused query was authorized (%d)", env.substrate.authorizeHits)
 				}
 				wantRefusal(t, x, http.StatusBadRequest, RefusedByProviderGateway, row.rule)
+				wantReasonInAnswer(t, x, rec.Body.String())
+				want := reasonFederatedQueryNoPatient
+				if row.rule == RefusalIntegrity {
+					want = reasonFederatedQueryTwoWays
+				}
+				if x.RefusalReason != string(want) {
+					t.Fatalf("reason %q, want %q", x.RefusalReason, want)
+				}
 			})
 		}
 	}

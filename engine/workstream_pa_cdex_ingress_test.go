@@ -303,6 +303,7 @@ func TestCDexIngress_OversizeSubmissionIsRefused413(t *testing.T) {
 			refusedBeforeTheNetwork(t, env, rec, http.StatusRequestEntityTooLarge, "request body too large")
 			x := got.only(t)
 			wantRefusal(t, x, http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalRouting)
+			wantReasonInAnswer(t, x, rec.Body.String())
 			if x.Exchange != legCDexSubmit {
 				t.Fatalf("refusal recorded as exchange %q, want %s", x.Exchange, legCDexSubmit)
 			}

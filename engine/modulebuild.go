@@ -26,6 +26,11 @@ type moduleBuild struct {
 	Builder     relay.BuilderID
 	ContentType string
 	Body        []byte
+	// InputEdits are the registered input edits made to a participant's
+	// record Body carries, before it was built (E-06, only when it changed a
+	// record): the request is sealed as the builder's own message carrying
+	// them (relay.InputEdited), so its records name them.
+	InputEdits []relay.EditID
 	// Contract, when set, is the contract whose line the request is checked at
 	// before it is sealed: the governed egress check of the participant's
 	// request, or, when module 2 walked it to the peer's line, module 2's
@@ -60,6 +65,16 @@ func (g *Gateway) egressBuild(ctx context.Context, route legRoute, x ExchangeIde
 	// carried by the registered transform (E-09), never under the builder
 	// alone, and only once the registered steps make the same bytes again.
 	payload := sealRequest(m.Builder, m.Body, m.ContentType)
+	if len(m.InputEdits) > 0 && payload.Ownership() == relay.OwnershipAuthored {
+		noted, err := relay.InputEdited(payload, m.InputEdits...)
+		if err != nil {
+			// An edit outside the closed input-edit set: SHN's own edit
+			// cannot be named, so nothing is sent.
+			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageVerify)
+			return builtRequest{}, http.StatusInternalServerError, "the gateway could not name its own edit to a record the request carries, so nothing was sent: " + err.Error(), nil
+		}
+		payload = noted
+	}
 	out, reports, err := g.egressAdapt(route, bytes.Clone(m.Body), x)
 	if err != nil {
 		return builtRequest{}, 0, "", err

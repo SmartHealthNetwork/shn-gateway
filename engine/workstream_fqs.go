@@ -87,6 +87,9 @@ var fqsIngressRoutes = map[string]ingressHandler{
 // ingressOperations: the federated query's ingress names no operation.
 func (fqsWorkstream) ingressOperations() []string { return nil }
 
+// refusalReasons: the FQS adapter's (workstream_fqs_refusalreason.go).
+func (fqsWorkstream) refusalReasons() []refusalReason { return fqsRefusalReasons() }
+
 // canonicalContractVersion and contractVersions: the federated query is
 // version-neutral, so the workstream names no contract line.
 func (fqsWorkstream) canonicalContractVersion() string { return "" }

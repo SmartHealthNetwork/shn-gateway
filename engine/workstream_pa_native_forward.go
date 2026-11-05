@@ -295,26 +295,61 @@ func publishedOperationURL(base, path string) string {
 	return strings.TrimRight(beforeQuery, "/") + path + rest
 }
 
+// dtrBaseAt is the base this payer's DTR operations are delivered under at
+// line, as resolvedURL resolves it, with its ending slashes dropped: the
+// payer's published DTR base for pa.dtr@line when there is evidence for it,
+// the configured DTR base otherwise. A base with a query or a fragment is never
+// stated as an address base, so ok is false for it.
+func (n *nativeResponder) dtrBaseAt(line string) (string, bool) {
+	base := n.dtrBase()
+	n.evMu.RLock()
+	u, ok := n.endpointEvidence["pa.dtr@"+line]
+	n.evMu.RUnlock()
+	if ok {
+		base = u
+	}
+	if strings.ContainsAny(base, "?#") {
+		return "", false
+	}
+	base = strings.TrimRight(base, "/")
+	return base, base != ""
+}
+
 // forwardDTROperation sends a framed DTR operation's own input to the payer's
 // system at path and relays the answer exactly. When carrier is set, the
 // payer identity of every coverage in the input is mapped (when the mapping
 // is configured) and nothing else changes.
 func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract string, in relay.Body, path string, carrier payorEdgeCarrier, leg, label string) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	request := relay.Exact(in, fhirJSON)
+	restore := n.adaptiveRestore(ctx, in)
+	var request relay.Payload
 	if carrier != 0 {
-		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON, nil)
+		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON, nil, restore)
 		if err != nil || lr.Status != 0 {
 			return lr, err
 		}
 		request = mapped
+	} else {
+		restored, err := restoredRequest(in, fhirJSON, restore)
+		if err != nil {
+			return LegResult{}, err
+		}
+		request = restored
 	}
-	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerDTR)), n.resolvedURL(ctx, contract, n.dtrBase(), path), "", request, leg, label)
+	target := n.resolvedURL(ctx, contract, n.dtrBase(), path)
+	if d, ok := verifiedRoundAddress(ctx); ok {
+		// A round called at an address this payer issued, its tag verified
+		// (verifyRoundSubpath): delivered at that address, whatever line the
+		// frame's contract token names.
+		target = d.url(path)
+	}
+	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerDTR)), target, "", request, leg, label)
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}
 	if bad.Status != 0 {
 		return bad, nil // upstream non-2xx → relayable LegResult (Response carries the body)
 	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers,
+		AddressHeaders: n.addressHeaders(ctx, in, up.body)}, nil
 }

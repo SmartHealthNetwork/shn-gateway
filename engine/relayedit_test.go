@@ -55,8 +55,9 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			[]string{"$.parameter"}, "array-append"},
 		{"E-05", "dtr-patient-obtain", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.parameter"}, "array-append"},
-		{"E-06", "evidence-subject-rekey", []string{"pas-claim-update"}, relay.RoleRequester, relay.DirectionRequest,
-			[]string{"DiagnosticReport.subject.reference"}, "replace-value"},
+		{"E-06", "evidence-subject-rekey", []string{"pas-claim", "pas-claim-update"}, relay.RoleRequester, relay.DirectionRequest,
+			[]string{"DiagnosticReport.subject.reference", "Condition.subject.reference", "Observation.subject.reference",
+				"ClinicalImpression.subject.reference", "Goal.subject.reference"}, "replace-value"},
 		{"E-07", "cds-callback-coverage-carry", crd, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.prefetch", "$.prefetch.coverage"}, "insert-member"},
 		{"E-08", "dtr-answer-line-names", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionResponse,
@@ -67,6 +68,14 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			[]string{"Task.input[i].valueUrl (the input whose type is PASTempCodes#payer-url)"}, "replace-value"},
 		{"E-11", "cdex-task-return-rekey", []string{"cdex-attachment-request"}, relay.RoleRecipient, relay.DirectionRequest,
 			[]string{"Task.input[i].valueUrl (the one input whose type is PASTempCodes#payer-url)"}, "replace-value"},
+		{"E-12", "dtr-adaptive-address-rekey", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionResponse,
+			[]string{"Questionnaire.extension[i].valueUrl (the extension whose url is sdc-questionnaire-questionnaireAdaptive), " +
+				"or its valueBoolean true, on any Questionnaire in the answer"}, "replace-value"},
+		{"E-13", "dtr-adaptive-address-restore",
+			[]string{"dtr-questionnaire-fetch", "cdex-attachment-submit", "pas-claim", "pas-claim-update", "pas-claim-inquire"},
+			relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"Questionnaire.extension[i].valueUrl (the extension whose url is sdc-questionnaire-questionnaireAdaptive), " +
+				"or its valueBoolean true written back, on any Questionnaire the request carries"}, "replace-value"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))

@@ -165,10 +165,19 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 	if err != nil {
 		return out, http.StatusInternalServerError, "PAS supplier linkage failed", err
 	}
-	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+	var evidenceEdits []relay.EditID
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), in.sorID, member)
 	if err != nil {
 		// Answered as failEvidenceLinkage answers it: a read the system failed
 		// to answer with its own status and reason, anything else 502.
+		if status, why, ok := signedEvidenceRefusal(err); ok {
+			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+			return out, status, why, err
+		}
+		if evidencePrepareFailed(err) {
+			exchangeOf(ctx).ownFailure()
+			return out, http.StatusInternalServerError, err.Error(), err
+		}
 		status, msg := http.StatusBadGateway, "PAS evidence linkage failed"
 		var readErr *SoRReadError
 		if errors.As(err, &readErr) {
@@ -189,7 +198,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 	sent, failed := g.sendLeg(ctx, r, legSend{
 		Workstream: workstreamPA, Leg: "pas-claim", Recipient: recipient, PCI: pci, Corr: out.corr, Route: &route,
 		Build: &moduleBuild{
-			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, Contract: "pa.pas",
+			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, InputEdits: evidenceEdits, Contract: "pa.pas",
 			Check: func(line string, body []byte) (int, string) {
 				return g.validatePASAttachments(ctx, body, line, source != nil)
 			},

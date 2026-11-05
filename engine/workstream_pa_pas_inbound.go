@@ -516,6 +516,9 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 		return "", status, msg
 	}
 	if !found {
+		// Only a participant that requires known members gets here: a check
+		// it opted into, recorded as conformance.
+		exchangeOf(ctx).refusing(RefusalConformance)
 		return "", http.StatusBadRequest, "unknown member"
 	}
 	return pci, 0, ""

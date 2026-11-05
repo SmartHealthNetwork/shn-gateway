@@ -22,7 +22,8 @@ import (
 // primitives:
 //   - a body that reads two ways (message integrity);
 //   - a Task outside the leg's scope: not a Task, or a Task.code other than
-//     PASTempCodes#attachment-request-code (the leg's authority);
+//     PASTempCodes#attachment-request-code or #attachment-request-questionnaire
+//     (the leg's authority; cdexRequestCodeTaken);
 //   - a Task it cannot route: a base that names no registered provider
 //     (routing);
 //   - a Task it cannot bind to a patient: one that names no member number
@@ -31,13 +32,17 @@ import (
 // The provider's answer is relayed exactly, its headers as on the other
 // carried legs. No Location is added: the base's Task read is a later leg's.
 //
-// The gateway mounts no plain Task endpoint: a Task names its provider only in
-// Task.owner, by an identifier (an NPI) the network holds for no registered
-// provider, so a payer's system creates the Task at the provider's base.
+// A Task created at a provider's base goes to that provider whatever its
+// Task.owner names; an owner naming an organization the network attests for
+// another provider is recorded (CDexOwnerDiffersEvent) and carried.
 
 // RouteCDexRequestBase is the attachment-request ingress route at a provider's
 // base on this gateway, as exchange records name it.
 const RouteCDexRequestBase = "cdex-request-base"
+
+// RouteCDexRequest is the attachment-request ingress route at this gateway's
+// plain Task endpoint, routed by Task.owner, as exchange records name it.
+const RouteCDexRequest = "cdex-request"
 
 // CDexProvidersPath is the payer gateway's listing of the providers a Task can
 // be created for, each with its base.
@@ -48,19 +53,62 @@ const CDexProvidersPath = "/cdex/providers"
 // workstream_pa_cdex_task.go's.
 const errCDexRequestNoProvider = "this base names no registered provider: " + CDexProvidersPath + " lists the providers' bases"
 
+// The plain Task endpoint's routing refusals: the Task's owner names no one
+// provider the network can route it to. Each names the primitive and where
+// the Task can be created instead.
+const (
+	cdexOwnerElsewhere              = ": create the Task at its provider's base (" + CDexProvidersPath + " lists them)"
+	errCDexRequestOwnerUnreadable   = "the network cannot route this Task (routing): its owner cannot be read" + cdexOwnerElsewhere
+	errCDexRequestOwnerNoProvider   = "the network cannot route this Task (routing): its owner names no organization NPI the network attests for a registered provider" + cdexOwnerElsewhere
+	errCDexRequestOwnerTwoProviders = "the network cannot route this Task (routing): its owner names organizations the network attests for different providers" + cdexOwnerElsewhere
+)
+
 // handleCDexRequestIngress is the payer-facing Task create at a provider's
 // base (POST /cdex/provider/{provider}/Task): it is routed to the provider the
 // base names, carried as sent, and the provider's answer comes back exactly as
 // the provider wrote it.
 func (g *Gateway) handleCDexRequestIngress(w http.ResponseWriter, r *http.Request) {
-	w, scope := g.withScope(w, relay.RoleRequester)
-	w = &fhirOperationWriter{w}
-	if g.ingressScopeRefused(w, r, TaskWriteScope) {
+	w, ok := g.admitCDexRequest(w, r)
+	if !ok {
 		return
 	}
-	leg := legCDexRequest
 	// Every refusal from here is recorded as this leg's.
-	exchangeOf(r.Context()).leg(leg)
+	exchangeOf(r.Context()).leg(legCDexRequest)
+	g.serveCDexRequest(w, r, func(task cdextask.Task) (string, int, string, refusalReason) { return g.cdexRequestRecipient(r) })
+}
+
+// handleCDexRequestByOwner is the payer-facing Task create at the plain Task
+// endpoint (POST /Task): routed to the one registered provider the
+// organization NPIs its Task.owner states are attested for, then carried and
+// answered as at a provider's base.
+func (g *Gateway) handleCDexRequestByOwner(w http.ResponseWriter, r *http.Request) {
+	w, ok := g.admitCDexRequest(w, r)
+	if !ok {
+		return
+	}
+	// Every refusal from here is recorded as this leg's.
+	exchangeOf(r.Context()).leg(legCDexRequest)
+	g.serveCDexRequest(w, r, g.cdexRequestOwnerRecipient)
+}
+
+// admitCDexRequest checks the payer system's bearer for a Task route, on the
+// writer scoped to the requester it returns: a refusal (401, or 403 for
+// another scope) is written, before the Task is read and before the exchange
+// is the leg's. ok is false when it refused.
+func (g *Gateway) admitCDexRequest(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
+	w, _ = g.withScope(w, relay.RoleRequester)
+	w = &fhirOperationWriter{w}
+	return w, !g.ingressScopeRefused(w, r, TaskWriteScope)
+}
+
+// serveCDexRequest serves the payer's Task, routed to the provider recipientOf
+// names for it. An owner naming another provider than the recipient is
+// recorded (noteCDexOwner); at the plain Task endpoint, where the owner names
+// the recipient, it never is.
+func (g *Gateway) serveCDexRequest(w http.ResponseWriter, r *http.Request, recipientOf func(cdextask.Task) (string, int, string, refusalReason)) {
+	// The scope admitCDexRequest put on the writer.
+	w, scope := g.withScope(w, relay.RoleRequester)
+	leg := legCDexRequest
 	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
 	if !ok {
 		return
@@ -73,27 +121,27 @@ func (g *Gateway) handleCDexRequestIngress(w http.ResponseWriter, r *http.Reques
 	task, err := cdextask.Read(relay.NewBody(body, relay.OriginIngressRequest))
 	switch {
 	case readsTwoWays(err):
-		exchangeOf(r.Context()).refusing(RefusalIntegrity)
+		exchangeOf(r.Context()).refusingFor(RefusalIntegrity, reasonCDexRequestTwoWays)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errCDexRequestTwoWays})
 		return
 	case err != nil:
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonCDexRequestNotTask)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": errCDexRequestNotTask})
 		return
-	case !task.Code.Has(cdextask.PASTempCodes, cdextask.CodeAttachmentRequest):
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+	case !cdexRequestCodeTaken(task):
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonCDexRequestCode)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": errCDexRequestCode})
 		return
 	}
-	recipient, status, msg := g.cdexRequestRecipient(r)
+	recipient, status, msg, reason := recipientOf(task)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	member, ok := cdexTaskMember(task)
 	if !ok {
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonCDexRequestNoPatient)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": errCDexRequestNoPatient})
 		return
 	}
@@ -114,7 +162,7 @@ func (g *Gateway) handleCDexRequestIngress(w http.ResponseWriter, r *http.Reques
 		// and no Patient of the member's own: it identifies no one patient,
 		// refused as any Task the network cannot bind (422, as the other bind
 		// failures here).
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonPatientUnidentifiable)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgPatientUnidentifiable})
 		return
 	}
@@ -137,6 +185,7 @@ func (g *Gateway) handleCDexRequestIngress(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	g.noteCDexOwner(task, recipient, child)
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
 	var stated statedAnswer
 	var answerType string
@@ -170,21 +219,52 @@ func (g *Gateway) handleCDexRequestIngress(w http.ResponseWriter, r *http.Reques
 
 // cdexRequestRecipient is the provider a Task is routed to: the one its base
 // names, which must be a registered provider. A Task it cannot route is
-// refused (routing): there is no default provider, and Task.owner names its
-// provider only by an identifier the network holds for no registered
-// provider, so it is never read to guess one.
-func (g *Gateway) cdexRequestRecipient(r *http.Request) (string, int, string) {
+// refused (routing): there is no default provider, and the base's provider is
+// the recipient whatever Task.owner names (noteCDexOwner records a
+// difference). A provider that does not take the leg is refused by the Hub,
+// which records the refusal on the network's audit chain.
+func (g *Gateway) cdexRequestRecipient(r *http.Request) (string, int, string, refusalReason) {
 	path := r.PathValue("provider")
 	if e, ok := g.cfg.Reg.Lookup(path); path == "" || !ok || e.Role != "provider" {
-		return "", http.StatusUnprocessableEntity, errCDexRequestNoProvider
+		return "", http.StatusUnprocessableEntity, errCDexRequestNoProvider, reasonCDexRequestNoProvider
 	}
-	return path, 0, ""
+	return path, 0, "", ""
 }
 
-// cdexProvider is one entry of the payer gateway's provider listing.
+// cdexRequestOwnerRecipient is the provider a Task at the plain Task endpoint
+// is routed to: the one registered provider the network attests for the
+// organization NPIs its Task.owner states (ownerOrganizationNPIs). Every
+// routable identifier counts, and an identifier that matches no one is passed
+// over when another matches. An owner that cannot be read, one whose
+// identifiers match no provider, and one whose identifiers match different
+// providers (an identifier attested for two among them) are refused on
+// routing, never picked. A provider that does not take the attachment request
+// is refused by the Hub, which records it on the network's audit chain, as at
+// its base.
+func (g *Gateway) cdexRequestOwnerRecipient(task cdextask.Task) (string, int, string, refusalReason) {
+	ids, readable := ownerOrganizationNPIs(task.Owner)
+	if !readable {
+		return "", http.StatusUnprocessableEntity, errCDexRequestOwnerUnreadable, reasonCDexRequestOwnerUnreadable
+	}
+	providers := g.providersAttestedFor(ids)
+	switch len(providers) {
+	case 0:
+		return "", http.StatusUnprocessableEntity, errCDexRequestOwnerNoProvider, reasonCDexRequestOwnerNoProvider
+	case 1:
+	default:
+		return "", http.StatusUnprocessableEntity, errCDexRequestOwnerTwoProviders, reasonCDexRequestOwnerTwoProviders
+	}
+	return providers[0], 0, "", ""
+}
+
+// cdexProvider is one entry of the payer gateway's provider listing: the
+// provider, the base a Task for it is created at, and the organization
+// identifiers the network attests for it (omitted when none), the public
+// feed's own.
 type cdexProvider struct {
-	Participant string `json:"participant"`
-	Base        string `json:"base"`
+	Participant string                      `json:"participant"`
+	Base        string                      `json:"base"`
+	Identifiers []shnsdk.ProviderIdentifier `json:"identifiers,omitempty"`
 }
 
 // cdexProviders lists every registered provider that declares it takes the
@@ -204,7 +284,7 @@ func (g *Gateway) cdexProviders() ([]cdexProvider, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, cdexProvider{Participant: id, Base: base})
+		out = append(out, cdexProvider{Participant: id, Base: base, Identifiers: e.ProviderIDs})
 	}
 	return out, nil
 }

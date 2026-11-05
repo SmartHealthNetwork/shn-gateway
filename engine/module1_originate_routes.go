@@ -114,6 +114,9 @@ func originationExchangeRoute(pattern string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "-")
 }
 
+// refusalReasons: module 1's (module1_refusalreason.go).
+func (moduleOne) refusalReasons() []refusalReason { return moduleOneRefusalReasons() }
+
 // exchangeRoutes are the routes module 1 originates exchanges from: every
 // originating route of its table, by its exchange route name.
 func (moduleOne) exchangeRoutes() []string {

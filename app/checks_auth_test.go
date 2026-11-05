@@ -120,9 +120,7 @@ func TestCheckTargets_PartnerMetadataCredentialFailures(t *testing.T) {
 	// A token obtained and a base that is down: the base is unreachable, not
 	// the credential rejected.
 	_, tok, mints = authedPartner(t, http.StatusOK, "c1", "s1")
-	gone := httptest.NewServer(http.NotFoundHandler())
-	goneURL := gone.URL + "/fhir"
-	gone.Close()
+	goneURL := downEndpoint(t) + "/fhir"
 	cfg = config{PayerDavinciBaseURL: goneURL, PayerDavinciTokenURL: tok, PayerDavinciClientID: "c1", PayerDavinciClientSecret: "s1"}
 	got = runTarget(t, cfg, "PAYER_DAVINCI_BASE_URL")
 	if got.OK || got.Failure == nil || got.Failure.Code != checks.FailUnreachable || strings.HasPrefix(got.Detail, "credential check failed") {
@@ -138,9 +136,7 @@ func TestCheckTargets_PartnerMetadataCredentialFailures(t *testing.T) {
 // failure: nothing of the token endpoint (its URL, its query, its body) reaches
 // the result.
 func TestCheckTargets_PartnerMetadataTokenErrorsRedacted(t *testing.T) {
-	down := httptest.NewServer(http.NotFoundHandler())
-	downURL := down.URL + "/token?tenant=SECRETQ"
-	down.Close()
+	downURL := downEndpoint(t) + "/token?tenant=SECRETQ"
 	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("<html>SECRETBODY</html>"))
 	}))

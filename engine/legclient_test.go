@@ -110,7 +110,7 @@ func TestModuleOneReachesItsLegsOnlyThroughTheLegClient(t *testing.T) {
 		"workstream_pa_inquire.go:handlePASInquireIngress":              1,
 		"workstream_pa_cdex.go:handleCDexSubmitIngress":                 1,
 		// A payer's own ingress: its system's attachment-request Task.
-		"workstream_pa_cdex_request_ingress.go:handleCDexRequestIngress": 1,
+		"workstream_pa_cdex_request_ingress.go:serveCDexRequest": 1,
 	}
 	if fmt.Sprint(callers) != fmt.Sprint(want) {
 		t.Errorf("OriginateLeg is called by %v, want %v: a module 1 site sends through sendLeg", callers, want)

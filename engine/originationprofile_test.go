@@ -268,9 +268,9 @@ var providerOtherRoutes = []string{
 // otherRoleRoutes are the routes of the roles that originate nothing.
 var otherRoleRoutes = map[string][]string{
 	// A payer's own Da Vinci ingress takes its system's attachment-request
-	// Tasks at each provider's base, and lists the bases, behind its own token
-	// endpoint.
-	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "GET /cdex/providers",
+	// Tasks at each provider's base and at its plain Task endpoint, and lists
+	// the bases, behind its own token endpoint.
+	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
 		"POST /oauth/token", "GET /.well-known/smart-configuration"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},

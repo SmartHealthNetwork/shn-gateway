@@ -39,8 +39,17 @@ const maxEligibilityBatch = maxInvolved + 1
 // eligibilityBatchTooLarge is the refusal of an input submitting n requests,
 // more than maxEligibilityBatch.
 func eligibilityBatchTooLarge(n int) string {
-	return fmt.Sprintf("the batch carries %d coverage eligibility requests; a gateway reads at most %d in one batch, so send them in batches of at most %d", n, maxEligibilityBatch, maxEligibilityBatch)
+	return "the batch carries " + strconv.Itoa(n) + " " + msgEligibilityBatchLimit
 }
+
+// msgEligibilityBatchLimit is eligibilityBatchTooLarge's refusal after the
+// count the request carries. eligibilityBatchBoundText is maxEligibilityBatch
+// (TestEligibilityBatch_BoundTextIsTheBound).
+const (
+	eligibilityBatchBoundText = "17"
+	msgEligibilityBatchLimit  = "coverage eligibility requests; a gateway reads at most " + eligibilityBatchBoundText +
+		" in one batch, so send them in batches of at most " + eligibilityBatchBoundText
+)
 
 // eligibilitySubmission is one request an operation input submits: its exact
 // bytes, the entries of the Bundle that carries it with the resources it
@@ -168,9 +177,23 @@ func eligibilityNamedInAnotherCase(err error) (string, bool) {
 	case errors.Is(err, errNamedInAnotherCase):
 		return "eligibility request names its type or patient only in another case" + noPatient, true
 	case errors.Is(err, errReplacedCharacter):
-		return "eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind", true
+		return errEligibilityReplacedCharacter, true
 	}
 	return "", false
+}
+
+// errEligibilityReplacedCharacter is the refusal of an eligibility request
+// whose patient is named by a value carrying a replaced character.
+const errEligibilityReplacedCharacter = "eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind"
+
+// eligibilityAnotherCaseReason is the recorded reason of the refusal
+// eligibilityNamedInAnotherCase answers err with, without the member names it
+// quotes.
+func eligibilityAnotherCaseReason(err error) refusalReason {
+	if errors.Is(err, errReplacedCharacter) {
+		return reasonEligibilityReplacedValue
+	}
+	return reasonEligibilityAnotherCase
 }
 
 // eligibilityBundleEntries is a Bundle's entries read by their exact member
@@ -485,30 +508,30 @@ type eligibilityIdentifier struct {
 // batch naming more than one payer, and a payer the network does not
 // register; a failed read of the system of record is that system's failure.
 // The requests are read, never changed.
-func (g *Gateway) eligibilityRecipient(ctx context.Context, subs []eligibilitySubmission, members []string) (string, int, string) {
+func (g *Gateway) eligibilityRecipient(ctx context.Context, subs []eligibilitySubmission, members []string) (string, int, string, refusalReason) {
 	if g.cfg.PayerRouter == nil {
-		return "", http.StatusUnprocessableEntity, "no payer router configured"
+		return "", http.StatusUnprocessableEntity, "no payer router configured", reasonNoPayerRouter
 	}
 	var pid shnsdk.PayerIdentifier
 	for i, sub := range subs {
-		p, status, msg := eligibilityRequestPayer(sub, g.eligibilitySoRRead(ctx, members[i]))
+		p, status, msg, reason := eligibilityRequestPayer(sub, g.eligibilitySoRRead(ctx, members[i]))
 		if status != 0 {
 			if len(subs) > 1 {
 				msg = "request " + strconv.Itoa(i) + " of the batch: " + msg
 			}
-			return "", status, msg
+			return "", status, msg, reason
 		}
 		if i > 0 && p != pid {
 			return "", http.StatusUnprocessableEntity, fmt.Sprintf("%s (request 0 names %s|%s, request %d names %s|%s)",
-				eligibilityBatchTwoPayers, pid.System, pid.Value, i, p.System, p.Value)
+				eligibilityBatchTwoPayers, pid.System, pid.Value, i, p.System, p.Value), reasonEligibilityTwoPayers
 		}
 		pid = p
 	}
 	holder, found := g.cfg.PayerRouter.Resolve(pid)
 	if !found {
-		return "", http.StatusUnprocessableEntity, "no registered payer for identifier " + pid.System + "|" + pid.Value
+		return "", http.StatusUnprocessableEntity, "no registered payer for identifier " + pid.System + "|" + pid.Value, reasonUnregisteredPayer
 	}
-	return holder, 0, ""
+	return holder, 0, "", ""
 }
 
 // eligibilityScope is where a reference written in one resource resolves: a
@@ -731,7 +754,7 @@ func (s eligibilityScope) payer(ref *eligibilityReference) (pid shnsdk.PayerIden
 // a reader taking member names exactly reads it. A payer named only by a
 // reference nothing resolves is refused naming that reference and what
 // resolves it.
-func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) (shnsdk.PayerIdentifier, int, string) {
+func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) (shnsdk.PayerIdentifier, int, string, refusalReason) {
 	var none shnsdk.PayerIdentifier
 	// resourceType is in the view so that a request naming it in another
 	// case, which a FHIR reader sees no type on, does not read one way only.
@@ -744,12 +767,12 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 		} `json:"insurance"`
 	}
 	if err := decodeMessage(sub.request, &req); err != nil {
-		return none, http.StatusBadRequest, "parse eligibility request failed"
+		return none, http.StatusBadRequest, "parse eligibility request failed", ""
 	}
 	scope := newEligibilityScope(req.Contained, sub.entries, sor)
 	pid, insurerUnresolved, status, msg := scope.payer(req.Insurer)
 	if status != 0 || pid != none {
-		return pid, status, msg
+		return pid, status, msg, eligibilityReadReason(status)
 	}
 	// Every coverage the request names must name a payer, and all of them
 	// the same one: a coverage naming none is not passed over for another.
@@ -761,10 +784,10 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 		at := "insurance[" + strconv.Itoa(i) + "].coverage " + quotedBounded(ins.Coverage.Reference)
 		cov, unresolved, status, msg := scope.resolve(ins.Coverage.Reference, "Coverage")
 		if status != 0 {
-			return none, status, msg
+			return none, status, msg, eligibilityReadReason(status)
 		}
 		if remedy, ok := eligibilityRemedy(ins.Coverage.Reference, "Coverage", eligibilityRemedyInsurer); unresolved && ok {
-			return none, http.StatusUnprocessableEntity, eligibilityCoverageUnresolved + "; " + remedy + ": " + at
+			return none, http.StatusUnprocessableEntity, eligibilityCoverageUnresolved + "; " + remedy + ": " + at, reasonEligibilityNoPayer
 		}
 		var c struct {
 			Payor []*eligibilityReference `json:"payor"`
@@ -794,35 +817,46 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 				covScope = newEligibilityScope(own.Contained, entries, sor)
 			}
 			if pid, payorUnresolved, status, msg = covScope.payer(c.Payor[0]); status != 0 {
-				return none, status, msg
+				return none, status, msg, eligibilityReadReason(status)
 			}
 		}
 		switch {
 		case pid == none && payorUnresolved:
 			remedy, ok := eligibilityRemedy(c.Payor[0].Reference, "Organization", eligibilityRemedyPayor)
 			if !ok {
-				return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at
+				return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
 			}
 			if held {
 				// Nothing the request carries resolves a payor of a
 				// Coverage read from the system of record.
 				remedy = eligibilityRemedyHeldCoverage
 			}
-			return none, http.StatusUnprocessableEntity, eligibilityPayorUnresolved + "; " + remedy + ": " + at + ", payor " + quotedBounded(c.Payor[0].Reference)
+			return none, http.StatusUnprocessableEntity, eligibilityPayorUnresolved + "; " + remedy + ": " + at + ", payor " + quotedBounded(c.Payor[0].Reference), reasonEligibilityNoPayer
 		case pid == none:
-			return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at
+			return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
 		case found != none && pid != found:
-			return none, http.StatusUnprocessableEntity, eligibilityTwoPayers
+			return none, http.StatusUnprocessableEntity, eligibilityTwoPayers, reasonEligibilityRequestTwoPayers
 		}
 		found = pid
 	}
 	if found == none {
 		if remedy, ok := eligibilityRemedy(req.Insurer.Reference, "Organization", eligibilityRemedyInsurer); insurerUnresolved && ok {
-			return none, http.StatusUnprocessableEntity, eligibilityInsurerUnresolved + "; " + remedy + ": insurer " + quotedBounded(req.Insurer.Reference)
+			return none, http.StatusUnprocessableEntity, eligibilityInsurerUnresolved + "; " + remedy + ": insurer " + quotedBounded(req.Insurer.Reference), reasonEligibilityNoPayer
 		}
-		return none, http.StatusUnprocessableEntity, eligibilityNoPayer
+		return none, http.StatusUnprocessableEntity, eligibilityNoPayer, reasonEligibilityNoPayer
 	}
-	return found, 0, ""
+	return found, 0, "", ""
+}
+
+// eligibilityReadReason is the recorded reason of a refusal an eligibility
+// scope's read answers with: its only 422 is a reference that more than one
+// resource the request carries answers (eligibilityScope.resolve); any other
+// status is the system of record's, not a refusal.
+func eligibilityReadReason(status int) refusalReason {
+	if status == http.StatusUnprocessableEntity {
+		return reasonEligibilityAmbiguousRef
+	}
+	return ""
 }
 
 // eligibilityAnswerResponse is one CoverageEligibilityResponse an answer

@@ -15,8 +15,9 @@ import (
 // The fixtures are the CDex 2.1.0 IG's own examples of the
 // cdex-task-attachment-request profile, byte for byte
 // (https://hl7.org/fhir/us/davinci-cdex/STU2.1/Task-cdex-task-example19.json,
-// an attachment request by code, and Task-cdex-task-example22.json, one by
-// questionnaire).
+// an attachment request by code; Task-cdex-task-example22.json,
+// Task-cdex-task-inline-example22.json and Task-cdex-task-example23.json,
+// requests by questionnaire).
 func fixture(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", name))
@@ -104,24 +105,35 @@ func TestRead_TheIGExample(t *testing.T) {
 	}
 }
 
-// The IG's attachment request by questionnaire reads its own code and the
-// same fields.
-func TestRead_TheIGQuestionnaireExample(t *testing.T) {
-	task := read(t, fixture(t, "cdex-task-example22.json"))
-	if !task.Code.Has(PASTempCodes, CodeAttachmentRequestQuestionnaire) || task.Code.Has(PASTempCodes, CodeAttachmentRequest) {
-		t.Errorf("code %+v", task.Code)
-	}
-	if task.Patient.State != Present || !task.Patient.Contained || len(task.Patient.Identifiers) == 0 {
-		t.Errorf("patient %+v", task.Patient)
-	}
-	if task.Owner.State != Present || task.Owner.Organization.State != Present || task.Owner.Practitioner.State != Present {
-		t.Errorf("owner %+v", task.Owner)
-	}
-	if task.Requester.State != Present || task.Requester.Identifier.State != Present {
-		t.Errorf("requester %+v", task.Requester)
-	}
-	if task.PayerURL != (PayerURL{State: Present, Value: example19URL, Index: 1, Form: "valueUrl"}) {
-		t.Errorf("payer-url %+v", task.PayerURL)
+// The IG's attachment requests by questionnaire read their own code and the
+// same fields: example 22 (the in-progress Task the DTR app reads), inline
+// example 22 (the Task the IG's questionnaire page has the payer POST) and
+// example 23 (an adaptive questionnaire, with a signature-flag input before
+// its payer-url), each as published.
+func TestRead_TheIGQuestionnaireExamples(t *testing.T) {
+	for f, payerURLIndex := range map[string]int{
+		"cdex-task-example22.json":        1,
+		"cdex-task-inline-example22.json": 1,
+		"cdex-task-example23.json":        2,
+	} {
+		t.Run(f, func(t *testing.T) {
+			task := read(t, fixture(t, f))
+			if !task.Code.Has(PASTempCodes, CodeAttachmentRequestQuestionnaire) || task.Code.Has(PASTempCodes, CodeAttachmentRequest) {
+				t.Errorf("code %+v", task.Code)
+			}
+			if task.Patient.State != Present || !task.Patient.Contained || len(task.Patient.Identifiers) == 0 {
+				t.Errorf("patient %+v", task.Patient)
+			}
+			if task.Owner.State != Present || task.Owner.Organization.State != Present || task.Owner.Practitioner.State != Present {
+				t.Errorf("owner %+v", task.Owner)
+			}
+			if task.Requester.State != Present || task.Requester.Identifier.State != Present {
+				t.Errorf("requester %+v", task.Requester)
+			}
+			if task.PayerURL != (PayerURL{State: Present, Value: example19URL, Index: payerURLIndex, Form: "valueUrl"}) {
+				t.Errorf("payer-url %+v", task.PayerURL)
+			}
+		})
 	}
 }
 
@@ -339,6 +351,22 @@ func TestRead_Owner(t *testing.T) {
 		"two roles share its id": {func(m map[string]any) {
 			m["contained"] = append(m["contained"].([]any), map[string]any{"resourceType": "PractitionerRole", "id": "practitionerrole"})
 		}, Owner{State: Present, Reference: "#practitionerrole", Organization: unreadable, Practitioner: unreadable}},
+		// The role's organization can name a contained Organization, read as
+		// one the owner names is.
+		"an organization naming a contained Organization": {roleOrganization(map[string]any{"reference": "#org2"}, orgIdentifiers),
+			Owner{State: Present, Reference: "#practitionerrole", Practitioner: practNPI,
+				ContainedOrganization: ContainedOrganization{State: Present, Identifiers: []Identifier{orgNPI.Identifier}}}},
+		"an organization naming a contained Organization and an identifier": {roleOrganization(map[string]any{"reference": "#org2",
+			"identifier": map[string]any{"system": npi, "value": "1234567893"}}, orgIdentifiers),
+			Owner{State: Present, Reference: "#practitionerrole", Organization: orgNPI, Practitioner: practNPI,
+				ContainedOrganization: ContainedOrganization{State: Present, Identifiers: []Identifier{orgNPI.Identifier}}}},
+		"an organization naming a contained Organization with an unreadable identifier": {roleOrganization(map[string]any{"reference": "#org2"},
+			[]any{map[string]any{"system": npi}}),
+			Owner{State: Present, Reference: "#practitionerrole", Practitioner: practNPI, ContainedOrganization: ContainedOrganization{State: Unreadable}}},
+		"an organization naming no contained resource": {roleOrganization(map[string]any{"reference": "#nobody"}, orgIdentifiers),
+			Owner{State: Present, Reference: "#practitionerrole", Practitioner: practNPI, ContainedOrganization: ContainedOrganization{State: Unreadable}}},
+		"an organization naming a contained resource of another type": {roleOrganization(map[string]any{"reference": "#patient"}, orgIdentifiers),
+			Owner{State: Present, Reference: "#practitionerrole", Practitioner: practNPI, ContainedOrganization: ContainedOrganization{State: Unreadable}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := read(t, mutate(t, row.edit)).Owner
@@ -346,6 +374,19 @@ func TestRead_Owner(t *testing.T) {
 				t.Fatalf("owner %+v\nwant %+v", got, row.want)
 			}
 		})
+	}
+}
+
+// orgIdentifiers are a contained Organization's identifiers: the IG
+// example's organization NPI.
+var orgIdentifiers = []any{map[string]any{"system": npi, "value": "1234567893"}}
+
+// roleOrganization sets the contained PractitionerRole's organization to ref,
+// and contains an Organization "org2" with identifiers.
+func roleOrganization(ref map[string]any, identifiers []any) func(map[string]any) {
+	return func(m map[string]any) {
+		contained(m, "practitionerrole")["organization"] = ref
+		m["contained"] = append(m["contained"].([]any), map[string]any{"resourceType": "Organization", "id": "org2", "identifier": identifiers})
 	}
 }
 
@@ -488,6 +529,11 @@ func TestRead_ReadsTwoWaysWhateverItsSiblings(t *testing.T) {
 		"a bad contained resource before one naming ID": func(m map[string]any) {
 			m["contained"] = append([]any{nil, map[string]any{"resourceType": 1}}, append(m["contained"].([]any), map[string]any{"resourceType": "Organization", "ID": "o"})...)
 		},
+		"a bad owner organization identifier before one naming Value": func(m map[string]any) {
+			m["contained"] = append(m["contained"].([]any), map[string]any{"resourceType": "Organization", "id": "org",
+				"identifier": []any{map[string]any{"system": "urn:x"}, map[string]any{"system": "urn:x", "Value": "O"}}})
+			m["owner"] = map[string]any{"reference": "#org"}
+		},
 		"a bad patient identifier before one naming Value": func(m map[string]any) {
 			contained(m, "patient")["identifier"] = []any{map[string]any{"system": "urn:x"}, map[string]any{"system": "urn:x", "Value": "M"}}
 		},
@@ -505,4 +551,54 @@ func TestRead_ReadsTwoWaysWhateverItsSiblings(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A Task.owner naming a contained Organization reads that Organization's
+// identifiers, in order, and no PractitionerRole's. Every identifier must
+// read, or the whole is Unreadable: one unreadable identifier is never
+// dropped to leave the rest.
+func TestRead_OwnerAContainedOrganization(t *testing.T) {
+	withOrg := func(org map[string]any) func(map[string]any) {
+		return func(m map[string]any) {
+			org["resourceType"], org["id"] = "Organization", "org"
+			m["contained"] = append(m["contained"].([]any), org)
+			m["owner"] = map[string]any{"reference": "#org"}
+		}
+	}
+	other := Identifier{System: "urn:oid:2.16.840.1.113883.4.4", Value: "123456789"}
+	for name, row := range map[string]struct {
+		edit func(map[string]any)
+		want ContainedOrganization
+	}{
+		"its NPI and another identifier": {withOrg(map[string]any{"identifier": []any{
+			map[string]any{"system": npi, "value": "1234567893"}, map[string]any{"system": other.System, "value": other.Value},
+		}}), ContainedOrganization{State: Present, Identifiers: []Identifier{orgNPI.Identifier, other}}},
+		"no identifier": {withOrg(map[string]any{}), ContainedOrganization{State: Present}},
+		"an identifier without a value": {withOrg(map[string]any{"identifier": []any{
+			map[string]any{"system": npi, "value": "1234567893"}, map[string]any{"system": npi},
+		}}), ContainedOrganization{State: Unreadable}},
+		"identifiers not given as a list": {withOrg(map[string]any{"identifier": map[string]any{"system": npi, "value": "1234567893"}}),
+			ContainedOrganization{State: Unreadable}},
+		"an empty identifier list": {withOrg(map[string]any{"identifier": []any{}}), ContainedOrganization{State: Unreadable}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := read(t, mutate(t, row.edit)).Owner
+			want := Owner{State: Present, Reference: "#org", ContainedOrganization: row.want}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("owner %+v\nwant %+v", got, want)
+			}
+		})
+	}
+	// Two contained resources sharing its id are not one Organization: the
+	// owner is unreadable, as two roles sharing an id are.
+	t.Run("two resources share its id", func(t *testing.T) {
+		got := read(t, mutate(t, func(m map[string]any) {
+			withOrg(map[string]any{})(m)
+			m["contained"] = append(m["contained"].([]any), map[string]any{"resourceType": "Organization", "id": "org"})
+		})).Owner
+		want := Owner{State: Present, Reference: "#org", Organization: unreadable, Practitioner: unreadable}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("owner %+v\nwant %+v", got, want)
+		}
+	})
 }

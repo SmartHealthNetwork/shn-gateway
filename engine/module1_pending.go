@@ -69,6 +69,10 @@ type pendState struct {
 	// the Reference-shaped value the QR-context / native-lane roles need).
 	// In-memory like the rest of pendState.
 	member string
+	// sorID is the id the participant's own system holds that member's Patient
+	// under, pinned beside member: the resume ClaimUpdate's evidence is named by
+	// member as the submission's was (evidenceReadByMember).
+	sorID string
 	// memberSystem is the namespace the participant's own system names that
 	// member under, pinned at run-to-PENDED beside member itself: the resume
 	// ClaimUpdate names the member exactly as the submission did, so the payer

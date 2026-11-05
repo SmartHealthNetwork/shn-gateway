@@ -97,6 +97,7 @@ func wantClosed(t *testing.T, rec ExchangeRecord) {
 	} else if rec.RefusalStage != "" {
 		t.Errorf("RefusalStage %q set on rule %q", rec.RefusalStage, rec.Rule)
 	}
+	wantReasonClosed(t, rec)
 	if b := rec.Backend; b != nil && b.ErrorClass != "" && !slices.Contains(BackendErrorClasses, b.ErrorClass) {
 		t.Errorf("Backend.ErrorClass %q not in its closed list", b.ErrorClass)
 	}
@@ -124,6 +125,7 @@ func wantRefusal(t *testing.T, rec ExchangeRecord, status int, by, rule string) 
 	if rec.Outcome != ExchangeRefused || rec.RefusedBy != by || rec.Rule != rule || rec.Status != status {
 		t.Fatalf("record = %s %s/%s status %d, want refused %s/%s status %d", rec.Outcome, rec.RefusedBy, rec.Rule, rec.Status, by, rule, status)
 	}
+	wantPreHubReason(t, rec)
 }
 
 // Every closed list ends in "other" and names each value once, and the
@@ -241,7 +243,9 @@ func TestExchangeRecord_IngressRoutingRefusal(t *testing.T) {
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	wantRefusal(t, got.only(t), http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+	xr := got.only(t)
+	wantRefusal(t, xr, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+	wantReasonInAnswer(t, xr, w.Body.String())
 }
 
 // hubAnswers answers /route itself — the Hub's own refusal, or no answer —
@@ -2560,7 +2564,7 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

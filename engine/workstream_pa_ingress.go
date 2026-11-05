@@ -49,6 +49,14 @@ func prefetchValues(prefetch map[string][]byte) [][]byte {
 // the refusal, so its text is pinned byte for byte.
 const noCoverageInRequestOrSoR = "no coverage in request or system of record"
 
+// The refusals of a request whose own bytes no certified translation carries
+// to the payer's line, when the participant requires a shared line
+// (Config.RequireSharedLine).
+const (
+	msgCRDLineUnchanged = "the CDS Hooks request cannot be carried to the payer's line unchanged"
+	msgDTRLineUnchanged = "the questionnaire-package request cannot be carried to the payer's line unchanged"
+)
+
 // crdIngressRecipient routes a prepared CDS Hooks request by the coverage it
 // carries (FR-G40; no default): a bare Coverage or a Bundle of Coverages that
 // name one payer. The payer's Organization is looked up among the request's
@@ -62,15 +70,15 @@ const noCoverageInRequestOrSoR = "no coverage in request or system of record"
 // fhirServer read of it with the read's status and reason under that
 // coverage's prefix (sentPayorRefusal), and a failed system-of-record read
 // with the system-of-record failure status.
-func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRequest) (string, int, string) {
+func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRequest) (string, int, string, refusalReason) {
 	coverage, carried := prepared.values["coverage"]
 	switch {
 	case !carried && prepared.coverageStatus != 0:
-		return "", prepared.coverageStatus, prepared.coverageMsg
+		return "", prepared.coverageStatus, prepared.coverageMsg, prepared.coverageReason
 	case !carried || string(bytes.TrimSpace(coverage)) == "null":
 		// CDS Hooks' 412: the service could not obtain the data the request
 		// left out (a null coverage prefetch, or none the system holds).
-		return "", http.StatusPreconditionFailed, noCoverageInRequestOrSoR
+		return "", http.StatusPreconditionFailed, noCoverageInRequestOrSoR, reasonNoCoverage
 	}
 	// The payor is resolved among the prefetch values first (a coverage the
 	// system of record supplied among them, with the records its search
@@ -97,27 +105,27 @@ func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRe
 		// resources do not answer is read only to route (sentPayorResolver).
 		refs.next, unresolved, fhirStatus, fhirMsg, readErr = g.sentPayorResolver(ctx, prepared.sentPayor)
 	}
-	recipient, _, status, msg := g.recipientForCoverages(coverageResources(coverage), refs)
+	recipient, _, status, msg, reason := g.recipientForCoverages(coverageResources(coverage), refs)
 	if *readErr != nil {
 		status, msg := SoRFailureResponse(*readErr)
-		return "", status, msg
+		return "", status, msg, ""
 	}
 	if *fhirStatus != 0 {
 		if sent {
 			// The request carried a coverage: its refusal is that coverage's
 			// (no payer identifier), with the read's reason and status.
-			return "", *fhirStatus, sentPayorRefusal(*fhirMsg)
+			return "", *fhirStatus, sentPayorRefusal(*fhirMsg), reasonNoPayerIdentifier
 		}
-		return "", *fhirStatus, *fhirMsg
+		return "", *fhirStatus, *fhirMsg, reasonNoCoverageToRouteBy
 	}
 	if sent && msg == noPayerIdentifier {
 		// An Organization or urn reference nothing resolved names the
 		// remedy that resolves it (unresolvedPayor); another kind of payor
 		// keeps the bare text. A resolved payor with no payer identifier
 		// already says why (recipientForCoverages).
-		return "", status, unresolved.refusal(msg)
+		return "", status, unresolved.refusal(msg), reason
 	}
-	return recipient, status, msg
+	return recipient, status, msg, reason
 }
 
 // handleIngressMetadata serves the provider ingress CapabilityStatement
@@ -220,14 +228,14 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	if status != 0 {
 		if status == http.StatusPreconditionFailed {
 			// No coverage to route by could be obtained: a routing refusal.
-			exchangeOf(r.Context()).routed(status)
+			exchangeOf(r.Context()).routedFor(status, reasonNoCoverageToRouteBy)
 		}
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	recipient, status, msg := g.crdIngressRecipient(r.Context(), prepared)
+	recipient, status, msg, reason := g.crdIngressRecipient(r.Context(), prepared)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -292,8 +300,8 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		// carry is recorded (OriginateLeg). The participant's own setting
 		// refuses the pair as routing instead.
 		if g.cfg.RequireSharedLine {
-			exchangeOf(r.Context()).routed(http.StatusUnprocessableEntity)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "the CDS Hooks request cannot be carried to the payer's line unchanged"})
+			exchangeOf(r.Context()).routedFor(http.StatusUnprocessableEntity, reasonCRDLineUnchanged)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgCRDLineUnchanged})
 			return
 		}
 		route = route.asSent()
@@ -356,6 +364,13 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 // ingress does not invoke the Populator: the EHR's own DTR application
 // populates.
 func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
+	// The adaptive rounds share this route and leg; the pattern the mux
+	// matched decides which operation the call is.
+	switch r.Pattern {
+	case patternDTRNextQuestionPayer, patternDTRNextQuestionFetchServer, patternDTRNextQuestionPlain:
+		g.handleDTRNextQuestionIngress(w, r)
+		return
+	}
 	const legType = "dtr-questionnaire-fetch"
 	w, scope := g.withScope(w, relay.RoleRequester)
 	scope.leg = legType
@@ -382,15 +397,18 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Route by every coverage the request carries (FR-G40; no default).
-	recipient, payers, status, msg := g.dtrIngressRecipient(r.Context(), prepared)
+	recipient, payers, status, msg, reason := g.dtrIngressRecipient(r.Context(), prepared)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	// A payer that has not declared framed DTR operations would drop the
 	// operation header: refused before anything is sent.
 	if status, msg := g.framedDTRRefusal(recipient); status != 0 {
+		// Nothing to route the framed operation to: routing, as on the
+		// $next-question route and module 1's origination.
+		exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonFramedDTRUnsupported)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -429,8 +447,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		// carry is recorded (OriginateLeg). The participant's own setting
 		// refuses the pair as routing instead.
 		if g.cfg.RequireSharedLine {
-			exchangeOf(r.Context()).routed(http.StatusUnprocessableEntity)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "the questionnaire-package request cannot be carried to the payer's line unchanged"})
+			exchangeOf(r.Context()).routedFor(http.StatusUnprocessableEntity, reasonDTRLineUnchanged)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgDTRLineUnchanged})
 			return
 		}
 		route = route.asSent()
@@ -540,9 +558,9 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// (Finding 1): a conformant $submit carries the payor Org as a sibling bundle entry (br-payer's
 	// findInBundle form), NOT in the provider SoR; bundleref.go says which entry a reference
 	// names. Contained / inline payor forms still route without hitting resolveRef.
-	recipient, payer, status, msg := g.pasRecipient(body)
+	recipient, payer, status, msg, reason := g.pasRecipient(body)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

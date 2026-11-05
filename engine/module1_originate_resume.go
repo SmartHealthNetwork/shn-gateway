@@ -147,7 +147,8 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// pinned into the pendState below so the resume leg's restoring
 	// chain has an independent record to verify against. Everything else about
 	// this call is unchanged.
-	bundleJSON, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+	var evidenceEdits []relay.EditID
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), res.sorID, res.member)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return pendState{}, false
@@ -171,7 +172,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	sent, failed := g.sendLeg(ctx, r, legSend{
 		Workstream: workstreamPA, Leg: "pas-claim", Recipient: res.recipient, PCI: res.pci, Corr: pasCorr, Route: &route,
 		Build: &moduleBuild{
-			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, Contract: "pa.pas",
+			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, InputEdits: evidenceEdits, Contract: "pa.pas",
 			Check: func(line string, body []byte) (int, string) {
 				return g.validatePASAttachments(ctx, body, pasDTRLine, res.qrSource != nil)
 			},
@@ -214,6 +215,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		coverage:          res.coverage,
 		insurer:           res.insurer,
 		member:            res.member,
+		sorID:             res.sorID,
 		memberSystem:      res.memberSystem,
 		pci:               res.pci,
 		pasCorr:           pasCorr,
@@ -477,7 +479,8 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		if !g.guardPendCarry(r.Context(), w, st, route, updateBundle, pasUpdateID) {
 			return nil, nil, true, nil
 		}
-		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+		var evidenceEdits []relay.EditID
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), st.sorID, st.member)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -485,7 +488,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		sent, failed := g.sendLeg(ctx, r, legSend{
 			Workstream: workstreamPA, Leg: "pas-claim-update", Recipient: st.recipient, PCI: st.pci, Corr: updateCorr, Route: &route,
 			Build: &moduleBuild{
-				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, Contract: "pa.pas",
+				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, InputEdits: evidenceEdits, Contract: "pa.pas",
 				Check: func(_ string, body []byte) (int, string) {
 					return g.validatePASAttachments(ctx, body, pasDTRLine, true)
 				},
@@ -527,7 +530,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 	wait, _ := pasWaitOf(r) // checked on the route's entry (waitOrFail)
 	decision, status, msg, err := g.followDecision(ctx, r,
 		pasSubmission{corr: updateCorr, route: route, bundleJSON: updateBundle, respJSON: updateResp},
-		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member,
+		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member, sorID: st.sorID,
 			recipient: st.recipient, orderRef: srRef, orderJSON: st.srJSON, wait: wait})
 	if status != 0 {
 		g.answerFollowFailure(r.Context(), w, status, msg, err)
@@ -564,6 +567,8 @@ func (g *Gateway) handleUC07(w http.ResponseWriter, r *http.Request) {
 	r = ensureOriginationClaimInput(r)
 	if tooLarge, err := shnsdk.DecodeJSONBody(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		if tooLarge {
+			// The network's body limit: a size refusal, recorded as routing.
+			exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonRequestTooLarge)
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": afterLegs(r.Context(), "request body too large")})
 			return
 		}
@@ -640,7 +645,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	// --- Patient-DTR exchange: ask the Trust PHG to have the patient author + attest. ---
 	phg, ok := g.cfg.Reg.LookupByRole("phg")
 	if !ok {
-		refuseOriginRouting(ctx, w, http.StatusUnprocessableEntity, "no PHG registered")
+		refuseOriginRouting(ctx, w, http.StatusUnprocessableEntity, msgNoPHG, reasonNoPHG)
 		return false
 	}
 	pdReq, err := json.Marshal(patientDTRRequest{LinkID: linkID, Answer: score, PatientRef: st.patientRef})
@@ -759,7 +764,8 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		if !g.guardPendCarry(r.Context(), w, st, route, updateBundle, pasUpdateID) {
 			return nil, nil, true, nil
 		}
-		updateBundle, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile))
+		var evidenceEdits []relay.EditID
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), st.sorID, st.member)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -767,7 +773,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		sent, failed := g.sendLeg(ctx, r, legSend{
 			Workstream: workstreamPA, Leg: "pas-claim-update", Recipient: st.recipient, PCI: st.pci, Corr: updateCorr, Route: &route,
 			Build: &moduleBuild{
-				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, Contract: "pa.pas",
+				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, InputEdits: evidenceEdits, Contract: "pa.pas",
 				Check: func(_ string, body []byte) (int, string) {
 					return g.validatePASAttachments(ctx, body, pasDTRLine, true)
 				},
@@ -809,7 +815,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 	wait, _ := pasWaitOf(r) // checked on the route's entry (waitOrFail)
 	decision, status, msg, err := g.followDecision(ctx, r,
 		pasSubmission{corr: updateCorr, route: route, bundleJSON: updateBundle, respJSON: updateResp},
-		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member,
+		pasFollowInputs{pci: st.pci, patientRef: st.patientRef, member: st.member, sorID: st.sorID,
 			recipient: st.recipient, orderRef: srRef, orderJSON: st.srJSON, wait: wait})
 	if status != 0 {
 		g.answerFollowFailure(r.Context(), w, status, msg, err)

@@ -38,7 +38,7 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 			// No caller to verify first: a body in a coding the gateway does
 			// not decode is refused here, once, for every operator route.
 			if contentcoding.Unsupported(r) {
-				exchangeOf(r.Context()).refused(RefusalIntegrity)
+				exchangeOf(r.Context()).refusedFor(RefusalIntegrity, reasonUnsupportedCoding)
 				writeUnsupportedCoding(w)
 				return
 			}
@@ -53,7 +53,7 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, shnsdk.MaxRequestBytes+1))
 		if errors.Is(err, contentcoding.ErrUnsupported) {
-			exchangeOf(r.Context()).refused(RefusalIntegrity)
+			exchangeOf(r.Context()).refusedFor(RefusalIntegrity, reasonUnsupportedCoding)
 			writeUnsupportedCoding(w)
 			return
 		}
@@ -96,7 +96,7 @@ func (g *Gateway) requireScenarioCaller(h http.HandlerFunc) http.HandlerFunc {
 // the route and the reason (never the assertion). On a route that records its
 // exchange, the refusal is recorded as authentication.
 func refuseScenarioCaller(w http.ResponseWriter, r *http.Request, why string) {
-	exchangeOf(r.Context()).refused(RefusalAuthentication)
+	exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonScenarioCaller)
 	log.Printf("gateway: refused a /scenario caller: %s %s: %s", r.Method, r.URL.Path, why)
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": errUnauthorizedCaller})
 }

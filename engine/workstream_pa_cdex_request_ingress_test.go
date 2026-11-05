@@ -62,6 +62,69 @@ func cdexRequestMutate(t *testing.T, edit func(task map[string]any)) []byte {
 	return b
 }
 
+// The leg takes a Task coded, by system and code, as a request for attachments
+// by code or for a questionnaire, and no other: not the CDex data requests,
+// not a taken code under another system, not a Task with no code.
+func TestCDexRequestCodeTaken(t *testing.T) {
+	for name, row := range map[string]struct {
+		codings []cdextask.Coding
+		taken   bool
+	}{
+		"by code":                          {[]cdextask.Coding{{System: cdextask.PASTempCodes, Code: cdextask.CodeAttachmentRequest}}, true},
+		"by questionnaire":                 {[]cdextask.Coding{{System: cdextask.PASTempCodes, Code: cdextask.CodeAttachmentRequestQuestionnaire}}, true},
+		"a data request by code":           {[]cdextask.Coding{{System: cdexTempCodes, Code: "data-request-code"}}, false},
+		"a data request by query":          {[]cdextask.Coding{{System: cdexTempCodes, Code: "data-request-query"}}, false},
+		"a data request by questionnaire":  {[]cdextask.Coding{{System: cdexTempCodes, Code: "data-request-questionnaire"}}, false},
+		"a taken code, another system":     {[]cdextask.Coding{{System: cdexTempCodes, Code: cdextask.CodeAttachmentRequestQuestionnaire}}, false},
+		"the by-code code, another system": {[]cdextask.Coding{{System: cdexTempCodes, Code: cdextask.CodeAttachmentRequest}}, false},
+		"another PAS code":                 {[]cdextask.Coding{{System: cdextask.PASTempCodes, Code: "data-request-code"}}, false},
+		"no code":                          {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := cdextask.Task{}
+			if row.codings != nil {
+				task.Code = cdextask.Codes{State: cdextask.Present, Codings: row.codings}
+			}
+			if got := cdexRequestCodeTaken(task); got != row.taken {
+				t.Fatalf("taken %v, want %v", got, row.taken)
+			}
+		})
+	}
+}
+
+// cdexTempCodes is the CDex code system the IG's data-request Tasks are coded in.
+const cdexTempCodes = "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp"
+
+// cdexDataRequest is example 19 recoded as system#code, as a CDex data
+// request is: Task.code replaced, everything else as the IG wrote it.
+func cdexDataRequest(system, code string) func(t *testing.T) []byte {
+	return func(t *testing.T) []byte {
+		return cdexRequestMutate(t, func(m map[string]any) {
+			m["code"] = map[string]any{"coding": []any{map[string]any{"system": system, "code": code}}}
+		})
+	}
+}
+
+// cdexQuestionnaireTasks are the CDex 2.1.0 IG's own questionnaire-request
+// Tasks, byte for byte as published (D128):
+//   - Task-cdex-task-inline-example22.json, the Task the IG's questionnaire
+//     page has the payer POST (a static questionnaire;
+//     https://hl7.org/fhir/us/davinci-cdex/STU2.1/Task-cdex-task-inline-example22.json);
+//   - Task-cdex-task-example23.json, an adaptive questionnaire with a
+//     signature-flag input
+//     (https://hl7.org/fhir/us/davinci-cdex/STU2.1/Task-cdex-task-example23.json).
+var cdexQuestionnaireTasks = []string{"cdex-task-inline-example22.json", "cdex-task-example23.json"}
+
+// cdexFixture is one of the IG's Tasks in gateway/pa/cdextask/testdata, as published.
+func cdexFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile("../pa/cdextask/testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // cdexRequestPost is the payer system's POST of body to provider's base.
 func cdexRequestPost(body []byte, provider string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, cdexroute.ProviderPrefix+provider+"/Task", bytes.NewReader(body))
@@ -91,7 +154,6 @@ func payerIngressExchange(t *testing.T, level ConformanceEnforcement) (*inProces
 // to a patient (authority, 422). Nothing is sent.
 func TestCDexRequestIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 	priv, pub := newTestClientKey(t)
-	questionnaire := `"code" : "` + cdextask.CodeAttachmentRequestQuestionnaire + `"`
 	for name, row := range map[string]struct {
 		body     func(t *testing.T) []byte
 		provider string
@@ -111,9 +173,15 @@ func TestCDexRequestIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 		"not JSON":   {func(*testing.T) []byte { return []byte("not json") }, "provider-1", http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
 		"not a Task": {func(*testing.T) []byte { return []byte(`{"resourceType":"Parameters"}`) }, "provider-1", http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
 		"no code":    {func(t *testing.T) []byte { return cdexRequestEdit(t, `"code" : {`, `"codeX" : {`) }, "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
-		"a questionnaire request, a later slice's": {func(t *testing.T) []byte {
-			return cdexRequestEdit(t, `"code" : "attachment-request-code"`, questionnaire)
-		}, "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		// The CDex data-request Tasks (the IG's cdex-temp codes) are outside
+		// the leg's authority (the design, §12), whatever else the Task says.
+		"a data request by code":          {cdexDataRequest(cdexTempCodes, "data-request-code"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"a data request by query":         {cdexDataRequest(cdexTempCodes, "data-request-query"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		"a data request by questionnaire": {cdexDataRequest(cdexTempCodes, "data-request-questionnaire"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		// A PAS code the leg does not take: the system alone is not enough.
+		"another PAS code": {cdexDataRequest(cdextask.PASTempCodes, "data-request-code"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
+		// A taken code under another system is not that code.
+		"the questionnaire code under another system": {cdexDataRequest(cdexTempCodes, cdextask.CodeAttachmentRequestQuestionnaire), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
 		"the code under another system": {func(t *testing.T) []byte {
 			return cdexRequestMutate(t, func(m map[string]any) {
 				m["code"] = map[string]any{"coding": []any{map[string]any{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": cdextask.CodeAttachmentRequest}}}
@@ -191,6 +259,7 @@ func TestCDexRequestIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 				}
 				x := got.only(t)
 				wantRefusal(t, x, row.status, RefusedByPayerGateway, row.rule)
+				wantReasonInAnswer(t, x, rec.Body.String())
 				if x.Exchange != legCDexRequest {
 					t.Fatalf("refusal recorded as exchange %q, want %s", x.Exchange, legCDexRequest)
 				}
@@ -321,8 +390,9 @@ func scopedBearer(t *testing.T, g *Gateway, priv *ecdsa.PrivateKey, clientID, sc
 // The payer's Task routes take only a bearer granted system/Task.write: one
 // granted none, or the provider ingress's scope, is refused 403
 // insufficient_scope, recorded as the payer gateway's authority refusal,
-// before the Task is read. No bearer is 401. The SMART configuration
-// advertises the one scope.
+// before the Task is read and before the exchange is the leg's, at a
+// provider's base and at the plain Task endpoint alike. No bearer is 401. The
+// SMART configuration advertises the one scope.
 func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
 	priv, pub := newTestClientKey(t)
 	g := payerGatewayWithAuth(t, "payer-system", pub)
@@ -339,7 +409,7 @@ func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
 		return rec
 	}
 	task := cdexRequestTask(t)
-	for _, path := range []string{cdexroute.ProviderPrefix + "provider-1/Task"} {
+	for _, path := range []string{cdexroute.ProviderPrefix + "provider-1/Task", "/Task"} {
 		for name, scope := range map[string]string{"no scope": "", "the provider ingress's scope": ingressScope} {
 			t.Run(path+"/"+name, func(t *testing.T) {
 				rec := send(http.MethodPost, path, scopedBearer(t, g, priv, "payer-system", scope), task)
@@ -349,13 +419,21 @@ func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
 				}
 				x := got.only(t)
 				wantRefusal(t, x, http.StatusForbidden, RefusedByPayerGateway, RefusalAuthority)
+				if x.Exchange != ExchangeOther {
+					t.Fatalf("recorded as %s, want %s: the scope is checked before the leg is known", x.Exchange, ExchangeOther)
+				}
+				wantReasonInAnswer(t, x, rec.Body.String())
 			})
 		}
 		t.Run(path+"/no bearer", func(t *testing.T) {
 			if rec := send(http.MethodPost, path, "", task); rec.Code != http.StatusUnauthorized {
 				t.Fatalf("answer %d %s, want 401", rec.Code, rec.Body)
 			}
-			wantRefusal(t, got.only(t), http.StatusUnauthorized, RefusedByPayerGateway, RefusalAuthentication)
+			x := got.only(t)
+			wantRefusal(t, x, http.StatusUnauthorized, RefusedByPayerGateway, RefusalAuthentication)
+			if x.Exchange != ExchangeOther {
+				t.Fatalf("recorded as %s, want %s", x.Exchange, ExchangeOther)
+			}
 		})
 	}
 	// Granted the scope, the Task is read and routed: a base naming no
@@ -365,7 +443,9 @@ func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "names no registered provider") {
 			t.Fatalf("answer %d %s, want the routing refusal", rec.Code, rec.Body)
 		}
-		wantRefusal(t, got.only(t), http.StatusUnprocessableEntity, RefusedByPayerGateway, RefusalRouting)
+		xr := got.only(t)
+		wantRefusal(t, xr, http.StatusUnprocessableEntity, RefusedByPayerGateway, RefusalRouting)
+		wantReasonInAnswer(t, xr, rec.Body.String())
 	})
 	t.Run("the listing", func(t *testing.T) {
 		if rec := send(http.MethodGet, CDexProvidersPath, scopedBearer(t, g, priv, "payer-system", ingressScope), nil); rec.Code != http.StatusForbidden {
@@ -455,8 +535,16 @@ func TestCDexProviders_ListsEachProvidersBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, providers := list(); code != http.StatusOK || len(providers) != 1 || providers[0] != (cdexProvider{Participant: "provider", Base: want}) {
+	if code, providers := list(); code != http.StatusOK || len(providers) != 1 || !sameCDexProvider(providers[0], cdexProvider{Participant: "provider", Base: want}) {
 		t.Fatalf("listing %d %+v, want the one provider at %s", code, providers, want)
+	}
+	// The organization identifiers the network attests for a provider are
+	// listed with its base, as the public feed serves them.
+	attested := []shnsdk.ProviderIdentifier{{System: providerIDSystem, Value: "1234567893"}}
+	provider.ProviderIDs = attested
+	env.originator.cfg.Reg.Set("provider", provider)
+	if code, providers := list(); code != http.StatusOK || len(providers) != 1 || !sameCDexProvider(providers[0], cdexProvider{Participant: "provider", Base: want, Identifiers: attested}) {
+		t.Fatalf("listing %d %+v, want the provider with its identifiers", code, providers)
 	}
 	// A provider whose base cannot be built makes the listing unavailable,
 	// never a shorter list.
@@ -478,14 +566,10 @@ func TestCDexRequestIngress_MountedOnlyOnAPayerWithItsIngress(t *testing.T) {
 	for _, r := range g.paRoutes("payer") {
 		patterns = append(patterns, r.pattern)
 	}
-	for _, want := range []string{"POST " + cdexroute.ProviderPrefix + "{provider}/Task", "GET " + CDexProvidersPath} {
+	for _, want := range []string{"POST " + cdexroute.ProviderPrefix + "{provider}/Task", "POST /Task", "GET " + CDexProvidersPath} {
 		if !slices.Contains(patterns, want) {
 			t.Errorf("payer routes %v, want %q", patterns, want)
 		}
-	}
-	// No plain Task endpoint: the network routes a Task only by its base.
-	if slices.Contains(patterns, "POST /Task") {
-		t.Errorf("payer routes %v mount a plain POST /Task", patterns)
 	}
 	for _, p := range patterns {
 		if strings.Contains(p, "cds-services") || strings.Contains(p, "$submit") {
@@ -533,16 +617,18 @@ func runCDexRequestIngress(t *testing.T, level ConformanceEnforcement, body []by
 // its system holds it.
 var cdexRequestAnswer = []byte(`{"resourceType":"Task","id":"t-1","status":"requested","intent":"order"}`)
 
-// A Task the network can bind to a patient is carried to the provider its
-// base names exactly as sent, and the provider's answer relayed exactly, with
+// A Task the network can bind to a patient, coded as a request for
+// attachments by code or (D128) for a questionnaire, is carried to the
+// provider its base names exactly as sent, and the provider's answer relayed exactly, with
 // its status and no Location, at every level, whichever form names the member
 // number: the Patient it contains as Task.for (the IG's own example),
-// Task.for.identifier alone, or both, agreeing. The leg is authorized for one
+// Task.for.identifier alone, or both, agreeing; and the IG's own
+// questionnaire-request Tasks, byte for byte. The leg is authorized for one
 // patient, and nothing is edited.
 func TestCDexRequestIngress_CarriesTheTaskAsSent(t *testing.T) {
 	t.Parallel()
 	mb := map[string]any{"coding": []any{map[string]any{"system": v20203MB.System, "code": "MB"}}}
-	for name, body := range map[string]func(t *testing.T) []byte{
+	bodies := map[string]func(t *testing.T) []byte{
 		"the contained Patient": cdexRequestTask,
 		"Task.for.identifier alone": func(t *testing.T) []byte {
 			return cdexRequestMutate(t, func(m map[string]any) {
@@ -554,7 +640,12 @@ func TestCDexRequestIngress_CarriesTheTaskAsSent(t *testing.T) {
 				m["for"] = map[string]any{"reference": "#patient", "identifier": map[string]any{"type": mb, "value": "Member123"}}
 			})
 		},
-	} {
+	}
+	// The IG's questionnaire-request Tasks (D128), as published.
+	for _, f := range cdexQuestionnaireTasks {
+		bodies["the IG's "+f] = func(t *testing.T) []byte { return cdexFixture(t, f) }
+	}
+	for name, body := range bodies {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				task := body(t)
@@ -774,7 +865,9 @@ func TestCDexRequestIngress_ScopeAtEveryLevelAndEveryCredential(t *testing.T) {
 			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "insufficient_scope") {
 				t.Fatalf("answer %d %s, want 403 insufficient_scope", rec.Code, rec.Body)
 			}
-			wantRefusal(t, got.only(t), http.StatusForbidden, RefusedByPayerGateway, RefusalAuthority)
+			xr := got.only(t)
+			wantRefusal(t, xr, http.StatusForbidden, RefusedByPayerGateway, RefusalAuthority)
+			wantReasonInAnswer(t, xr, rec.Body.String())
 		})
 	}
 	direct := func(scope string) string {
@@ -815,7 +908,9 @@ func TestCDexRequestIngress_ScopeAtEveryLevelAndEveryCredential(t *testing.T) {
 			if rec.Code != row.status {
 				t.Fatalf("answer %d %s, want %d", rec.Code, rec.Body, row.status)
 			}
-			wantRefusal(t, got.only(t), row.status, RefusedByPayerGateway, row.rule)
+			xr := got.only(t)
+			wantRefusal(t, xr, row.status, RefusedByPayerGateway, row.rule)
+			wantReasonInAnswer(t, xr, rec.Body.String())
 			// The listing is held to the same credential.
 			if listed := payerPost(g, http.MethodGet, CDexProvidersPath, row.bearer(g), nil); row.status != http.StatusUnprocessableEntity && listed.Code != row.status {
 				t.Fatalf("listing %d %s, want %d", listed.Code, listed.Body, row.status)
@@ -845,4 +940,12 @@ func TestCDexRequestIngress_ScopeAtEveryLevelAndEveryCredential(t *testing.T) {
 			}
 		}
 	})
+}
+
+// sameCDexProvider reports whether a and b are one listing entry: the same
+// participant, base and identifiers, an omitted identifier list apart from
+// an empty one.
+func sameCDexProvider(a, b cdexProvider) bool {
+	return a.Participant == b.Participant && a.Base == b.Base &&
+		(a.Identifiers == nil) == (b.Identifiers == nil) && slices.Equal(a.Identifiers, b.Identifiers)
 }

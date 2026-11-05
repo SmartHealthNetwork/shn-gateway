@@ -35,7 +35,7 @@ func (g *Gateway) holdAttachment(w http.ResponseWriter, r *http.Request) (releas
 	}
 	release, ok = g.bodies.acquire(n)
 	if !ok {
-		exchangeOf(r.Context()).refusing(RefusalRouting)
+		exchangeOf(r.Context()).refusingFor(RefusalRouting, reasonAttachmentBudget)
 		w.Header().Set("Retry-After", strconv.Itoa(bodyBudgetRetryAfter))
 		writeUnavailable(w, errAttachmentBudget)
 	}

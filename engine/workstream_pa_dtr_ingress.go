@@ -230,6 +230,9 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		return out, status, msg
 	}
 	if !found {
+		// Only a participant that requires known members gets here: a check
+		// it opted into, recorded as conformance.
+		exchangeOf(ctx).refusing(RefusalConformance)
 		return out, http.StatusForbidden, "request patient does not resolve"
 	}
 	out.pci = pci
@@ -518,28 +521,28 @@ func (g *Gateway) dtrPayorRefs(ctx context.Context, prepared *dtrIngressRequest)
 // (422 otherwise). Each payor Organization is looked up as dtrPayorRefs
 // says. payers is the payer identities the coverages named, each once: the
 // identity the exchange is routed by, which decides whose answer it is.
-func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRequest) (string, []shnsdk.PayerIdentifier, int, string) {
+func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRequest) (string, []shnsdk.PayerIdentifier, int, string, refusalReason) {
 	refs, unresolved, readErr := g.dtrPayorRefs(ctx, &prepared)
 	recipient := ""
 	var payers []shnsdk.PayerIdentifier
 	for _, cov := range prepared.coverages {
-		holder, pid, status, msg := g.recipientForCoverages([][]byte{cov}, refs)
+		holder, pid, status, msg, reason := g.recipientForCoverages([][]byte{cov}, refs)
 		if *readErr != nil {
 			status, msg := SoRFailureResponse(*readErr)
-			return "", nil, status, msg
+			return "", nil, status, msg, ""
 		}
 		if msg == noPayerIdentifier {
 			// An Organization reference nothing resolved names the remedy
 			// that resolves it (unresolvedPayor); another kind of payor
 			// keeps the bare text. A resolved payor with no payer
 			// identifier already says why (recipientForCoverages).
-			return "", nil, status, unresolved.refusal(msg)
+			return "", nil, status, unresolved.refusal(msg), reason
 		}
 		if status != 0 {
-			return "", nil, status, msg
+			return "", nil, status, msg, reason
 		}
 		if recipient != "" && holder != recipient {
-			return "", nil, http.StatusUnprocessableEntity, "coverages name more than one payer"
+			return "", nil, http.StatusUnprocessableEntity, msgCoveragesNameTwoPayers, reasonCoveragesNameTwoPayers
 		}
 		recipient = holder
 		if !slices.Contains(payers, pid) {
@@ -547,10 +550,14 @@ func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRe
 		}
 	}
 	if recipient == "" {
-		return "", nil, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR
+		return "", nil, http.StatusUnprocessableEntity, noCoverageInRequestOrSoR, reasonNoCoverage
 	}
-	return recipient, payers, 0, ""
+	return recipient, payers, 0, "", ""
 }
+
+// msgCoveragesNameTwoPayers is the refusal of a request whose coverages do not
+// name one payer.
+const msgCoveragesNameTwoPayers = "coverages name more than one payer"
 
 // keptPayorResolver resolves a payor Organization that a coverage the EHR
 // sent names by reference alone, when the request's own resources do not

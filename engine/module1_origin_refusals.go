@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
@@ -63,8 +64,8 @@ func (g *Gateway) refuseOwnFill(ctx context.Context, w http.ResponseWriter, reci
 // carry the patient's leg, a payer that cannot take the leg's frame — as a
 // routing refusal, with status (400 for a member the request names that the
 // system does not hold, else 422), saying which legs were carried.
-func refuseOriginRouting(ctx context.Context, w http.ResponseWriter, status int, msg string) {
-	exchangeOfWriter(w).refused(RefusalRouting)
+func refuseOriginRouting(ctx context.Context, w http.ResponseWriter, status int, msg string, reason refusalReason) {
+	exchangeOfWriter(w).refusedFor(RefusalRouting, reason)
 	writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
 
@@ -138,6 +139,18 @@ func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recip
 	writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
 
+// signedEvidenceRefusal is the answer to evidence E-06 would re-point and a
+// signature covers: 422 with the signed-content refusal (D113), as the
+// supplemental report's is, recorded as the fidelity of SHN's own edit at
+// the build. ok is false for any other error.
+func signedEvidenceRefusal(err error) (int, string, bool) {
+	var signed *relay.SignedContentError
+	if !errors.As(err, &signed) {
+		return 0, "", false
+	}
+	return http.StatusUnprocessableEntity, signed.Error(), true
+}
+
 // failEvidenceLinkage answers a PAS request whose evidence could not be
 // linked (completeAuthoredPASRequest), after the legs before the claim: a
 // read of the participant's system that failed to answer is a backend
@@ -145,6 +158,17 @@ func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recip
 // which legs were carried.
 func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) {
 	const msg = "PAS evidence linkage failed"
+	if status, why, ok := signedEvidenceRefusal(err); ok {
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+		writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, why)})
+		return
+	}
+	if evidencePrepareFailed(err) {
+		// This gateway could not prepare a record it read: its own failure.
+		exchangeOf(ctx).ownFailure()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": withCarriedLegs(ctx, err.Error())})
+		return
+	}
 	var readErr *SoRReadError
 	if errors.As(err, &readErr) {
 		status, why := SoRFailureResponse(err)
@@ -153,3 +177,7 @@ func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) 
 	}
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
+
+// msgNoPHG is the refusal of a call to originate to a patient's PHG when the
+// network registers none.
+const msgNoPHG = "no PHG registered"

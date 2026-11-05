@@ -78,6 +78,10 @@ type dispatchResult struct {
 	orderJSON, supplierJSON, qrJSON, questionnaireJSON []byte
 	qrAnswers                                          map[string]string
 	member                                             string
+	// sorID is the id the participant's own system holds the member's Patient
+	// under (crdOriginRecords), which the PAS build names member: the evidence
+	// the PAS completion reads is named the same way (evidenceReadByMember).
+	sorID string
 	// memberSystem is the namespace the participant's own system names that
 	// member under, carried from the one reading of their Patient (crdOriginRecords).
 	memberSystem string
@@ -117,7 +121,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		return dispatchResult{}, false
 	}
 	if !found {
-		refuseOriginRouting(r.Context(), w, http.StatusBadRequest, "unknown member")
+		refuseOriginRouting(r.Context(), w, http.StatusBadRequest, "unknown member", reasonUnknownMember)
 		return dispatchResult{}, false
 	}
 	patientRef := "Patient/" + member
@@ -262,7 +266,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// coverage-assertion-id as context, framed with the operation and sent only
 	// to a payer that declares framed DTR operations.
 	if status, msg := g.framedDTRRefusal(recipient); status != 0 {
-		refuseOriginRouting(ctx, w, http.StatusUnprocessableEntity, msg)
+		refuseOriginRouting(ctx, w, http.StatusUnprocessableEntity, msg, reasonFramedDTRUnsupported)
 		return dispatchResult{}, false
 	}
 	// As at the order-select prefix: a payer-record read the system failed
@@ -375,8 +379,8 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 		dtrLine:  dtrLine,
 		pci:      pci, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, orderRef: orderRef,
 		orderJSON: orderJSON, supplierJSON: supplierJSON, qrJSON: qrJSON, questionnaireJSON: questionnaireJSON, qrAnswers: qrAnswers,
-		memberSystem: recs.memberSystem,
-		member:       member, payer: payer, recipient: recipient, canonical: canonical,
+		memberSystem: recs.memberSystem, sorID: recs.sorID,
+		member: member, payer: payer, recipient: recipient, canonical: canonical,
 		pasDeferred: deferred, statedMember: statedMember,
 	}, true
 }
@@ -460,7 +464,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 		return
 	}
 	if !found {
-		refuseOriginRouting(r.Context(), w, http.StatusBadRequest, "unknown member")
+		refuseOriginRouting(r.Context(), w, http.StatusBadRequest, "unknown member", reasonUnknownMember)
 		return
 	}
 	order, ok := g.dispatchOrderOfRecord(w, r, member)
@@ -480,7 +484,7 @@ func (g *Gateway) originateDispatch(w http.ResponseWriter, r *http.Request, memb
 	// continuation, which the caller continues; it is not reported as a failed request. ---
 	wait, _ := pasWaitOf(r) // checked on the route's entry (waitOrFail)
 	decision, status, msg, err := g.submitClaimAndFollow(r.Context(), r, pasFollowInputs{
-		pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, memberSystem: res.memberSystem,
+		pci: res.pci, patientRef: res.patientRef, coverageRef: res.coverageRef, coverage: res.coverage, insurer: res.insurer, member: res.member, sorID: res.sorID, memberSystem: res.memberSystem,
 		recipient: res.recipient, orderRef: res.orderRef, orderJSON: res.orderJSON,
 		supplierJSON: res.supplierJSON, source: res.qrSource, payer: res.payer, wait: wait,
 		pasDeferred: res.pasDeferred, statedMember: res.statedMember,

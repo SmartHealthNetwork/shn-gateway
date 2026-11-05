@@ -42,9 +42,11 @@ var (
 	// URL.
 	davinciConfigRoutePatterns = []string{"GET /.well-known/davinci-configuration"}
 	// payerIngressRoutePatterns are mounted on a payer when its Da Vinci
-	// ingress is enabled: the attachment-request Task routes.
+	// ingress is enabled: the attachment-request Task routes, at a
+	// provider's base and at the plain Task endpoint.
 	payerIngressRoutePatterns = []string{
 		"POST /cdex/provider/{provider}/Task",
+		"POST /Task",
 		"GET /cdex/providers",
 	}
 	// cdexTaskRoutePatterns are mounted on a provider that sets its own Task

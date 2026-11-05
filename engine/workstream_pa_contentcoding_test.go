@@ -111,7 +111,9 @@ func TestIngress_AnUnsupportedCodingIs415(t *testing.T) {
 					rec := codedIngressPost(env, route, coding, []byte(`{}`))
 					wantUnsupportedCoding(t, rec)
 					refusedBeforeTheNetwork(t, env, rec, http.StatusUnsupportedMediaType, errUnsupportedCoding)
-					wantRefusal(t, got.only(t), http.StatusUnsupportedMediaType, RefusedByProviderGateway, RefusalIntegrity)
+					xr := got.only(t)
+					wantRefusal(t, xr, http.StatusUnsupportedMediaType, RefusedByProviderGateway, RefusalIntegrity)
+					wantReasonInAnswer(t, xr, rec.Body.String())
 				})
 			}
 		}

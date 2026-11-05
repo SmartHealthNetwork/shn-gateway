@@ -82,6 +82,10 @@ type cdexParameters struct {
 	} `json:"parameter"`
 }
 
+// errCDexSubmissionTwoWays is the refusal of a submission that repeats a
+// member name.
+const errCDexSubmissionTwoWays = "the submission can be read two ways: it repeats a member name"
+
 // errCDexNoMember is a submission the gateway cannot read one MemberId from.
 const errCDexNoMember = "cannot identify the patient: the submission carries no readable MemberId"
 
@@ -96,10 +100,10 @@ func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, 
 	var p cdexParameters
 	if err := decodeMessage(body, &p); err != nil {
 		if readsTwoWays(err) {
-			exchangeOf(ctx).refusing(RefusalIntegrity)
-			return cdexSubmission{}, http.StatusBadRequest, "the submission can be read two ways: it repeats a member name"
+			exchangeOf(ctx).refusingFor(RefusalIntegrity, reasonCDexSubmissionTwoWays)
+			return cdexSubmission{}, http.StatusBadRequest, errCDexSubmissionTwoWays
 		}
-		exchangeOf(ctx).refusing(RefusalAuthority)
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonCDexNoMember)
 		return cdexSubmission{}, http.StatusBadRequest, errCDexNoMember
 	}
 	var s cdexSubmission
@@ -117,7 +121,7 @@ func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, 
 		}
 	}
 	if p.ResourceType != "Parameters" || len(members) != 1 {
-		exchangeOf(ctx).refusing(RefusalAuthority)
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonCDexNoMember)
 		return cdexSubmission{}, http.StatusBadRequest, errCDexNoMember
 	}
 	if len(s.payers) > 0 {
@@ -177,16 +181,16 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	recipient, status, msg := g.cdexRecipient(r, sub)
+	recipient, status, msg, reason := g.cdexRecipient(r, sub)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	// A file over the largest the payer declares its system accepts is
 	// refused before anything is sent: the payer said it cannot take it.
 	if status, msg := g.attachmentOverDeclared(recipient, body); status != 0 {
-		exchangeOf(r.Context()).refusing(RefusalRouting)
+		exchangeOf(r.Context()).refusingFor(RefusalRouting, reasonAttachmentOverDeclared)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -250,10 +254,10 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 // difference observed, one event for the submission. At the plain
 // endpoint it is the registered payer the PayerId names; none, or one naming
 // no registered payer, is refused (routing): there is no default payer.
-func (g *Gateway) cdexRecipient(r *http.Request, sub cdexSubmission) (string, int, string) {
+func (g *Gateway) cdexRecipient(r *http.Request, sub cdexSubmission) (string, int, string, refusalReason) {
 	if path := r.PathValue("payer"); path != "" {
 		if e, ok := g.cfg.Reg.Lookup(path); !ok || e.Role != "payer" {
-			return "", http.StatusUnprocessableEntity, "this return path names no registered payer"
+			return "", http.StatusUnprocessableEntity, errCDexReturnPathNoPayer, reasonCDexReturnPathNoPayer
 		}
 		for _, p := range sub.payers {
 			if named, ok := g.resolvePayer(p); !ok || named != path {
@@ -261,17 +265,23 @@ func (g *Gateway) cdexRecipient(r *http.Request, sub cdexSubmission) (string, in
 				break
 			}
 		}
-		return path, 0, ""
+		return path, 0, "", ""
 	}
 	if sub.payer == nil {
-		return "", http.StatusUnprocessableEntity, "the submission names no payer to route to: send it to a payer's return path, or name one PayerId"
+		return "", http.StatusUnprocessableEntity, errCDexSubmissionNoPayer, reasonCDexSubmissionNoPayer
 	}
 	holder, ok := g.resolvePayer(*sub.payer)
 	if !ok {
-		return "", http.StatusUnprocessableEntity, fmt.Sprintf("no registered payer for identifier %s|%s", sub.payer.System, sub.payer.Value)
+		return "", http.StatusUnprocessableEntity, fmt.Sprintf("no registered payer for identifier %s|%s", sub.payer.System, sub.payer.Value), reasonUnregisteredPayer
 	}
-	return holder, 0, ""
+	return holder, 0, "", ""
 }
+
+// The routing refusals of a submission that names no payer to route to.
+const (
+	errCDexReturnPathNoPayer = "this return path names no registered payer"
+	errCDexSubmissionNoPayer = "the submission names no payer to route to: send it to a payer's return path, or name one PayerId"
+)
 
 // resolvePayer is the payer router's holder for p, false with no router.
 func (g *Gateway) resolvePayer(p shnsdk.PayerIdentifier) (string, bool) {
@@ -390,8 +400,12 @@ func (n *nativeResponder) cdexSubmitURL() string {
 // exactly, and relays whatever comes back with the payer's own media type: a
 // 2xx OperationOutcome, informational or not, and an error alike.
 func (n *nativeResponder) forwardCDexSubmit(ctx context.Context, in relay.Body) (LegResult, error) {
+	request, err := restoredRequest(in, "application/fhir+json", n.adaptiveRestore(ctx, in))
+	if err != nil {
+		return LegResult{}, err
+	}
 	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.PayerDavinci)), n.cdexSubmitURL(), "",
-		relay.Exact(in, "application/fhir+json"), legCDexSubmit, "CDex submit-attachment")
+		request, legCDexSubmit, "CDex submit-attachment")
 	if err != nil {
 		return LegResult{}, err
 	}

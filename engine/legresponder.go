@@ -41,10 +41,15 @@ type LegResult struct {
 	// AnswerHeaders are the headers the network carries of that answer, as it
 	// gave them. An answer this gateway built states none.
 	AnswerHeaders map[string]string
-	Status        int          // connector-signalled HTTP outcome (409/422); 0 = proceed
-	Message       string       // body for a non-zero Status
-	Commit        func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
-	Rollback      func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
+	// AddressHeaders are the address headers a payer gateway states on a 2xx
+	// answer to a framed DTR operation (operationBase, operationAddressTags),
+	// framed for the requester's gateway only: never written to a
+	// participant.
+	AddressHeaders map[string]string
+	Status         int          // connector-signalled HTTP outcome (409/422); 0 = proceed
+	Message        string       // body for a non-zero Status
+	Commit         func() error // NON-FHIR durable state (Store writes); fired after buildResponseLeg, before writeLeg; error => 502
+	Rollback       func()       // undo a claim acquired in Handle; engine arms defer-rollback-unless-committed
 	// ResponseSubjectForeign identifies the payer's patient namespace. The full
 	// graph must remain internally subject-consistent; it is not compared with
 	// the request's SHN member id.
@@ -74,6 +79,7 @@ func (r LegResult) stated() statedAnswer {
 	answer := statedAnswer{status: r.answerStatus()}
 	if r.ResponseRelayed() && r.AnswerStatus/100 == 2 {
 		answer.headers = statedAnswer{headers: r.AnswerHeaders}.about(r.Response)
+		answer.address = r.AddressHeaders
 	}
 	return answer
 }

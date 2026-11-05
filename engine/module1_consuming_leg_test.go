@@ -1349,12 +1349,35 @@ func TestFailEvidenceLinkage(t *testing.T) {
 		{"the system did not answer", &SoRReadError{Kind: SoRUnavailable}, http.StatusServiceUnavailable},
 		{"the system's answer was unusable", &SoRReadError{Kind: SoRInvalidResponse}, http.StatusBadGateway},
 		{"the gateway's own failure", errors.New("evidence graph too large"), http.StatusBadGateway},
+		{"evidence E-06 would re-point under a signature (D113)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusUnprocessableEntity},
+		{"the gateway could not prepare a record it read", errEvidencePrepare, http.StatusInternalServerError},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			ctx := context.WithValue(context.Background(), legsCarriedKey{}, &legsCarried{legs: []string{"crd-order-select", "dtr-questionnaire-fetch"}})
+			x := &exchangeRecorder{}
+			ctx = context.WithValue(ctx, exchangeRecorderKey{}, x)
 			rec := httptest.NewRecorder()
 			failEvidenceLinkage(ctx, rec, row.err)
-			if rec.Code != row.status || !strings.Contains(rec.Body.String(), "PAS evidence linkage failed") {
+			switch row.status {
+			case http.StatusUnprocessableEntity:
+				// The fidelity of SHN's own edit, at the build.
+				if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+					t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
+				}
+			case http.StatusInternalServerError:
+				// This gateway's own failure, never a refusal.
+				if x.outcome != ExchangeOther {
+					t.Fatalf("recorded %s %s, want the gateway's own failure", x.outcome, x.rule)
+				}
+			}
+			want := "PAS evidence linkage failed"
+			switch row.status {
+			case http.StatusUnprocessableEntity:
+				want = "signed content cannot be edited (E-06, Signature in Condition)"
+			case http.StatusInternalServerError:
+				want = "prepare evidence record failed"
+			}
+			if rec.Code != row.status || !strings.Contains(rec.Body.String(), want) {
 				t.Fatalf("%d %s, want %d", rec.Code, rec.Body, row.status)
 			}
 			wantCarried(t, rec.Body.String(), "crd-order-select", "dtr-questionnaire-fetch")

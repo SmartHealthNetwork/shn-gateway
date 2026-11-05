@@ -89,10 +89,13 @@ const (
 	// the same subject from the request. An enrichment: not applied to
 	// Da Vinci-native traffic unless the participant opts in.
 	EditDTRPatientObtain EditID = "E-05"
-	// EditEvidenceSubjectRekey re-points the subject.reference of the
-	// supplemental report a provider's gateway attaches to a claim update it
-	// builds, from its system of record's own Patient to the member's network
-	// patient, and only when the report names that Patient.
+	// EditEvidenceSubjectRekey re-points the subject.reference of a record a
+	// provider's gateway reads from its system of record and puts inside a
+	// request it builds (the supplemental report a claim update carries, the
+	// evidence a provider-data PAS request carries), from the system's own
+	// Patient to the member's network patient, and only when the record names
+	// that Patient. An input edit (InputEdited): the request is the builder's
+	// own and names it.
 	EditEvidenceSubjectRekey EditID = "E-06"
 	// EditCDSCoverageCarry carries, as a CDS Hooks request's
 	// prefetch.coverage, the Coverage the provider's gateway read through the
@@ -117,6 +120,19 @@ const (
 	// network. It is made even where a signature covers the payer-url
 	// (signedExempt, D127).
 	EditCDexTaskReturnRekey EditID = "E-11"
+	// EditDTRAdaptiveAddressRekey re-keys the questionnaireAdaptive address
+	// of each Questionnaire in a questionnaire-fetch answer, as the
+	// provider's gateway relays it to its own DTR client, to the gateway's
+	// per-payer address for it, so the client's adaptive rounds stay on the
+	// network; a boolean true is made explicit as the address. It is made
+	// even where a signature covers the address (signedExempt, D128).
+	EditDTRAdaptiveAddressRekey EditID = "E-12"
+	// EditDTRAdaptiveAddressRestore restores, on a request the payer's
+	// gateway forwards to its own system, an address the re-key wrote to the
+	// one the payer issued, or to the boolean true, so the payer's system
+	// receives the bytes it wrote. It is made even where a signature covers
+	// the address (signedExempt, D128).
+	EditDTRAdaptiveAddressRestore EditID = "E-13"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -125,15 +141,25 @@ const (
 	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept
 // with its builder.
 var transformEdits = []EditID{EditRegisteredTransform}
 
+// inputEdits are the registered edits the gateway makes to a participant's
+// record before it puts the record inside a message it builds itself: the
+// build is the builder's own message, unmodified after it was built, and
+// carries the edited record (InputEdited). E-06 alone.
+var inputEdits = []EditID{EditEvidenceSubjectRekey}
+
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }
+
+// InputEditIDs returns the registered edits a build may carry a record
+// changed by (inputEdits), in order.
+func InputEditIDs() []EditID { return slices.Clone(inputEdits) }
 
 // TransformEditIDs returns the registered edits a payload keeps its builder
 // through (transformEdits), in order. The SDK publishes the same set as
@@ -155,6 +181,9 @@ type sealed struct {
 	edits       []EditID
 	builder     BuilderID
 	contentType string
+	// inputs are the registered input edits (inputEdits) made to a
+	// participant's record the gateway's own build carries (InputEdited).
+	inputs []EditID
 	// signed names the signatures, by carrier, whose covered content an
 	// exempt edit changed (signedExempt).
 	signed []string
@@ -175,6 +204,17 @@ func (p Payload) Edits() []EditID {
 		return nil
 	}
 	return slices.Clone(p.c.edits)
+}
+
+// InputEdits returns a copy of the registered input edits made to a
+// participant's record that the gateway's own build carries, in the order
+// made, each once (InputEdited); nil when the build carries no such record.
+// They are not Edits: the build is the builder's message as built.
+func (p Payload) InputEdits() []EditID {
+	if p.c == nil {
+		return nil
+	}
+	return slices.Clone(p.c.inputs)
 }
 
 // SignedEdited names, by carrier (as SignedContentError does), each in-payload
@@ -349,6 +389,11 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 				continue
 			}
 			changed = true
+			if adaptiveEdits[c.Edit] {
+				if err := m.adaptiveChange(c.Edit, *eff); err != nil {
+					return Payload{}, err
+				}
+			}
 			carriers := cov.hits(*eff)
 			if len(carriers) == 0 {
 				continue
@@ -365,6 +410,11 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 		if changed && !slices.Contains(applied, c.Edit) {
 			applied = append(applied, c.Edit)
 		}
+	}
+	// After each adaptive edit's own change is checked: over the whole
+	// document, no address is added, removed or changed in form but by those.
+	if err := m.adaptiveFormsHeld(out, changes); err != nil {
+		return Payload{}, err
 	}
 	if len(applied) == 0 {
 		// The output changed although no operation declares a change.
@@ -421,7 +471,44 @@ func Transformed(src Payload, id EditID, out []byte, rederive func([]byte) ([]by
 			return Payload{}, err
 		}
 	}
-	return Payload{c: &sealed{b: seal(bytes.Clone(out)), own: OwnershipEdited, edits: []EditID{id}, builder: src.c.builder, contentType: src.c.contentType}}, nil
+	return Payload{c: &sealed{b: seal(bytes.Clone(out)), own: OwnershipEdited, edits: []EditID{id}, builder: src.c.builder, contentType: src.c.contentType, inputs: slices.Clone(src.c.inputs)}}, nil
+}
+
+// InputEdited returns src, a message the gateway built (OwnershipAuthored),
+// noting that the build carries a participant's record the registered input
+// edits ids changed before it was built (E-06: an evidence record read from
+// the participant's own system, its subject re-pointed to the member). The
+// result is still OwnershipAuthored under src's builder, with src's bytes:
+// the message is the builder's own, unmodified after the build. It names the
+// ids in InputEdits, after any src already names, each once, and Transformed
+// keeps them.
+//
+// An id that is not registered is ErrUnknownEdit; one that is not an input
+// edit, or src that is not OwnershipAuthored, is ErrInvalidEdit. With no ids,
+// src is returned.
+func InputEdited(src Payload, ids ...EditID) (Payload, error) {
+	for _, id := range ids {
+		switch {
+		case !slices.Contains(editIDs, id):
+			return Payload{}, fmt.Errorf("%w: %q", ErrUnknownEdit, id)
+		case !slices.Contains(inputEdits, id):
+			return Payload{}, fmt.Errorf("%w: %s is not made to a record a build carries", ErrInvalidEdit, id)
+		}
+	}
+	if src.Ownership() != OwnershipAuthored {
+		return Payload{}, fmt.Errorf("%w: input edits are noted only on the gateway's own message, not %s", ErrInvalidEdit, src.Ownership())
+	}
+	if len(ids) == 0 {
+		return src, nil
+	}
+	c := *src.c
+	c.inputs = slices.Clone(src.c.inputs)
+	for _, id := range ids {
+		if !slices.Contains(c.inputs, id) {
+			c.inputs = append(c.inputs, id)
+		}
+	}
+	return Payload{c: &c}, nil
 }
 
 // Embed declares that b[At:At+(End-Start)] is a copy of Source's bytes

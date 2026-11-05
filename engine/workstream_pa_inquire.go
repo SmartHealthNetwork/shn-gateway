@@ -494,7 +494,7 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // this gateway.
 func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -918,15 +918,18 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !found {
+		// Only a participant that requires known members gets here: a check
+		// it opted into, recorded as conformance.
+		exchangeOf(r.Context()).refusing(RefusalConformance)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
 	// Routed by the inquiry's OWN Coverage, the same rule the submit ingress
 	// follows: a Coverage naming no resolvable payer fails closed rather than
 	// defaulting to one.
-	recipient, payer, status, msg := g.pasRecipient(body)
+	recipient, payer, status, msg, reason := g.pasRecipient(body)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

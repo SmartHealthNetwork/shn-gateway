@@ -81,7 +81,9 @@ func TestCDexIngress_AConfiguredCeilingRefusesOneByteOver(t *testing.T) {
 			if env.substrate.authorizeHits != 0 {
 				t.Fatalf("the refused submission was authorized (%d)", env.substrate.authorizeHits)
 			}
-			wantRefusal(t, got.only(t), http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalRouting)
+			xr := got.only(t)
+			wantRefusal(t, xr, http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalRouting)
+			wantReasonInAnswer(t, xr, rec.Body.String())
 		})
 		t.Run("at/"+level.String(), func(t *testing.T) {
 			env := newInProcessExchange(t)

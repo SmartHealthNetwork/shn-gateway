@@ -147,7 +147,7 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	// request frame; a payer that has not declared framed DTR operations is
 	// refused before anything is sent.
 	if status, msg := g.framedDTRRefusal(res.recipient); status != 0 {
-		exchangeOf(ctx).refused(RefusalRouting)
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonFramedDTRUnsupported)
 		return nil, http.StatusUnprocessableEntity, withCarriedLegs(ctx, msg), nil
 	}
 	reqBytes, merr := buildNextQuestionParameters(reqQR)

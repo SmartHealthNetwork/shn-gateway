@@ -169,8 +169,13 @@ type Config struct {
 	// supplemental/facility-records). E2 swaps in a FHIR client; demo uses the stub.
 	SoR SystemOfRecord
 	// RequireKnownMembers is the participant's opt-in to checking members against
-	// its own system of record: on the Da Vinci CRD/DTR/PAS legs, a subject the
-	// system of record does not hold is refused ("unknown member"). The default
+	// its own system of record: on every leg that binds a member (the Da Vinci
+	// CRD, DTR and PAS legs, the DTR $next-question round, coverage
+	// eligibility, the CDex legs and the federated query), a subject the system
+	// of record does not hold is refused ("unknown member"), recorded as
+	// conformance: a check the participant opted into. (A payer answering
+	// eligibility from its own records, and a facility answering a federated
+	// query, answer for members they hold whatever the setting.) The default
 	// (false, the zero value) stays out of the way: such a subject binds by member id
 	// and the Patient the request carries (resolveSubjectPCI). Set from
 	// REQUIRE_KNOWN_MEMBERS (gateway/app).
@@ -795,26 +800,40 @@ const noPayerIdentifier = "no payer identifier on member coverage"
 // et al.). No default: any miss fails closed with a legible 422 (AI-G11 / OWD-G10). status==0 ⇒ ok.
 // It also returns the parsed PayerIdentifier so an origination site can REUSE it as the emitted payer
 // (one parse, one external-Org lookup) instead of re-parsing the same Coverage.
-func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) ([]byte, bool)) (holderID string, pid shnsdk.PayerIdentifier, status int, msg string) {
+func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) ([]byte, bool)) (holderID string, pid shnsdk.PayerIdentifier, status int, msg string, reason refusalReason) {
 	// Fail closed when the gateway was deployed without a payer directory: no router ⇒ no routing
 	// ⇒ no default (AI-G11 / OWD-G10). Guard BEFORE the nil-interface Resolve call so a provider
 	// missing PAYER_DIRECTORY returns a legible 422 instead of panicking.
 	if g.cfg.PayerRouter == nil {
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer router configured"
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgNoPayerRouter, reasonNoPayerRouter
 	}
 	parsed, err := shnsdk.ParseCoveragePayer(coverageJSON, resolveRef)
 	switch {
 	case errors.Is(err, shnsdk.ErrAmbiguousCoveragePayer):
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the coverage names more than one payer"
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgCoverageNamesTwoPayers, reasonCoverageNamesTwoPayers
 	case err != nil:
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
 	if !ok {
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity,
-			fmt.Sprintf("no registered payer for identifier %s|%s", parsed.System, parsed.Value)
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, unregisteredPayer(parsed), reasonUnregisteredPayer
 	}
-	return holder, parsed, 0, ""
+	return holder, parsed, 0, "", ""
+}
+
+// Routing refusals of a coverage that names no payer this gateway can route
+// to. msgUnregisteredPayer is followed by the identifier the coverage names
+// (unregisteredPayer); the record keeps the sentence alone.
+const (
+	msgNoPayerRouter          = "no payer router configured"
+	msgCoverageNamesTwoPayers = "ambiguous coverage for routing: the coverage names more than one payer"
+	msgUnregisteredPayer      = "no registered payer for identifier"
+)
+
+// unregisteredPayer is the refusal of a payer identifier no participant
+// registers, naming it.
+func unregisteredPayer(p shnsdk.PayerIdentifier) string {
+	return msgUnregisteredPayer + " " + p.System + "|" + p.Value
 }
 
 // recipientFor resolves the payer holder from the patient's own Coverage (FR-G40) using the provider
@@ -1111,13 +1130,13 @@ func (g *Gateway) ingressScopeRefused(w http.ResponseWriter, r *http.Request, sc
 		writeStoreUnavailable(w, "ingress key store unavailable")
 		return true
 	case !ok:
-		exchangeOf(r.Context()).refused(RefusalAuthentication)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+		exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonIngressAuthentication)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msgIngressAuthentication})
 		return true
 	}
 	noteIngressCaller(r.Context(), client)
 	if granted != scope {
-		exchangeOf(r.Context()).refused(RefusalAuthority)
+		exchangeOf(r.Context()).refusedFor(RefusalAuthority, scopeReason(scope))
 		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+scope+`"`)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "insufficient_scope: this route takes a bearer granted " + scope})
 		return true
@@ -1141,10 +1160,14 @@ func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) boo
 		writeStoreUnavailable(w, "ingress key store unavailable")
 		return true
 	}
-	exchangeOf(r.Context()).refused(RefusalAuthentication)
-	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "ingress authentication required"})
+	exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonIngressAuthentication)
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msgIngressAuthentication})
 	return true
 }
+
+// msgIngressAuthentication is the refusal of an ingress caller that presents
+// no bearer, or one this gateway does not admit.
+const msgIngressAuthentication = "ingress authentication required"
 
 // writeStoreUnavailable is the refusal a route answers when a shared-state record could
 // not be consulted: 503 (not a 401/403 denial, which would accuse an honest caller of a
@@ -1403,7 +1426,11 @@ var errHubTimeout = errors.New("hub leg timed out")
 // minted. It is refused 413 as routing, as an over-limit body is at the
 // ingress (bodycap.go): no route carries it. The error returned is an
 // *envelopeTooLargeError, which names the leg's limit.
-var errEnvelopeTooLarge = errors.New(errRequestTooLarge + ": sealed for the network it is over the limit an envelope may carry")
+var errEnvelopeTooLarge = errors.New(msgEnvelopeTooLarge)
+
+// msgEnvelopeTooLarge is the refusal of a request whose sealed envelope is
+// over the network's limit.
+const msgEnvelopeTooLarge = errRequestTooLarge + ": sealed for the network it is over the limit an envelope may carry"
 
 // envelopeTooLargeError is errEnvelopeTooLarge for a leg whose envelope may
 // carry limit bytes.
@@ -2042,7 +2069,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	exchangeOf(ctx).requestHash(sha256hex(env.Ciphertext))
 	// The sealed leg's event names the registered edits the request was
 	// sealed with; the record names them once the leg is sent (below).
-	edits := content.Payload.Edits()
+	edits := requestEdits(content.Payload)
 	g.diagnosticSealed(ctx, env, recipient, correlationID, txType, content.ProfileID, payload, edits)
 	tok, err := g.authorizeLeg(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
@@ -3646,7 +3673,37 @@ type (
 	answerLineKey     struct{}
 	declaredSetKey    struct{}
 	frameOperationKey struct{}
+	frameSubpathKey   struct{}
 )
+
+// withRequestFrameSubpath tags ctx with the operationSubpath value an inbound
+// request frame carries, as it came. The leg that defines the header reads and
+// verifies it; nothing else does.
+func withRequestFrameSubpath(ctx context.Context, v string) context.Context {
+	return context.WithValue(ctx, frameSubpathKey{}, v)
+}
+
+// requestFrameSubpath returns the operationSubpath value the inbound request
+// frame carries, and whether it carries one.
+func requestFrameSubpath(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(frameSubpathKey{}).(string)
+	return v, ok
+}
+
+// inboundFrameSubpath reads the operationSubpath header of an inbound request
+// frame, as it came, and whether the frame carries one. A payload that is not
+// a frame carries none.
+func inboundFrameSubpath(payload []byte) (string, bool) {
+	if !shnsdk.IsFramed(payload) {
+		return "", false
+	}
+	hdr, _, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		return "", false
+	}
+	v, ok := hdr.Headers[shnsdk.FrameHeaderOperationSubpath]
+	return v, ok
+}
 
 // withRequestFrameOperation tags ctx with the DTR operation the request frame
 // names ("" is a no-op).
@@ -3994,6 +4051,9 @@ func (g *Gateway) frameAnswer(requester string, answer statedAnswer, contentType
 		return payload, false, nil, nil, nil
 	}
 	headers, notCarried := writableAnswerHeaders(answer.headers)
+	address, addressNotCarried := writableAnswerHeaders(answer.address)
+	maps.Copy(headers, address)
+	notCarried = append(notCarried, addressNotCarried...)
 	framed, tooLarge, err := encodeAnswerFrame(answer.status, map[string]string{
 		"Content-Type":                    contentType,
 		shnsdk.FrameHeaderContractVersion: contractToken, // "" is omitted by the encoder
@@ -4021,7 +4081,9 @@ func (g *Gateway) successFrame(ctx context.Context, requester string, answer sta
 	return func(payload []byte, carryHeaders bool) ([]byte, []string, error) {
 		answer := answer
 		if !carryHeaders {
-			answer.headers = nil
+			// Without its headers, an answer leaves the address headers out
+			// too: no header ever costs an answer its delivery.
+			answer.headers, answer.address = nil, nil
 		}
 		out, framed, carried, notCarried, err := g.frameAnswer(requester, answer, contentType, contractToken, payload)
 		if err != nil {

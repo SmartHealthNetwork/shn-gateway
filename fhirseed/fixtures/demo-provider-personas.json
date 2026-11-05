@@ -1829,6 +1829,55 @@
       }
     },
     {
+      "fullUrl": "Condition/cond-mbrdependent-j449-provider",
+      "resource": {
+        "category": [
+          {
+            "coding": [
+              {
+                "code": "problem-list-item",
+                "display": "Problem List Item",
+                "system": "http://terminology.hl7.org/CodeSystem/condition-category"
+              }
+            ]
+          }
+        ],
+        "clinicalStatus": {
+          "coding": [
+            {
+              "code": "active",
+              "display": "Active",
+              "system": "http://terminology.hl7.org/CodeSystem/condition-clinical"
+            }
+          ]
+        },
+        "code": {
+          "coding": [
+            {
+              "code": "J44.9",
+              "display": "Chronic obstructive pulmonary disease, unspecified",
+              "system": "http://hl7.org/fhir/sid/icd-10-cm"
+            }
+          ],
+          "text": "Chronic obstructive pulmonary disease, unspecified"
+        },
+        "id": "cond-mbrdependent-j449-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"
+          ]
+        },
+        "resourceType": "Condition",
+        "subject": {
+          "reference": "Patient/pat-mbrdependent-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Condition/cond-mbrdependent-j449-provider"
+      }
+    },
+    {
       "fullUrl": "Coverage/cov-mbrbridgedemo-provider",
       "resource": {
         "beneficiary": {
@@ -4876,6 +4925,54 @@
       }
     },
     {
+      "fullUrl": "DeviceRequest/dr-mbrdependent-e0424-provider",
+      "resource": {
+        "codeCodeableConcept": {
+          "coding": [
+            {
+              "code": "E0424",
+              "display": "Stationary Oxygen System",
+              "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"
+            }
+          ]
+        },
+        "id": "dr-mbrdependent-e0424-provider",
+        "intent": "order",
+        "performer": {
+          "reference": "Organization/org-dme-mbrdependent-provider"
+        },
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "code": "J44.9",
+                "display": "Chronic obstructive pulmonary disease, unspecified",
+                "system": "http://hl7.org/fhir/sid/icd-10-cm"
+              }
+            ],
+            "text": "Chronic obstructive pulmonary disease, unspecified"
+          }
+        ],
+        "reasonReference": [
+          {
+            "reference": "Condition/cond-mbrdependent-j449-provider"
+          }
+        ],
+        "requester": {
+          "reference": "Practitioner/prac-mbrdependent-provider"
+        },
+        "resourceType": "DeviceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "Patient/pat-mbrdependent-provider"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DeviceRequest/dr-mbrdependent-e0424-provider"
+      }
+    },
+    {
       "fullUrl": "DeviceRequest/dr-order-mbrcanarycovered-provider",
       "resource": {
         "codeCodeableConcept": {
@@ -5939,6 +6036,100 @@
       "request": {
         "method": "PUT",
         "url": "DiagnosticReport/dr-xray-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrdependent-pao2-provider",
+      "resource": {
+        "category": [
+          {
+            "coding": [
+              {
+                "code": "exam",
+                "display": "Exam",
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "code": "2703-7",
+              "display": "Oxygen [Partial pressure] in Arterial blood",
+              "system": "http://loinc.org"
+            }
+          ]
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "id": "obs-mbrdependent-pao2-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "resourceType": "Observation",
+        "status": "final",
+        "subject": {
+          "reference": "Patient/pat-mbrdependent-provider"
+        },
+        "valueQuantity": {
+          "code": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "unit": "mm[Hg]",
+          "value": 52
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrdependent-pao2-provider"
+      }
+    },
+    {
+      "fullUrl": "Observation/obs-mbrdependent-pulseox-provider",
+      "resource": {
+        "category": [
+          {
+            "coding": [
+              {
+                "code": "exam",
+                "display": "Exam",
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "code": "59408-5",
+              "display": "Oxygen saturation in Arterial blood by Pulse oximetry",
+              "system": "http://loinc.org"
+            }
+          ]
+        },
+        "effectiveDateTime": "2026-06-28T12:00:00Z",
+        "id": "obs-mbrdependent-pulseox-provider",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result"
+          ]
+        },
+        "resourceType": "Observation",
+        "status": "final",
+        "subject": {
+          "reference": "Patient/pat-mbrdependent-provider"
+        },
+        "valueQuantity": {
+          "code": "%",
+          "system": "http://unitsofmeasure.org",
+          "unit": "%",
+          "value": 85
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation/obs-mbrdependent-pulseox-provider"
       }
     },
     {
@@ -8036,6 +8227,24 @@
       }
     },
     {
+      "fullUrl": "Organization/org-dme-mbrdependent-provider",
+      "resource": {
+        "id": "org-dme-mbrdependent-provider",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1447896832"
+          }
+        ],
+        "name": "Nordstrand Respiratory Supply",
+        "resourceType": "Organization"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Organization/org-dme-mbrdependent-provider"
+      }
+    },
+    {
       "fullUrl": "Organization/org-ordering-provider",
       "resource": {
         "id": "org-ordering-provider",
@@ -9919,6 +10128,33 @@
       "request": {
         "method": "PUT",
         "url": "Patient/pat-mbruc08-provider"
+      }
+    },
+    {
+      "fullUrl": "Practitioner/prac-mbrdependent-provider",
+      "resource": {
+        "id": "prac-mbrdependent-provider",
+        "identifier": [
+          {
+            "system": "http://hl7.org/fhir/sid/us-npi",
+            "value": "1644556676"
+          }
+        ],
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"
+          ]
+        },
+        "name": [
+          {
+            "family": "Lindqvist-Pulmonology"
+          }
+        ],
+        "resourceType": "Practitioner"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Practitioner/prac-mbrdependent-provider"
       }
     },
     {

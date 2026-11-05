@@ -174,5 +174,5 @@ func certifyCDSHooksAnswer(ctx context.Context, mod conformanceModule, emit func
 // Coverage naming no readable payor, or another payer, is refused, and so is a request
 // whose only Coverage is outside prefetch.coverage.
 func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(in, payorEdgeCDSHooksPrefetch, "application/json", nil)
+	return n.payorEdgeRequest(in, payorEdgeCDSHooksPrefetch, "application/json", nil, nil)
 }

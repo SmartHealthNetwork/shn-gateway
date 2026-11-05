@@ -608,6 +608,11 @@ var signedExempt = map[EditID]func(m *model, n splice.NodeID) bool{
 	EditPASPendReturnRekey: (*model).payerURLValue,
 	// D127: so is the return address of a payer's attachment-request Task.
 	EditCDexTaskReturnRekey: (*model).payerURLValue,
+	// D128: the questionnaireAdaptive address is re-keyed even where the
+	// payer's signature covers it, and restored even where the provider's
+	// does; each place may also take the one form change adaptivePair allows.
+	EditDTRAdaptiveAddressRekey:   (*model).adaptiveAddressValue,
+	EditDTRAdaptiveAddressRestore: (*model).adaptiveAddressValue,
 }
 
 // pasTempCodes is the PAS code system that names a Task's payer-url input.
@@ -620,6 +625,9 @@ func (m *model) signedExemption(id EditID, eff effect) bool {
 	place, ok := signedExempt[id]
 	if !ok || eff.replaced < 0 {
 		return false
+	}
+	if adaptiveEdits[id] && m.adaptivePair(id, eff.replaced, m.replaced[eff.replaced]) {
+		return true
 	}
 	v := m.replaced[eff.replaced]
 	if len(v) < 2 || v[0] != '"' || !json.Valid(v) || m.doc.Kind(eff.replaced) != splice.KindString {

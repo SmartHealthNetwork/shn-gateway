@@ -81,7 +81,7 @@ const msgPatientUnidentifiable = "cannot identify the patient: the request carri
 // record is unchanged.
 func subjectBindingFailure(ctx context.Context, err error) (int, string) {
 	if errors.Is(err, errPatientUnidentifiable) {
-		exchangeOf(ctx).refusing(RefusalAuthority)
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonPatientUnidentifiable)
 		return http.StatusBadRequest, msgPatientUnidentifiable
 	}
 	if x := exchangeOf(ctx); readRepeatsAMember(err) && x.answering() {

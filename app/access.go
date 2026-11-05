@@ -28,7 +28,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		AnswerHeadersNotCarried: r.AnswerHeadersNotCarried,
 	}
 	if r.Outcome == engine.ExchangeRefused {
-		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule, Stage: r.RefusalStage}
+		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule, Stage: r.RefusalStage, Reason: r.RefusalReason}
 	}
 	if b := r.Backend; b != nil {
 		line.Backend = &diagnostics.AccessBackend{Status: b.Status, LatencyMs: b.Latency.Milliseconds(), ErrorClass: b.ErrorClass, Calls: r.BackendCalls}

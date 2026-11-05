@@ -81,7 +81,9 @@ func TestOrigination_UnknownMemberIsRouting(t *testing.T) {
 				t.Fatalf("%s = %d %s legs %v, want 400 unknown member and no leg", route, rec.Code, rec.Body, stub.legTypes)
 			}
 			wantCarried(t, rec.Body.String())
-			wantRefusal(t, onlyRecord(t, recs), http.StatusBadRequest, RefusedByProviderGateway, RefusalRouting)
+			xr := onlyRecord(t, recs)
+			wantRefusal(t, xr, http.StatusBadRequest, RefusedByProviderGateway, RefusalRouting)
+			wantReasonInAnswer(t, xr, rec.Body.String())
 		})
 	}
 }
@@ -135,7 +137,9 @@ func TestOrigination_UnaddressablePayerIsRouting(t *testing.T) {
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), row.want) || len(stub.legTypes) != 0 {
 					t.Fatalf("%s = %d %s legs %v, want 422 %q and no leg", route, rec.Code, rec.Body, stub.legTypes, row.want)
 				}
-				wantRefusal(t, onlyRecord(t, recs), http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+				xr := onlyRecord(t, recs)
+				wantRefusal(t, xr, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+				wantReasonInAnswer(t, xr, rec.Body.String())
 			})
 		}
 	}
@@ -353,7 +357,9 @@ func testUC07CompletePatientLegChecks(t *testing.T, level ConformanceEnforcement
 			t.Fatalf("%d %s legs %v, want 422 and no leg", rec.Code, rec.Body, stub.legTypes[before:])
 		}
 		wantCarried(t, rec.Body.String())
-		wantRefusal(t, onlyRecord(t, recs), http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+		xr := onlyRecord(t, recs)
+		wantRefusal(t, xr, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+		wantReasonInAnswer(t, xr, rec.Body.String())
 	})
 }
 

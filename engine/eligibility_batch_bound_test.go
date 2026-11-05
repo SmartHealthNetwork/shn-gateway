@@ -91,6 +91,7 @@ func TestEligibilityBatch_OneMoreThanTheBoundIsRefused(t *testing.T) {
 			env, rec, x, sor := batchBoundIngress(t, level, pastBound, answer)
 			refusedBeforeTheNetwork(t, env, rec, http.StatusRequestEntityTooLarge, over)
 			wantRefusal(t, x, http.StatusRequestEntityTooLarge, RefusedByProviderGateway, RefusalLimit)
+			wantReasonInAnswer(t, x, rec.Body.String())
 			if n := sor.count(); n != 0 {
 				t.Fatalf("%d system-of-record reads before the refusal", n)
 			}

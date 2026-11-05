@@ -61,7 +61,7 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	// identity (and a Claim.insurer naming this payer) BEFORE any store write, so a
 	// refusal never leaves a claim pended with no way to release it. Off (the default) ⇒
 	// the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -315,7 +315,7 @@ func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subj
 	// Payer-edge identity mapping (payoredge.go): map the bundle's Coverage payer
 	// identity (and a Claim.insurer naming this payer) before it is posted (and before
 	// any store side-effect below). Off (the default) ⇒ the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR))
+	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
 	}

@@ -262,6 +262,9 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	x.operation(operation)
 	r = r.WithContext(withRequestFrameOperation(r.Context(), operation))
+	if subpath, ok := inboundFrameSubpath(payload); ok {
+		r = r.WithContext(withRequestFrameSubpath(r.Context(), subpath))
+	}
 
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	// The leg is verified and open: what follows is its answer.

@@ -136,10 +136,13 @@ type Rule struct {
 	Allowed  []Ownership
 	Edits    []EditID
 	Builders []BuilderID
+	// InputEdits are the input edits (InputEditIDs) a payload sealed under
+	// one of Builders may carry a record changed by (Payload.InputEdits).
+	InputEdits []EditID
 }
 
 func (r Rule) clone() Rule {
-	return Rule{Allowed: slices.Clone(r.Allowed), Edits: slices.Clone(r.Edits), Builders: slices.Clone(r.Builders)}
+	return Rule{Allowed: slices.Clone(r.Allowed), Edits: slices.Clone(r.Edits), Builders: slices.Clone(r.Builders), InputEdits: slices.Clone(r.InputEdits)}
 }
 
 // RefusedEvent is the name under which transmit boundaries count a payload
@@ -306,8 +309,9 @@ func buildOwnership(legs []string, rows map[Key]Rule) (*registeredOwnership, err
 // checkRule refuses a workstream rule that is not closed over the registered
 // sets: one that permits nothing, names an ownership value that does not
 // exist, lists edits without permitting Edited (or the reverse), lists
-// builders without permitting Authored (or the reverse), or names an edit or
-// a builder that is not registered. The gateway's refusal and the test
+// builders without permitting Authored (or the reverse), names an edit or
+// a builder that is not registered, or lists an input edit that is not one
+// (InputEditIDs) or without builders. The gateway's refusal and the test
 // builder are never a workstream's to list.
 func checkRule(r Rule) error {
 	if len(r.Allowed) == 0 {
@@ -330,6 +334,14 @@ func checkRule(r Rule) error {
 		}
 		if slices.Contains(transformEdits, e) && len(r.Builders) == 0 {
 			return fmt.Errorf("transform %s is listed without the builders whose messages it carries", e)
+		}
+	}
+	for _, e := range r.InputEdits {
+		switch {
+		case !slices.Contains(inputEdits, e):
+			return fmt.Errorf("edit %s is not an input edit", e)
+		case len(r.Builders) == 0:
+			return fmt.Errorf("input edit %s is listed without the builders whose messages carry it", e)
 		}
 	}
 	for _, b := range r.Builders {
@@ -426,6 +438,13 @@ func checkIn(table map[Key]Rule, k Key) func(Payload) error {
 		}
 		if !slices.Contains(rule.Allowed, p.Ownership()) {
 			return refuse("ownership not permitted")
+		}
+		// An input edit (InputEdited) is registered for the transmit it is
+		// named on, apart from the edits made to the payload itself.
+		for _, e := range p.InputEdits() {
+			if !slices.Contains(rule.InputEdits, e) {
+				return refuse("input edit " + string(e) + " not permitted")
+			}
 		}
 		switch p.Ownership() {
 		case OwnershipEdited:

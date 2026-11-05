@@ -193,8 +193,12 @@ type pasFollowInputs struct {
 	// site: the PAS request carries it as the resolvable entry the Claim names.
 	coverage []byte
 	// insurer is the payer's own Organization record — see crdDtrResult.insurer.
-	insurer      []byte
-	member       string
+	insurer []byte
+	member  string
+	// sorID is the id the participant's own system holds member's Patient
+	// under: the PAS completion names the evidence it reads by member, as the
+	// build names the patient (evidenceReadByMember). "" when unknown.
+	sorID        string
 	recipient    string
 	orderRef     string
 	orderJSON    []byte

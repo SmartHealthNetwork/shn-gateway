@@ -136,6 +136,9 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		return "", status, msg
 	}
 	if !found {
+		// Only a participant that requires known members gets here: a check
+		// it opted into, recorded as conformance.
+		exchangeOf(ctx).refusing(RefusalConformance)
 		return "", http.StatusBadRequest, "unknown member"
 	}
 	// Every other patient reference must resolve to the SAME pci.
@@ -260,6 +263,7 @@ type crdIngressRequest struct {
 	// left out because the system of record could not provide it.
 	coverageStatus int
 	coverageMsg    string
+	coverageReason refusalReason
 	// carried records the finding for each prefetch value left out below
 	// strict (RulePrefetchFill), once the request is routed: a request
 	// refused before it is carried records none.
@@ -681,6 +685,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 		if value == nil {
 			if key == "coverage" {
 				out.coverageStatus, out.coverageMsg = coverageOmitted(outcome)
+				out.coverageReason = coverageOmittedReason(outcome)
 			}
 			continue
 		}
@@ -703,6 +708,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 				}
 				if value == nil {
 					out.coverageStatus, out.coverageMsg = coverageOmitted(outcome)
+					out.coverageReason = coverageOmittedReason(outcome)
 					continue
 				}
 			} else {
@@ -794,9 +800,28 @@ func coverageOmitted(o SearchOutcome) (int, string) {
 	case SearchFailed:
 		return http.StatusBadGateway, coverageSearchAnsweredError
 	case SearchUnsupported:
-		return http.StatusUnprocessableEntity, "coverage not in request, and the system of record cannot search for it"
+		return http.StatusUnprocessableEntity, msgCoverageNotSearchable
 	}
-	return http.StatusUnprocessableEntity, "coverage unreadable from system of record"
+	return http.StatusUnprocessableEntity, msgCoverageUnreadable
+}
+
+// The routing refusals of a request that carries no coverage when the system
+// of record cannot supply one.
+const (
+	msgCoverageNotSearchable = "coverage not in request, and the system of record cannot search for it"
+	msgCoverageUnreadable    = "coverage unreadable from system of record"
+)
+
+// coverageOmittedReason is the recorded reason of coverageOmitted's refusal:
+// "" for a system that failed to answer, which is not a refusal.
+func coverageOmittedReason(o SearchOutcome) refusalReason {
+	switch o {
+	case SearchUnavailable, SearchFailed:
+		return ""
+	case SearchUnsupported:
+		return reasonCoverageNotSearchable
+	}
+	return reasonCoverageUnreadable
 }
 
 // coverageSearchAnsweredError is the backend failure of a coverage search the

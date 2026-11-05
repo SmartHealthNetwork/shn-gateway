@@ -50,6 +50,7 @@ func (w toyWorkstream) newNativeState(*nativeResponder) nativeState       { retu
 func (w toyWorkstream) lineBridge() lineBridgeRows                        { return lineBridgeRows{} }
 func (w toyWorkstream) relayEdits() []relayEdit                           { return w.edits }
 func (w toyWorkstream) ingressOperations() []string                       { return w.ops }
+func (w toyWorkstream) refusalReasons() []refusalReason                   { return nil }
 
 // checkWorkstreamsUnique reports the first collision among compiled-in
 // workstreams: an empty or repeated WorkstreamType, a transaction type two

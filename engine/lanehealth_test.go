@@ -62,8 +62,7 @@ func testLane(t *testing.T, mode *int32) *httptest.Server {
 func TestLaneFailureOf(t *testing.T) {
 	var mode int32
 	lane := testLane(t, &mode)
-	closed := httptest.NewServer(http.NotFoundHandler())
-	closed.Close()
+	closedURL := downEndpoint(t)
 	call := func(base string, timeout time.Duration, ctx context.Context) error {
 		v := shnsdk.NewOperationValidator(base)
 		v.Client = &http.Client{Timeout: timeout}
@@ -78,13 +77,13 @@ func TestLaneFailureOf(t *testing.T) {
 		ctx  context.Context
 		want laneFailure
 	}{
-		"refused":              {base: closed.URL, want: laneUnreachable},
+		"refused":              {base: closedURL, want: laneUnreachable},
 		"dropped":              {mode: testLaneDrops, want: laneUnreachable},
 		"timed out":            {mode: testLaneHangs, want: laneTimedOut},
 		"answered 503":         {mode: testLaneFails, want: laneAnswered},
 		"answered":             {mode: testLaneAnswers, want: laneAnswered},
 		"the caller gave up":   {mode: testLaneHangs, ctx: gone, want: laneAnswered},
-		"refused, caller gone": {base: closed.URL, ctx: gone, want: laneAnswered},
+		"refused, caller gone": {base: closedURL, ctx: gone, want: laneAnswered},
 	} {
 		t.Run(name, func(t *testing.T) {
 			atomic.StoreInt32(&mode, tc.mode)
@@ -263,13 +262,12 @@ func TestExplicitLaneProbeCountsAnyAnswer(t *testing.T) {
 	if err := l.probe(context.Background()); err == nil {
 		t.Fatal("a dropped connection is not an answer")
 	}
-	closed := httptest.NewServer(http.NotFoundHandler())
-	closed.Close()
-	if err := newExplicitLane([]string{"2.2"}, shnsdk.NewOperationValidator(closed.URL)).probe(context.Background()); err == nil {
+	closedURL := downEndpoint(t)
+	if err := newExplicitLane([]string{"2.2"}, shnsdk.NewOperationValidator(closedURL)).probe(context.Background()); err == nil {
 		t.Fatal("a refused connection is not an answer")
 	}
 	var opErr *net.OpError
-	l2 := newExplicitLane([]string{"2.2"}, shnsdk.NewOperationValidator(closed.URL))
+	l2 := newExplicitLane([]string{"2.2"}, shnsdk.NewOperationValidator(closedURL))
 	if err := l2.probe(context.Background()); !errors.As(err, &opErr) {
 		t.Fatalf("refused: %v, want the connection's error", err)
 	}

@@ -18,9 +18,20 @@ const (
 	errCDexRequestTwoWays = "the Task can be read two ways: it repeats a member name, or names one in another case"
 	errCDexRequestNotTask = "not a CDex Task Attachment Request: the body is not a Task this leg carries"
 	errCDexRequestCode    = "the Task's code is not one this leg carries: it takes a Task Attachment Request coded " +
-		cdextask.PASTempCodes + "#" + cdextask.CodeAttachmentRequest
+		cdextask.PASTempCodes + "#" + cdextask.CodeAttachmentRequest + " or " +
+		cdextask.PASTempCodes + "#" + cdextask.CodeAttachmentRequestQuestionnaire
 	errCDexRequestNoPatient = "cannot bind the request to a patient: Task.for names no one member number (an identifier typed v2-0203#MB)"
 )
+
+// cdexRequestCodeTaken reports whether the Task's code is one the leg carries,
+// read by system and code: a request for attachments by code, or (D128) a
+// request for a questionnaire to be completed. Any other code, the CDex
+// data-request codes among them, is outside the leg's authority. Both ends of
+// the leg decide by it.
+func cdexRequestCodeTaken(task cdextask.Task) bool {
+	return task.Code.Has(cdextask.PASTempCodes, cdextask.CodeAttachmentRequest) ||
+		task.Code.Has(cdextask.PASTempCodes, cdextask.CodeAttachmentRequestQuestionnaire)
+}
 
 // v20203MB is the identifier type of a member number (HL7 v2 table 0203, MB):
 // the slice cdex-patient-demographics requires of the contained Patient.

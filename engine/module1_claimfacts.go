@@ -147,6 +147,8 @@ func ensureOriginationClaimInput(r *http.Request) *http.Request {
 func claimInputOrFail(w http.ResponseWriter, r *http.Request) (originationClaimInput, bool) {
 	in, err := claimInputOf(r)
 	if errors.Is(err, errOriginationBodyTooLarge) {
+		// The network's body limit: a size refusal, recorded as routing.
+		exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonRequestTooLarge)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": afterLegs(r.Context(), err.Error())})
 		return originationClaimInput{}, false
 	}

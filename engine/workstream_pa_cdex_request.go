@@ -85,7 +85,7 @@ func (g *Gateway) handleCDexRequestInbound(w http.ResponseWriter, r *http.Reques
 	case err != nil:
 		refuse(RefusalAuthority, http.StatusForbidden, errCDexRequestNotTask)
 		return
-	case !task.Code.Has(cdextask.PASTempCodes, cdextask.CodeAttachmentRequest):
+	case !cdexRequestCodeTaken(task):
 		refuse(RefusalAuthority, http.StatusForbidden, errCDexRequestCode)
 		return
 	}

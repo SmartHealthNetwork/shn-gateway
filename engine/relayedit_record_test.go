@@ -416,6 +416,11 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		relay.EditRegisteredTransform:  {"registered-transform", relay.RoleRecipient},
 		relay.EditPASPendReturnRekey:   {"pas-pend-return-rekey", 0},
 		relay.EditCDexTaskReturnRekey:  {"cdex-task-return-rekey", 0},
+		// E-12 is made on the answer to the provider's own client, E-13 on
+		// the forward to the payer's own system: no other party receives
+		// either.
+		relay.EditDTRAdaptiveAddressRekey:   {"dtr-adaptive-address-rekey", 0},
+		relay.EditDTRAdaptiveAddressRestore: {"dtr-adaptive-address-restore", 0},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

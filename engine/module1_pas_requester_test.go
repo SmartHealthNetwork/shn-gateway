@@ -423,7 +423,7 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, true); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
 		t.Fatalf("the request without a requester fails the guard: %v", err)
 	}
 	in.SR = withOrderRequester(t, in.SR, "Practitioner/prac-2")
@@ -435,14 +435,14 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, true); err == nil {
+	if _, _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err == nil {
 		t.Fatal("a request naming a clinician it does not carry passed the evidence guard")
 	}
 	with, err := buildModuleOnePASSubmit("2.2", in, records)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, true); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
 		t.Fatalf("the carried request failed the evidence guard: %v", err)
 	}
 }
@@ -501,7 +501,7 @@ func TestModuleOnePAS_AuthorNamingTheCarriedClinician(t *testing.T) {
 				t.Fatalf("questionnaire author %q, want the carried entry %q", author, full)
 			}
 			if name == "submit" {
-				if _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, true); err != nil {
+				if _, _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
 					t.Fatalf("the evidence guard refused the carried request: %v", err)
 				}
 			}

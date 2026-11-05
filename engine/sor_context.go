@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -148,7 +147,7 @@ func (g *Gateway) originCoverage(ctx context.Context, w http.ResponseWriter, mem
 	coverage, found, ambiguous, status, msg, readErr := g.readMemberCoverage(ctx, member, choose)
 	switch {
 	case ambiguous:
-		exchangeOf(ctx).refused(RefusalRouting)
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonMemberCoverageTwoPayers)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return nil, false
 	case status != 0:
@@ -159,8 +158,8 @@ func (g *Gateway) originCoverage(ctx context.Context, w http.ResponseWriter, mem
 		writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 		return nil, false
 	case !found:
-		exchangeOf(ctx).refused(RefusalRouting)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no coverage on file for member"})
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonNoCoverageOnFile)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgNoCoverageOnFile})
 		return nil, false
 	}
 	return coverage, true
@@ -169,6 +168,10 @@ func (g *Gateway) originCoverage(ctx context.Context, w http.ResponseWriter, mem
 // msgAmbiguousCoverage is the refusal of Coverage records that do not name
 // one payer.
 const msgAmbiguousCoverage = "ambiguous coverage for routing: the member's Coverage records do not name one payer"
+
+// msgNoCoverageOnFile is the refusal of a call to originate for a member whose
+// system of record holds no Coverage to route on.
+const msgNoCoverageOnFile = "no coverage on file for member"
 
 // errAmbiguousCoverage marks that refusal for a caller that hands the read's
 // refusal on as an error (memberRoutingCoverage); relayOriginationError
@@ -220,8 +223,8 @@ func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose 
 // recorded as a backend failure.
 func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string, shnsdk.PayerIdentifier, int, string) {
 	if g.cfg.PayerRouter == nil {
-		exchangeOf(ctx).refused(RefusalRouting)
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, "no payer router configured"
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonNoPayerRouter)
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgNoPayerRouter
 	}
 	resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
 	parsed, ok := shnsdk.ParsePayerIdentifier(coverage, resolve)
@@ -233,13 +236,13 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 		return "", shnsdk.PayerIdentifier{}, status, msg
 	}
 	if !ok {
-		exchangeOf(ctx).refused(RefusalRouting)
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonNoPayerIdentifier)
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
 	if !ok {
-		exchangeOf(ctx).refused(RefusalRouting)
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, fmt.Sprintf("no registered payer for identifier %s|%s", parsed.System, parsed.Value)
+		exchangeOf(ctx).refusedFor(RefusalRouting, reasonUnregisteredPayer)
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, unregisteredPayer(parsed)
 	}
 	return holder, parsed, 0, ""
 }

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/pa/dtraddress"
 )
 
 // nativeEnrichment is the one hook through which a participant's own
@@ -59,6 +61,11 @@ type paGatewayState struct {
 	// provider whose participant sets one (Config.ProviderCDexTaskURL); nil
 	// otherwise, when the payer's attachment request is refused as routing.
 	cdexTask *nativeResponder
+	// addressKey is a payer gateway's DTR adaptive-address tag key, derived
+	// from its identity signing key (dtraddress.DeriveKey); zero on any other
+	// role, when no address is tagged and none verifies. Its bytes never
+	// format.
+	addressKey dtraddress.Key
 }
 
 // cdexTaskDeadline bounds the provider's Task forward, its token request
@@ -72,6 +79,13 @@ var cdexTaskDeadline = shnsdk.NewClient().Timeout - 5*time.Second
 // managed one over the system of record New has decorated.
 func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
 	st := &paGatewayState{populator: newManagedPopulator(g.cfg.SoR)}
+	if g.cfg.Role == "payer" {
+		k, err := dtraddress.DeriveKey(g.cfg.Identity.SignPriv)
+		if err != nil {
+			return nil, err
+		}
+		st.addressKey = k
+	}
 	if url := strings.TrimSpace(g.cfg.ProviderCDexTaskURL); url != "" && g.cfg.Role == "provider" {
 		st.cdexTask = NewNativeResponder(g.cfg.ProviderCDexTaskClient, url, g.cfg.Clock, WithUpstreamParty("provider"),
 			WithBackendDeadline(cdexTaskDeadline))

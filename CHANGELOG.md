@@ -4,6 +4,188 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A payer's gateway tags its adaptive questionnaire addresses and restores them (E-13) (v1.7.0)
+
+- **Added (`dtr-questionnaire-fetch`):** on a 2xx answer to a framed `$questionnaire-package` or
+  `$next-question` request, a payer's gateway states, inside the sealed answer frame, the base it
+  delivered the operation under (`operationBase`), when an adaptive `valueUrl` in the answer is
+  under it. It also states a tag for each adaptive `$next-question` address it issues
+  (`operationAddressTags`), on the rules CONFIGURATION states: a `true`, and a `valueUrl` spelled
+  exactly as that base followed by a clean remainder and written without JSON escapes. The answer is relayed exactly as the payer's system sent it. A provider's
+  gateway reads the headers only from the release that turns on its re-key of the address
+  (registered edit E-12). A header that cannot be carried is named in the exchange record's
+  `answerHeadersNotCarried`.
+- **Added:** a `$next-question` round that names its address (`operationSubpath`) is delivered at
+  that address only when its tag verifies for the provider that sent it. Otherwise it is refused
+  `422 not an address this payer issued, or its base or key changed; fetch the package again`,
+  recorded as `routing`. A package request naming an address is refused `400`.
+- **Added (registered edit E-13, `dtr-adaptive-address-restore`):** on `dtr-questionnaire-fetch`,
+  `cdex-attachment-submit`, `pas-claim`, `pas-claim-update` and `pas-claim-inquire`, a payer's
+  gateway restores an adaptive address a provider's gateway re-keyed, whose tag it issued to that
+  provider and verifies, to the bytes the payer's system wrote. It does so before forwarding the
+  request to that system.
+  - The restore is made even where a signature covers the address, so that signature no longer
+    verifies in the payer's copy.
+  - The forward names the edit in `X-SHN-Edited`.
+  - A provider's gateway does not re-key the address in v1.7.0. From the release that makes
+    E-12, it re-keys an address only toward a payer's gateway that declares the `v1opsub`
+    request frame, which v1.7.0 does not. So no request carries an address to restore yet.
+- **Added (`editsNotMade`):** for a re-keyed address naming this payer that the restore cannot
+  make, carried as sent: `E-13:unclean-remainder`, `E-13:not-verified` and
+  `E-13:unreadable-request` (an address that cannot be rewritten). A request the payer's gateway
+  cannot read as JSON is refused `400` by the leg's own read before the restore, so it records no
+  E-13 reason.
+- **Added (observer, full):** `dtr.adaptive-address-carried`, for an address in the re-keyed form
+  that names another payer, carried as sent. It carries the event's kind, direction, leg and
+  correlation only.
+- **Changed (STABILITY):** a third recorded exception covers E-12 and E-13, at the adaptive address
+  only, on the legs named above. The only edits the gateway may make to signed content are now
+  E-10, E-11, E-12 and E-13.
+
+## Registered edit ids for an adaptive questionnaire's address (v1.7.0)
+
+- **Go API (additive):** `relay.EditDTRAdaptiveAddressRekey` (`E-12`,
+  `dtr-adaptive-address-rekey`) and `relay.EditDTRAdaptiveAddressRestore` (`E-13`,
+  `dtr-adaptive-address-restore`) are registered in the relay's closed edit set. The gateway does
+  not make E-12 in v1.7.0; it makes E-13 only on an address a provider's gateway re-keyed
+  with E-12.
+
+## The gateway builds on shn-sdk v1.8.0 (v1.7.0)
+
+- **Changed:** the gateway pins shn-sdk v1.8.0.
+
+## Pre-Hub refusals that recorded no rule now name it (v1.7.0)
+
+- **Access line and exchange record:** three refusals a gateway makes before the request
+  reaches the Hub, which recorded `refusal.rule` `other`, now name their rule.
+  - **An origination body over the network's limit:** `413` on the module origination routes
+    (`/scenario/…`) that read their body against the limit, now `routing` (the rule of every
+    size refusal) with `refusal.reason`.
+  - **A payer without framed DTR operations at the DTR package route:** `502`, now `routing`
+    with its reason, as module 1's origination records it.
+  - **A member your system of record does not hold, under `REQUIRE_KNOWN_MEMBERS=true`:** on
+    the CRD, DTR package request, PAS submission and inquiry, coverage eligibility and federated
+    query routes, now `conformance`, as the CDex routes already recorded it: a check the
+    participant opted into, so it carries no reason. Without the setting, such a member is
+    bound from the request and carried, as before.
+- **Unchanged:** every answer's status and bytes.
+- **Documentation:** `REQUIRE_KNOWN_MEMBERS` is documented for every route that binds a
+  member, not only the CRD, DTR and PAS legs.
+
+## A refusal before the Hub records its reason (v1.7.0)
+
+- **Access line and exchange record:** a refusal the gateway makes of its own participant's
+  call before the request it refuses reaches the Hub now carries `refusal.reason` on its
+  access line, and `RefusalReason` on its `engine.ExchangeRecord` (on a module's origination
+  route, an earlier leg of the same call may have been sent). This covers refusals for authentication or
+  scope at an ingress, message integrity, authority read from the body, routing with no
+  recipient, and size.
+  - The reason is the gateway's own fixed refusal sentence: the answer the caller is given,
+    or the fixed sentence in it when the answer adds a detail (an identifier, a member name,
+    a count, the contract lines). It is never a value from the request, a credential or patient data; a value the
+    gateway has not registered is written as `other`.
+  - The field is core; its sentences may be reworded or added to in a minor release, so
+    decide by `refusal.rule`.
+  - Such refusals reach no Hub record, so the gateway's own line and record keep them.
+- **Unchanged:** every answer's status and bytes. Refusals of a leg received from the network,
+  refusals by the Hub, a peer or the Authorization Framework, and a refusal of an answer that
+  came back from the network carry no reason.
+
+## A payer's attachment-request Task at the plain Task endpoint, routed by its owner (v1.7.0)
+
+- **New (payer, `PAYER_DAVINCI_INGRESS`):** your system can create the Task with
+  `POST {PAYER_DAVINCI_INGRESS_BASE_URL}/Task`. The gateway routes it by the organization its
+  `Task.owner` names: the NPIs the owner states on the owner reference, on the `organization` of
+  the PractitionerRole it contains, or on a contained Organization that the owner or that role's
+  `organization` names. It goes to the one
+  registered provider the network attests them for. The practitioner's NPI is never routed on,
+  an identifier in another system names no one, and an NPI attested for no provider is passed
+  over when another names a provider.
+- **Refused `422`, on `routing`, before the Task crosses the network:**
+  - an owner that cannot be read;
+  - an owner that names no organization NPI the network attests for a provider;
+  - an owner whose NPIs name different providers. The network never picks one.
+
+  Each refusal points to the providers' bases, which work as before. A Task routed to a provider
+  that does not take the request is refused by the Hub, `422` on `routing`, as at its base.
+- **Records:** exchange records name the route `cdex-request` (`RouteCDexRequest`, new in the
+  engine). The observer tag is `cdex-request-ingress`, as at a provider's base.
+- **Hosted payers:** the tenant's edge forwards `POST /Task` once the tenant runs shn-gateway v1.7.0 or later.
+- **STABILITY.md:** `POST /Task` is now listed once per role, `POST /Task (provider)` for the
+  federated query and `POST /Task (payer)` for this route, each classed by its own workstream.
+
+## A payer's attachment-request Task at a provider's base: the provider's identifiers and the owner (v1.7.0)
+
+- **Listing (payer, `PAYER_DAVINCI_INGRESS`):** each entry of `GET /cdex/providers` now also
+  carries `identifiers`: the organization NPIs the network attests for that provider, each a
+  `{"system","value"}` pair, as the public holder feed serves them. It is omitted for a provider
+  attested for none.
+- **The owner (payer):** the gateway now reads the organization NPIs `Task.owner` states, on the
+  owner reference, the `organization` of the PractitionerRole it contains, or a contained
+  Organization that the owner or that role's `organization` names. The practitioner's NPI is
+  never read for this. When one is an NPI the network attests for another registered provider,
+  or the owner cannot be read, the gateway records the new observer event `cdex.owner-differs`,
+  with no identifier. The Task is carried to the base's provider as sent, as before.
+- **Reading the Task (`pa/cdextask`):** `Owner.ContainedOrganization` is the Organization a
+  `Task.owner` reference, or its contained PractitionerRole's `organization`, names when the Task
+  contains it, with its identifiers. Before, an owner naming one read as an unreadable
+  PractitionerRole, and a role's contained organization was not read.
+
+## A payer's attachment-request Task may ask for a questionnaire (v1.7.0)
+
+- **Added (`cdex-attachment-request`, evolving):** the leg now also takes a CDex 2.1.0 Task
+  Attachment Request coded
+  `http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes#attachment-request-questionnaire`,
+  a request for a questionnaire to be completed, besides one coded `attachment-request-code`.
+  The payer's gateway and the provider's gateway take it alike. It is carried exactly as the
+  payer's system sent it, apart from its `payer-url`, which the provider's gateway re-keys to its
+  documentation return path (registered edit E-11, `cdex-task-return-rekey`), as for a request by
+  code. That includes the questionnaire canonical in its `questionnaire-context` input and any
+  `signature-flag` input. The canonical is the payer's identifier for the questionnaire, so it is
+  never rewritten. Before, such a Task was refused `403` (`authority`) at both gateways. Your
+  system fetches the questionnaire through its gateway's `$questionnaire-package`, on the
+  network. An adaptive questionnaire's `$next-question` rounds go to the address its
+  `questionnaireAdaptive` extension names, the payer's own system, outside the network.
+- **Unchanged:** a Task with any other code is refused `403` with
+  `the Task's code is not one this leg carries`, recorded as `authority`, at every conformance
+  level. That includes the CDex data requests (`data-request-code`, `data-request-query`,
+  `data-request-questionnaire`), either taken code under another system, and a Task with no code.
+  The refusal's text now names both codes the leg takes.
+
+## A provider-data request carries its evidence for a member your system keys by its own record id (v1.7.0)
+
+- **Fix (requester, `ORIGINATION_PROFILE=provider-data`):** when your system of record holds the
+  member's `Patient` under its own record id rather than the member id, the gateway names the
+  patient by the member id in the prior-authorization request it builds. Registered edit E-06
+  (`evidence-subject-rekey`) now also covers the clinical records it reads from your system to
+  complete that request. For each `Condition`, `Observation`, `ClinicalImpression`, `Goal` or
+  `DiagnosticReport` the request references, a record whose own `subject.reference` is exactly
+  that record id is re-pointed to `Patient/<member id>`. Nothing else in the record changes, and a
+  resource contained in it is not edited. Before, every such request was refused with
+  `502 PAS evidence linkage failed`, after the CRD and questionnaire legs had gone out. That
+  applied on each submission and update, at every conformance level.
+- **Refused:** a record naming anything else, including another patient and a versioned or
+  absolute reference, is refused with `502 PAS evidence linkage failed`.
+- **Newly refused:** a record naming `Patient/<member id>` while your system holds the member
+  under another id. In your system's own numbering it is another record. It was carried before;
+  it is now refused with `502 PAS evidence linkage failed`. One a signature covers is refused
+  with `422 signed content cannot be edited (E-06, <carrier>)`, as the supplemental report is.
+- **Access line:** a request the gateway built that carries a record E-06 re-pointed (these
+  records, or the supplemental report an update carries) now names `E-06` in `relayEdits` and
+  the exchange record's `requestEdits`. It stays `ownership: authored` with its `builder`, since
+  the edit is made to the record before the build. Through the registered transform it names
+  `["E-06","E-09"]`. Earlier releases re-pointed the supplemental report's subject but did not
+  name the edit there; the provider-data evidence is re-pointed only from v1.7.0, as above.
+  A request whose records your system already names by the member id names nothing.
+- **Unchanged:** a system that holds the member's `Patient` under the member id, a request that
+  references no clinical record, how the supplemental report is re-pointed and refused, the
+  `demo` profile, and your Da Vinci ingress and relays.
+- **Go API:** `relay.EditEvidenceSubjectRekey` (`E-06`) is registered on `pas-claim` as well as
+  `pas-claim-update`, on the five records' `subject.reference`. `relay.InputEdited`,
+  `relay.InputEditIDs` and `Payload.InputEdits` are new: they note on the gateway's own message
+  the registered edits made to a record its build carries (`E-06` alone). `relay.Rule` gains
+  `InputEdits`, the input edits a transmit admits.
+
 ## A prior-authorization inquiry your gateway builds carries a dependent's parent (v1.6.0)
 
 - **Behavior change (requester, `ORIGINATION_PROFILE`):** the inquiry the gateway builds to

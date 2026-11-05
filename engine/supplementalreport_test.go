@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -67,13 +68,16 @@ func reportGateway(sor SystemOfRecord) *Gateway { return &Gateway{cfg: Config{So
 // TestSupplementalReport_SubjectRekeyedOnly: a report the provider's system
 // holds under its own Patient id reaches the claim update with only its
 // subject.reference changed, to the member's network patient (E-06); every
-// other byte is the system's.
+// other byte is the system's. The claim update that carries it names E-06.
 func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/pat-7")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-	got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+	got, edits, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 	if status != 0 {
 		t.Fatalf("refused: %d %s", status, msg)
+	}
+	if !slices.Equal(edits, []relay.EditID{relay.EditEvidenceSubjectRekey}) {
+		t.Fatalf("input edits %v, want [E-06] for the update that carries the report", edits)
 	}
 	want := strings.Replace(held, `"Patient/pat-7"`, `"Patient/MBR-UC04"`, 1)
 	if string(got) != want {
@@ -82,13 +86,14 @@ func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 }
 
 // TestSupplementalReport_MemberNamedReportExact: a system that names the
-// patient by the member id gets its report sent exactly as held.
+// patient by the member id gets its report sent exactly as held, and names
+// no edit.
 func TestSupplementalReport_MemberNamedReportExact(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/MBR-UC04")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "MBR-UC04", report: []byte(held)})
-	got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
-	if status != 0 || string(got) != held {
-		t.Fatalf("want the report exactly as held: %d %s\n got %s", status, msg, got)
+	got, edits, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
+	if status != 0 || string(got) != held || edits != nil {
+		t.Fatalf("want the report exactly as held, no edit: %d %s edits %v\n got %s", status, msg, edits, got)
 	}
 }
 
@@ -124,7 +129,7 @@ func TestSupplementalReport_Refusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(tc.report)})
-			got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			got, _, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 			if status != tc.status || msg != tc.msg || got != nil {
 				t.Fatalf("got %d %q %s, want %d %q", status, msg, got, tc.status, tc.msg)
 			}
@@ -154,7 +159,7 @@ func TestSupplementalReport_SignatureCoveringOnlyAContainedResource(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			held := strings.Replace(supplementalReportAsHeld("Patient/pat-7"), `"status":"final"`, `"status":"final","contained":[`+tc.contained+`]`, 1)
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-			got, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			got, _, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
 			if status != 0 {
 				t.Fatalf("refused: %d %s", status, msg)
 			}
@@ -179,7 +184,7 @@ func TestSupplementalReport_SystemOfRecordFailures(t *testing.T) {
 		{"no report", &failingReportSoR{prefetchSoR: newPrefetchSoR(), noReport: true}, http.StatusInternalServerError, "no supplemental report"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, status, msg, _ := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
+			_, _, status, msg, _ := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
 			if status != tc.status || msg != tc.msg {
 				t.Fatalf("got %d %q, want %d %q", status, msg, tc.status, tc.msg)
 			}

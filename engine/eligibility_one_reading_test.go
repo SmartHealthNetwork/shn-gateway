@@ -89,6 +89,16 @@ func TestEligibility_EachGatewayReadsTheRequestOneWayOnly(t *testing.T) {
 						t.Fatalf("the refusal echoes a value: %s", rec.Body.String())
 					}
 					wantRefusal(t, x, http.StatusBadRequest, RefusedByProviderGateway, rule)
+					if rule != ExchangeOther {
+						wantReasonInAnswer(t, x, rec.Body.String())
+						want := reasonEligibilityAnotherCase
+						if row.repeats {
+							want = reasonEligibilityTwoWays
+						}
+						if x.RefusalReason != string(want) {
+							t.Fatalf("reason %q, want %q", x.RefusalReason, want)
+						}
+					}
 				})
 			}
 		}

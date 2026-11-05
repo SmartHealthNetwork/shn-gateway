@@ -59,15 +59,15 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 	// refuses it as the leg's scope (cdexTaskQuery).
 	var view federatedQueryView
 	if err := decodeMessage(task, &view); err != nil && !valueTypeError(err) {
-		exchangeOf(r.Context()).refusing(RefusalIntegrity)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "federated query rejected: the Task cannot be read one way only (it is not one JSON document, or it repeats a member or names one only in another case)"})
+		exchangeOf(r.Context()).refusingFor(RefusalIntegrity, reasonFederatedQueryTwoWays)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errFederatedQueryTwoWays})
 		return
 	}
 	_, member, err := cdexTaskQuery(task)
 	if err != nil {
 		// The leg's scope (its taxonomy row's named-docs-only): a data request
 		// for one patient's named documents, the patient read from Task.for.
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonFederatedQueryNoPatient)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "federated query rejected: " + err.Error()})
 		return
 	}
@@ -78,12 +78,15 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !found {
+		// Only a participant that requires known members gets here: a check
+		// it opted into, recorded as conformance.
+		exchangeOf(r.Context()).refusing(RefusalConformance)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member"})
 		return
 	}
-	facility, status, msg := g.federatedQueryRecipient(view.Owner)
+	facility, status, msg, reason := g.federatedQueryRecipient(view.Owner)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
@@ -205,20 +208,24 @@ type federatedQueryOwner struct {
 // routed to: the holder its owner names by identifier. No default: a Task
 // whose owner names no holder, a holder the network does not register, or a
 // holder that is not a facility is refused (422), with what is missing.
-func (g *Gateway) federatedQueryRecipient(owner *federatedQueryOwner) (string, int, string) {
+func (g *Gateway) federatedQueryRecipient(owner *federatedQueryOwner) (string, int, string, refusalReason) {
 	if owner == nil || owner.Identifier == nil || owner.Identifier.System != holderIdentifierSystem || owner.Identifier.Value == "" {
-		return "", http.StatusUnprocessableEntity, federatedQueryNoOwner
+		return "", http.StatusUnprocessableEntity, federatedQueryNoOwner, reasonFederatedQueryNoOwner
 	}
 	id := owner.Identifier.Value
 	holder, ok := g.cfg.Reg.Lookup(id)
 	switch {
 	case !ok:
-		return "", http.StatusUnprocessableEntity, "no facility to route the federated query to: the Task's owner " + quotedBounded(id) + " is not a holder the network registers"
+		return "", http.StatusUnprocessableEntity, "no facility to route the federated query to: the Task's owner " + quotedBounded(id) + " is not a holder the network registers", reasonFederatedQueryNoFacility
 	case holder.Role != "facility":
-		return "", http.StatusUnprocessableEntity, "no facility to route the federated query to: the Task's owner " + quotedBounded(id) + " is a " + holder.Role + ", not a facility"
+		return "", http.StatusUnprocessableEntity, "no facility to route the federated query to: the Task's owner " + quotedBounded(id) + " is a " + holder.Role + ", not a facility", reasonFederatedQueryNoFacility
 	}
-	return id, 0, ""
+	return id, 0, "", ""
 }
+
+// errFederatedQueryTwoWays is the refusal of a federated-query Task that
+// cannot be read one way only.
+const errFederatedQueryTwoWays = "federated query rejected: the Task cannot be read one way only (it is not one JSON document, or it repeats a member or names one only in another case)"
 
 // federatedRecordsRefused is a requester's check of the records a facility's
 // federated answer discloses, apart from any it builds into a message of its

@@ -1616,6 +1616,43 @@ func TestConvergeRegistry_CarriesPayerIDs(t *testing.T) {
 	}
 }
 
+// TestConvergeRegistry_CarriesProviderIDs: a provider holder's
+// operator-attested organization identifiers survive the /holders → Registry
+// snapshot, the index the payer's gateway routes an attachment-request Task by.
+// A holder with none converges with none.
+func TestConvergeRegistry_CarriesProviderIDs(t *testing.T) {
+	var enc [32]byte
+	enc[0], enc[31] = 7, 9
+	var signPub [ed25519.PublicKeySize]byte
+	signPub[0] = 3
+	attested := shnsdk.Holder{
+		ID:          "provider-b",
+		Role:        "provider",
+		EncPub:      base64.StdEncoding.EncodeToString(enc[:]),
+		SignPub:     base64.StdEncoding.EncodeToString(signPub[:]),
+		BaseURL:     "https://provider-b.example",
+		ProviderIDs: []shnsdk.ProviderIdentifier{{System: "http://hl7.org/fhir/sid/us-npi", Value: "1234567893"}},
+	}
+	bare := attested
+	bare.ID, bare.ProviderIDs = "provider-c", nil
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]shnsdk.Holder{attested, bare})
+	}))
+	defer srv.Close()
+
+	reg := shnsdk.NewRegistry()
+	if _, err := convergeRegistry(context.Background(), http.DefaultClient, srv.URL, reg); err != nil {
+		t.Fatalf("convergeRegistry: %v", err)
+	}
+	entry, ok := reg.Lookup("provider-b")
+	if !ok || len(entry.ProviderIDs) != 1 || entry.ProviderIDs[0] != attested.ProviderIDs[0] {
+		t.Fatalf("ProviderIDs not converged: want %+v, got %+v (%v)", attested.ProviderIDs, entry.ProviderIDs, ok)
+	}
+	if e, _ := reg.Lookup("provider-c"); e.ProviderIDs != nil {
+		t.Fatalf("a holder attested for none converged %+v", e.ProviderIDs)
+	}
+}
+
 // TestConvergeRegistry_CarriesMessageFrames verifies convergeRegistry copies a
 // fed holder's MessageFrames onto the resulting RegistryEntry — the peer cache
 // must thread the feed's self-declared frame capability so the responder-side

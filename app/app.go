@@ -3382,7 +3382,7 @@ func convergeRegistry(ctx context.Context, c *http.Client, registrarURL string, 
 		if raw, derr := base64.StdEncoding.DecodeString(h.SignPub); derr == nil && len(raw) == ed25519.PublicKeySize {
 			signPub = ed25519.PublicKey(raw)
 		}
-		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, MessageFrames: h.MessageFrames, ContractVersions: h.ContractVersions, RequestFrames: h.RequestFrames, Legs: h.Legs, AttachmentMaxBytes: h.AttachmentMaxBytes})
+		reg.Set(h.ID, shnsdk.RegistryEntry{ID: h.ID, Role: h.Role, EncPub: encPub, SignPub: signPub, BaseURL: h.BaseURL, PayerIDs: h.PayerIDs, ProviderIDs: h.ProviderIDs, MessageFrames: h.MessageFrames, ContractVersions: h.ContractVersions, RequestFrames: h.RequestFrames, Legs: h.Legs, AttachmentMaxBytes: h.AttachmentMaxBytes})
 		n++
 	}
 	return n, nil

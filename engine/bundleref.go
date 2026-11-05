@@ -16,7 +16,6 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -250,16 +249,16 @@ func organizationMiss(res json.RawMessage, what string) string {
 // pasRecipient routes a PAS request Bundle by its first Coverage's payor,
 // resolved among the Bundle's own entries (recipientForWith). When that payor
 // reads as no payer identifier, the refusal says why.
-func (g *Gateway) pasRecipient(body []byte) (string, shnsdk.PayerIdentifier, int, string) {
+func (g *Gateway) pasRecipient(body []byte) (string, shnsdk.PayerIdentifier, int, string, refusalReason) {
 	refs := readBundleRefs(body)
 	coverage := refs.firstCoverage()
-	recipient, pid, status, msg := g.recipientForWith(coverage, refs.resolver())
+	recipient, pid, status, msg, reason := g.recipientForWith(coverage, refs.resolver())
 	if msg == noPayerIdentifier {
 		if why := refs.payorMiss(coverage); why != "" {
 			msg += ": " + why
 		}
 	}
-	return recipient, pid, status, msg
+	return recipient, pid, status, msg, reason
 }
 
 // carriedRefs indexes the resources a request carries (CDS Hooks prefetch
@@ -375,10 +374,10 @@ func coverageResources(coverage []byte) [][]byte {
 // refused with refs' reason, and one that resolved to a resource naming no
 // payer identifier with the reason organizationMiss gives (as a PAS
 // Bundle's is); any other payor without one keeps the bare refusal.
-func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string, shnsdk.PayerIdentifier, int, string) {
+func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string, shnsdk.PayerIdentifier, int, string, refusalReason) {
 	none := shnsdk.PayerIdentifier{}
 	if g.cfg.PayerRouter == nil {
-		return "", none, http.StatusUnprocessableEntity, "no payer router configured"
+		return "", none, http.StatusUnprocessableEntity, msgNoPayerRouter, reasonNoPayerRouter
 	}
 	var first shnsdk.PayerIdentifier
 	for i, c := range covs {
@@ -386,28 +385,27 @@ func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string,
 		pid, err := shnsdk.ParseCoveragePayer(c, refs.resolve)
 		switch {
 		case err != nil && refs.disagreed:
-			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree, reasonNoPayerIdentifier
 		case err != nil && refs.resolved != nil:
 			if why := organizationMiss(refs.resolved, "the payor Organization"); why != "" {
-				return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + why
+				return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + why, reasonNoPayerIdentifier
 			}
-			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 		case err != nil:
-			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 		case i > 0 && pid != first:
-			return "", none, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the coverage names more than one payer"
+			return "", none, http.StatusUnprocessableEntity, msgCoverageNamesTwoPayers, reasonCoverageNamesTwoPayers
 		}
 		first = pid
 	}
 	if len(covs) == 0 {
-		return "", none, http.StatusUnprocessableEntity, noPayerIdentifier
+		return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 	}
 	holder, ok := g.cfg.PayerRouter.Resolve(first)
 	if !ok {
-		return "", none, http.StatusUnprocessableEntity,
-			fmt.Sprintf("no registered payer for identifier %s|%s", first.System, first.Value)
+		return "", none, http.StatusUnprocessableEntity, unregisteredPayer(first), reasonUnregisteredPayer
 	}
-	return holder, first, 0, ""
+	return holder, first, 0, "", ""
 }
 
 // The reasons coveragePayorRecords gives for a payor reference it leaves out.

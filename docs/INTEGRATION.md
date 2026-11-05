@@ -346,7 +346,9 @@ Task Attachment Request.
   (`INGRESS_CLIENTS_FILE`). Your system gets a bearer from the gateway's own token endpoint
   (SMART Backend Services, `system/Task.write`), lists the providers that take the request with
   `GET /cdex/providers`, and creates the Task at a provider's base, `POST {base}/Task`. The base
-  names the provider, so the network routes the Task by the address alone. See
+  names the provider, so the network routes the Task by the address alone. From shn-gateway
+  v1.7.0, it can instead create the Task at the gateway's plain `POST /Task`, which routes it to
+  the provider whose organization NPI its `Task.owner` names. See
   [the payer's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#ask-a-provider-for-documentation-the-payers-attachment-request-task-payer-optional).
 - **On the provider's side,** set `PROVIDER_CDEX_TASK_URL` to the endpoint your system takes the
   Task at, with your gateway's Da Vinci ingress and its base URL (`PROVIDER_DAVINCI_INGRESS`,

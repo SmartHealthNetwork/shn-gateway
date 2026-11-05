@@ -35,12 +35,14 @@ const rekeyed = `"https://provider-gw.example/cdex/payer/payer-1"`
 
 // TestSignedContentRekeyExemption: the PAS pend return-path re-key (E-10) and
 // the attachment-request Task's (E-11) are made even where a signature covers
-// the payer-url they change (D127), and are the only edits that are: every
-// other edit of signed content is still refused, and each of the two is
-// refused on any other signed value.
+// the payer-url they change (D127). With the questionnaireAdaptive address's
+// re-key and restore (E-12, E-13, D128; their rows are in
+// adaptive_test.go), they are the only edits that are: every other edit of
+// signed content is still refused, and each of the two is refused on any other
+// signed value.
 func TestSignedContentRekeyExemption(t *testing.T) {
-	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey}) {
-		t.Fatalf("signed-content exempt edits %v, want exactly E-10 and E-11", got)
+	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore}) {
+		t.Fatalf("signed-content exempt edits %v, want exactly E-10, E-11, E-12 and E-13", got)
 	}
 	bundleSigned := NewBody(pendBundle(`,"signature":{`+signatureElement+`}`, "", ""), OriginPeerFrame)
 	provSigned := NewBody(pendBundle("", "", `,{"resource":{"resourceType":"Provenance","target":[{"reference":"Task/t1"}],`+

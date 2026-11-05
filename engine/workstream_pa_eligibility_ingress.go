@@ -48,13 +48,13 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 		if !ok {
 			dup = "a member name"
 		}
-		exchangeOf(r.Context()).refusing(RefusalIntegrity)
+		exchangeOf(r.Context()).refusingFor(RefusalIntegrity, reasonEligibilityTwoWays)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "eligibility request repeats " + dup + ": it can be read two ways, so it is not read"})
 		return
 	}
 	subs, err := eligibilitySubmissions(body)
 	if msg, ok := eligibilityNamedInAnotherCase(err); ok {
-		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, eligibilityAnotherCaseReason(err))
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
 		return
 	}
@@ -63,7 +63,7 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if len(subs) > maxEligibilityBatch {
-		exchangeOf(r.Context()).refusing(RefusalLimit)
+		exchangeOf(r.Context()).refusingFor(RefusalLimit, reasonEligibilityBatchLimit)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": eligibilityBatchTooLarge(len(subs))})
 		return
 	}
@@ -78,7 +78,7 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 	for i, sub := range subs {
 		member, err := eligibilitySubmissionMember(sub)
 		if msg, ok := eligibilityNamedInAnotherCase(err); ok {
-			exchangeOf(r.Context()).refusing(RefusalAuthority)
+			exchangeOf(r.Context()).refusingFor(RefusalAuthority, eligibilityAnotherCaseReason(err))
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg + eligibilityBatchAt(subs, i)})
 			return
 		}
@@ -93,6 +93,9 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !found {
+			// Only a participant that requires known members gets here: a
+			// check it opted into, recorded as conformance.
+			exchangeOf(r.Context()).refusing(RefusalConformance)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown member" + eligibilityBatchAt(subs, i)})
 			return
 		}
@@ -105,9 +108,9 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 	// Each request is routed by the payer it names, a reference it does not
 	// carry the resource for read from this participant's system of record
 	// for its own patient, only to route (eligibilitySoRRead).
-	recipient, status, msg := g.eligibilityRecipient(r.Context(), subs, members)
+	recipient, status, msg, reason := g.eligibilityRecipient(r.Context(), subs, members)
 	if status != 0 {
-		exchangeOf(r.Context()).routed(status)
+		exchangeOf(r.Context()).routedFor(status, reason)
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}

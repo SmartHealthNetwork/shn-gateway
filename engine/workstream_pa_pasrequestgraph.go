@@ -7,42 +7,132 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // completePASRequest retains only clinical evidence selected by the request. Reads
-// use the configured holder-local SoR authority, never a reference URL transport.
-// The complete graph then follows the existing transform and validation path.
-func (g *Gateway) completePASRequest(ctx context.Context, body []byte) ([]byte, error) {
+// use the configured holder-local SoR authority, never a reference URL transport,
+// and each record read is named as the build names the patient
+// (evidenceReadByMember). The complete graph then follows the existing transform
+// and validation path.
+//
+// edits are the registered input edits made to a record the completed request
+// carries (E-06, only when it changed a record), for the request's seal
+// (moduleBuild.InputEdits); nil when none was made.
+func (g *Gateway) completePASRequest(ctx context.Context, body []byte, sorID, member string) ([]byte, []relay.EditID, error) {
 	if g.cfg.OriginationProfile != "provider-data" {
-		return body, nil
+		return body, nil, nil
 	}
 	if g.cfg.SoR == nil {
-		return nil, errors.New("PAS evidence unavailable")
+		return nil, nil, errors.New("PAS evidence unavailable")
 	}
-	return retainPASRequestEvidence(ctx, body, ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext)
+	var note inputEditNote
+	out, err := retainPASRequestEvidence(ctx, body, evidenceReadByMember(ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, sorID, member, &note))
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, note.list(), nil
+}
+
+// inputEditNote collects the registered input edits (relay.InputEdited) a
+// build's reads made, each once, in the order made: only an edit that changed
+// a record the build then carries.
+type inputEditNote struct{ edits []relay.EditID }
+
+// made notes id; a nil note notes nothing.
+func (n *inputEditNote) made(id relay.EditID) {
+	if n != nil && !slices.Contains(n.edits, id) {
+		n.edits = append(n.edits, id)
+	}
+}
+
+// list is the edits noted, nil when none.
+func (n *inputEditNote) list() []relay.EditID {
+	if n == nil || len(n.edits) == 0 {
+		return nil
+	}
+	return slices.Clone(n.edits)
+}
+
+// evidencePrepareFailed reports whether err is this gateway's own failure to
+// prepare an evidence record it read (rekeyEvidenceSubject), answered as the
+// gateway's own failure, never as the record's.
+func evidencePrepareFailed(err error) bool { return errors.Is(err, errEvidencePrepare) }
+
+// evidenceReadByMember is read with each record it answers named as the PAS
+// build names the patient. The system of record holds the member's Patient
+// under sorID and the build names that patient member (patientRef), so a
+// clinical record the system answers about them names Patient/<sorID> where
+// the request names Patient/<member>. Each such record's root
+// subject.reference is re-pointed to Patient/<member> by registered edit E-06
+// (rekeyEvidenceSubject), exactly as the supplemental report's is. A record
+// whose subject is anything else (another patient, Patient/<member> under
+// another record id, a versioned or absolute reference, none) is answered as
+// not held, so the completion refuses it as evidence it cannot carry; one a
+// signature covers is refused with its *relay.SignedContentError. Contained
+// resources are not edited. With sorID equal to member, or unknown (""),
+// nothing is edited and the completion's own subject check decides. Each
+// record E-06 changed is noted on note, so the request that carries it names
+// the edit (relay.InputEdited); a record already naming the member notes
+// nothing.
+func evidenceReadByMember(read func(context.Context, string) ([]byte, bool, error), sorID, member string, note *inputEditNote) func(context.Context, string) ([]byte, bool, error) {
+	if sorID == "" || sorID == member {
+		return read
+	}
+	return func(ctx context.Context, ref string) ([]byte, bool, error) {
+		raw, found, err := read(ctx, ref)
+		if err != nil || !found {
+			return raw, found, err
+		}
+		named, edited, err := rekeyEvidenceSubject(raw, "Patient/"+sorID, member)
+		var signed *relay.SignedContentError
+		switch {
+		case errors.As(err, &signed):
+			return nil, false, signed
+		case errors.Is(err, errEvidencePrepare):
+			// This gateway's own failure to prepare the record, never the
+			// record's: answered as such, not as evidence it cannot carry.
+			return nil, false, err
+		case err != nil:
+			return nil, false, nil
+		}
+		if edited {
+			note.made(relay.EditEvidenceSubjectRekey)
+		}
+		return named, true, nil
+	}
 }
 
 func retainPASRequestEvidence(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error)) ([]byte, error) {
 	return retainPASRequestEvidenceWithPolicy(ctx, body, read, nil)
 }
 
-func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool) ([]byte, error) {
+// completeAuthoredPASRequest is completePASRequest for a request whose
+// questionnaire response the build links (authoredPASReferencePolicyFor),
+// with the same input edits.
+func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool, sorID, member string) ([]byte, []relay.EditID, error) {
 	if len(sourceQR) == 0 || g.cfg.OriginationProfile != "provider-data" {
-		return g.completePASRequest(ctx, body)
+		return g.completePASRequest(ctx, body, sorID, member)
 	}
 	if g.cfg.SoR == nil {
-		return nil, errors.New("PAS evidence unavailable")
+		return nil, nil, errors.New("PAS evidence unavailable")
 	}
 	policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef, absolute)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return retainPASRequestEvidenceWithPolicy(ctx, body, ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, policy)
+	var note inputEditNote
+	out, err := retainPASRequestEvidenceWithPolicy(ctx, body, evidenceReadByMember(ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, sorID, member, &note), policy)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, note.list(), nil
 }
 
 func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error), policy *authoredPASReferencePolicy) ([]byte, error) {
@@ -186,6 +276,14 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 				return nil, safeSoRError(err)
 			}
 			raw, found, err := read(ctx, ref)
+			var signed *relay.SignedContentError
+			if errors.As(err, &signed) {
+				// E-06 would change a record a signature covers (D113).
+				return nil, signed
+			}
+			if errors.Is(err, errEvidencePrepare) {
+				return nil, err
+			}
 			if err != nil {
 				return nil, safeSoRError(err)
 			}

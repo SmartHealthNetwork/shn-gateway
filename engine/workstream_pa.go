@@ -40,6 +40,9 @@ func (paWorkstream) routes(g *Gateway, role string) []mountedRoute {
 func (paWorkstream) ownershipRows() map[relay.Key]relay.Rule  { return paLegOwnership }
 func (paWorkstream) ingressRoutes() map[string]ingressHandler { return paIngressRoutes }
 
+// refusalReasons: the PA adapter's (workstream_pa_refusalreason.go).
+func (paWorkstream) refusalReasons() []refusalReason { return paRefusalReasons() }
+
 // ingressOperations: the CRD ingress records the hook of the CDS service it
 // answers (cdsIngressServices), in discovery order.
 func (paWorkstream) ingressOperations() []string {
@@ -102,6 +105,9 @@ var paIngressRoutes = map[string]ingressHandler{
 	// The payer's attachment-request Task, at a provider's base on the payer's
 	// gateway (cdexroute.ProviderBase).
 	RouteCDexRequestBase: {"cdex-request-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexRequestIngress }},
+	// The same Task at the payer's plain Task endpoint, routed by the
+	// organization its Task.owner names.
+	RouteCDexRequest: {"cdex-request-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexRequestByOwner }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -223,9 +229,10 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		}
 		// The payer's own system creates an attachment-request Task at a
 		// provider's base (cdexroute.ProviderPrefix), listed at
-		// CDexProvidersPath. No plain Task endpoint is mounted: the network
-		// knows no provider by the identifier Task.owner carries.
+		// CDexProvidersPath, or at the plain Task endpoint, which routes it by
+		// the organization its Task.owner names.
 		route("POST /cdex/provider/{provider}/Task", noCredential, g.ingressRoute(RouteCDexRequestBase))
+		route("POST /Task", noCredential, g.ingressRoute(RouteCDexRequest))
 		route("GET /cdex/providers", noCredential, g.withIngressCorrelation(g.handleCDexProviders))
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)

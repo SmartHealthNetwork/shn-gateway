@@ -93,7 +93,7 @@ func TestPASIngressExternalPayorEntryRoutes(t *testing.T) {
 
 	// External entry-form carrying CMSPayerIdentity (00001 → payer-a in the 2-entry directory).
 	bundle := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, shnsdk.CMSPayerIdentity.Value, true)
-	recipient, pid, status, msg := gw.pasRecipient(bundle)
+	recipient, pid, status, msg, _ := gw.pasRecipient(bundle)
 	if status != 0 {
 		t.Fatalf("external entry-form must route, got (%d,%q)", status, msg)
 	}
@@ -106,14 +106,14 @@ func TestPASIngressExternalPayorEntryRoutes(t *testing.T) {
 
 	// SAME bundle WITHOUT the sibling Organization → the external ref cannot resolve → 422, no route.
 	noOrg := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, shnsdk.CMSPayerIdentity.Value, false)
-	if r, _, s, _ := gw.pasRecipient(noOrg); s != http.StatusUnprocessableEntity || r != "" {
+	if r, _, s, _, why := gw.pasRecipient(noOrg); s != http.StatusUnprocessableEntity || r != "" || why != reasonNoPayerIdentifier {
 		t.Fatalf("missing payor Organization must fail closed 422 with no route, got (%q,%d)", r, s)
 	}
 
 	// Present Organization but an UNMAPPED identifier (00099) → resolves the Org but no directory
 	// entry → 422 "no registered payer".
 	unmapped := externalPayorPASBundle(shnsdk.CMSPayerIdentity.System, "00099", true)
-	if _, _, s, m := gw.pasRecipient(unmapped); s != http.StatusUnprocessableEntity || !strings.Contains(m, "no registered payer") {
+	if _, _, s, m, why := gw.pasRecipient(unmapped); s != http.StatusUnprocessableEntity || !strings.Contains(m, "no registered payer") || why != reasonUnregisteredPayer {
 		t.Fatalf("unmapped identifier must 422 no-registered-payer, got (%d,%q)", s, m)
 	}
 }

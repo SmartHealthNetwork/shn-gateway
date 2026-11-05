@@ -1,5 +1,5 @@
 // Package paedits holds the Prior Authorization workstream's registered relay
-// edits (E-01 … E-10): the only changes a gateway may make to a participant's
+// edits (E-01 … E-13): the only changes a gateway may make to a participant's
 // message it relays on a PA leg, and the transform it makes to a PAS message
 // it built itself. The gateway gathers them into its registry through the PA
 // workstream; a reader of recorded exchanges names an edit by them
@@ -114,23 +114,34 @@ func Rows() []relay.Edit {
 		{
 			ID:        relay.EditEvidenceSubjectRekey,
 			Name:      "evidence-subject-rekey",
-			Legs:      []string{"pas-claim-update"},
+			Legs:      []string{"pas-claim", "pas-claim-update"},
 			Role:      relay.RoleRequester,
 			Direction: relay.DirectionRequest,
-			Paths:     []string{"DiagnosticReport.subject.reference"},
-			Kind:      relay.EditKindReplaceValue,
-			Precondition: "Only on a claim update the provider's gateway builds for its own workflow, to the supplemental " +
-				"report it reads from the provider's own system, and only when that report's subject.reference names the " +
-				"Patient that system holds the member under and that Patient's id is not the member id. A report with no " +
-				"subject.reference, or one naming any other subject, is refused. A request the provider's own client sends " +
-				"is never edited this way.",
+			Paths: []string{
+				"DiagnosticReport.subject.reference",
+				"Condition.subject.reference",
+				"Observation.subject.reference",
+				"ClinicalImpression.subject.reference",
+				"Goal.subject.reference",
+			},
+			Kind: relay.EditKindReplaceValue,
+			Precondition: "Only on a prior-authorization request the provider's gateway builds for its own workflow, to a " +
+				"clinical record it reads from the provider's own system for that request: the supplemental report a claim " +
+				"update attaches, and, on the provider-data origination profile, each Condition, Observation, " +
+				"ClinicalImpression, Goal or DiagnosticReport the submission or update references. Only when that record's " +
+				"own subject.reference is exactly the Patient that system holds the member under, and that Patient's id is " +
+				"not the member id. A record with no subject.reference, or one naming any other subject, is refused, and so " +
+				"is one a signature covers. A record contained in another is not edited. A request the provider's own " +
+				"client sends is never edited this way.",
 			Authority: "The provider's own system: the Patient it holds the member under. The value written is the " +
 				"member's network patient reference, Patient/<member id>.",
-			Disclosure: "When a provider's gateway attaches a supplemental report from the provider's own system to a claim " +
-				"update it builds, and that system names the patient by its own id, the gateway changes only the report's " +
-				"subject.reference, to the member's network patient, and only when the report names that patient. The " +
-				"report is otherwise read exactly as the system holds it; the update bundle the gateway builds gives it its " +
-				"bundle-local id and no declared profile.",
+			Disclosure: "When a provider's gateway carries a clinical record from the provider's own system in a " +
+				"prior-authorization request it builds (a claim update's supplemental report, or the evidence a " +
+				"provider-data request references), and that system names the patient by its own id, the gateway changes " +
+				"only the record's subject.reference, to the member's network patient, and only when the record names that " +
+				"patient. The record is otherwise read exactly as the system holds it. In a claim update the supplemental " +
+				"report is then given its bundle-local id and no declared profile by the update bundle the gateway builds; " +
+				"provider-data evidence keeps the id and profile the system holds it under.",
 		},
 		{
 			ID:        relay.EditCDSCoverageCarry,
@@ -253,6 +264,54 @@ func Rows() []relay.Edit {
 				"provider's gateway replaces that address with its own return path for the same payer, so the " +
 				"documentation the provider sends there reaches that payer through the network. The forward to the " +
 				"provider's system names the edit in a header, and names any signature that covered the address.",
+		},
+		{
+			ID:        relay.EditDTRAdaptiveAddressRekey,
+			Name:      "dtr-adaptive-address-rekey",
+			Legs:      []string{"dtr-questionnaire-fetch"},
+			Role:      relay.RoleRequester,
+			Direction: relay.DirectionResponse,
+			Paths: []string{"Questionnaire.extension[i].valueUrl (the extension whose url is sdc-questionnaire-questionnaireAdaptive), " +
+				"or its valueBoolean true, on any Questionnaire in the answer"},
+			Kind: relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a questionnaire-fetch answer (a package or a next-question answer) the " +
+				"provider's gateway relays to its own DTR client, toward a payer whose gateway restores the address, for " +
+				"each questionnaireAdaptive address the payer's gateway stated and tagged in the sealed answer, decided by " +
+				"structure. Only the payer's base is replaced; the rest of the address is kept byte for byte. A true is made " +
+				"explicit as the gateway's address for the payer's own DTR endpoint. Made even where an in-payload signature " +
+				"covers the address; that signature then no longer verifies in the client's copy, and the answer says so. " +
+				"Any address it cannot re-key is carried as sent and the exchange records why.",
+			Authority: "The provider gateway's own per-payer DTR address, under its Da Vinci ingress base, carrying the address " +
+				"tag the payer's gateway issued for that address and this provider. Nothing is stored per request.",
+			Disclosure: "When a payer's questionnaire names the server for its adaptive next-question calls, the provider's " +
+				"gateway replaces the payer's base in that address with its own address for the same payer, so the DTR " +
+				"client's next-question calls reach that payer through the network. A questionnaire that marks itself " +
+				"adaptive with true gets that address written out. The answer to the client names the edit in a header, " +
+				"and names any signature that covered the address. The payer's ETag is left out, since it named the " +
+				"payer's bytes.",
+			DropsAnswerHeaders: []string{relay.ETagHeader},
+		},
+		{
+			ID:   relay.EditDTRAdaptiveAddressRestore,
+			Name: "dtr-adaptive-address-restore",
+			Legs: []string{"dtr-questionnaire-fetch", "cdex-attachment-submit", "pas-claim", "pas-claim-update",
+				"pas-claim-inquire"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths: []string{"Questionnaire.extension[i].valueUrl (the extension whose url is sdc-questionnaire-questionnaireAdaptive), " +
+				"or its valueBoolean true written back, on any Questionnaire the request carries"},
+			Kind: relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a request the payer's gateway forwards to its own system, for each " +
+				"questionnaireAdaptive address carrying an address tag this payer's gateway issued for the provider that " +
+				"sent the request, and only when that tag verifies. Made even where an in-payload signature covers the " +
+				"address; that signature then no longer verifies in the payer's copy, and the forward says so. Any other " +
+				"address is carried as sent, and one this gateway recognises but cannot restore is recorded.",
+			Authority: "The address the payer itself issued: its base at the address's line, as its gateway states it, and " +
+				"the rest of the address kept byte for byte, or the true it wrote. Nothing is stored per request.",
+			Disclosure: "When a request carries back a questionnaire address the provider's gateway re-keyed, the payer's " +
+				"gateway restores the address the payer wrote, or the true it wrote, before forwarding the request to the " +
+				"payer's system, so the payer receives its own address. The forward names the edit in a header, and names any signature that " +
+				"covered the address.",
 		},
 	}
 }

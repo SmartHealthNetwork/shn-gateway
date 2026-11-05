@@ -183,14 +183,26 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 	if got := stated.about(relayedResponse([]byte(`{}`))); len(got) != 3 {
 		t.Fatalf("unedited: %v", got)
 	}
-	body := relay.NewBody([]byte(`{"a":"b"}`), relay.OriginUpstreamResponse)
-	doc, err := relay.Doc(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	member, ok := doc.Member(doc.Root(), "a")
-	if !ok {
-		t.Fatal("no member")
+	// A value each edit of an answer may change: the adaptive address of a
+	// Questionnaire for the re-key (E-12), which changes nothing else, and a
+	// plain member for every other edit, which may not change that address.
+	target := func(id relay.EditID) (relay.Body, *relay.Document, relay.NodeID) {
+		raw := `{"a":"b"}`
+		if id == relay.EditDTRAdaptiveAddressRekey {
+			raw = `{"resourceType":"Questionnaire","extension":[{"url":"` + sdcQuestionnaireAdaptiveExt + `","valueUrl":"b"}]}`
+		}
+		body := relay.NewBody([]byte(raw), relay.OriginUpstreamResponse)
+		doc, err := relay.Doc(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != relay.EditDTRAdaptiveAddressRekey {
+			member, _ := doc.Member(doc.Root(), "a")
+			return body, doc, member
+		}
+		exts, _ := doc.Member(doc.Root(), "extension")
+		member, _ := doc.Member(doc.Elems(exts)[0], "valueUrl")
+		return body, doc, member
 	}
 	var edits int
 	for _, e := range relayEdits {
@@ -204,6 +216,7 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 		if !strings.Contains(e.Disclosure, "ETag") {
 			t.Errorf("%s does not disclose the drop", e.ID)
 		}
+		body, doc, member := target(e.ID)
 		edited, err := relay.Apply(body, "application/json", e.ID, doc.Replace(member, []byte(`"c"`)))
 		if err != nil {
 			t.Fatalf("%s: %v", e.ID, err)
@@ -264,14 +277,17 @@ func TestNoteStatedAnswer(t *testing.T) {
 }
 
 func TestAnswerHeaderNotCarriedValues_Closed(t *testing.T) {
+	// The answer's own headers, and the address headers a payer's gateway
+	// states for the requester's gateway alone.
+	names := append(slices.Clone(answerHeaderNames), shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags)
 	for _, reason := range []string{AnswerHeaderValueNotCarriable, AnswerHeaderOverFrameLimit, AnswerHeaderOverAnswerLimit} {
-		for _, name := range answerHeaderNames {
+		for _, name := range names {
 			if !slices.Contains(AnswerHeaderNotCarriedValues, name+":"+reason) {
 				t.Errorf("%s:%s is not on the closed list", name, reason)
 			}
 		}
 	}
-	if !slices.Contains(AnswerHeaderNotCarriedValues, "ETag:"+AnswerHeaderDecodedFromGzip) || len(AnswerHeaderNotCarriedValues) != 3*len(answerHeaderNames)+1 {
+	if !slices.Contains(AnswerHeaderNotCarriedValues, "ETag:"+AnswerHeaderDecodedFromGzip) || len(AnswerHeaderNotCarriedValues) != 3*len(names)+1 {
 		t.Fatalf("%v", AnswerHeaderNotCarriedValues)
 	}
 }

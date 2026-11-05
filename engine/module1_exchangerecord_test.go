@@ -96,6 +96,7 @@ func TestOriginationRecord_UnregisteredPayerIsRouting(t *testing.T) {
 	r := onlyRecord(t, recs)
 	wantOrigination(t, r, route, http.StatusUnprocessableEntity)
 	wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+	wantReasonInAnswer(t, r, rec.Body.String())
 	if r.Exchange != ExchangeOther || r.Recipient != "" {
 		t.Fatalf("exchange %q recipient %q, want none: no leg was sent", r.Exchange, r.Recipient)
 	}
@@ -336,6 +337,7 @@ func TestOriginationRecord_EveryOriginatingRouteAndNoLocalOne(t *testing.T) {
 					// No assertion: refused before the route runs, on
 					// authentication.
 					wantRefusal(t, r, http.StatusUnauthorized, RefusedByProviderGateway, RefusalAuthentication)
+					wantReasonInAnswer(t, r, rec.Body.String())
 				}
 			})
 		}
@@ -440,6 +442,7 @@ func TestOriginationRecord_NoCoverageOnFileIsRouting(t *testing.T) {
 				r := onlyRecord(t, recs)
 				wantOrigination(t, r, row.route, http.StatusUnprocessableEntity)
 				wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+				wantReasonInAnswer(t, r, rec.Body.String())
 			})
 		}
 	}
@@ -474,6 +477,7 @@ func TestOriginationRecord_AmbiguousPayerIsRouting(t *testing.T) {
 			r := onlyRecord(t, recs)
 			wantOrigination(t, r, route, http.StatusUnprocessableEntity)
 			wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+			wantReasonInAnswer(t, r, rec.Body.String())
 
 			// One claimant: the same member's leg is routed and sent, so the
 			// refusal above is the ambiguity's. (What the stub answers it is
@@ -839,6 +843,7 @@ func TestOriginationRecord_AmbiguousCoverageIsRouting(t *testing.T) {
 					r := onlyRecord(t, recs)
 					wantOrigination(t, r, route, http.StatusUnprocessableEntity)
 					wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+					wantReasonInAnswer(t, r, rec.Body.String())
 				})
 			}
 		}

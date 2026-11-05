@@ -171,10 +171,12 @@ func TestCheckRows(t *testing.T) {
 	edited := Key{"leg-e", RoleRecipient, DirectionRequest, OutcomeCarried}
 	authoredKey := Key{"leg-a", RoleRequester, DirectionRequest, OutcomeOriginated}
 	relayKey := Key{"leg-r", RoleRecipient, DirectionResponse, OutcomeAnswered}
+	inputKey := Key{"leg-i", RoleRequester, DirectionRequest, OutcomeOriginated}
 	table := map[Key]Rule{
 		edited:      {Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditPayorEdgeRestamp}},
 		authoredKey: {Allowed: []Ownership{OwnershipAuthored}, Builders: []BuilderID{BuilderSDKPASSubmit}},
 		relayKey:    {Allowed: []Ownership{OwnershipRelayed}},
+		inputKey:    {Allowed: []Ownership{OwnershipAuthored}, Builders: []BuilderID{BuilderSDKPASSubmit}, InputEdits: []EditID{EditEvidenceSubjectRekey}},
 	}
 	body := NewBody([]byte(`{"payor":"a","hook":"order-sign"}`), OriginPeerFrame)
 	d := mustDoc(t, body)
@@ -206,6 +208,10 @@ func TestCheckRows(t *testing.T) {
 	if _, err := Authored(BuilderInterimEmptyErrorSubstitution, []byte(`{}`), fhirJSON); err == nil {
 		t.Fatal("the retired interim builder defect-empty-error-substitution still authors a payload")
 	}
+	noted, err := InputEdited(submit, EditEvidenceSubjectRekey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	exact := Exact(body, fhirJSON)
 	injected := ForTest([]byte(`{"x":1}`), fhirJSON)
 	unknown := Key{"leg-z", RoleRecipient, DirectionResponse, OutcomeAnswered}
@@ -220,6 +226,8 @@ func TestCheckRows(t *testing.T) {
 		{"relayed where edits are permitted", edited, exact, true},
 		{"permitted edit", edited, restamp, true},
 		{"registered builder", authoredKey, submit, true},
+		{"input edit listed", inputKey, noted, true},
+		{"no input edit where one is listed", inputKey, submit, true},
 		{"test payload on any listed key", relayKey, injected, true},
 		{"test payload on an authored key", authoredKey, injected, true},
 		{"test payload on an edited key", edited, injected, true},
@@ -233,6 +241,7 @@ func TestCheckRows(t *testing.T) {
 		{"one of two edits not listed", edited, both, false},
 		{"edited at a relay transmit", relayKey, restamp, false},
 		{"edited at an authored transmit", authoredKey, restamp, false},
+		{"input edit not listed", authoredKey, noted, false},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			err := checkIn(table, r.key)(r.p)

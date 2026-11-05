@@ -270,9 +270,12 @@ Go-only) in-process alternative.
 
 ## Members your system of record does not hold (every role)
 
-A Da Vinci CRD, DTR or PAS request can name a member your system of record does not hold,
-a patient from the other participant's own environment, for example. By default your
-gateway carries it; set `REQUIRE_KNOWN_MEMBERS=true` to have it refused instead.
+A Da Vinci CRD, DTR or PAS request, a coverage eligibility request, a CDex request or a
+federated query can name a member your system of record does not hold, a patient from the
+other participant's own environment, for example. By default your gateway carries it; set
+`REQUIRE_KNOWN_MEMBERS=true` to have it refused instead. The refusal is a check you opted
+into, so its access line records `refusal.rule` `conformance` (from v1.7.0 on every route
+that binds a member; earlier releases recorded it as `other` on some ingress routes).
 
 A provider's and a payer's gateway read the setting wherever they bind a patient a request
 names: the legs the table below lists, and also the federated query at a provider's ingress and
@@ -283,7 +286,7 @@ nothing there. On every role, a value other than `true` or `false` refuses to bo
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS or CDex submission subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS, CDex or federated query subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
 | `SHN_ACCEPT_UNKNOWN_MEMBERS` | **No longer read** (from shn-gateway v1.0.0). Carrying members your system of record does not hold is the default, so a gateway that sets it, to any value, logs `gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read` at boot and starts; remove it. Beside `REQUIRE_KNOWN_MEMBERS=true` it no longer refuses to boot: `REQUIRE_KNOWN_MEMBERS` alone decides. Releases before v1.0.0 logged a deprecation warning, and refused to boot when it was set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`. |
 
 ## Documentation attachment size (every role)
@@ -360,6 +363,33 @@ There is nothing to configure:
   earlier leg of the same call may already have been sent); `verify`, an edit
   or message the gateway built failed its own verification. Absent for every
   other rule.
+- From v1.7.0, a refusal this gateway makes of your own system's call before
+  the request it refuses reaches the Hub also names its reason
+  (`refusal.reason`); on a module's origination route, an earlier leg of the
+  same call may have been sent. This
+  covers refusals for authentication or scope, a body that reads two ways or
+  in an unsupported coding, authority read from the body (no patient it can
+  identify, not the resource the route takes), routing with no recipient,
+  and size.
+  - The reason is the gateway's own fixed sentence: the answer your caller was
+    given, or the fixed sentence in it when the answer adds a detail (an
+    identifier, a member name, a count, the contract lines). It never carries a value from the
+    request, a credential or patient data, and a value the gateway has not
+    registered is written as `other`.
+  - Read it to tell such refusals apart, but don't match on its text: a minor
+    release may reword a sentence or add one. `refusal.rule` is the field to
+    decide by.
+  - These refusals reach no Hub record, so this line and the exchange record
+    are where they are kept.
+  - Also from v1.7.0, three refusals that recorded rule `other` name their
+    rule. An origination route's body over the network's limit (`413`, on the
+    routes that read their body against it) is `routing`, the rule of every
+    size refusal, with its reason. The DTR
+    package route's refusal of a payer that has not declared framed DTR
+    operations (`502`) is `routing`, with its reason, as module 1's
+    origination records it. A member your system of record does not hold,
+    refused because you set `REQUIRE_KNOWN_MEMBERS=true`, is `conformance`
+    on every route: a check you opted into, so it carries no reason.
 - On a leg from the network, `backend` is your own system's answer: its
   `status`, `latencyMs`, `errorClass` and how many `calls` were made, reads
   and searches of your system of record included (they have status 0). It
@@ -486,7 +516,11 @@ There is nothing to configure:
   given to your system (`["E-08"]`: a questionnaire package answer's parameter
   names renamed to your DTR line's); and, from v0.63.0, on a prior-authorization
   submission or update this gateway built for your system and carried to the
-  payer's PAS line (`["E-09"]`: the registered transform). Only the ids: never a value an edit
+  payer's PAS line (`["E-09"]`: the registered transform); and, from v1.7.0, on
+  a prior-authorization submission or update this gateway built that carries a
+  record from your system it re-pointed to the member (`["E-06"]`: the evidence
+  a provider-data request carries, or the supplemental report an update
+  carries). Only the ids: never a value an edit
   removed or wrote. The ids are
   named once the request has left the gateway: the receiver answered (with
   anything, a refusal included), or the connection failed after the request
@@ -503,7 +537,10 @@ There is nothing to configure:
     ingress client's request is). From v0.63.0 a request the gateway built and
     carried to the payer's PAS line through the registered transform is `edited`
     with its `builder` and `relayEdits` `["E-09"]`: the builder's message, then
-    that edit;
+    that edit. From v1.7.0 an `authored` request names in `relayEdits` a
+    registered edit made to a record from your system that its build carries
+    (`E-06`, made before the build): the request is still the builder's own,
+    and through the registered transform it names `["E-06","E-09"]`;
   - `builder` names the registered builder of a request the gateway built:
     `authored`, or `edited` by the registered transform.
 
@@ -522,8 +559,9 @@ There is nothing to configure:
   answered a bare `500`.
 - `requestEdits` and `answerEdits` (from v0.63.0) split `relayEdits` by body:
   the edits to the request `ownership` describes, and those to the answer
-  (`["E-08"]`). Each is absent when that body was not edited. All four keys
-  are Evolving.
+  (`["E-08"]`). From v1.7.0 `requestEdits` also names an edit made to a record
+  from your system that a request the gateway built carries (`["E-06"]`).
+  Each is absent when that body names no edit. All four keys are Evolving.
 - `editsNotMade` (from v1.1.0) names each edit the gateway would make
   that it could not make on the call, and why, so the bytes it would have
   changed were carried as sent: `E-10:no-structural-payer-url` (a pend's
@@ -543,10 +581,18 @@ There is nothing to configure:
   `E-11:no-structural-payer-url` (a `payer-url` that is not a non-empty `valueUrl`),
   `E-11:unreadable-payer-url` (several `payer-url` inputs, or an input that cannot be read, so
   which address to re-key is unknown) and `E-11:payer-does-not-take` (a payer not known to take
-  the documentation submission). Absent when empty. Evolving.
+  the documentation submission). From v1.7.0, on a request a payer's gateway forwards to its
+  own system (see [Adaptive questionnaire addresses](#adaptive-questionnaire-addresses-the-payers-tags-and-the-restore-payer)),
+  for an address in the form a provider's gateway re-keys to that names this payer:
+  `E-13:unclean-remainder` (its remainder breaks the clean-remainder rule), `E-13:not-verified`
+  (its tag does not verify) and `E-13:unreadable-request` (it cannot be rewritten). Absent when
+  empty. Evolving.
 - `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
-  `Retry-After` of a participant's 2xx answer that was not carried, and why, never its
-  value: `<header>:value-not-carriable` (not an HTTP field value, or not UTF-8, which a
+  `Retry-After` of a participant's 2xx answer that was not carried, and, from v1.7.0, each
+  `operationBase` or `operationAddressTags` a payer's gateway states on a DTR answer that was not
+  carried (see
+  [Adaptive questionnaire addresses](#adaptive-questionnaire-addresses-the-payers-tags-and-the-restore-payer)),
+  and why, never its value: `<header>:value-not-carriable` (not an HTTP field value, or not UTF-8, which a
   frame cannot carry exactly), `<header>:over-frame-limit` (no room in the message frame's
   64 KiB header segment), `<header>:over-answer-limit` (with it, the answer
   would leave less than the 64 KiB its authorization takes under the network's limit, so
@@ -2329,6 +2375,18 @@ through its own gateway and the network, by creating a CDex 2.1.0 Task Attachmen
 leg is `cdex-attachment-request`, in the evolving tier (see `STABILITY.md`). The network delivers
 it only to a provider's gateway, and only to one whose registry entry lists the leg.
 
+The request asks either for documents by code (`Task.code`
+`PASTempCodes#attachment-request-code`) or, from v1.7.0, for a questionnaire to be
+completed (`PASTempCodes#attachment-request-questionnaire`). A questionnaire request names its
+questionnaire by canonical in a `questionnaire-context` input. Your system completes it with DTR
+and answers on the documentation return path, as for a request by code. The canonical is the
+payer's identifier for the questionnaire, not an address, and it reaches your system as the payer
+wrote it. Fetch the questionnaire through your gateway's `$questionnaire-package`, which carries
+the fetch on the network. A plain `GET` of the canonical URL goes around the network. For an
+adaptive questionnaire, your DTR client calls `$next-question` at the address the questionnaire's
+`questionnaireAdaptive` extension names, which in v1.7.0 is the payer's own system as the payer
+wrote it. Those rounds go to the payer directly, outside the network.
+
 A provider's gateway takes the request only once you set your system's Task endpoint:
 
 | Env var | Description |
@@ -2379,7 +2437,7 @@ conformance level, and answers the payer with the refusal:
 |---|---|
 | `400 the Task can be read two ways: it repeats a member name, or names one in another case` | The body repeats a member name, or names one in another case (`integrity`). |
 | `403 not a CDex Task Attachment Request: the body is not a Task this leg carries` | The body is not JSON, or not a Task (the leg's `authority`). |
-| `403 the Task's code is not one this leg carries: …` | `Task.code` holds no `PASTempCodes#attachment-request-code` coding (the leg's `authority`). |
+| `403 the Task's code is not one this leg carries: …` | `Task.code` holds neither a `PASTempCodes#attachment-request-code` nor a `PASTempCodes#attachment-request-questionnaire` coding, a CDex data request among them (the leg's `authority`). |
 | `422 cannot bind the request to a patient: Task.for names no one member number (an identifier typed v2-0203#MB)` | `Task.for`, on the reference or on the Patient it contains, names no member number, or two that differ (the leg's `authority`). |
 
 Your gateway binds the member number against your system of record, as on every leg the network
@@ -2694,6 +2752,79 @@ Both env vars are **all-or-nothing**: setting one without the other is a startup
 Leaving both unset (the default) disables this mapping entirely — requests forward with
 their payor identifier untouched, the behavior for every deployment that doesn't need it.
 
+## Adaptive questionnaire addresses: the payer's tags and the restore (payer)
+
+An adaptive questionnaire names the address of its `$next-question` rounds in its
+`sdc-questionnaire-questionnaireAdaptive` extension: a `valueUrl` under your DTR base, or
+`valueBoolean` `true` for the base itself. DTR requires that address to sit under the base the
+client fetched the questionnaire from. When a provider's DTR client fetches through its gateway,
+that base is the provider's gateway. So a later provider release re-keys the address to the
+provider's gateway (registered edit E-12), and the client's rounds stay on the network. It does
+so only toward a payer's gateway that declares it restores the address: the `v1opsub` request
+frame in its registry entry. v1.7.0 does not declare it, so no provider's gateway re-keys an
+address toward yours yet. From v1.7.0 your gateway does its part, with nothing to configure:
+
+- **The base and the tags.** On a 2xx answer to a framed `$questionnaire-package` or
+  `$next-question` request, your gateway may state two headers inside the sealed answer frame:
+  - **`operationBase`**, the base it delivered the operation under. It is stated when an
+    adaptive `valueUrl` in the answer is under that base.
+  - **`operationAddressTags`**, a tag for each adaptive address it issues:
+    - on a package answer, a `valueUrl` on a top-level Questionnaire, and only when the request
+      carried no Questionnaire;
+    - on a `$next-question` answer, the base itself or the address the round was delivered to;
+    - a `true`, wherever it appears.
+
+  A `valueUrl` is tagged only when it is spelled exactly as the base followed by a clean
+  remainder and written without JSON escapes. A clean remainder is empty, or `/`-separated
+  segments of unreserved characters (letters, digits, `-`, `.`, `_`, `~`), none of them `.` or
+  `..`. An address that is not tagged is not re-keyed, and its rounds go to your system
+  directly, off the network.
+
+  A tag binds the address to your payer, the provider the answer goes to, the IG line and the
+  base. It is keyed from your gateway's own signing identity, so every replica issues and
+  verifies the same tags. Nothing is stated when your gateway has no DTR base at the answer's
+  line (or only one with a query or fragment), or cannot read the answer. Your system's answer is relayed exactly as it sent it, and the
+  headers ride the frame beside it, never reaching the provider's EHR.
+- **Rounds.** A `$next-question` round a provider's gateway sends naming an address
+  (`operationSubpath`) is delivered at that address, under your base, only when its tag
+  verifies for that provider. Otherwise it is refused
+  `422 not an address this payer issued, or its base or key changed; fetch the package again`,
+  recorded as `routing`, and nothing reaches your system. A package request naming an address is
+  refused `400`, recorded as `integrity`.
+- **The restore (registered edit E-13, `dtr-adaptive-address-restore`).** Before your gateway
+  forwards a `dtr-questionnaire-fetch`, `cdex-attachment-submit`, `pas-claim`, `pas-claim-update`
+  or `pas-claim-inquire` request to your system, it restores each adaptive address in it that:
+  - a provider's gateway re-keyed;
+  - your gateway issued to that provider;
+  - has a tag that verifies.
+
+  The address goes back to the bytes your system wrote: the `valueUrl`, or `valueBoolean`
+  `true`. Nothing else in the request changes. Where your gateway also maps the payer identity
+  (above), the two registered edits are made together in one change of the request. The restore
+  is made even where a signature covers the address, so that signature no longer verifies in your
+  copy. The forward carries `X-SHN-Edited: dtr-adaptive-address-restore`, with
+  `; signed="<signatures>"` added when a signature covered the address.
+
+An address in the re-keyed form that names your payer, but that the restore cannot make, is
+carried as sent, and the exchange record's `editsNotMade` says why:
+- its remainder breaks the clean-remainder rule (`E-13:unclean-remainder`);
+- its tag does not verify for the provider that sent it: not one your gateway issued to that
+  provider, or issued for a base, line or key that changed since (`E-13:not-verified`);
+- it cannot be rewritten (`E-13:unreadable-request`).
+
+A request your gateway cannot read as JSON never reaches the restore: each of these legs reads
+the request first and refuses one it cannot read, `400`, before anything is forwarded. So no
+E-13 reason is recorded for it. Until a provider's gateway re-keys an address, a request
+carries none to restore, and none of these is recorded unless a request carries a string in
+the re-keyed form naming your payer from elsewhere.
+
+An address in the re-keyed form that names another payer is carried as sent and observed as the
+`dtr.adaptive-address-carried` event. The event carries its kind, direction, leg and correlation
+only: never the address, its tag or any participant's identifier. Rotating your gateway's
+signing key ends every adaptive session in progress. An address tagged under the old key no
+longer verifies, so a round to it is refused, and the refusal tells the client to fetch the
+package again.
+
 ## Ask a provider for documentation: the payer's attachment-request Task (payer, optional)
 
 Set `PAYER_DAVINCI_INGRESS=1` to mount the payer-side Da Vinci ingress. Through it your own system
@@ -2721,19 +2852,48 @@ Task by the address alone.
 
 `GET /cdex/providers`, with the same bearer, lists them:
 `{"providers":[{"participant":"…","base":"…"}]}`. The list holds every registered provider whose
-gateway declares that it takes the request, and nothing else.
+gateway declares that it takes the request, and nothing else. From shn-gateway v1.7.0, an entry
+also carries `identifiers`: the organization NPIs the network attests for that provider, each a
+`{"system","value"}` pair, as the public holder feed serves them. The field is omitted for a
+provider attested for none.
 
-There is no plain `POST /Task`. A Task names its provider in `Task.owner`, by an identifier such
-as an NPI, and the network does not yet know registered providers by such identifiers.
+**At the plain Task endpoint.** From shn-gateway v1.7.0, your system can also create the Task
+with `POST {PAYER_DAVINCI_INGRESS_BASE_URL}/Task`, and the network routes it by the organization
+its `Task.owner` names. The gateway reads the organization NPIs the owner states, as at a
+provider's base (below): on the owner reference itself, on the `organization` of the
+PractitionerRole it contains, or on a contained Organization that the owner or that role's
+`organization` names. It routes the Task to the one
+registered provider the network attests those NPIs for. The practitioner's NPI is never routed
+on, and an identifier in another system names no one. An NPI the network attests for no
+provider is passed over when another NPI names a provider. Refused `422`, on `routing`, before
+the Task crosses the network:
+- an owner that cannot be read: an identifier given as a list, a `#id` reference that names no
+  contained resource, several, or one that is neither a PractitionerRole nor an Organization, or
+  a role whose `organization` is a `#id` reference naming no one contained Organization;
+- an owner that names no organization NPI the network attests for a registered provider:
+  no owner, a literal reference alone, a practitioner's NPI only, or NPIs no provider is
+  attested for;
+- an owner whose NPIs the network attests for different providers, whether on two NPIs or on one
+  NPI two providers are attested for. The network never picks one.
+
+Each refusal says it is on `routing` and points to the providers' bases, where a Task routes by
+its address alone. A Task routed to a provider that does not take the request is refused by the
+Hub, `422` (`routing`), as at its base.
 
 **What the network checks.** The network refuses a Task only on its own rules, at every
 conformance level, and records each refusal as this gateway's:
 - **Reads two ways:** a body that repeats a member name, or names one in another case, is `400`
   (`integrity`).
-- **Not a Task Attachment Request:** a body that is not a Task, or whose `Task.code` is not
-  `http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes#attachment-request-code`, is `403`
-  (`authority`). The code is read by system and code. A request for a questionnaire
-  (`attachment-request-questionnaire`) is not taken yet.
+- **Not a Task Attachment Request:** a body that is not a Task is `403` (`authority`). So is one
+  whose `Task.code` is neither
+  `http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes#attachment-request-code` (documents by
+  code) nor, from v1.7.0,
+  `http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes#attachment-request-questionnaire` (a
+  questionnaire to complete). The code is read by system and code, so a CDex data request
+  (`data-request-code`, `data-request-query`, `data-request-questionnaire`) is refused, as is
+  either taken code under another system. A questionnaire request is carried as you sent it, its
+  questionnaire canonical included, apart from its `payer-url`, which the provider's gateway re-keys
+  to its documentation return path for you (registered edit E-11).
 - **No provider at the base:** a base that names no registered provider is `422` (`routing`).
 - **No patient to bind:** the patient is bound by its member number (an identifier typed
   `v2-0203#MB`), as the other legs bind theirs. The number is read from the Patient the Task
@@ -2750,8 +2910,17 @@ conformance level, and records each refusal as this gateway's:
   subscriber, policyholder or payor) under the member's `id` or `urn:shn:member` number is
   `422` (`authority`): the number is shared, so it identifies no one patient.
 
-Nothing else in the Task is read. The network does not judge its `owner`, `requester`,
-tracking identifier or `payer-url`.
+Nothing else in the Task decides whether it is carried, and at a provider's base nothing in it
+decides where it goes. The network does not judge its `requester`, tracking identifier or
+`payer-url`, and reads its `owner` only for the organization NPIs it states.
+
+**The owner at a provider's base.** From shn-gateway v1.7.0, the gateway reads the organization
+NPIs `Task.owner` states: an NPI on the owner reference itself, on the `organization` of the
+PractitionerRole it contains, or on a contained Organization that the owner or that role's
+`organization` names. The practitioner's NPI is never read for this, nor an identifier in another
+system. When one is an NPI the network attests for another registered provider, or the owner
+cannot be read, the gateway records the observer event `cdex.owner-differs`, with no identifier,
+once the Task is to be carried. The Task is carried to the base's provider either way.
 
 **The answer.** The provider's answer is relayed as its side sent it, with its status and media
 type. One that repeats a member name is refused `502` (`integrity`), since it can be read two

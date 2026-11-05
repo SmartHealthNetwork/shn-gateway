@@ -57,8 +57,8 @@ evolving.
   `pas-pend-return-rekey`; participant protocol §7b.1a), when that payer's
   registry entry lists `cdex-attachment-submit`; any other payer's `payer-url` is
   carried as sent. It is made even where
-  a signature covers the `payer-url`, the one edit the gateway makes to signed
-  content, and the answer names it in `X-SHN-Edited`. It re-keys addressing at
+  a signature covers the `payer-url`, then the one edit the gateway made to
+  signed content, and the answer names it in `X-SHN-Edited`. It re-keys addressing at
   a participant boundary so that documentation the provider sends stays on the
   network, and nothing used it in production when it shipped. The exception is
   this edit only: it lets no minor release add another edit to a full item, or
@@ -74,10 +74,43 @@ evolving.
   `X-SHN-Edited`. It keeps a documentation return address on the network, as
   E-10 does, so that a Task cannot direct the provider's documentation off the
   network, and no participant used the leg when it shipped. The exception is
-  this edit only, on this leg's request only. With it, E-10 and E-11 are the only
-  edits the gateway makes to signed content, each only at a `payer-url`; neither
-  exception lets a minor release add another edit to signed content, or make
-  either edit anywhere else.
+  this edit only, on this leg's request only. With it, E-10 and E-11 were the
+  only edits the gateway made to signed content, each only at a `payer-url`;
+  neither exception lets a minor release add another edit to signed content, or
+  make either edit anywhere else. (v1.7.0 records a third exception of its own,
+  for two other edits only; see the next entry.)
+- **A third recorded exception, v1.7.0:** DTR and PAS pass-through and signed
+  content travelling untouched are full. Two registered edits, made in minor
+  releases, change one address only: the `$next-question` address an adaptive
+  questionnaire's `sdc-questionnaire-questionnaireAdaptive` extension names.
+  - **E-12 (`dtr-adaptive-address-rekey`):** on the `dtr-questionnaire-fetch`
+    answers a provider's gateway relays to its own DTR client, the provider's
+    gateway re-keys that address to its own per-payer address, so that the
+    client's `$next-question` rounds stay on the network. It is made from the
+    release that turns it on, and only toward a payer's gateway that declares
+    it restores the address. v1.7.0 does not make it.
+  - **E-13 (`dtr-adaptive-address-restore`):** on the requests a payer's gateway
+    forwards to its own system on `dtr-questionnaire-fetch` (the package and
+    `$next-question`), `cdex-attachment-submit`, `pas-claim`,
+    `pas-claim-update` and `pas-claim-inquire`, the payer's gateway restores
+    the address its own system wrote. From v1.7.0 it is made only on an
+    address a provider's gateway re-keyed, whose tag this payer's gateway
+    issued to that provider and verifies. Until a provider's gateway makes
+    E-12, a request carries no such address.
+  - **Signed content:** each edit is made even where a signature covers the
+    address, so that signature no longer verifies in the copy the receiving
+    system gets. The edit is named in `X-SHN-Edited`, with the signature added
+    when one covered the address.
+  - **Why it was granted:** when it was granted, no partner's DTR client
+    fetched through a gateway on preview (a 60-day read), production carried
+    no live traffic, only occasional tests, and adaptive DTR had never
+    completed through the network.
+
+  The exception is these two edits only, at this address only, on these legs
+  only. With it, E-10, E-11, E-12 and E-13 are the only edits the gateway makes
+  to signed content, each only at its own address. No exception lets a minor
+  release add another edit to a full item or to signed content, or make any
+  of these four anywhere else.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -823,6 +856,11 @@ endpoints by a payer's gateway with `PAYER_DAVINCI_INGRESS` set,
 gateway that receives legs from the Hub, and the `/scenario/*` routes, which
 are test tooling, only by a provider's gateway.
 
+A pattern that gateways of two roles mount for different workstreams is listed
+once for each role, as `PATTERN (ROLE)`, and classed by that role's workstream.
+From shn-gateway v1.7.0, `POST /Task` is the one: a provider's federated query
+and a payer's attachment-request Task.
+
 The main listener, on `HOST` and `PORT`:
 
 | Item | Class | Owner |
@@ -843,12 +881,13 @@ The main listener, on `HOST` and `PORT`:
 | `POST /cdex/payer/{payer}/$submit-attachment` | PA workstream, evolving | PA workstream |
 | `GET /cdex/payers` | PA workstream, evolving | PA workstream |
 | `POST /cdex/provider/{provider}/Task` | PA workstream, evolving | PA workstream |
+| `POST /Task (payer)` | PA workstream, evolving | PA workstream |
 | `GET /cdex/providers` | PA workstream, evolving | PA workstream |
 | `GET /metadata` | core | core |
 | `POST /oauth/token` | core | core |
 | `GET /.well-known/smart-configuration` | core | core |
 | `GET /.well-known/davinci-configuration` | PA workstream | PA workstream |
-| `POST /Task` | FQS workstream | FQS workstream |
+| `POST /Task (provider)` | FQS workstream | FQS workstream |
 | `POST /scenario/uc01` | test tooling | test tooling |
 | `POST /scenario/uc02` | test tooling | test tooling |
 | `POST /scenario/uc02-payerb` | test tooling | test tooling |
@@ -952,6 +991,34 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   as your system holds it. A connector whose system holds the patient under
   the member id, and returns the report naming `Patient/<member id>`, is
   unaffected.
+
+### The evidence a provider-data request carries
+
+**Behavior change in shn-gateway v1.7.0.**
+
+- On the provider-data origination profile (`ORIGINATION_PROFILE=provider-data`), a PAS
+  submission or update the gateway builds carries the clinical records it references
+  (each Condition, Observation, ClinicalImpression, Goal or DiagnosticReport) as your
+  system of record holds them. When your system holds the member's Patient under its
+  own id, the only change to such a record is registered edit E-06: its own
+  `subject.reference`, when it is exactly that Patient, is re-pointed to
+  `Patient/<member id>`, as the request names the patient. A resource contained in the
+  record is not edited.
+- A record naming anything else (another patient, `Patient/<member id>` itself, a
+  versioned or absolute reference) is refused, `502 PAS evidence linkage failed`, and one
+  a signature covers is refused, `422 signed content cannot be edited (E-06, <carrier>)`,
+  each before the claim is sent. Before v1.7.0, a request with a record about the
+  Patient your system holds the member under was refused with `502 PAS evidence linkage
+  failed`, after the CRD and questionnaire legs had gone out, and a record naming
+  `Patient/<member id>` while your system holds the member under another id was carried.
+  In your system's own numbering that is another record, so it is now refused.
+- A system that holds the member's Patient under the member id is unaffected.
+- From v1.7.0 the access line's `relayEdits` names `E-06` on a request the gateway built
+  that carries a record E-06 re-pointed, these records or the supplemental report an
+  update carries. The request stays `ownership: authored` with its `builder`, since E-06
+  is made to the record before the build. Earlier releases re-pointed the supplemental
+  report's subject but did not name the edit there; the provider-data evidence is
+  re-pointed only from v1.7.0.
 
 ### Refusals of a request frame are framed
 
@@ -1396,6 +1463,8 @@ table.
 | `involved.omitted` | core | core |
 | `subject.binding-differs` | core | core |
 | `cdex.requester-differs` | PA workstream, evolving | PA workstream |
+| `cdex.owner-differs` | PA workstream, evolving | PA workstream |
+| `dtr.adaptive-address-carried` | PA workstream | PA workstream |
 | `crd.embedded.validated` | module 3 | module 3 |
 | `prefetch.obtained` | PA workstream | PA workstream |
 | `peer.nonconformant` | module 3 | module 3 |
@@ -1652,6 +1721,7 @@ classify is written as `other`.
 | `refusal.by` | core | core |
 | `refusal.rule` | core | core |
 | `refusal.stage` | core | core |
+| `refusal.reason` | core | core |
 | `status` | core | core |
 | `latencyMs` | core | core |
 | `backend.status` | core | core |
@@ -1755,6 +1825,23 @@ classify is written as `other`.
   what the caller declared or did not state (earlier legs of the same call
   may already have been sent), or `verify`, an edit or message the gateway
   built failed its own verification. Absent for every other rule.
+- **Additive (v1.7.0):** a refusal the gateway makes of its own participant's
+  call before the request it refuses reaches the Hub carries `refusal.reason`
+  on its access line, and `RefusalReason` on its record (on a module's
+  origination route, an earlier leg of the same call may have been sent). This covers refusals for
+  authentication or scope at an ingress, message integrity, authority read
+  from the body, routing with no recipient, and size.
+  - **Value:** the gateway's own fixed refusal sentence: the answer its caller
+    is given, or the fixed sentence in it when the answer adds a detail (an
+    identifier, a member name, a count, the contract lines). It is never a value from the request,
+    a credential or patient data. A value the gateway has not registered is
+    written as `other`.
+  - **Stability:** the field is core; its sentences are not. A minor release
+    may reword a sentence or add one, so decide by `refusal.rule`, never by
+    the text.
+  - **Absent:** on a refusal by the Hub, a peer or the Authorization Framework,
+    on a leg received from the network, and on a refusal of an answer that came
+    back from the network.
 
 ### One record per exchange
 

@@ -55,8 +55,9 @@ func TestAnswerHeaderMintMarginHoldsTheTokens(t *testing.T) {
 
 // An answer whose own headers leave it no room under the sealed limit is
 // sealed without them before its token is minted: it is delivered, authorized
-// once, and only the headers it framed are recorded as over-answer-limit. One
-// with room carries them, also authorized once.
+// once, and only the headers it framed are recorded as over-answer-limit (a
+// DTR answer's address headers among them). One with room carries them, also
+// authorized once.
 func TestAnAnswerNearTheLimitIsAuthorizedOnce(t *testing.T) {
 	g, authz, _, _ := involvedGateway(t, false)
 	pub, _, err := box.GenerateKey(rand.Reader)
@@ -70,6 +71,11 @@ func TestAnAnswerNearTheLimitIsAuthorizedOnce(t *testing.T) {
 		shnsdk.FrameHeaderETag: `"v1"`, shnsdk.FrameHeaderRetryAfter: "30",
 		// Not carriable: recorded as such, never as over-answer-limit.
 		shnsdk.FrameHeaderLastModified: "Sun, 01 Nov 2026 00:00:00 GMT\r\n",
+	}, address: map[string]string{
+		// A DTR answer's address headers, for the requester's gateway: left
+		// out with the others, never at the cost of the answer.
+		shnsdk.FrameHeaderOperationBase:        "https://payer.example/fhir/dtr",
+		shnsdk.FrameHeaderOperationAddressTags: "/forms/a=" + strings.Repeat("A", 22),
 	}}
 	// sealedWithHeaders is the size of the answer's envelope, framed with its
 	// headers, before any token: what the margin is checked against.
@@ -125,7 +131,8 @@ func TestAnAnswerNearTheLimitIsAuthorizedOnce(t *testing.T) {
 			}
 			want := []string{"Last-Modified:" + AnswerHeaderValueNotCarriable}
 			if !c.carried {
-				want = append(want, "ETag:"+AnswerHeaderOverAnswerLimit, "Retry-After:"+AnswerHeaderOverAnswerLimit)
+				want = append(want, "ETag:"+AnswerHeaderOverAnswerLimit, "Retry-After:"+AnswerHeaderOverAnswerLimit,
+					shnsdk.FrameHeaderOperationAddressTags+":"+AnswerHeaderOverAnswerLimit, shnsdk.FrameHeaderOperationBase+":"+AnswerHeaderOverAnswerLimit)
 			}
 			if got := x.rec.AnswerHeadersNotCarried; strings.Join(got, ",") != strings.Join(want, ",") {
 				t.Fatalf("recorded %v, want %v", got, want)

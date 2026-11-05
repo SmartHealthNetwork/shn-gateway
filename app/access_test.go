@@ -97,6 +97,18 @@ func TestAccessLineFor(t *testing.T) {
 	if wantNotMade := strings.TrimSuffix(want, "}") + `,"answerEdits":["E-10"],"editsNotMade":["E-10:no-structural-payer-url"],"answerHeadersNotCarried":["ETag:value-not-carriable"]}`; string(b) != wantNotMade {
 		t.Fatalf("access line with an edit not made\n got %s\nwant %s", b, wantNotMade)
 	}
+	// A refusal the gateway made before the request reached the Hub carries its
+	// fixed reason beside the rule.
+	reasoned := refusedRecord()
+	reasoned.Direction, reasoned.Route, reasoned.Rule, reasoned.RefusalReason = engine.DirectionIngress, engine.RoutePAS, engine.RefusalRouting, "no registered payer for identifier"
+	b, err = json.Marshal(accessLineFor(reasoned))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"refusal":{"by":"payer-gateway","rule":"routing","reason":"no registered payer for identifier"}`) {
+		t.Fatalf("access line with a refusal's reason: %s", b)
+	}
+
 	refusal := refusedRecord()
 	refusal.AnswerOwnership, refusal.AnswerBuilder = "authored", "gateway-refusal"
 	b, err = json.Marshal(accessLineFor(refusal))

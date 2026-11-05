@@ -234,6 +234,7 @@ func TestEligibilityIngress_UnroutableRequestIsRefused(t *testing.T) {
 					t.Fatalf("a refused request crossed the network (%d)", env.routeHitCount())
 				}
 				wantRefusal(t, x, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
+				wantReasonInAnswer(t, x, rec.Body.String())
 			})
 		}
 	}

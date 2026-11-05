@@ -92,12 +92,8 @@ func TestAttachmentInflightDefault_TaskMetadata(t *testing.T) {
 		"an absurd limit":           {func(t *testing.T) string { return metadataAnswering(t, 200, `{"Limits":{"Memory":9007199254740992}}`) }, attachmentInflightFallback, inflightFromFallback},
 		"not a number":              {func(t *testing.T) string { return metadataAnswering(t, 200, `{"Limits":{"Memory":"lots"}}`) }, attachmentInflightFallback, inflightFromFallback},
 		"garbage":                   {func(t *testing.T) string { return metadataAnswering(t, 200, `<html>`) }, attachmentInflightFallback, inflightFromFallback},
-		"nothing listening": {func(t *testing.T) string {
-			srv := httptest.NewServer(http.NotFoundHandler())
-			srv.Close()
-			return srv.URL
-		}, attachmentInflightFallback, inflightFromFallback},
-		"not a URL": {func(*testing.T) string { return "http://[::1" }, attachmentInflightFallback, inflightFromFallback},
+		"nothing listening":         {func(t *testing.T) string { return downEndpoint(t) }, attachmentInflightFallback, inflightFromFallback},
+		"not a URL":                 {func(*testing.T) string { return "http://[::1" }, attachmentInflightFallback, inflightFromFallback},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, from := attachmentInflightDefault(t.Context(), ceiling, noCgroup, row.url(t), http.DefaultClient)

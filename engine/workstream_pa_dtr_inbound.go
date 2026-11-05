@@ -64,6 +64,18 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusBadRequest, "unsupported DTR operation", nil)
 		return
 	}
+	// A round called at an address this payer issued names it
+	// (operationSubpath): it is delivered there only if its tag verifies for
+	// the requesting provider, and refused as routing otherwise, before
+	// anything is forwarded.
+	verified, status, msg := g.verifyRoundSubpath(ctx, env.Metadata.Sender)
+	if status != 0 {
+		exchangeOf(ctx).refusing(frameRefusalRule(status))
+		g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
+		return
+	}
+	ctx = verified
+	r = r.WithContext(ctx)
 	if isNextQuestion {
 		pci, status, msg := g.bindNextQuestionSubjectContext(ctx, nextQuestionSubject, reqJSON)
 		if status != 0 {

@@ -259,21 +259,21 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	}
 	var rre *RouteRefusalError
 	if errors.As(err, &rre) {
-		exchangeOfWriter(w).refused(RefusalRouting)
+		exchangeOfWriter(w).refusedFor(RefusalRouting, reasonNoSharedLine)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": rre.Error()})
 		return true
 	}
 	// A request whose sealed envelope is over the network's limit was not
 	// sent: refused 413 as routing, as an over-limit body is at the ingress.
 	if errors.Is(err, errEnvelopeTooLarge) {
-		exchangeOfWriter(w).refused(RefusalRouting)
+		exchangeOfWriter(w).refusedFor(RefusalRouting, reasonEnvelopeTooLarge)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
 		return true
 	}
 	// The member's Coverage records do not name one payer: no one recipient
 	// to ask (memberRoutingCoverage).
 	if errors.Is(err, errAmbiguousCoverage) {
-		exchangeOfWriter(w).refused(RefusalRouting)
+		exchangeOfWriter(w).refusedFor(RefusalRouting, reasonMemberCoverageTwoPayers)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgAmbiguousCoverage})
 		return true
 	}

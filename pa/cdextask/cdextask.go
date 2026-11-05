@@ -5,9 +5,10 @@
 //   - Task.code's codings, by system and code;
 //   - the patient Task.for names: the contained Patient's identifiers, and
 //     its bytes, for binding the request to a patient;
-//   - Task.owner: an identifier on the reference itself, and the
+//   - Task.owner: an identifier on the reference itself, the
 //     organization and practitioner identifiers of the contained
-//     PractitionerRole it names;
+//     PractitionerRole it names, or the identifiers of the contained
+//     Organization it names;
 //   - Task.requester: its reference and identifier;
 //   - the payer-url input: the input whose type is PASTempCodes#payer-url,
 //     and its valueUrl.
@@ -155,10 +156,25 @@ type Owner struct {
 	// Organization and Practitioner are the identifiers of the contained
 	// PractitionerRole that Reference names ("#id"): its organization's and
 	// its practitioner's reference identifiers. Both are Absent when
-	// Reference is not a local "#id" reference, and Unreadable when it names
-	// no contained resource, several, or one that is not a PractitionerRole.
+	// Reference is not a local "#id" reference or names a contained
+	// Organization, and Unreadable when it names no contained resource,
+	// several, or one that is neither a PractitionerRole nor an Organization.
 	Organization IdentifierField
 	Practitioner IdentifierField
+	// ContainedOrganization is the contained Organization Reference names
+	// ("#id"), or the one the contained PractitionerRole's organization
+	// names by a local reference. It is Absent unless Reference names exactly
+	// one or the role's organization is a local reference, and Unreadable
+	// when that reference names no one contained Organization or the
+	// Organization's identifiers cannot be read.
+	ContainedOrganization ContainedOrganization
+}
+
+// ContainedOrganization is a contained Organization's identifiers, in order.
+// One with no identifier member is Present with none.
+type ContainedOrganization struct {
+	State       State
+	Identifiers []Identifier
 }
 
 // Requester is Task.requester.
@@ -546,6 +562,10 @@ func (r *reader) owner(raw json.RawMessage) Owner {
 		return out
 	}
 	unreadable := IdentifierField{State: Unreadable}
+	if org, ok := r.local(ref, "Organization"); ok {
+		out.ContainedOrganization = r.containedOrganization(org)
+		return out
+	}
 	role, ok := r.local(ref, "PractitionerRole")
 	if !ok {
 		out.Organization, out.Practitioner = unreadable, unreadable
@@ -561,7 +581,52 @@ func (r *reader) owner(raw json.RawMessage) Owner {
 	}
 	out.Organization = r.referenceIdentifier(pr.Organization)
 	out.Practitioner = r.referenceIdentifier(pr.Practitioner)
+	// The role's organization can itself be contained, named by a local
+	// reference: it is read as an Organization the owner names is.
+	if !absent(pr.Organization) {
+		if orgRef, _, ok := r.reference(pr.Organization); ok && strings.HasPrefix(orgRef, "#") {
+			out.ContainedOrganization = ContainedOrganization{State: Unreadable}
+			if org, ok := r.local(orgRef, "Organization"); ok {
+				out.ContainedOrganization = r.containedOrganization(org)
+			}
+		}
+	}
 	return out
+}
+
+// containedOrganization reads a contained Organization's identifiers, as a
+// contained Patient's are read: every identifier readable, or the whole
+// Unreadable.
+func (r *reader) containedOrganization(res json.RawMessage) ContainedOrganization {
+	var o struct {
+		Identifier json.RawMessage `json:"identifier"`
+	}
+	if r.decode(res, &o) != nil {
+		return ContainedOrganization{State: Unreadable}
+	}
+	if absent(o.Identifier) {
+		return ContainedOrganization{State: Present}
+	}
+	items, ok := r.list(o.Identifier)
+	if !ok {
+		return ContainedOrganization{State: Unreadable}
+	}
+	// Every identifier is read before the field is decided, so one that
+	// names a member in another case is found whatever its siblings hold.
+	var ids []Identifier
+	bad := false
+	for _, item := range items {
+		id, ok := r.identifier(item)
+		if !ok {
+			bad = true
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if bad {
+		return ContainedOrganization{State: Unreadable}
+	}
+	return ContainedOrganization{State: Present, Identifiers: ids}
 }
 
 func (r *reader) requester(raw json.RawMessage) Requester {
