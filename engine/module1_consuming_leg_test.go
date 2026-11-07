@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1351,6 +1352,7 @@ func TestFailEvidenceLinkage(t *testing.T) {
 		{"the gateway's own failure", errors.New("evidence graph too large"), http.StatusBadGateway},
 		{"evidence E-06 would re-point under a signature (D113)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusUnprocessableEntity},
 		{"the gateway could not prepare a record it read", errEvidencePrepare, http.StatusInternalServerError},
+		{"a record read the splice cannot carry as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusUnprocessableEntity},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			ctx := context.WithValue(context.Background(), legsCarriedKey{}, &legsCarried{legs: []string{"crd-order-select", "dtr-questionnaire-fetch"}})
@@ -1374,6 +1376,9 @@ func TestFailEvidenceLinkage(t *testing.T) {
 			switch row.status {
 			case http.StatusUnprocessableEntity:
 				want = "signed content cannot be edited (E-06, Signature in Condition)"
+				if errors.Is(row.err, errRecordNotCarried) {
+					want = "a record read from the system of record cannot be carried as read: it is not UTF-8"
+				}
 			case http.StatusInternalServerError:
 				want = "prepare evidence record failed"
 			}

@@ -116,14 +116,14 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 // completeAuthoredPASRequest is completePASRequest for a request whose
 // questionnaire response the build links (authoredPASReferencePolicyFor),
 // with the same input edits.
-func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool, sorID, member string) ([]byte, []relay.EditID, error) {
+func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, sorID, member string) ([]byte, []relay.EditID, error) {
 	if len(sourceQR) == 0 || g.cfg.OriginationProfile != "provider-data" {
 		return g.completePASRequest(ctx, body, sorID, member)
 	}
 	if g.cfg.SoR == nil {
 		return nil, nil, errors.New("PAS evidence unavailable")
 	}
-	policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef, absolute)
+	policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -206,6 +206,10 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 	}
 	refs := 0
 	total := len(body)
+	had := len(entries)
+	// added is each record read from the participant's system, as read: it
+	// is spliced into the request's bytes, which stay as built.
+	var added []bundleEntryBytes
 	for i := 0; i < len(entries); i++ {
 		entry := entries[i].(map[string]any)
 		owner := graph.ByURL[entry["fullUrl"].(string)]
@@ -311,6 +315,11 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 				return fail()
 			}
 			entries = append(entries, e)
+			encodedURL, err := json.Marshal(full)
+			if err != nil {
+				return fail()
+			}
+			added = append(added, bundleEntryBytes{fullURL: encodedURL, resource: raw})
 		}
 	}
 	graph.Entries = entries
@@ -318,7 +327,15 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 	if graph.ValidateWithReferencePolicy(policy) != nil || !consistentPASGraphSubjects(graph, patient) {
 		return fail()
 	}
-	result, err := json.Marshal(bundle)
+	// The request leaves as built, with the records read added: it is
+	// never re-encoded, so a participant's record the build carried as
+	// written stays so.
+	result, err := spliceBundleEntries(body, had, added)
+	if errors.Is(err, errRecordNotCarried) {
+		// A record read that the splice cannot carry as read: the fidelity
+		// of the gateway's own edit (evidenceFidelityRefusal), not a graph fault.
+		return nil, err
+	}
 	if err != nil || len(result) > pasGraphMaxBytes {
 		return fail()
 	}

@@ -328,7 +328,7 @@ func TestValidationVerdictDoesNotChangeDefaultReadiness(t *testing.T) {
 func TestDTRContextCannotUseSingleContractFallback(t *testing.T) {
 	canonical := shnsdk.NewFakeValidator()
 	g := &Gateway{cfg: Config{Validator: canonical, ValidatorsByContractLine: ContractLineLanes(map[string]shnsdk.Validator{"2.0": canonical, "2.1": canonical}, nil, map[string]bool{"2.1": true}, nil)}}
-	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1"); status != http.StatusInternalServerError {
+	if status, _ := g.validateDTRQuestionnaireResponse(context.Background(), []byte(`{"resourceType":"QuestionnaireResponse"}`), "2.1", false); status != http.StatusInternalServerError {
 		t.Fatalf("DTR context status=%d; unavailable PA lane borrowed the single-line fallback", status)
 	}
 	// A payer's DTR answer routed at 2.1 is not certified on the borrowed fallback

@@ -133,6 +133,13 @@ const (
 	// receives the bytes it wrote. It is made even where a signature covers
 	// the address (signedExempt, D128).
 	EditDTRAdaptiveAddressRestore EditID = "E-13"
+	// EditFacilityReportSubjectRekey re-points the subject.reference of a
+	// facility's report, read on the federated-query leg, that a provider's
+	// gateway puts inside the claim update it builds, to the Claim's patient,
+	// once the report is shown to be about that patient; every other byte of
+	// the report, the rest of its subject included, is the facility's. An
+	// input edit (InputEdited): the update is the builder's own and names it.
+	EditFacilityReportSubjectRekey EditID = "E-14"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -141,7 +148,7 @@ const (
 	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore, EditFacilityReportSubjectRekey}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept
@@ -151,8 +158,8 @@ var transformEdits = []EditID{EditRegisteredTransform}
 // inputEdits are the registered edits the gateway makes to a participant's
 // record before it puts the record inside a message it builds itself: the
 // build is the builder's own message, unmodified after it was built, and
-// carries the edited record (InputEdited). E-06 alone.
-var inputEdits = []EditID{EditEvidenceSubjectRekey}
+// carries the edited record (InputEdited): E-06, and E-14.
+var inputEdits = []EditID{EditEvidenceSubjectRekey, EditFacilityReportSubjectRekey}
 
 // EditIDs returns every registered edit id, in order.
 func EditIDs() []EditID { return slices.Clone(editIDs) }
@@ -477,7 +484,9 @@ func Transformed(src Payload, id EditID, out []byte, rederive func([]byte) ([]by
 // InputEdited returns src, a message the gateway built (OwnershipAuthored),
 // noting that the build carries a participant's record the registered input
 // edits ids changed before it was built (E-06: an evidence record read from
-// the participant's own system, its subject re-pointed to the member). The
+// the participant's own system, its subject re-pointed to the member; E-14: a
+// facility's report, its subject.reference re-pointed to the Claim's
+// patient). The
 // result is still OwnershipAuthored under src's builder, with src's bytes:
 // the message is the builder's own, unmodified after the build. It names the
 // ids in InputEdits, after any src already names, each once, and Transformed

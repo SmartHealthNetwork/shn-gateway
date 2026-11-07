@@ -4,12 +4,17 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
 func TestPASSubmitSupplierRetention(t *testing.T) {
@@ -47,6 +52,22 @@ func TestPASSubmitSupplierRetention(t *testing.T) {
 						t.Fatal("invalid supplier accepted")
 					}
 				})
+			}
+			// A supplier whose id or type is spelled in another case states none:
+			// its entry is never addressed by an id it does not state exactly.
+			for _, spelled := range []string{
+				strings.Replace(string(supplier), `"id":`, `"ID":`, 1),
+				strings.Replace(string(supplier), `"resourceType":`, `"ResourceType":`, 1),
+			} {
+				if out, err := retainPASSubmitSupplier(original, []byte(spelled)); !errors.Is(err, errRecordNotCarried) {
+					t.Fatalf("a supplier %s: %v (%s), want errRecordNotCarried", spelled, err, out)
+				}
+			}
+			// A supplier whose record the splice cannot carry as read is the
+			// fidelity of the gateway's own edit, never its own failure.
+			twoSpellings := []byte(strings.Replace(string(supplier), `"name":`, `"Name":"Another supplier","name":`, 1))
+			if _, err := retainPASSubmitSupplier(original, twoSpellings); !errors.Is(err, errRecordNotCarried) {
+				t.Fatalf("a supplier naming a member in two cases: %v, want errRecordNotCarried", err)
 			}
 			// The SAME supplier already at that entry is the shape a dispatched
 			// request has once the Claim names its performer as the requesting
@@ -148,6 +169,44 @@ func TestPASSubmitSupplierRejectsInvalidLinkage(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := retainPASSubmitSupplier([]byte(body), supplier); err == nil {
 				t.Fatal("invalid linkage accepted")
+			}
+		})
+	}
+}
+
+// supplierLinkageAnswer answers a supplier record the splice cannot carry as
+// read 422, recorded as the fidelity of the gateway's own edit at the build and
+// saying which legs were carried; anything else is the gateway's own 500.
+func TestSupplierLinkageAnswer(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"a record not carried as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusUnprocessableEntity},
+		{"the gateway's own failure", errors.New("conflicting supplier entry"), http.StatusInternalServerError},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), legsCarriedKey{}, &legsCarried{legs: []string{"crd-order-dispatch", "dtr-questionnaire-fetch"}})
+			x := &exchangeRecorder{}
+			ctx = context.WithValue(ctx, exchangeRecorderKey{}, x)
+			status, msg, err := supplierLinkageAnswer(ctx, row.err)
+			if status != row.status {
+				t.Fatalf("status %d, want %d", status, row.status)
+			}
+			if row.status == http.StatusUnprocessableEntity {
+				if err != nil || x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+					t.Fatalf("recorded %s %s/%s (err %v), want refused fidelity/build", x.outcome, x.rule, x.refusalStage, err)
+				}
+				if !strings.Contains(msg, "cannot be carried as read: it is not UTF-8") {
+					t.Fatalf("message %q", msg)
+				}
+				body, _ := json.Marshal(map[string]string{"error": msg})
+				wantCarried(t, string(body), "crd-order-dispatch", "dtr-questionnaire-fetch")
+				return
+			}
+			if err == nil || msg != "PAS supplier linkage failed" || x.outcome == ExchangeRefused {
+				t.Fatalf("%q %v, recorded %s: want the gateway's own failure", msg, err, x.outcome)
 			}
 		})
 	}

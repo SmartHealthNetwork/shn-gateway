@@ -111,6 +111,22 @@ func WithPopulator(p Populator) Option {
 	}
 }
 
+// gatewayEngine marks a Populator that is the gateway's own engine: a
+// profile its response declares is the gateway's. A populator without the
+// mark (one that forwards to a participant's own $populate engine, or one
+// not known to be the gateway's) fills a response whose profiles are read
+// as a participant's.
+type gatewayEngine interface{ gatewayEngine() }
+
+// ownEngine reports whether p is the gateway's own engine (gatewayEngine).
+func ownEngine(p Populator) bool {
+	_, own := p.(gatewayEngine)
+	return own
+}
+
+// gatewayEngine: the managed fill is the gateway's own engine.
+func (*managedPopulator) gatewayEngine() {}
+
 // populator is the gateway's DTR populator, or nil on a gateway assembled
 // without New.
 func (g *Gateway) populator() Populator {

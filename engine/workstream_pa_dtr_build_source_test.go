@@ -19,7 +19,7 @@ func TestDTRRawSourcePairedBuildIsolation(t *testing.T) {
 	before := append([]byte(nil), raw...)
 	qc := contextInputs()
 	qc.Authored = time.Unix(1700000000, 0).UTC()
-	source := newRawDTRBuildSource(raw, tree, qc)
+	source := newRawDTRBuildSource(raw, tree, qc, false)
 	item, err := buildOxygenNecessityItem("1234567890", "Synthetic service", "J44.9", "2026-06-03")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestDTRRawSourcePairedBuildIsolation(t *testing.T) {
 	if !bytes.Equal(source.raw, before) {
 		t.Fatal("source bytes mutated")
 	}
-	conflict := newRawDTRBuildSource([]byte(strings.Replace(contextQR, `"resourceType"`, `"meta":{"profile":["`+dtrQRCanonical+`|2.0.1"]},"resourceType"`, 1)), []byte(sourceTree), qc)
+	conflict := newRawDTRBuildSource([]byte(strings.Replace(contextQR, `"resourceType"`, `"meta":{"profile":["`+dtrQRCanonical+`|2.0.1"]},"resourceType"`, 1)), []byte(sourceTree), qc, false)
 	if _, err := conflict.buildAtLine("2.0"); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestDTRAutomaticSourceCopiesAnswerPointers(t *testing.T) {
 }
 
 func TestPASAttachmentValidationChecksExactFinalBytes(t *testing.T) {
-	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs())
+	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs(), false)
 	qr, err := source.buildAtLine("2.2")
 	if err != nil {
 		t.Fatal(err)
@@ -134,27 +134,27 @@ func TestPASAttachmentValidationChecksExactFinalBytes(t *testing.T) {
 	recorder := &dtrRecordingValidator{base: NewLineFakeValidator("2.2")}
 	g := &Gateway{cfg: Config{ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.2": recorder})}}
 	bundle := []byte(`{"resourceType":"Bundle","entry":[{"resource":` + string(qr) + `}]}`)
-	if status, msg := g.validatePASAttachments(context.Background(), bundle, "2.2", true); status != 0 {
+	if status, msg := g.validatePASAttachments(context.Background(), bundle, "2.2", true, false); status != 0 {
 		t.Fatalf("%d %s", status, msg)
 	}
 	if len(recorder.calls) != 1 || !bytes.Equal(recorder.calls[0].payload, qr) || recorder.calls[0].profile != dtrQRCanonical+"|2.2.0" {
 		t.Fatal("did not validate exact embedded QR at paired profile")
 	}
 	missing := []byte(`{"resourceType":"Bundle","entry":[]}`)
-	if status, _ := g.validatePASAttachments(context.Background(), missing, "2.2", true); status == 0 {
+	if status, _ := g.validatePASAttachments(context.Background(), missing, "2.2", true, false); status == 0 {
 		t.Fatal("missing expected QR accepted")
 	}
-	if status, _ := g.validatePASAttachments(context.Background(), missing, "2.2", false); status != 0 {
+	if status, _ := g.validatePASAttachments(context.Background(), missing, "2.2", false, false); status != 0 {
 		t.Fatal("true no-documentation flow refused")
 	}
 	extra := []byte(`{"resourceType":"Bundle","entry":[{"resource":` + string(qr) + `},{"resource":{"resourceType":"QuestionnaireResponse","meta":{"profile":["` + dtrQRCanonical + `|2.2.0"]}}}]}`)
-	if status, _ := g.validatePASAttachments(context.Background(), extra, "2.2", true); status != 422 {
+	if status, _ := g.validatePASAttachments(context.Background(), extra, "2.2", true, false); status != 422 {
 		t.Fatalf("unvalidated additional QR accepted: %d", status)
 	}
 }
 
 func TestDTRSourceAmendmentRefusalPreservesSource(t *testing.T) {
-	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs())
+	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs(), false)
 	before, err := source.buildAtLine("2.2")
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestDTRSourceAmendmentRefusalPreservesSource(t *testing.T) {
 }
 
 func TestPASAttachmentFinalMutationRefusals(t *testing.T) {
-	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs())
+	source := newRawDTRBuildSource([]byte(contextQR), []byte(sourceTree), contextInputs(), false)
 	qr, err := source.buildAtLine("2.2")
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func TestPASAttachmentFinalMutationRefusals(t *testing.T) {
 				recorder.mode = "validator outage"
 				want = 500
 			}
-			if status, _ := g.validatePASAttachments(context.Background(), bundle, "2.2", true); status != want {
+			if status, _ := g.validatePASAttachments(context.Background(), bundle, "2.2", true, false); status != want {
 				t.Fatalf("status=%d want=%d", status, want)
 			}
 		})

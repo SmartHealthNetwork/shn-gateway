@@ -40,7 +40,7 @@ const (
 	reasonNextQuestionNoPayer          refusalReason = errNextQuestionNoPayer
 	reasonNextQuestionUnknownPayer     refusalReason = errNextQuestionUnknownPayer
 	reasonNextQuestionNoSubpath        refusalReason = errNextQuestionNoSubpath
-	reasonNextQuestionUnverifiable     refusalReason = errNextQuestionUnverifiable
+	reasonNextQuestionTwoAddresses     refusalReason = errNextQuestionTwoAddresses
 	reasonAttachmentBudget             refusalReason = errAttachmentBudget
 	reasonAttachmentOverDeclared       refusalReason = errAttachmentTooLarge
 	reasonEligibilityBatchLimit        refusalReason = msgEligibilityBatchLimit
@@ -60,8 +60,8 @@ func paRefusalReasons() []refusalReason {
 		reasonCDexRequestOwnerUnreadable, reasonCDexRequestOwnerNoProvider,
 		reasonCDexRequestOwnerTwoProviders, reasonEligibilityTwoPayers, reasonEligibilityNoPayer,
 		reasonEligibilityRequestTwoPayers, reasonEligibilityAmbiguousRef, reasonNextQuestionAddress,
-		reasonNextQuestionNoPayer, reasonNextQuestionUnknownPayer, reasonNextQuestionNoSubpath,
-		reasonNextQuestionUnverifiable, reasonAttachmentBudget, reasonAttachmentOverDeclared,
+		reasonNextQuestionNoPayer, reasonNextQuestionUnknownPayer, reasonNextQuestionNoSubpath, reasonNextQuestionTwoAddresses,
+		reasonAttachmentBudget, reasonAttachmentOverDeclared,
 		reasonEligibilityBatchLimit,
 	}
 }

@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // The facility's federated answers on /scenario/uc05, as the requester's
@@ -217,5 +219,177 @@ func TestHandleUC05_AnotherPatientsReportAsEvidenceIsAFidelityRefusal(t *testing
 				}
 			})
 		}
+	}
+}
+
+// withFacilityRecords edits the facility's records Bundle in a federated
+// answer: change gets the Bundle's entries and returns them.
+func withFacilityRecords(t *testing.T, payload []byte, change func([]any) []any) []byte {
+	t.Helper()
+	var task map[string]any
+	if err := json.Unmarshal(payload, &task); err != nil {
+		t.Fatal(err)
+	}
+	contained, _ := task["contained"].([]any)
+	for _, c := range contained {
+		if res, _ := c.(map[string]any); res["resourceType"] == "Bundle" {
+			entries, _ := res["entry"].([]any)
+			res["entry"] = change(entries)
+			return mustJSON(t, task)
+		}
+	}
+	t.Fatal("the facility answer holds no records Bundle")
+	return nil
+}
+
+// facilityEntry returns the resource of type rt among a records Bundle's
+// entries.
+func facilityEntry(t *testing.T, entries []any, rt string) map[string]any {
+	t.Helper()
+	for _, e := range entries {
+		if res, _ := e.(map[string]any)["resource"].(map[string]any); res["resourceType"] == rt {
+			return res
+		}
+	}
+	t.Fatalf("the records Bundle holds no %s", rt)
+	return nil
+}
+
+// facilitySubject gives the facility's report subject, and, when the subject
+// names the facility's own Patient, adds that Patient, carried with the member
+// identifier, to the records Bundle.
+func facilitySubject(t *testing.T, subject map[string]any, signedProvenance bool) func(int, []byte) []byte {
+	return func(n int, p []byte) []byte {
+		if n != 1 {
+			return p
+		}
+		return withFacilityRecords(t, p, func(entries []any) []any {
+			facilityEntry(t, entries, "DiagnosticReport")["subject"] = subject
+			if signedProvenance {
+				facilityEntry(t, entries, "Provenance")["signature"] = []any{map[string]any{
+					"type": []any{map[string]any{"system": "urn:iso-astm:E1762-95:2013", "code": "1.2.840.10065.1.12.1.1"}},
+					"when": "2026-01-01T00:00:00Z", "who": map[string]any{"display": "a clinician"},
+				}}
+			}
+			if subject["reference"] == "Patient/fac-77" {
+				entries = append(entries, map[string]any{"fullUrl": "urn:shn:fedquery:fac-77", "resource": map[string]any{
+					"resourceType": "Patient", "id": "fac-77",
+					"identifier": []any{map[string]any{"system": shnsdk.MemberSystem, "value": "MBR-UC05"}},
+				}})
+			}
+			return entries
+		})
+	}
+}
+
+// sentReportSubject is the subject of the DiagnosticReport in the claim
+// update the payer received.
+func sentReportSubject(t *testing.T, stub *pendResumeSubstrate) map[string]any {
+	t.Helper()
+	sent := stub.requests["pas-claim-update"]
+	if len(sent) != 1 {
+		t.Fatalf("%d claim updates sent, want 1", len(sent))
+	}
+	var b struct {
+		Entry []struct {
+			Resource map[string]any `json:"resource"`
+		} `json:"entry"`
+	}
+	if err := json.Unmarshal(sent[0], &b); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range b.Entry {
+		if e.Resource["resourceType"] == "DiagnosticReport" {
+			s, _ := e.Resource["subject"].(map[string]any)
+			return s
+		}
+	}
+	t.Fatal("the claim update carries no DiagnosticReport")
+	return nil
+}
+
+// End to end, registered edit E-14: the claim update carries the facility's
+// report naming the Claim's patient by subject.reference alone, the rest of
+// the subject as the facility wrote it, and the update's sealed leg names
+// E-14. A report already naming the Claim's patient, or naming the member by
+// identifier alone, reaches the payer as the facility wrote its subject, and
+// names nothing. A report about anyone else is refused before any edit
+// (TestHandleUC05_AnotherPatientsReportAsEvidenceIsAFidelityRefusal).
+func TestHandleUC05_FacilityReportSubjectE14(t *testing.T) {
+	const route = "POST /scenario/uc05"
+	kept := map[string]any{"type": "Patient", "identifier": map[string]any{"system": "urn:fac:mrn", "value": "77"}, "display": "L. Johansson"}
+	with := func(ref string) map[string]any {
+		m := map[string]any{"reference": ref}
+		for k, v := range kept {
+			m[k] = v
+		}
+		return m
+	}
+	byIdentifier := map[string]any{"identifier": map[string]any{"system": shnsdk.MemberSystem, "value": "MBR-UC05"}, "display": "L. Johansson"}
+	for _, row := range []struct {
+		name          string
+		subject, want map[string]any
+		edits         []string
+	}{
+		{"the facility's own Patient: subject.reference re-pointed alone", with("Patient/fac-77"), with("Patient/MBR-UC05"), []string{"E-14"}},
+		{"control: already the Claim's patient", with("Patient/MBR-UC05"), with("Patient/MBR-UC05"), nil},
+		{"control: the member by identifier alone", byIdentifier, byIdentifier, nil},
+	} {
+		for _, level := range allLevels {
+			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
+				gw, stub := uc05Fixture(t, level, facilitySubject(t, row.subject, false))
+				var events capturedEvents
+				gw.cfg.Diagnostic = events.sink
+				rec, _ := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("uc05 = %d %s legs %v, want 200 with the claim update sent", rec.Code, rec.Body, stub.legTypes)
+				}
+				if got := sentReportSubject(t, stub); !reflect.DeepEqual(got, row.want) {
+					t.Fatalf("the payer received subject %v, want %v", got, row.want)
+				}
+				var update capturedEvents
+				for _, e := range events.of("leg.sealed") {
+					if e.LegType == "pas-claim-update" {
+						update.events = append(update.events, e)
+					}
+				}
+				wantEventEdits(t, &update, "leg.sealed", row.edits)
+			})
+		}
+	}
+}
+
+// A signature over the facility's report, here the facility's Provenance
+// that attributes it, refuses E-14 at every level: 422 signed content cannot
+// be edited, the fidelity of SHN's own edit at the build, and no claim update
+// is sent. Its control: the same signed report already naming the Claim's
+// patient needs no edit and is carried.
+func TestHandleUC05_SignedFacilityReportRefusesE14(t *testing.T) {
+	const route = "POST /scenario/uc05"
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			gw, stub := uc05Fixture(t, level, facilitySubject(t, map[string]any{"reference": "Patient/fac-77"}, true))
+			rec, recs := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))
+			body := rec.Body.String()
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "signed content cannot be edited (E-14, Provenance.signature)") ||
+				!strings.Contains(body, "federated-query legs this request sent were carried and stand.") {
+				t.Fatalf("status %d: %s; want 422 signed content cannot be edited (E-14, Provenance.signature), stating the legs carried", rec.Code, body)
+			}
+			if legAttempted(stub.legTypes, "pas-claim-update") {
+				t.Fatalf("a claim update was sent (legs: %v)", stub.legTypes)
+			}
+			r := onlyRecord(t, recs)
+			wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
+			if r.RefusalStage != vocab.RefusalStageBuild {
+				t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
+			}
+		})
+		t.Run("control: already the Claim's patient/"+level.String(), func(t *testing.T) {
+			gw, stub := uc05Fixture(t, level, facilitySubject(t, map[string]any{"reference": "Patient/MBR-UC05"}, true))
+			rec, _ := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))
+			if rec.Code != http.StatusOK || !legAttempted(stub.legTypes, "pas-claim-update") {
+				t.Fatalf("uc05 = %d %s, want 200 with the claim update sent", rec.Code, rec.Body)
+			}
+		})
 	}
 }

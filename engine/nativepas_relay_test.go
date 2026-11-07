@@ -144,7 +144,7 @@ func relayDecidedAnswer(t *testing.T, id, trace, preAuthRef string) []byte {
 func deviceRequestSubmitBundle(t *testing.T) []byte {
 	t.Helper()
 	dr := []byte(`{"resourceType":"DeviceRequest","id":"dr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"codeCodeableConcept":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary compressed gaseous oxygen system"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(),
+	b, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(),
 		Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Provider: testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem, SR: dr,
 		PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
@@ -389,7 +389,7 @@ func TestNoInfoChangedInjectedOnFreshSubmit(t *testing.T) {
 // prior claim and returns the leg under test.
 func updateRelayLeg(t *testing.T, srv *httptest.Server) (*nativeResponder, context.Context, *censusSoR, []byte, string, string) {
 	t.Helper()
-	bundle := originatorBuiltConformantUpdateBundleProfile(t, true)
+	bundle := originatorBuiltConformantUpdateBundle(t)
 	const origCorr = "convergence-pas-submit-0001"
 	const pci = "PCI-CONF-UPD"
 	store := newCensusSoR()

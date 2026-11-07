@@ -50,6 +50,11 @@ type Content struct {
 	// shnsdk.RequestFrameV1Op; any other recipient is refused before
 	// anything is sent (framedDTRRefusal).
 	Operation string
+	// Subpath is the address a next-question round was called at
+	// (shnsdk.FrameHeaderOperationSubpath), written on the request frame
+	// beside Operation; "" for every other request. It is sent only to a
+	// recipient that declares shnsdk.RequestFrameV1OpSub.
+	Subpath string
 	// MediaType is the participant's declared FHIR JSON media type for a
 	// carried request (mediatype.go), stamped as the request frame's
 	// Content-Type whenever the request is framed; "" keeps

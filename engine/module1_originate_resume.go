@@ -81,12 +81,12 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 			g.answerFollowFailure(r.Context(), w, status, msg, err)
 			return pendState{}, false
 		}
-		qrForSubmit, status, msg = g.completeDTRContext(ctx, qrForSubmit, res.dtrLine, shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef})
+		res.qrSource = newAutomaticDTRBuildSource(questionnaireJSON, answers, qc)
+		qrForSubmit, status, msg = g.completeDTRContext(ctx, qrForSubmit, res.dtrLine, shnsdk.QRContext{PatientRef: res.patientRef, CoverageRef: res.coverageRef, OrderRef: orderRef}, res.qrSource.declaresOwn())
 		if status != 0 {
 			writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 			return pendState{}, false
 		}
-		res.qrSource = newAutomaticDTRBuildSource(questionnaireJSON, answers, qc)
 		baseTrace = attestedAnswerValues(answers)
 	}
 	pasCorr := g.cfg.CorrelationGen()
@@ -134,7 +134,6 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		QR: pasQR, SR: res.srJSON, Provider: pasProviderJSON, Coverage: res.coverage, CoverageParties: res.coverageParties, Insurer: res.insurer, PatientRef: res.patientRef, CoverageRef: res.coverageRef, MemberID: res.member, MemberIDSystem: pasMemberSystem,
 		Corr: pasCorr, Created: g.cfg.Clock(),
 		ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
-		AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 		PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		Payer:            res.payer,
 		PASClaimFacts:    claimFacts,
@@ -148,7 +147,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// chain has an independent record to verify against. Everything else about
 	// this call is unchanged.
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return pendState{}, false
@@ -174,7 +173,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 		Build: &moduleBuild{
 			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, InputEdits: evidenceEdits, Contract: "pa.pas",
 			Check: func(line string, body []byte) (int, string) {
-				return g.validatePASAttachments(ctx, body, pasDTRLine, res.qrSource != nil)
+				return g.validatePASAttachments(ctx, body, pasDTRLine, res.qrSource != nil, res.qrSource.declaresOwn())
 			},
 		},
 	})
@@ -255,7 +254,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 //
 // FAIL-CLOSED WHEN LIVE, by construction: the payload both resume sites hand
 // this guard is a FRESH build (buildModuleOnePASUpdate, over
-// BuildConformantClaimUpdateBundleAtLineExact, from
+// BuildConformantClaimUpdateBundleAtLineCarried, from
 // st.qrJSON) and the only producers of shn-carried-content wrappers are the
 // transform Down steps — so once the readiness trigger fires (a carry
 // adjacency above the pinned target), a non-empty declared record + a
@@ -402,11 +401,11 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "amend qr failed")})
 		return false
 	}
-	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
+	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine, amendedSource.declaresOwn()); status != 0 {
 		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
-	provJSON, err := buildEvidenceProvenance("QuestionnaireResponse/"+uc06QRID, "http://hl7.org/fhir/sid/us-npi", npi, "", "", g.cfg.Clock())
+	provJSON, err := buildEvidenceProvenance("", "QuestionnaireResponse/"+uc06QRID, "http://hl7.org/fhir/sid/us-npi", npi, "", "", g.cfg.Clock())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build provenance failed")})
 		return false
@@ -448,7 +447,6 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, CoverageParties: st.coverageParties, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
 			Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
-			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 			Payer:            st.payer,
 			// The amendment states the facts the resume request states, or —
@@ -480,7 +478,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			return nil, nil, true, nil
 		}
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), st.sorID, st.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -490,7 +488,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			Build: &moduleBuild{
 				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, InputEdits: evidenceEdits, Contract: "pa.pas",
 				Check: func(_ string, body []byte) (int, string) {
-					return g.validatePASAttachments(ctx, body, pasDTRLine, true)
+					return g.validatePASAttachments(ctx, body, pasDTRLine, true, amendedSource.declaresOwn())
 				},
 			},
 		})
@@ -681,12 +679,12 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "amend qr failed")})
 		return false
 	}
-	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine); status != 0 {
+	if status, msg := g.validateDTRQuestionnaireResponse(ctx, amendedQR, st.dtrLine, amendedSource.declaresOwn()); status != 0 {
 		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return false
 	}
 	// Provenance attributes the patient-authored QR to the PATIENT (FR-32, source=patient).
-	provJSON, err := shnsdk.BuildProvenance("QuestionnaireResponse/"+uc07QRID, st.patientRef, g.cfg.Clock())
+	provJSON, err := shnsdk.BuildProvenanceRecord(shnsdk.ProvenanceInputs{Target: "QuestionnaireResponse/" + uc07QRID, Agent: st.patientRef, Recorded: g.cfg.Clock()})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build provenance failed")})
 		return false
@@ -734,7 +732,6 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			QR: pasQR, SR: st.srJSON, Provider: pasProviderJSON, Coverage: st.coverage, CoverageParties: st.coverageParties, Insurer: st.insurer, PatientRef: st.patientRef, CoverageRef: st.coverageRef, MemberID: st.member, MemberIDSystem: pasMemberSystem,
 			Provenance: provJSON, DiagnosticReport: nil, Corr: updateCorr, OriginalCorr: st.pasCorr, Created: g.cfg.Clock(),
 			ContainedInsurer: relaysReferencePayerBytes(g.cfg.OriginationProfile),
-			AbsoluteRefs:     relaysReferencePayerBytes(g.cfg.OriginationProfile),
 			PayerOrgEntry:    relaysReferencePayerBytes(g.cfg.OriginationProfile), // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 			Payer:            st.payer,
 			// The amendment states the facts the resume request states, or —
@@ -765,7 +762,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			return nil, nil, true, nil
 		}
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), st.sorID, st.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -775,7 +772,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			Build: &moduleBuild{
 				Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: updateBundle, InputEdits: evidenceEdits, Contract: "pa.pas",
 				Check: func(_ string, body []byte) (int, string) {
-					return g.validatePASAttachments(ctx, body, pasDTRLine, true)
+					return g.validatePASAttachments(ctx, body, pasDTRLine, true, amendedSource.declaresOwn())
 				},
 			},
 		})

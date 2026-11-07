@@ -279,6 +279,11 @@ func (s *pendResumeSubstrate) federatedQueryAnswer(requestTaskJSON []byte) ([]by
 	}
 	provJSON, err := shnsdk.BuildProvenanceWithPolicy("DiagnosticReport/dr-uc05-operative",
 		"Organization/metro-spine", "Consent/consent-linda-treat", shnsdk.PurposeTreatment, s.clock())
+	if err == nil {
+		// A searchset entry has an id, as the facility's own answer gives it
+		// (workstream_fqs_records.go).
+		provJSON, err = withID(provJSON, "record-provenance-0")
+	}
 	if err != nil {
 		return nil, err
 	}

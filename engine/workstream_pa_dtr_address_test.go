@@ -34,6 +34,12 @@ type addressed struct {
 // frames it.
 func (d dtrPayer) sendAddressed(t *testing.T, operation, subpath string, body []byte) addressed {
 	t.Helper()
+	return d.sendAddressedIn(t, context.Background(), operation, subpath, body)
+}
+
+// sendAddressedIn is sendAddressed on a request context derived from base.
+func (d dtrPayer) sendAddressedIn(t *testing.T, base context.Context, operation, subpath string, body []byte) addressed {
+	t.Helper()
 	d.partner.lastPath, d.partner.lastBody = "", nil
 	env, err := shnsdk.Seal(shnsdk.Metadata{
 		Sender: d.requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
@@ -43,7 +49,7 @@ func (d dtrPayer) sendAddressed(t *testing.T, operation, subpath string, body []
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := withRequestFrameOperation(withAnswerLine(context.Background(), "pa.dtr@2.0"), operation)
+	ctx := withRequestFrameOperation(withAnswerLine(base, "pa.dtr@2.0"), operation)
 	if subpath != "" {
 		ctx = withRequestFrameSubpath(ctx, subpath)
 	}
@@ -218,6 +224,72 @@ func TestDTRAddress_APackageAnswerStatesItsBaseAndTags(t *testing.T) {
 				t.Fatal("an address header reached the body")
 			}
 		})
+	}
+}
+
+// A package request answered at another line than the one it claims states
+// no base and no tag: the requester's gateway would write the claimed line
+// into the re-keyed address, which the tag (bound to the answer's line) does
+// not, and every round would be refused. The address is then carried as sent,
+// and the client calls the payer directly. A request carried but answered at
+// the line it claims (a declared line with no ready lane) states both, as a
+// request answered as claimed does.
+func TestDTRAddress_APackageAnsweredAtAnotherLineStatesNoTags(t *testing.T) {
+	d := newDTRPayer(t)
+	base := d.partner.srv.URL
+	d.partner.respByPath[packagePath] = []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","id":"a","status":"active",` +
+		`"extension":[{"url":"` + questionnaireAdaptiveExtension + `","valueUrl":"` + base + `/forms/a"}]}}]}`)
+	req := dtrPackageFixture(t, "valid/dtr-package-params-2.0.json")
+	for name, row := range map[string]struct {
+		ctx    context.Context
+		stated bool
+	}{
+		"a request at a line it answers": {context.Background(), true},
+		// sendAddressedIn answers at 2.0.
+		"a request carried and answered at another line":       {withRequestLineCarried(context.Background(), "pa.dtr@2.2"), false},
+		"a request carried but answered at the line it claims": {withRequestLineCarried(context.Background(), "pa.dtr@2.0"), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := d.sendAddressedIn(t, row.ctx, shnsdk.FrameOperationQuestionnairePackage, "", req)
+			if got.status != http.StatusOK {
+				t.Fatalf("status %d %s", got.status, got.body)
+			}
+			_, baseStated := got.headers[shnsdk.FrameHeaderOperationBase]
+			_, tagsStated := got.headers[shnsdk.FrameHeaderOperationAddressTags]
+			if baseStated != row.stated || tagsStated != row.stated {
+				t.Fatalf("operationBase stated %v, operationAddressTags stated %v, want both %v", baseStated, tagsStated, row.stated)
+			}
+			if !bytes.Contains(got.body, []byte(base+"/forms/a")) {
+				t.Fatalf("the answer lost the payer's own address: %s", got.body)
+			}
+		})
+	}
+}
+
+// A round's answer is tagged at the line of the address the round was
+// delivered to, which the provider's gateway writes too, even when the
+// round's request claims another line it was carried from: the guard that
+// leaves a package answered at another line untagged does not reach rounds.
+func TestDTRAddress_ARoundCarriedFromAnotherLineIsStillTagged(t *testing.T) {
+	d := newDTRPayer(t)
+	base := d.partner.srv.URL
+	d.partner.respByPath["/forms/a"+nextPath] = []byte(`{"resourceType":"Parameters","parameter":[{"name":"questionnaire-response","resource":` +
+		`{"resourceType":"QuestionnaireResponse","status":"in-progress","subject":{"reference":"Patient/` + dtrFrameMember + `"},` +
+		`"contained":[{"resourceType":"Questionnaire","id":"q","status":"active","extension":[{"url":"` + questionnaireAdaptiveExtension + `","valueUrl":"` + base + `/forms/a"}]}],"questionnaire":"#q"}}]}`)
+	got := d.sendAddressedIn(t, withRequestLineCarried(context.Background(), "pa.dtr@2.2"), shnsdk.FrameOperationNextQuestion,
+		"/payer/2.0/"+d.issuedTag(dtraddress.FamilyPayer, "/forms/a")+"/forms/a", []byte(nextQuestionQR(dtrFrameMember)))
+	if got.status != http.StatusOK {
+		t.Fatalf("status %d %s", got.status, got.body)
+	}
+	if b, ok := got.headers[shnsdk.FrameHeaderOperationBase]; !ok || b != base {
+		t.Fatalf("operationBase %q %v, want %q stated", b, ok, base)
+	}
+	pairs, err := dtraddress.ParseTags(got.headers[shnsdk.FrameHeaderOperationAddressTags])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].Remainder != "/forms/a" || pairs[0].Tag != d.issuedTag(dtraddress.FamilyPayer, "/forms/a") {
+		t.Fatalf("tagged %+v, want the round's own address at its own line", pairs)
 	}
 }
 
@@ -511,6 +583,43 @@ func TestDTRAddress_TheRestoreRecordsWhatItCannotRead(t *testing.T) {
 			}
 			if !slices.Equal(x.rec.EditsNotMade, []string{row.want}) {
 				t.Fatalf("not made %v, want %s", x.rec.EditsNotMade, row.want)
+			}
+		})
+	}
+}
+
+// A round whose frame names another line than its address is delivered at
+// the address's line, which the tag binds, and the difference is recorded as
+// a line carry (LineCarriedRequest) with its event, never refused. A round at
+// its own address's line records none.
+func TestDTRAddress_ARoundAtAnotherLineThanItsAddressIsRecorded(t *testing.T) {
+	for _, row := range []struct {
+		line    string
+		carried bool
+	}{{"2.2", true}, {"2.0", false}} {
+		t.Run(row.line, func(t *testing.T) {
+			d := newDTRPayer(t)
+			var events []ObserverEvent
+			d.g.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
+			d.partner.respByPath["/forms/a"+nextPath] = d.partner.respByPath[nextPath]
+			tag := d.g.paState().addressKey.Tag(dtraddress.Address{Family: dtraddress.FamilyPayer, Payer: d.g.cfg.HolderID,
+				Provider: d.requester.ID, Line: row.line, Base: d.partner.srv.URL, Remainder: "/forms/a"})
+			// sendAddressed frames the round at pa.dtr@2.0.
+			got := d.sendAddressed(t, shnsdk.FrameOperationNextQuestion, "/payer/"+row.line+"/"+tag+"/forms/a", []byte(nextQuestionQR(dtrFrameMember)))
+			if got.status != http.StatusOK || d.partner.lastPath != "/forms/a"+nextPath {
+				t.Fatalf("status %d %s, delivered at %q: want the round delivered at its address", got.status, got.body, d.partner.lastPath)
+			}
+			var carried []ObserverEvent
+			for _, e := range events {
+				if e.Kind == LineCarriedEvent {
+					carried = append(carried, e)
+				}
+			}
+			if row.carried != (len(carried) == 1) || len(carried) > 1 {
+				t.Fatalf("line-carried events %+v, want carried %v", carried, row.carried)
+			}
+			if row.carried && (!strings.Contains(carried[0].Detail, "2.2") || !strings.Contains(carried[0].Detail, "2.0")) {
+				t.Fatalf("the event's detail %q does not name both lines", carried[0].Detail)
 			}
 		})
 	}

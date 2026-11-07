@@ -192,11 +192,15 @@ func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback
 // isPASBuildFidelity reports whether a PAS builder refused the request on
 // the fidelity of SHN's own build: a claim fact the request does not state or
 // states invalidly, a submitted Claim an amendment cannot carry as submitted,
-// or a person the member's Coverage names whose record cannot be carried. Every
-// site that answers a PAS build's failure decides by it, so they cannot drift.
+// a person the member's Coverage names whose record cannot be carried, a
+// report or Provenance an amendment cannot carry as written, or a record of
+// the order's requester the gateway cannot splice in as read
+// (errRecordNotCarried). Every site that answers a PAS build's failure decides
+// by it, so they cannot drift.
 func isPASBuildFidelity(err error) bool {
 	return errors.Is(err, shnsdk.ErrPASClaimFactAbsent) || errors.Is(err, shnsdk.ErrPASClaimFactInvalid) ||
-		errors.Is(err, shnsdk.ErrPASPriorClaimNotCarried) || errors.Is(err, shnsdk.ErrPASCoveragePartyNotCarried)
+		errors.Is(err, shnsdk.ErrPASPriorClaimNotCarried) || errors.Is(err, shnsdk.ErrPASCoveragePartyNotCarried) ||
+		errors.Is(err, shnsdk.ErrPASRecordNotCarried) || errors.Is(err, errRecordNotCarried)
 }
 
 // pasSubmitBuildFailure answers a PAS submit's build failure to recipient: a

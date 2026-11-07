@@ -19,19 +19,25 @@ import (
 // step runs on the SDK's bundle before the attachment is completed, so the
 // completion sees every entry the request carries.
 func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
-	body, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineCarried(line, in)
 	if err != nil {
 		return body, err
+	}
+	if err := builtEntriesNamed(body, pasBuildReIDs(in.SR, false)); err != nil {
+		return nil, err
 	}
 	if body, err = extendAuthoredPAS(body, extend); err != nil || len(in.QR) == 0 {
 		return body, err
 	}
-	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef)
 }
 
 func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
-	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
+	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLineCarried(line, in)
 	if err != nil {
+		return nil, err
+	}
+	if err := builtEntriesNamed(body, pasBuildReIDs(in.SR, len(in.DiagnosticReport) == 0)); err != nil {
 		return nil, err
 	}
 	order, err := authoredPASObject(in.SR)
@@ -41,7 +47,74 @@ func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, 
 	if body, err = extendAuthoredPAS(body, extend); err != nil {
 		return nil, err
 	}
-	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef)
+}
+
+// pasBuildReIDs is the set of types of the records the SDK's Carried build
+// gives an id of its own, by the build's structure rather than by any id
+// value: the order (its own type, read exactly) and the QuestionnaireResponse
+// always, and an amendment's Provenance only where the amendment carries no
+// report (withProvenance). The Provenance attributing a report is carried under
+// its own id and is not re-identified.
+func pasBuildReIDs(order []byte, withProvenance bool) map[string]bool {
+	ids := map[string]bool{"QuestionnaireResponse": true}
+	if m, err := exactMembers(order); err == nil {
+		if typ := exactString(m, "resourceType"); typ != "" {
+			ids[typ] = true
+		}
+	}
+	if withProvenance {
+		ids["Provenance"] = true
+	}
+	return ids
+}
+
+// builtEntriesNamed is the fidelity of the gateway's own PAS build, checked
+// once, right after the SDK's Carried build, on every path of a submission or
+// an amendment, before any other step; nothing is sent when it refuses
+// (errRecordNotCarried, 422). Two of the build's own edits cannot be made:
+//   - It addresses each record it places (its entry's fullUrl, and the
+//     references the Claim and the Coverage make to it) by the record's
+//     resourceType and id. A participant's record that states either only in
+//     another spelling (an "ID", say) has no FHIR id, and the request would
+//     name it by an id the participant never gave.
+//   - It gives some records an id of its own (reIDs, pasBuildReIDs).
+//     Where such a record spells its id another way, the build's id would sit
+//     beside it, and the body would name the member twice under case folding:
+//     one the network's message integrity refuses to seal (relay's duplicate
+//     rule), since it can be read two ways. The re-id cannot be made. Once
+//     those records are carried as written, a lone member spelled so is
+//     carried. A record the build carries under its own id that itself names
+//     its id twice so is the participant's own ambiguity, not this edit's.
+//
+// Every entry SHN builds itself states both exactly, and only once.
+func builtEntriesNamed(body []byte, reIDs map[string]bool) error {
+	bundle, err := exactMembers(body)
+	if err != nil {
+		return err
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(bundle["entry"], &entries); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		entry, err := exactMembers(e)
+		if err != nil {
+			return err
+		}
+		r, err := exactMembers(entry["resource"])
+		if err != nil || exactString(r, "resourceType") == "" || exactString(r, "id") == "" {
+			return fmt.Errorf("%w: it states its resourceType or id only in another spelling", errRecordNotCarried)
+		}
+		if reIDs[exactString(r, "resourceType")] {
+			for name := range r {
+				if name != "id" && foldName(name) == foldName("id") {
+					return fmt.Errorf("%w: the build's own id for it cannot be set beside the id it spells another way", errRecordNotCarried)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // extendAuthoredPAS runs the build's extend steps in order.
@@ -127,7 +200,7 @@ func authoredPASResourceIdentity(fields map[string]authoredPASValue) (string, st
 // completeAuthoredPASAttachment is a construction boundary for an already
 // materialized holder-owned QR. It never accepts an inbound resource to repair.
 // Only the actual QR entry span changes; every other SDK-produced byte stays put.
-func completeAuthoredPASAttachment(body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool) ([]byte, error) {
+func completeAuthoredPASAttachment(body, sourceQR, sourceOrder []byte, coverageRef string) ([]byte, error) {
 	fail := func() ([]byte, error) { return nil, fmt.Errorf("invalid authored PAS attachment identity") }
 	order, err := authoredPASObject(sourceOrder)
 	if err != nil {
@@ -270,12 +343,6 @@ func completeAuthoredPASAttachment(body, sourceQR, sourceOrder []byte, coverageR
 	if err != nil {
 		return nil, err
 	}
-	if absolute {
-		replacement, err = authoredPASAbsoluteRefs(replacement, refs, false)
-		if err != nil {
-			return nil, err
-		}
-	}
 	if bytes.Equal(replacement, qrSpan.raw) {
 		return body, nil
 	}
@@ -284,69 +351,6 @@ func completeAuthoredPASAttachment(body, sourceQR, sourceOrder []byte, coverageR
 	out = append(out, replacement...)
 	out = append(out, body[qrSpan.end:]...)
 	return out, nil
-}
-
-// Retain the existing patient-compartment anchor semantics, including nested
-// references in that protected subtree. Raw values keep their numeric lexemes.
-func authoredPASAbsoluteRefs(raw []byte, refs map[string]string, protect bool) ([]byte, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, fmt.Errorf("missing PAS value")
-	}
-	switch trimmed[0] {
-	case '{':
-		fields, err := authoredPASObject(raw)
-		if err != nil {
-			return nil, err
-		}
-		anchor := ""
-		switch dtrString(fields["resourceType"].raw) {
-		case "Coverage":
-			anchor = "beneficiary"
-		case "ServiceRequest", "DeviceRequest":
-			anchor = "subject"
-		}
-		changed := false
-		values := map[string]json.RawMessage{}
-		for key, field := range fields {
-			value := field.raw
-			if key == "reference" {
-				if !protect {
-					if full := refs[dtrString(value)]; full != "" {
-						value = dtrRaw(full)
-					}
-				}
-			} else {
-				value, err = authoredPASAbsoluteRefs(value, refs, protect || (anchor != "" && key == anchor))
-				if err != nil {
-					return nil, err
-				}
-			}
-			changed = changed || !bytes.Equal(value, field.raw)
-			values[key] = value
-		}
-		if changed {
-			return json.Marshal(values)
-		}
-	case '[':
-		items, err := authoredPASArray(raw)
-		if err != nil {
-			return nil, err
-		}
-		values := make([]json.RawMessage, len(items))
-		changed := false
-		for i, item := range items {
-			values[i], err = authoredPASAbsoluteRefs(item.raw, refs, protect)
-			if err != nil {
-				return nil, err
-			}
-			changed = changed || !bytes.Equal(values[i], item.raw)
-		}
-		if changed {
-			return json.Marshal(values)
-		}
-	}
-	return raw, nil
 }
 
 // The policy describes exact occurrences in a verified holder-authored attachment.
@@ -384,8 +388,8 @@ func (p *authoredPASReferencePolicy) Allows(owner *pasGraphEntry, path string, n
 	raw, err := json.Marshal(node)
 	return err == nil && string(raw) == expected
 }
-func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageRef string, absolute bool) (*authoredPASReferencePolicy, error) {
-	verified, err := completeAuthoredPASAttachment(body, sourceQR, sourceOrder, coverageRef, absolute)
+func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageRef string) (*authoredPASReferencePolicy, error) {
+	verified, err := completeAuthoredPASAttachment(body, sourceQR, sourceOrder, coverageRef)
 	if err != nil || !bytes.Equal(verified, body) {
 		return nil, fmt.Errorf("authored attachment does not match source")
 	}

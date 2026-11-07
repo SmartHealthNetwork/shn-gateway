@@ -30,22 +30,36 @@ func dtrQRProfile(line string) (string, error) {
 	}
 	return dtrQRCanonical + "|" + def.PackageVersion, nil
 }
-func (g *Gateway) validateDTRQuestionnaireResponse(ctx context.Context, raw []byte, line string) (int, string) {
+
+// validateDTRQuestionnaireResponse checks a response at the DTR profile of
+// its line, asked for explicitly; own, for a response the gateway's own
+// engine filled, asks for every profile it declares too.
+func (g *Gateway) validateDTRQuestionnaireResponse(ctx context.Context, raw []byte, line string, own bool) (int, string) {
 	profile, err := dtrQRProfile(line)
 	if err != nil {
 		return http.StatusInternalServerError, "unsupported DTR validation line"
 	}
-	return g.validateFHIRForContract(ctx, raw, "egress", "pa.dtr", line, profile)
+	return g.validateFHIRForContract(withOwnDeclaredProfiles(ctx, own), raw, "egress", "pa.dtr", line, profile)
+}
+
+// withOwnDeclaredProfiles is ctx with its finding context's OwnDeclared set
+// to own, for the checks of one questionnaire response only: a later check
+// of another payload is made on the context it had before. Only the DTR
+// checks of a response an engine filled set it; the core reads it.
+func withOwnDeclaredProfiles(ctx context.Context, own bool) context.Context {
+	fc := findingContextFrom(ctx)
+	fc.OwnDeclared = own
+	return withFindingContext(ctx, fc)
 }
 
 // completeDTRContext preserves the local population artifact and creates an
 // explicitly profiled outgoing QR from the holder's established administrative facts.
-func (g *Gateway) completeDTRContext(ctx context.Context, raw []byte, line string, qc shnsdk.QRContext) ([]byte, int, string) {
+func (g *Gateway) completeDTRContext(ctx context.Context, raw []byte, line string, qc shnsdk.QRContext, own bool) ([]byte, int, string) {
 	out, err := composeDTRContextAtLine(raw, line, qc)
 	if err != nil {
 		return nil, http.StatusBadGateway, "DTR administrative context conflicts with the exchange"
 	}
-	status, msg := g.validateDTRQuestionnaireResponse(ctx, out, line)
+	status, msg := g.validateDTRQuestionnaireResponse(ctx, out, line, own)
 	return out, status, msg
 }
 

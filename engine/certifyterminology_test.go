@@ -137,7 +137,7 @@ func certifyAt(t *testing.T, v shnsdk.Validator, line string, payload []byte) (L
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, unchecked := certificationUnchecked(res, payload, line, profile)
+	_, unchecked := certificationUnchecked(res, payload, line, profile)
 	return got, unchecked
 }
 
@@ -537,5 +537,90 @@ func TestCertificationRunRegexCheckCouldNotRun(t *testing.T) {
 	}
 	if got := laneVerdict(t, e, "2.2"); got.State != "invalid" || got.Valid {
 		t.Fatalf("2.2: %+v, want invalid", got)
+	}
+}
+
+// Through a certification run: a payload declaring another line's versioned
+// profile. The line whose lane lacks it reads as before, invalid, when another
+// candidate line held it (it was checked there); only a profile no candidate
+// line held is a check that could not run, and names it.
+func TestCertificationRunAProfileAnotherLineHolds(t *testing.T) {
+	const pas22 = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.2.1"
+	payload := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"ClaimResponse","meta":{"profile":["` + pas22 + `","http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0"]}}}]}`)
+	issue := func(id, expr, diag string) map[string]any {
+		m := map[string]any{"severity": "error", "code": "processing", "diagnostics": diag,
+			"details": map[string]any{"coding": []any{map[string]any{"system": "http://hl7.org/fhir/java-core-messageId", "code": id}}}}
+		if expr != "" {
+			m["expression"] = []any{expr}
+		}
+		return m
+	}
+	lacks := outcomeIssues{
+		issue(validatorissue.ProfileUnknownNotPolicy, "Bundle.entry[0].resource.meta.profile[0]", "Profile reference '"+pas22+"' has not been checked because it could not be found, and the validator is set to not fetch unknown profiles"),
+		issue(validatorissue.ProfileUnknown, "", "Invalid profile. Failed to retrieve profile with url="+pas22),
+	}
+	broken := outcomeIssues{issue("Validation_VAL_Profile_Minimum", "Bundle.entry[0].resource", "ClaimResponse.outcome: minimum required = 1")}
+	// lacksOther lacks the payload's second declared profile, and so held the
+	// first, which lacks lacks.
+	const pas21 = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse|2.1.0"
+	lacksOther := outcomeIssues{
+		issue(validatorissue.ProfileUnknownNotPolicy, "Bundle.entry[0].resource.meta.profile[1]", "Profile reference '"+pas21+"' has not been checked because it could not be found, and the validator is set to not fetch unknown profiles"),
+		issue(validatorissue.ProfileUnknown, "", "Invalid profile. Failed to retrieve profile with url="+pas21),
+	}
+	for _, row := range []struct {
+		name  string
+		lanes map[string]shnsdk.Validator
+		want  map[string]string
+	}{
+		{"2.1 lacks it, 2.2 holds it", map[string]shnsdk.Validator{"2.0": serveOutcome(t, lacks), "2.1": serveOutcome(t, lacks), "2.2": serveOutcome(t, broken)},
+			map[string]string{"2.0": "invalid", "2.1": "invalid", "2.2": "invalid"}},
+		{"no line holds it", map[string]shnsdk.Validator{"2.0": serveOutcome(t, lacks), "2.1": serveOutcome(t, lacks), "2.2": serveOutcome(t, lacks)},
+			map[string]string{"2.0": "unavailable", "2.1": "unavailable", "2.2": "unavailable"}},
+		{"each line lacks what another holds", map[string]shnsdk.Validator{"2.0": serveOutcome(t, lacks), "2.1": serveOutcome(t, lacks), "2.2": serveOutcome(t, lacksOther)},
+			map[string]string{"2.0": "invalid", "2.1": "invalid", "2.2": "invalid"}},
+		// A line that certifies the payload held every profile it declares.
+		{"2.2 certifies it, the others lack it", map[string]shnsdk.Validator{"2.0": serveOutcome(t, lacks), "2.1": serveOutcome(t, lacks), "2.2": serveOutcome(t, outcomeIssues{})},
+			map[string]string{"2.0": "invalid", "2.1": "invalid", "2.2": "valid"}},
+		// A line that stopped without a verdict (HAPI-0389) held nothing.
+		{"2.2 never judged it, the others lack it", map[string]shnsdk.Validator{"2.0": serveOutcome(t, lacks), "2.1": serveOutcome(t, lacks), "2.2": serveOutcome(t, outcomeIssues{issue("", "", "HAPI-0389: Failed to call access method: java.lang.Error: failed to validate, but no errors. profile = x")})},
+			map[string]string{"2.0": "unavailable", "2.1": "unavailable"}},
+	} {
+		g := certificationGatewayByLine(t, row.lanes, nil)
+		certificationSubmitPayload(g, "consumers", payload)
+		certificationFlush(t, g)
+		e := g.CertificationEvidenceForTest()[0]
+		for line, want := range row.want {
+			got := laneVerdict(t, e, line)
+			if got.State != want {
+				t.Errorf("%s: %s %+v, want %s", row.name, line, got, want)
+			}
+			if want == "unavailable" && !strings.HasPrefix(got.Error, "profile unavailable: profile bytes=") {
+				t.Errorf("%s: %s error %q, want the profile named", row.name, line, got.Error)
+			}
+		}
+	}
+}
+
+// A PAS Claim entry's no-match summary and slice-match consequence follow
+// from an unchecked cause on that entry, never from a profile the Claim
+// declares that the lane does not hold: beside only that profile the
+// certification line is a verdict (invalid), while the profile alone leaves
+// it unable to check the payload.
+func TestCertificationAPASSummaryDoesNotFollowFromAnUnresolvedProfile(t *testing.T) {
+	claim := `{"resourceType":"Claim","id":"c1","use":"preauthorization","meta":{"profile":["` + localReportProfile + `"]}}`
+	body := pasBundle(claim)
+	profileIssues := []shnsdk.Issue{
+		profileNotCheckedIssue(claimEntry0+".meta.profile[0]", localReportProfile),
+		profileNotRetrievedIssue(localReportProfile),
+	}
+	cascade := cascade22Submit()
+	terminologyIssues := len(terminology(pasClaimCanonical, "2.2.1", "PASClaim")) * 2
+	summaryOnly := append(append([]shnsdk.Issue{}, cascade[terminologyIssues:]...), profileIssues...)
+	if _, ok := certificationUnchecked(invalid(summaryOnly...), body, "2.2", ""); ok {
+		t.Error("the Claim entry's summary beside only its unresolved profile: unchecked, want a verdict")
+	}
+	c, ok := certificationUnchecked(invalid(profileIssues...), body, "2.2", "")
+	if !ok || len(c.profiles) != 1 || c.profiles[0] != localReportProfile {
+		t.Errorf("the Claim entry's unresolved profile alone: %+v %v, want unchecked naming it", c, ok)
 	}
 }

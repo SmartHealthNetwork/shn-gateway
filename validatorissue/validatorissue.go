@@ -17,6 +17,14 @@ const (
 	// puts on an element did not finish within that limit: "could not be
 	// executed".
 	RegexTimedOut = "REGEX_MATCH_TIMED_OUT"
+	// ProfileUnknownNotPolicy is the message id HAPI's validator gives an
+	// error when a resource declares in meta.profile a profile the validator
+	// does not hold and is set not to fetch: the resource "has not been
+	// checked" against it. Its expression names the meta.profile element.
+	ProfileUnknownNotPolicy = "VALIDATION_VAL_PROFILE_UNKNOWN_NOT_POLICY"
+	// ProfileUnknown is the message id it gives the error that follows, that
+	// it failed to retrieve that profile. It carries no expression.
+	ProfileUnknown = "Validation_VAL_Profile_Unknown"
 )
 
 // CouldNotRun reports whether i says a check could not run. A fatal issue

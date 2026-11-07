@@ -1,5 +1,5 @@
 // Package paedits holds the Prior Authorization workstream's registered relay
-// edits (E-01 … E-13): the only changes a gateway may make to a participant's
+// edits (E-01 … E-14): the only changes a gateway may make to a participant's
 // message it relays on a PA leg, and the transform it makes to a PAS message
 // it built itself. The gateway gathers them into its registry through the PA
 // workstream; a reader of recorded exchanges names an edit by them
@@ -312,6 +312,30 @@ func Rows() []relay.Edit {
 				"gateway restores the address the payer wrote, or the true it wrote, before forwarding the request to the " +
 				"payer's system, so the payer receives its own address. The forward names the edit in a header, and names any signature that " +
 				"covered the address.",
+		},
+		{
+			ID:        relay.EditFacilityReportSubjectRekey,
+			Name:      "facility-report-subject-rekey",
+			Legs:      []string{"pas-claim-update"},
+			Role:      relay.RoleRequester,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"DiagnosticReport.subject.reference"},
+			Kind:      relay.EditKindReplaceValue,
+			Precondition: "Only on a prior-authorization update the provider's gateway builds for its own workflow, to the " +
+				"facility's report it read on the federated-query leg and attaches as the update's evidence, and only once " +
+				"that report, and the Provenance that attributes it, are shown to be about the Claim's patient: the report's " +
+				"subject names the member directly, or through a Patient the facility carried with the member identifier. " +
+				"A report about anyone else is refused, with no edit made. A report whose subject.reference is exactly the " +
+				"Claim's patient reference, or whose subject names the member by identifier alone, is carried as sent. A report a " +
+				"signature covers, in the report or in the facility's Provenance that attributes it, is refused. A request " +
+				"the provider's own client sends is never edited this way.",
+			Authority: "The facility's own answer, read on the federated-query leg, and the Claim the gateway builds: the " +
+				"value written is the Claim's patient reference.",
+			Disclosure: "When a provider's gateway attaches a facility's report to a prior-authorization update it builds, " +
+				"and that report's subject.reference is not exactly the Claim's patient reference (it names the facility's " +
+				"own Patient, or the member in another form), the gateway changes only that reference, to the Claim's " +
+				"patient, after checking the report is about that patient. Every other " +
+				"byte of the report is the facility's, the display, identifier and type of its subject included.",
 		},
 	}
 }

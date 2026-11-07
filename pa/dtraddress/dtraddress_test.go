@@ -210,3 +210,28 @@ func TestFindIssued(t *testing.T) {
 		}
 	}
 }
+
+func TestIssuedURL(t *testing.T) {
+	tag := strings.Repeat("A", TagLen)
+	got, err := IssuedURL("https://gw.example/base/", FamilyPayer, "p/q", "2.2", tag, "/forms/a")
+	if err != nil || got != "https://gw.example/base/dtr/payer/p%2Fq/2.2/"+tag+"/forms/a" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if is, ok := FindIssued(got); !ok || is.Payer != "p/q" || is.Remainder != "/forms/a" {
+		t.Fatalf("the written address does not read back: %+v %v", is, ok)
+	}
+	for _, bad := range [][6]string{
+		{"ftp://gw.example", FamilyPayer, "p", "2.2", tag, ""},
+		{"https://u@gw.example", FamilyPayer, "p", "2.2", tag, ""},
+		{"https://gw.example?q", FamilyPayer, "p", "2.2", tag, ""},
+		{"https://gw.example", FamilyPayer, "..", "2.2", tag, ""},
+		{"https://gw.example", FamilyPayer, "p q", "2.2", tag, ""},
+		{"https://gw.example", FamilyFetchServer, "p", "2.2", tag, "/x"},
+		{"https://gw.example", FamilyPayer, "p", "2.2", "short", ""},
+		{"https://gw.example", FamilyPayer, "p", "2.2", tag, "/a/"},
+	} {
+		if _, err := IssuedURL(bad[0], bad[1], bad[2], bad[3], bad[4], bad[5]); err == nil {
+			t.Errorf("IssuedURL%q passed", bad)
+		}
+	}
+}

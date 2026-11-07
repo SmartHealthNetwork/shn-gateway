@@ -336,12 +336,8 @@ func TestModuleOnePAS_CarriesTheOrdersRequester(t *testing.T) {
 						t.Fatalf("%s changed: %s", key, after[key].Resource)
 					}
 				}
-				wantRef := func(ref string) string {
-					if absolute {
-						return base + "/" + ref
-					}
-					return ref
-				}
+				// As written on every lane: AbsoluteRefs has no effect.
+				wantRef := func(ref string) string { return ref }
 				if got := referenceAt(t, orderEntry.Resource, "requester", "reference"); got != wantRef("PractitionerRole/role-1") {
 					t.Fatalf("order requester %q, want %q", got, wantRef("PractitionerRole/role-1"))
 				}
@@ -423,7 +419,7 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
 		t.Fatalf("the request without a requester fails the guard: %v", err)
 	}
 	in.SR = withOrderRequester(t, in.SR, "Practitioner/prac-2")
@@ -435,14 +431,14 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err == nil {
+	if _, _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err == nil {
 		t.Fatal("a request naming a clinician it does not carry passed the evidence guard")
 	}
 	with, err := buildModuleOnePASSubmit("2.2", in, records)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
 		t.Fatalf("the carried request failed the evidence guard: %v", err)
 	}
 }
@@ -497,11 +493,20 @@ func TestModuleOnePAS_AuthorNamingTheCarriedClinician(t *testing.T) {
 					author = referenceAt(t, e.Resource, "author", "reference")
 				}
 			}
-			if full == "" || author != full {
-				t.Fatalf("questionnaire author %q, want the carried entry %q", author, full)
+			// The author is carried as written, the relative reference the
+			// participant wrote, and names the carried entry exactly: that entry's
+			// fullUrl is the order entry's base followed by the reference.
+			base := ""
+			for key, e := range entries {
+				if strings.HasPrefix(key, "ServiceRequest/") {
+					base = strings.TrimSuffix(e.FullURL, key)
+				}
+			}
+			if author != "Practitioner/prac-2" || base == "" || full != base+author {
+				t.Fatalf("questionnaire author %q, carried entry %q on the order's base %q: want the author as written, naming that entry", author, full, base)
 			}
 			if name == "submit" {
-				if _, _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID); err != nil {
+				if _, _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
 					t.Fatalf("the evidence guard refused the carried request: %v", err)
 				}
 			}

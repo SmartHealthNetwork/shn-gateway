@@ -190,7 +190,7 @@ func TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded(t *testing.T) 
 				PatientRef: "Patient/" + member, CoverageRef: "Coverage/" + member,
 				MemberID: member, MemberIDSystem: shnsdk.MemberSystem,
 				Corr: "dom3-0001", Created: time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC),
-				ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true,
+				ContainedInsurer: true, PayerOrgEntry: true,
 				Payer: payer,
 			})
 			if err != nil {

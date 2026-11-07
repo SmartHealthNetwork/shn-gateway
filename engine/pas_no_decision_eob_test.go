@@ -58,7 +58,7 @@ func wantNoRetiredEvent(t *testing.T, events []ObserverEvent) {
 func hcpcsSubmitBundle(t *testing.T) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-hcpcs","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"E0424","display":"Stationary Oxygen System"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	b, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",

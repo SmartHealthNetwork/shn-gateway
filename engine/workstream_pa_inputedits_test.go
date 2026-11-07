@@ -132,11 +132,51 @@ func TestEgressBuild_AnEditThatIsNotAnInputEditSendsNothing(t *testing.T) {
 	}
 }
 
+// E-14 is registered for the claim update alone: an update carrying a
+// facility's report E-14 re-pointed names it, before the E-06 made after it,
+// as the update's input edits; the pas-claim transmit refuses a submission
+// naming E-14 (the PA table lists E-14 on the originated pas-claim-update
+// alone).
+func TestEgressBuild_E14OnTheClaimUpdateAlone(t *testing.T) {
+	body := pasGolden(t, "claimresponse-approved.json")
+	ctx, _ := recordingCtx()
+	inputs := []relay.EditID{relay.EditFacilityReportSubjectRekey, relay.EditEvidenceSubjectRekey}
+	built, status, msg, err := walkGateway(shnsdk.NewFakeValidator()).egressBuild(ctx, atBuildLine, ExchangeIdentity{CorrelationID: "corr-e14", LegType: "pas-claim-update"}, moduleBuild{
+		Builder: relay.BuilderSDKPASUpdate, ContentType: "application/fhir+json", Body: body, InputEdits: inputs, Contract: "pa.pas",
+	})
+	if err != nil || status != 0 {
+		t.Fatalf("egressBuild: %d %s %v", status, msg, err)
+	}
+	if p := built.Payload; p.Ownership() != relay.OwnershipAuthored || !slices.Equal(p.InputEdits(), inputs) {
+		t.Fatalf("sealed %v inputs %v, want authored carrying %v", p, p.InputEdits(), inputs)
+	}
+	x := &exchangeRecorder{}
+	x.sent(built.Payload)
+	if !slices.Equal(x.rec.RequestEdits, []string{"E-14", "E-06"}) || !slices.Equal(x.rec.Edits, []string{"E-14", "E-06"}) {
+		t.Fatalf("recorded request edits %v edits %v, want [E-14 E-06]", x.rec.RequestEdits, x.rec.Edits)
+	}
+	if sent, err := relay.Transmit(built.Payload, relay.Check(requestKey("pas-claim-update", false))); err != nil || !bytes.Equal(sent, body) {
+		t.Fatalf("the pas-claim-update transmit: %v; want the update as built", err)
+	}
+	// The same note on a submission: the pas-claim transmit refuses it.
+	sub, status, msg, err := walkGateway(shnsdk.NewFakeValidator()).egressBuild(ctx, atBuildLine, ExchangeIdentity{CorrelationID: "corr-e14-submit", LegType: "pas-claim"}, moduleBuild{
+		Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: body, InputEdits: []relay.EditID{relay.EditFacilityReportSubjectRekey}, Contract: "pa.pas",
+	})
+	if err != nil || status != 0 {
+		t.Fatalf("egressBuild: %d %s %v", status, msg, err)
+	}
+	if sent, err := relay.Transmit(sub.Payload, relay.Check(requestKey("pas-claim", false))); err == nil || sent != nil {
+		t.Fatalf("the pas-claim transmit sent a submission naming E-14")
+	}
+}
+
 // Every PAS request module 1 builds names the input edits its reads returned:
 // each moduleBuild with a PAS builder sets InputEdits, and the edits each
-// completion (completeAuthoredPASRequest) and each supplemental report read
-// (supplementalReport) return reach a moduleBuild's InputEdits in the same
-// function, so no site can carry an E-06'd record without naming it.
+// completion (completeAuthoredPASRequest), each supplemental report read
+// (supplementalReport) and each facility report re-point
+// (rekeyFacilityReportSubject) return reach a moduleBuild's InputEdits in the
+// same function, so no site can carry a record E-06 or E-14 changed without
+// naming it.
 func TestEveryPASBuildNamesItsInputEdits(t *testing.T) {
 	sites := moduleBuildLiterals(t)
 	var pas int
@@ -171,14 +211,20 @@ func TestEveryPASBuildNamesItsInputEdits(t *testing.T) {
 				if !ok {
 					return true
 				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || (sel.Sel.Name != "completeAuthoredPASRequest" && sel.Sel.Name != "supplementalReport") {
+				var callee string
+				switch f := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					callee = f.Sel.Name
+				case *ast.Ident:
+					callee = f.Name
+				}
+				if callee != "completeAuthoredPASRequest" && callee != "supplementalReport" && callee != "rekeyFacilityReportSubject" {
 					return true
 				}
 				reads++
 				id, ok := as.Lhs[1].(*ast.Ident)
 				if !ok || id.Name == "_" {
-					t.Errorf("%s: %s drops the input edits %s returned", fset.Position(as.Pos()), fn.Name.Name, sel.Sel.Name)
+					t.Errorf("%s: %s drops the input edits %s returned", fset.Position(as.Pos()), fn.Name.Name, callee)
 					return true
 				}
 				returned[id.Name] = fset.Position(as.Pos()).String()
@@ -215,8 +261,8 @@ func TestEveryPASBuildNamesItsInputEdits(t *testing.T) {
 			}
 		}
 	}
-	if reads < 12 {
-		t.Fatalf("found %d completion and supplemental report reads, want at least 12", reads)
+	if reads < 13 {
+		t.Fatalf("found %d completion, supplemental report and facility report reads, want at least 13", reads)
 	}
 }
 

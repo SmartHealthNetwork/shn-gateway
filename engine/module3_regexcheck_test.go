@@ -99,13 +99,13 @@ func TestCertificationRegexCheckCouldNotRun(t *testing.T) {
 		{"the timeout beside a structural error", regexResult(timeout, structural), false, ""},
 		{"a fatal issue with the id", regexResult(shnsdk.Issue{Severity: "fatal", MessageID: validatorissue.RegexException, Expression: []string{regexTimeoutURL}}), false, ""},
 	} {
-		systems, regex, ok := certificationUnchecked(tc.res, bundle, "2.1", "")
+		causes, ok := certificationUnchecked(tc.res, bundle, "2.1", "")
 		if ok != tc.unchecked {
 			t.Errorf("%s: unchecked=%v, want %v", tc.name, ok, tc.unchecked)
 			continue
 		}
 		if ok {
-			if got := uncheckedReason(systems, regex); got != tc.reason {
+			if got := uncheckedReason(causes); got != tc.reason {
 				t.Errorf("%s: reason %q, want %q", tc.name, got, tc.reason)
 			}
 		}
@@ -120,7 +120,7 @@ func TestCertificationRegexCheckCouldNotRun(t *testing.T) {
 		many = append(many, long(i%7))
 	}
 	for _, systems := range [][]string{{"http://example.org/cs"}, {long(1), long(2), long(3)}, many} {
-		got := uncheckedReason(systems, true)
+		got := uncheckedReason(uncheckedCauses{systems: systems, regex: true})
 		if !strings.HasPrefix(got, "terminology unavailable: code system bytes=") || !strings.HasSuffix(got, "; a primitive regex check could not run") || len(got) >= 256 {
 			t.Errorf("both causes, %d systems: %d bytes: %q", len(systems), len(got), got)
 		}

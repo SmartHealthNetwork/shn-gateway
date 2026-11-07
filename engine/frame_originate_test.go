@@ -741,7 +741,7 @@ func TestAGatedChainIsNotPlanned_TheSubmissionIsCarried(t *testing.T) {
 			order := pasTailServiceRequest()
 			qr := []byte(`{"resourceType":"QuestionnaireResponse","id":"qr-t4","status":"completed","subject":{"reference":"` + patientRef + `"}}`)
 			orderRef, _ := resourceRef(order)
-			source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
+			source := newRawDTRBuildSource(qr, nil, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef}, false)
 			_, status, msg, err := env.originator.submitClaimAndFollow(env.ctx, env.req, pasFollowInputs{
 				pci: "pci-1", orderJSON: order, source: source, patientRef: patientRef, memberSystem: shnsdk.MemberSystem,
 				coverageRef: coverageRef, coverage: testMemberCoverage(member), insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),

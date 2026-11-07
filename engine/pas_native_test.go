@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,7 +122,7 @@ func TestTask0_ConformantGoldensBind(t *testing.T) {
 }
 
 // originatorBuiltConformantBundle builds the LEAN conformant $submit bundle the way the
-// Originator does — via the additive shnsdk.BuildConformantClaimBundleExact, demo
+// Originator does — via the additive shnsdk.BuildConformantClaimBundleCarried, demo
 // persona only (Linda Johansson / MBR-COVERED, CPT 72148, M51.16), no br-payer foreign
 // seed. The QR's qr-context refs point at the bundle-local Coverage/SR (internally
 // consistent).
@@ -142,7 +143,7 @@ func originatorBuiltConformantBundle(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	got, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -240,52 +241,85 @@ func TestSplitHistory(t *testing.T) {
 	}
 }
 
-// TestParseConformantPASSubjects_AbsoluteRefs proves the br-payer-targeting lane (provider-data)
-// bundle — ABSOLUTIZED refs (ContainedInsurer+AbsoluteRefs, so a real Da Vinci payer resolves
-// them) — still binds at the SHN payer-gw: the member resolves from the absolute fullUrl refs and
-// the patient-consistency fence holds. Without the tolerant extractor this 400s "unknown member".
+// absolutizeEntryReferences writes each reference in bundle that names an entry ("Type/id",
+// the entry's fullUrl ending in it) as that entry's fullUrl, the patient anchors
+// (Coverage.beneficiary, ServiceRequest/DeviceRequest.subject) as written: the spelling a
+// requester may send, as provider gateways before shn-gateway v1.8.0 did. A test input only:
+// it re-encodes the bundle.
+func absolutizeEntryReferences(t *testing.T, bundle []byte) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(bundle, &doc); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := doc["entry"].([]any)
+	urls := map[string]string{}
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		r, _ := em["resource"].(map[string]any)
+		full, _ := em["fullUrl"].(string)
+		rt, _ := r["resourceType"].(string)
+		id, _ := r["id"].(string)
+		if rel := rt + "/" + id; rt != "" && id != "" && strings.HasSuffix(full, "/"+rel) {
+			urls[rel] = full
+		}
+	}
+	anchor := map[string]string{"Coverage": "beneficiary", "ServiceRequest": "subject", "DeviceRequest": "subject"}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if ref, ok := x["reference"].(string); ok && urls[ref] != "" {
+				x["reference"] = urls[ref]
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	changed := 0
+	for _, e := range entries {
+		r, _ := e.(map[string]any)["resource"].(map[string]any)
+		rt, _ := r["resourceType"].(string)
+		for k, c := range r {
+			if k != anchor[rt] {
+				before, _ := json.Marshal(c)
+				walk(c)
+				if after, _ := json.Marshal(c); !bytes.Equal(before, after) {
+					changed++
+				}
+			}
+		}
+	}
+	if changed == 0 {
+		t.Fatal("precondition: no reference names an entry")
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestParseConformantPASSubjects_AbsoluteRefs: a PAS bundle whose references a requester wrote in
+// absolute form still binds at the payer's gateway: the member resolves from the absolute
+// references, the patient anchors stay relative, and the patient-consistency fence holds.
+// Without the tolerant extractor this 400s "unknown member".
 func TestParseConformantPASSubjects_AbsoluteRefs(t *testing.T) {
 	const member = "MBR-COVERED"
-	ref := "Patient/" + member
-	created := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	srJSON, err := shnsdk.BuildServiceRequest("72148", "MRI lumbar spine w/o contrast", "M51.16", ref)
-	if err != nil {
-		t.Fatalf("BuildServiceRequest: %v", err)
-	}
-	qrJSON, err := shnsdk.FillQuestionnaire(fhirseed.DemoLumbarQuestionnaire(), shnsdk.DemoLumbarContext(), shnsdk.QRContext{
-		PatientRef:  ref,
-		CoverageRef: "Coverage/convergence-coverage",
-		OrderRef:    "ServiceRequest/convergence-sr",
-		Authored:    created,
-	})
-	if err != nil {
-		t.Fatalf("FillQuestionnaire: %v", err)
-	}
-	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
-		Provider:         testRequestingProvider(),
-		MemberIDSystem:   shnsdk.MemberSystem,
-		QR:               qrJSON,
-		SR:               srJSON,
-		PatientRef:       ref,
-		CoverageRef:      "Coverage/convergence-coverage",
-		MemberID:         member,
-		Corr:             "convergence-pas-submit-0001",
-		Created:          created,
-		ContainedInsurer: true,
-		AbsoluteRefs:     true,
-		Payer:            shnsdk.CMSPayerIdentity,
-	})
-	if err != nil {
-		t.Fatalf("BuildConformantClaimBundle: %v", err)
-	}
-	s, status, msg := parseConformantPASSubjects(got)
+	absolute := absolutizeEntryReferences(t, originatorBuiltConformantBundle(t, member))
+	s, status, msg := parseConformantPASSubjects(absolute)
 	if status != 0 || s.member != member {
-		t.Fatalf("absolute-ref br-payer bundle rejected by payer-gw bind: status=%d (%s) member=%q, want %q", status, msg, s.member, member)
+		t.Fatalf("absolute-reference bundle rejected by the payer's bind: status=%d (%s) member=%q, want %q", status, msg, s.member, member)
 	}
 }
 
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt: the payer-side bind accepts the
-// LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundleExact)
+// LEAN conformant $submit bundle the Originator builds (shnsdk.BuildConformantClaimBundleCarried)
 // — it three-way subject-binds to the member, exactly like the golden. This is the
 // builder↔parser contract: if the Originator-built bytes don't bind here, nothing
 // downstream (an in-process responder / a real br-payer) sees them.
@@ -593,7 +627,7 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 	if err != nil {
 		t.Fatalf("FillQuestionnaire: %v", err)
 	}
-	got, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	got, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		QR:             qrJSON,
@@ -612,29 +646,22 @@ func conformantPASBundlePended(t *testing.T, member string) []byte {
 }
 
 // originatorBuiltConformantUpdateBundle builds a LEAN conformant amended re-POST bundle via
-// shnsdk.BuildConformantClaimUpdateBundleExact — demo persona only (Linda Johansson / MBR-COVERED,
+// shnsdk.BuildConformantClaimUpdateBundleCarried — demo persona only (Linda Johansson / MBR-COVERED,
 // CPT 72148, M51.16). The QR/DR/Provenance are read from the golden (the amended QR is not
-// reproducible via a standard FillQuestionnaire call; the builder stamps ids/strips meta.profile
-// idempotently). Mirrors the sdk-side conformantUpdateInputsFromGolden helper.
+// reproducible via a standard FillQuestionnaire call; the builder carries the golden's report and
+// Provenance as written). Mirrors the sdk-side conformantUpdateInputsFromGolden helper. The payer
+// rides as a resolvable entry.
 func originatorBuiltConformantUpdateBundle(t *testing.T) []byte {
-	return originatorBuiltConformantUpdateBundleProfile(t, false)
-}
-
-// originatorBuiltConformantUpdateBundleProfile builds the same bundle; when brPayer==true it
-// sets the br-payer-targeting flags (ContainedInsurer/AbsoluteRefs) so the refs are absolutized
-// exactly as the provider-data lane produces them for a real Da Vinci payer. The payer rides as a
-// resolvable entry either way.
-func originatorBuiltConformantUpdateBundleProfile(t *testing.T, brPayer bool) []byte {
 	t.Helper()
-	return originatorBuiltConformantUpdateBundleCorrs(t, brPayer, "convergence-pas-update-0001", "convergence-pas-submit-0001")
+	return originatorBuiltConformantUpdateBundleCorrs(t, "convergence-pas-update-0001", "convergence-pas-submit-0001")
 }
 
-// originatorBuiltConformantUpdateBundleCorrs is originatorBuiltConformantUpdateBundleProfile with
+// originatorBuiltConformantUpdateBundleCorrs is originatorBuiltConformantUpdateBundle with
 // caller-chosen correlations: corr is THIS amendment's own correlation (the operative update
 // Claim's urn:shn:correlation identifier) and originalCorr is the original submit's — Claim.related
 // [prior], and the sole identifier of the prior-Claim bundle ENTRY the
 // sdk appends AFTER the operative Claim. Distinct values let a test tell the two apart on the wire.
-func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr, originalCorr string) []byte {
+func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, corr, originalCorr string) []byte {
 	t.Helper()
 	const member = "MBR-COVERED"
 	created := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
@@ -687,8 +714,6 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		Corr:             corr,
 		OriginalCorr:     originalCorr,
 		Created:          created,
-		ContainedInsurer: brPayer,
-		AbsoluteRefs:     brPayer,
 		// The payer as a resolvable entry on both profiles: required under this
 		// module's shn-sdk pin before v0.59.0, and what every request carries from
 		// v0.59.0 on.
@@ -697,7 +722,7 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 		Payer:         shnsdk.CMSPayerIdentity,
 	}
 	in.PriorClaim = testSubmissionFor("2.0", in)
-	got, err := shnsdk.BuildConformantClaimUpdateBundleExact(in)
+	got, err := shnsdk.BuildConformantClaimUpdateBundleCarried(in)
 	if err != nil {
 		t.Fatalf("BuildConformantClaimUpdateBundle: %v", err)
 	}
@@ -705,23 +730,25 @@ func originatorBuiltConformantUpdateBundleCorrs(t *testing.T, brPayer bool, corr
 }
 
 // TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer is the regression guard for the layer-3
-// amendment 403: the br-payer-targeting lane absolutizes bundle refs (AbsoluteRefs) so a real Da
-// Vinci payer resolves them, which rewrites Provenance.target to its absolute fullUrl. The
-// update-bind guard's supplemental-data check (conformantPASUpdateBind) must match the absolutized
-// target to the DiagnosticReport, exactly as it matches the relative form — else UC-04/06 (which
-// only reach the amendment once the layer-3 A3 fix lets the initial submit pend) 403 "ClaimUpdate
-// Provenance does not target the supplemental data". Same absolutization-tolerance class as
-// pasMemberFromRef.
+// amendment 403, for an update whose references a requester wrote in absolute form:
+// Provenance.target is then the report's absolute fullUrl. The update-bind guard's
+// supplemental-data check (conformantPASUpdateBind) must match the absolute target to the
+// DiagnosticReport, exactly as it matches the relative form, else the amendment is refused 403
+// "ClaimUpdate Provenance does not target the supplemental data". Same absolutization-tolerance
+// class as pasMemberFromRef.
 func TestConformantPASUpdateBind_AcceptsAbsolutizedBrPayer(t *testing.T) {
 	g, _ := updateGatewayForTest(t)
-	brPayerBundle := originatorBuiltConformantUpdateBundleProfile(t, true)
-	if _, _, status, msg := g.conformantPASUpdateBindContext(context.Background(), brPayerBundle); status != 0 {
-		t.Fatalf("br-payer (absolutized) update bundle rejected: status=%d (%s), want 0", status, msg)
+	absolute := absolutizeEntryReferences(t, originatorBuiltConformantUpdateBundle(t))
+	if !bytes.Contains(absolute, []byte(`"target":[{"reference":"http`)) {
+		t.Fatalf("precondition: the absolute bundle's Provenance does not target the report by its fullUrl: %s", absolute)
+	}
+	if _, _, status, msg := g.conformantPASUpdateBindContext(context.Background(), absolute); status != 0 {
+		t.Fatalf("absolute-reference update bundle rejected: status=%d (%s), want 0", status, msg)
 	}
 }
 
 // TestParseConformantPASUpdate_AcceptsOriginatorBuilt: the payer-side conformant parser accepts the
-// Originator-built amended re-POST bundle (shnsdk.BuildConformantClaimUpdateBundleExact). This is the
+// Originator-built amended re-POST bundle (shnsdk.BuildConformantClaimUpdateBundleCarried). This is the
 // builder↔parser contract for the update leg: if the Originator-built bytes don't bind here,
 // nothing downstream (an in-process responder / a real br-payer) sees them. Mirrors
 // TestParseConformantPASSubjects_AcceptsOriginatorBuilt for the submit leg.
@@ -748,7 +775,7 @@ func TestParseConformantPASUpdate_AcceptsOriginatorBuilt(t *testing.T) {
 // saw 502 {"error":"hub routing failed"}. The operative update Claim — the one carrying related[]
 // — is the only Claim whose correlation may be threaded.
 func TestParseConformantPASUpdateFacts_AmendCorrWinsOverPriorClaimEntry(t *testing.T) {
-	bundle := originatorBuiltConformantUpdateBundleCorrs(t, true, "AMEND-CORR", "SUBMIT-CORR")
+	bundle := originatorBuiltConformantUpdateBundleCorrs(t, "AMEND-CORR", "SUBMIT-CORR")
 	f, status, msg := parseConformantPASUpdateFacts(bundle)
 	if status != 0 {
 		t.Fatalf("PayerOrgEntry update bundle rejected: status=%d (%s), want 0", status, msg)
@@ -766,7 +793,7 @@ func TestParseConformantPASUpdateFacts_AmendCorrWinsOverPriorClaimEntry(t *testi
 // TestParseConformantPASUpdateFacts_SingleClaimShapeUnchanged pins the no-PayerOrgEntry shape (one
 // Claim, which carries related[]): its own correlation still threads, exactly as before.
 func TestParseConformantPASUpdateFacts_SingleClaimShapeUnchanged(t *testing.T) {
-	bundle := originatorBuiltConformantUpdateBundleCorrs(t, false, "AMEND-CORR", "SUBMIT-CORR")
+	bundle := originatorBuiltConformantUpdateBundleCorrs(t, "AMEND-CORR", "SUBMIT-CORR")
 	f, status, msg := parseConformantPASUpdateFacts(bundle)
 	if status != 0 {
 		t.Fatalf("single-Claim update bundle rejected: status=%d (%s), want 0", status, msg)

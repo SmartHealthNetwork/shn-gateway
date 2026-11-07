@@ -38,8 +38,8 @@ import (
 // targetsBrPayer — both provider-data over a live HTTP dial to br-payer AND demo through the
 // in-process mirror of the SAME reference-payer bytes need the br-payer-resolvable wire shape;
 // see relaysReferencePayerBytes's doc, gateway/engine/module1_originate.go): when true the bundle carries the
-// br-payer-resolvable forms (ContainedInsurer/AbsoluteRefs/PayerOrgEntry), exactly as the existing
-// HomeOxygen path built them. InfoChanged is never set on either order type: a fresh submit
+// br-payer-resolvable forms (ContainedInsurer/PayerOrgEntry), exactly as the existing
+// HomeOxygen path built them; its references stay as FHIR R4 resolves them. InfoChanged is never set on either order type: a fresh submit
 // states no information change, and the stamp only ever existed to make a payer gateway poll.
 // Pulled out as a standalone func so the byte-parity guard can unit-test it directly.
 // line is the routed contract line the bundle is BUILT at (select before build) —
@@ -59,7 +59,6 @@ func buildPASSubmitBundle(line string, brPayer bool, orderJSON, qrJSON, provider
 		QR: qrJSON, SR: orderJSON, Provider: providerJSON, Coverage: coverageJSON, CoverageParties: coverageParties, Insurer: insurerJSON, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member, MemberIDSystem: memberSystem,
 		Corr: corr, Created: created,
 		ContainedInsurer: brPayer,
-		AbsoluteRefs:     brPayer,
 		PayerOrgEntry:    brPayer, // payer Org as a resolvable PAS bundle entry (br-payer findInBundle)
 		// The payer identity derives from the member's REAL Coverage (threaded in from the fresh
 		// origination site), not a synthetic CMS literal (FR-G40).
@@ -163,14 +162,17 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 	}
 	bundleJSON, err = retainPASSubmitSupplier(bundleJSON, supplierJSON)
 	if err != nil {
-		return out, http.StatusInternalServerError, "PAS supplier linkage failed", err
+		status, msg, err := supplierLinkageAnswer(ctx, err)
+		return out, status, msg, err
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, relaysReferencePayerBytes(g.cfg.OriginationProfile), in.sorID, member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, in.sorID, member)
 	if err != nil {
-		// Answered as failEvidenceLinkage answers it: a read the system failed
-		// to answer with its own status and reason, anything else 502.
-		if status, why, ok := signedEvidenceRefusal(err); ok {
+		// Answered as failEvidenceLinkage answers it: evidence the gateway's
+		// own edit cannot carry 422, a record it could not prepare 500, a read
+		// the system failed to answer with its own status and reason, anything
+		// else 502.
+		if status, why, ok := evidenceFidelityRefusal(err); ok {
 			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
 			return out, status, why, err
 		}
@@ -200,7 +202,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 		Build: &moduleBuild{
 			Builder: relay.BuilderSDKPASSubmit, ContentType: "application/fhir+json", Body: bundleJSON, InputEdits: evidenceEdits, Contract: "pa.pas",
 			Check: func(line string, body []byte) (int, string) {
-				return g.validatePASAttachments(ctx, body, line, source != nil)
+				return g.validatePASAttachments(ctx, body, line, source != nil, source.declaresOwn())
 			},
 		},
 	})
@@ -244,6 +246,19 @@ func sameJSONResource(a, b []byte) bool {
 	return okX && okY && bytes.Equal(x, y)
 }
 
+// supplierLinkageAnswer answers a dispatched supplier retainPASSubmitSupplier
+// could not carry: a record the splice cannot carry as read is the fidelity of
+// the gateway's own edit at the build (422, errRecordNotCarried), saying which
+// legs were carried; anything else is the gateway's own failure (500), its
+// error returned to the caller.
+func supplierLinkageAnswer(ctx context.Context, err error) (int, string, error) {
+	if errors.Is(err, errRecordNotCarried) {
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+		return http.StatusUnprocessableEntity, withCarriedLegs(ctx, err.Error()), nil
+	}
+	return http.StatusInternalServerError, "PAS supplier linkage failed", err
+}
+
 // retainPASSubmitSupplier carries the actual dispatched supplier into the PAS
 // request (FR-G28). Its identity must match the order; it is never synthesized.
 func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
@@ -260,25 +275,31 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 	// performer is a LIST, and decoding every entry through one object-shaped
 	// probe made an ordinary authored order unreadable here — every entry passes
 	// through this loop, not just the one this function is about.
+	// Every member is read by its exact name (exactMembers): a member spelled
+	// in another case is not the member.
 	type identity struct {
-		ResourceType string          `json:"resourceType"`
-		ID           string          `json:"id"`
-		Performer    json.RawMessage `json:"performer"`
+		ResourceType, ID string
+		Performer        json.RawMessage
+	}
+	identityOf := func(raw []byte) (identity, error) {
+		m, err := exactMembers(raw)
+		if err != nil {
+			return identity{}, err
+		}
+		return identity{ResourceType: exactString(m, "resourceType"), ID: exactString(m, "id"), Performer: m["performer"]}, nil
 	}
 	performerRefOf := func(raw json.RawMessage) string {
-		var one struct {
-			Reference string `json:"reference"`
-		}
-		if len(raw) == 0 || json.Unmarshal(raw, &one) != nil {
+		one, err := exactMembers(raw)
+		if len(raw) == 0 || err != nil {
 			return ""
 		}
-		return one.Reference
+		return exactString(one, "reference")
 	}
 	var order *identity
 	var orderURL string
 	for _, entry := range entries {
-		var resource identity
-		if err := json.Unmarshal(entry["resource"], &resource); err != nil {
+		resource, err := identityOf(entry["resource"])
+		if err != nil {
 			return nil, err
 		}
 		if resource.ResourceType == "DeviceRequest" {
@@ -297,11 +318,15 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 		}
 		return body, nil
 	}
-	var org identity
-	if err := json.Unmarshal(supplier, &org); err != nil {
+	org, err := identityOf(supplier)
+	if err != nil {
 		return nil, fmt.Errorf("missing or invalid supplier: %w", err)
 	}
-	if org.ResourceType != "Organization" || org.ID == "" {
+	if org.ResourceType == "" || org.ID == "" {
+		// Never an entry built from an id the record does not state exactly.
+		return nil, fmt.Errorf("%w: it has no resourceType or no id, spelled exactly", errRecordNotCarried)
+	}
+	if org.ResourceType != "Organization" {
 		return nil, fmt.Errorf("supplier must identify an Organization")
 	}
 	relative := "Organization/" + org.ID
@@ -324,8 +349,8 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid supplier fullUrl")
 	}
 	for _, entry := range entries {
-		var resource identity
-		if err := json.Unmarshal(entry["resource"], &resource); err != nil {
+		resource, err := identityOf(entry["resource"])
+		if err != nil {
 			return nil, err
 		}
 		var existingURL string
@@ -345,22 +370,20 @@ func retainPASSubmitSupplier(body, supplier []byte) ([]byte, error) {
 		// compared, not just the identity, so a second, different record cannot
 		// be swallowed by the entry already there.
 		// The supplier may also be one of the records the order's requester leads
-		// to (carryOrderRequester), carried with its references to other entries
-		// written absolute: that is still the same record.
+		// to (carryOrderRequester), carried as read: the same record.
 		if existingURL == fullURL && resource.ResourceType == org.ResourceType && resource.ID == org.ID &&
-			(sameJSONResource(entry["resource"], supplier) ||
-				sameJSONResource(relativeReferences(entry["resource"], strings.TrimSuffix(fullURL, "/"+relative)), supplier)) {
+			sameJSONResource(entry["resource"], supplier) {
 			return body, nil
 		}
 		return nil, fmt.Errorf("conflicting supplier entry")
 	}
-	encodedURL, _ := json.Marshal(fullURL)
-	entries = append(entries, map[string]json.RawMessage{"fullUrl": encodedURL, "resource": supplier})
-	bundle["entry"], err = json.Marshal(entries)
+	// The supplier is spliced into the request's bytes, which stay as built:
+	// a participant's record the build carried as written stays so.
+	encodedURL, err := json.Marshal(fullURL)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(bundle)
+	return spliceBundleEntries(body, len(entries), []bundleEntryBytes{{fullURL: encodedURL, resource: supplier}})
 }
 
 // pasTailRefusal is writePASBuildRefusal for the shared tail, which answers

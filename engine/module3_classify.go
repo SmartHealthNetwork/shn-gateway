@@ -2,12 +2,12 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -25,7 +25,9 @@ import (
 // the result invalid: beside a structural error the result is invalid for that
 // error; otherwise, alone or beside deeper rules' errors only, the result is
 // unavailable, never deeper, since the primitive it could not check may be
-// malformed.
+// malformed. A profile the payload declares that the validator does not hold
+// is read the same way (excuseUnresolvedDeclaredProfiles): the payload was not
+// checked against it.
 //
 // A HAPI validator reports issue.code "processing" for nearly every issue, so
 // the kind of issue is read from its message id (shnsdk.Issue.MessageID), never
@@ -42,42 +44,27 @@ import (
 // checked against ("" for its own meta.profile). Nothing is logged; the
 // issues' text is read only to classify.
 func classifyFHIR(res shnsdk.Result, body []byte, line, profile string) Verdict {
-	errs := fhirErrors(res)
-	// An invalid result with no error or fatal detail is unclassified.
-	if len(errs) == 0 {
-		return VerdictInvalid
-	}
-	if validatorDidNotJudge(errs) {
-		return VerdictUnavailable
-	}
-	couldNotRun := false
-	for i := range errs {
-		if validatorissue.CouldNotRun(errs[i].Issue) {
-			errs[i].excused, couldNotRun = true, true
-			continue
-		}
-		errs[i].excused = errs[i].Severity == "error" && deeperMessageID(errs[i].MessageID)
-	}
-	if !allExcused(errs, body, line, profile) {
-		return VerdictInvalid
-	}
-	if couldNotRun {
-		return VerdictUnavailable
-	}
-	return VerdictDeeper
+	v, _ := classifyFHIRUnchecked(res, body, line, profile)
+	return v
 }
 
 // fhirIssue is one error or fatal issue as a reading of a $validate result
 // sees it. entry is the one Bundle.entry index its expressions name, or -1.
 // excused marks an issue the reading in progress does not count against the
-// payload: for classifyFHIR a deeper rule's or a regex check that could not
-// run, for certificationUnchecked terminology the validator could not check or
-// a regex check that could not run; the summaries and slice-match
+// payload: for classifyFHIR a deeper rule's, a regex check that could not run
+// or a declared profile the validator does not hold, for
+// certificationUnchecked terminology the validator could not check, a regex
+// check that could not run or such a profile; the summaries and slice-match
 // consequences that follow from such issues are then excused alike.
 type fhirIssue struct {
 	shnsdk.Issue
 	entry   int
 	excused bool
+	// unresolvedProfile marks an issue excused because the validator did not
+	// hold a profile the payload declares (excuseUnresolvedDeclaredProfiles):
+	// a check that did not run, not a defect, so it never counts as one a
+	// summary follows from (refineSummaries).
+	unresolvedProfile bool
 }
 
 // fhirErrors is every error and fatal issue of res, in order.
@@ -222,7 +209,9 @@ func refineSummaries(errs []fhirIssue) {
 		}
 		others, allExcused := 0, true
 		for j, o := range errs {
-			if j == i || o.entry != e.entry || isNoMatchSummary(o.MessageID) {
+			// An unresolved declared profile is no defect underneath the
+			// summary: the entry's other profiles still did not match.
+			if j == i || o.entry != e.entry || isNoMatchSummary(o.MessageID) || o.unresolvedProfile {
 				continue
 			}
 			others++
@@ -327,6 +316,55 @@ func validateRequest(body []byte, profile string) ([]byte, string) {
 		return wrapped, profile
 	}
 	return wrapValidateResource(asserted), ""
+}
+
+// askedProfileKey carries, on a $validate call's context, the profile the
+// gateway asked for when validateRequest asserted it into the wrapped body's
+// own meta.profile (a Parameters body): below the wrap the asked-for profile
+// reads as one the payload declares. The observer reads it from here, so a
+// profile the gateway asked for stays an error there as in the governed check.
+type askedProfileKey struct{}
+
+// validateRequestAsking is validateRequest, with the context its $validate
+// call is made under: one carrying the asked-for profile when the wrap
+// asserted it into the body (askedProfileKey). The caller makes the call
+// itself, so each call site keeps its own place in validateCallSites.
+func validateRequestAsking(ctx context.Context, body []byte, profile string) (context.Context, []byte, string) {
+	req, reqProfile := validateRequest(body, profile)
+	if profile != "" && reqProfile == "" {
+		ctx = context.WithValue(ctx, askedProfileKey{}, profile)
+	}
+	return ctx, req, reqProfile
+}
+
+// askedProfile is the profile a $validate call asked for: the one it names, or
+// the one validateRequest asserted into its body (askedProfileKey).
+func askedProfile(ctx context.Context, profile string) string {
+	if profile != "" {
+		return profile
+	}
+	asked, _ := ctx.Value(askedProfileKey{}).(string)
+	return asked
+}
+
+// validatedBody is the body a $validate request the gateway sent carries: for
+// a Parameters request, which is always the gateway's own wrap
+// (wrapValidateResource), the resource its "resource" parameter holds; any
+// other request as it is. A reading of the validator's answer reads the body
+// the governed check read.
+func validatedBody(req []byte) []byte {
+	var w struct {
+		ResourceType string `json:"resourceType"`
+		Parameter    []struct {
+			Name     string          `json:"name"`
+			Resource json.RawMessage `json:"resource"`
+		} `json:"parameter"`
+	}
+	if json.Unmarshal(req, &w) != nil || w.ResourceType != "Parameters" || len(w.Parameter) != 1 ||
+		w.Parameter[0].Name != "resource" || len(w.Parameter[0].Resource) == 0 {
+		return req
+	}
+	return w.Parameter[0].Resource
 }
 
 // WrapValidateResourceForTest is wrapValidateResource, for the same tests.

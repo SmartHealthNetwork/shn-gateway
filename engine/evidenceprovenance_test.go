@@ -4,17 +4,19 @@ package engine
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestEvidenceProvenanceUsesBusinessIdentity(t *testing.T) {
 	for _, tc := range []struct{ system, value string }{{"http://hl7.org/fhir/sid/us-npi", "1234567890"}, {"http://smarthealth.network/ids/holder", "metro-spine"}} {
-		raw, err := buildEvidenceProvenance("DiagnosticReport/d", tc.system, tc.value, "Consent/c", "TREAT", time.Unix(0, 0))
+		raw, err := buildEvidenceProvenance("", "DiagnosticReport/d", tc.system, tc.value, "Consent/c", "TREAT", time.Unix(0, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		var p struct {
+			ID    string `json:"id"`
 			Agent []struct {
 				Who struct {
 					Reference  string                         `json:"reference"`
@@ -27,14 +29,43 @@ func TestEvidenceProvenanceUsesBusinessIdentity(t *testing.T) {
 		if err = json.Unmarshal(raw, &p); err != nil {
 			t.Fatal(err)
 		}
-		if len(p.Agent) != 1 || p.Agent[0].Who.Reference != "" || p.Agent[0].Who.Identifier.System != tc.system || p.Agent[0].Who.Identifier.Value != tc.value || len(p.Policy) != 1 || p.Policy[0] != "Consent/c" || p.Target[0].Reference != "DiagnosticReport/d" {
+		if len(p.Agent) != 1 || p.Agent[0].Who.Reference != "" || p.Agent[0].Who.Identifier.System != tc.system || p.Agent[0].Who.Identifier.Value != tc.value || len(p.Policy) != 1 || p.Policy[0] != "Consent/c" || p.Target[0].Reference != "DiagnosticReport/d" || p.ID != "prov-d" {
 			t.Fatalf("wrong identity/provenance: %s", raw)
 		}
 	}
 	for _, value := range []string{"", " "} {
-		if _, err := buildEvidenceProvenance("DiagnosticReport/d", "http://hl7.org/fhir/sid/us-npi", value, "", "", time.Unix(0, 0)); err == nil {
+		if _, err := buildEvidenceProvenance("", "DiagnosticReport/d", "http://hl7.org/fhir/sid/us-npi", value, "", "", time.Unix(0, 0)); err == nil {
 			t.Fatal("accepted absent identity")
 		}
+	}
+	// A caller's id wins: each amendment's Provenance carries its own.
+	raw, err := buildEvidenceProvenance("prov-amend-1", "DiagnosticReport/d", "http://smarthealth.network/ids/holder", "metro-spine", "", "", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(raw, &p) != nil || p.ID != "prov-amend-1" {
+		t.Fatalf("id: %s, want prov-amend-1", raw)
+	}
+}
+
+// A Provenance records one activity and each amendment is one: two
+// amendments, under two correlations, never share a Provenance id, and each
+// id is a FHIR id whatever the correlation.
+func TestAmendmentProvenanceID(t *testing.T) {
+	for _, corr := range []string{"0f3a9c", "corr-1", "a_b", "x/y", strings.Repeat("c", 64)} {
+		id := amendmentProvenanceID(corr)
+		if !idShape.MatchString(id) {
+			t.Errorf("amendmentProvenanceID(%q) = %q, not a FHIR id", corr, id)
+		}
+		if id == amendmentProvenanceID(corr+"x") {
+			t.Errorf("two correlations share the id %q", id)
+		}
+	}
+	if got := amendmentProvenanceID("0f3a9c"); got != "prov-0f3a9c" {
+		t.Errorf("amendmentProvenanceID = %q, want prov-0f3a9c", got)
 	}
 }
 

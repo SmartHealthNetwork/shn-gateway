@@ -139,26 +139,33 @@ func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recip
 	writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
 
-// signedEvidenceRefusal is the answer to evidence E-06 would re-point and a
-// signature covers: 422 with the signed-content refusal (D113), as the
-// supplemental report's is, recorded as the fidelity of SHN's own edit at
-// the build. ok is false for any other error.
-func signedEvidenceRefusal(err error) (int, string, bool) {
+// evidenceFidelityRefusal is the answer to evidence the gateway's own edit
+// cannot carry, recorded as the fidelity of SHN's own edit at the build: 422
+// with the signed-content refusal (D113) for evidence E-06 would re-point and
+// a signature covers, as the supplemental report's is, and 422 saying so for a
+// record read from the participant's system that the splice cannot carry as
+// read (errRecordNotCarried). ok is false for any other error.
+func evidenceFidelityRefusal(err error) (int, string, bool) {
 	var signed *relay.SignedContentError
-	if !errors.As(err, &signed) {
-		return 0, "", false
+	if errors.As(err, &signed) {
+		return http.StatusUnprocessableEntity, signed.Error(), true
 	}
-	return http.StatusUnprocessableEntity, signed.Error(), true
+	if errors.Is(err, errRecordNotCarried) {
+		return http.StatusUnprocessableEntity, err.Error(), true
+	}
+	return 0, "", false
 }
 
 // failEvidenceLinkage answers a PAS request whose evidence could not be
-// linked (completeAuthoredPASRequest), after the legs before the claim: a
-// read of the participant's system that failed to answer is a backend
-// failure (failOriginRead), anything else the gateway's own 502. Each says
+// linked (completeAuthoredPASRequest), after the legs before the claim:
+// evidence the gateway's own edit cannot carry is refused 422
+// (evidenceFidelityRefusal), a record the gateway could not prepare is its own
+// 500, a read of the participant's system that failed to answer is a backend
+// failure (failOriginRead), and anything else the gateway's own 502. Each says
 // which legs were carried.
 func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) {
 	const msg = "PAS evidence linkage failed"
-	if status, why, ok := signedEvidenceRefusal(err); ok {
+	if status, why, ok := evidenceFidelityRefusal(err); ok {
 		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
 		writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, why)})
 		return

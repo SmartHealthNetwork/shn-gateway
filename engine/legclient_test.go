@@ -102,13 +102,14 @@ func TestModuleOneReachesItsLegsOnlyThroughTheLegClient(t *testing.T) {
 	want := map[string]int{
 		"legclient.go:sendLeg": 1,
 		// The core's ingress: a participant's own request, sent for it.
-		"workstream_pa_eligibility_ingress.go:handleEligibilityIngress": 1,
-		"workstream_fqs_ingress.go:handleFederatedQueryIngress":         1,
-		"workstream_pa_ingress.go:handleCRDIngress":                     1,
-		"workstream_pa_ingress.go:handleDTRIngress":                     1,
-		"workstream_pa_ingress.go:handlePASIngress":                     1,
-		"workstream_pa_inquire.go:handlePASInquireIngress":              1,
-		"workstream_pa_cdex.go:handleCDexSubmitIngress":                 1,
+		"workstream_pa_eligibility_ingress.go:handleEligibilityIngress":       1,
+		"workstream_fqs_ingress.go:handleFederatedQueryIngress":               1,
+		"workstream_pa_ingress.go:handleCRDIngress":                           1,
+		"workstream_pa_ingress.go:handleDTRIngress":                           1,
+		"workstream_pa_dtr_next_question_ingress.go:forwardNextQuestionRound": 1,
+		"workstream_pa_ingress.go:handlePASIngress":                           1,
+		"workstream_pa_inquire.go:handlePASInquireIngress":                    1,
+		"workstream_pa_cdex.go:handleCDexSubmitIngress":                       1,
 		// A payer's own ingress: its system's attachment-request Task.
 		"workstream_pa_cdex_request_ingress.go:serveCDexRequest": 1,
 	}

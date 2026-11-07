@@ -1,7 +1,7 @@
 {
   "name": "upd-accept-absolute-refs",
   "family": "update-bind",
-  "description": "The reference-payer lane absolutizes bundle references, so the same patient is legally spelled both relative and absolute and the Provenance target carries its absolute fullUrl; the fences compare identities, not spellings.",
+  "description": "A requester that writes bundle references in absolute form (one built by the Deprecated Exact builders under AbsoluteRefs, say) spells the same patient both relative and absolute, and the Provenance target is the supplemental entry's own absolute fullUrl; the fences compare identities, not spellings, and a target equal to the entry's own fullUrl names it.",
   "expect": "accept",
   "tokenMember": "MBR-COVERED",
   "originalCorr": "twinfence-sub-0001",

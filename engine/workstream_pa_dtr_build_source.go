@@ -19,15 +19,24 @@ type dtrBuildSource struct {
 	qc         shnsdk.QRContext
 	amendments []dtrSourceAmendment
 	qrID       string
+	// ownEngine is whether the gateway's own engine filled the response:
+	// the automatic fill, or a raw one the managed populator returned. A
+	// raw one a participant's own $populate engine returned is not.
+	ownEngine bool
 }
 type dtrSourceAmendment struct {
 	item        []byte
 	errorPrefix string
 }
 
-func newRawDTRBuildSource(raw, tree []byte, qc shnsdk.QRContext) *dtrBuildSource {
-	return &dtrBuildSource{raw: append([]byte(nil), raw...), tree: append([]byte(nil), tree...), qc: qc}
+func newRawDTRBuildSource(raw, tree []byte, qc shnsdk.QRContext, ownEngine bool) *dtrBuildSource {
+	return &dtrBuildSource{raw: append([]byte(nil), raw...), tree: append([]byte(nil), tree...), qc: qc, ownEngine: ownEngine}
 }
+
+// declaresOwn reports whether every profile the response declares is the
+// gateway's own: it was filled by the gateway's own engine. Nil declares
+// nothing of its own.
+func (s *dtrBuildSource) declaresOwn() bool { return s != nil && s.ownEngine }
 func newAutomaticDTRBuildSource(tree []byte, answers map[string]shnsdk.Answer, qc shnsdk.QRContext) *dtrBuildSource {
 	copied := make(map[string]shnsdk.Answer, len(answers))
 	for key, value := range answers {
@@ -49,7 +58,7 @@ func newAutomaticDTRBuildSource(tree []byte, answers map[string]shnsdk.Answer, q
 		}
 		copied[key] = value
 	}
-	return &dtrBuildSource{tree: append([]byte(nil), tree...), answers: copied, qc: qc}
+	return &dtrBuildSource{tree: append([]byte(nil), tree...), answers: copied, qc: qc, ownEngine: true}
 }
 func (s *dtrBuildSource) withAmendment(item []byte, errorPrefix string) *dtrBuildSource {
 	if s == nil {
@@ -123,7 +132,7 @@ func buildPASAttachment(source *dtrBuildSource, pasLine string) ([]byte, error) 
 
 // validatePASAttachments reads every final embedded QR without re-marshaling it.
 // Callers validate the unchanged whole PAS Bundle next, then send those bytes.
-func (g *Gateway) validatePASAttachments(ctx context.Context, bundle []byte, line string, expected bool) (int, string) {
+func (g *Gateway) validatePASAttachments(ctx context.Context, bundle []byte, line string, expected, own bool) (int, string) {
 	if _, err := dtrQRProfile(line); err != nil {
 		return http.StatusInternalServerError, "unsupported DTR attachment line"
 	}
@@ -144,7 +153,7 @@ func (g *Gateway) validatePASAttachments(ctx context.Context, bundle []byte, lin
 			continue
 		}
 		found++
-		if status, msg := g.validateDTRQuestionnaireResponse(ctx, entry.Resource, line); status != 0 {
+		if status, msg := g.validateDTRQuestionnaireResponse(ctx, entry.Resource, line, own); status != 0 {
 			return status, msg
 		}
 	}

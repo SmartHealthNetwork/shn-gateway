@@ -125,7 +125,13 @@ func addressIssuerOf(ctx context.Context) (addressIssuer, bool) {
 //   - a valueBoolean true anywhere, as "*" over the fetch-server family.
 //
 // It returns nil when nothing is stated: no issuer on ctx, no base at the
-// answer's line, or an answer it cannot read.
+// answer's line, an answer it cannot read, or a package request it answers at
+// another line than the one the request claims. The requester's gateway
+// writes the claimed line into the re-keyed address while the tag would bind
+// the answer's, so every round would name a line its tag does not bind and
+// be refused. Stating nothing leaves the address carried as sent, which the
+// client calls directly, as before the re-key. A request carried but answered
+// at the line it claims (a declared line with no ready lane) is tagged.
 func (n *nativeResponder) addressHeaders(ctx context.Context, request, answer relay.Body) map[string]string {
 	issuer, ok := addressIssuerOf(ctx)
 	if !ok {
@@ -135,6 +141,9 @@ func (n *nativeResponder) addressHeaders(ctx context.Context, request, answer re
 	line, base := round.line, round.base
 	if !delivered {
 		line = answerLineOr(ctx, "pa.dtr")
+		if claimed := requestLineCarried(ctx); claimed != "" && shnsdk.LineOf(claimed) != line {
+			return nil
+		}
 		if base, ok = n.dtrBaseAt(line); !ok {
 			return nil
 		}

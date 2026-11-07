@@ -163,12 +163,9 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 		// Source Provenance: targets the disclosed record, agent = this
 		// facility, .policy cites the authenticated consent reference, reason
 		// = TREAT (FR-32/C11).
-		prov, err := buildEvidenceProvenance(target, "http://smarthealth.network/ids/holder", g.cfg.HolderID,
-			consentRef, shnsdk.PurposeTreatment, g.cfg.Clock())
-		if err == nil {
-			// A searchset entry must have an id; the record index keeps it unique.
-			prov, err = withID(prov, "record-provenance-"+strconv.Itoa(len(provenances)))
-		}
+		// A searchset entry must have an id; the record index keeps it unique.
+		prov, err := buildEvidenceProvenance("record-provenance-"+strconv.Itoa(len(provenances)), target,
+			"http://smarthealth.network/ids/holder", g.cfg.HolderID, consentRef, shnsdk.PurposeTreatment, g.cfg.Clock())
 		if err != nil {
 			return fail(http.StatusInternalServerError, "build provenance failed")
 		}

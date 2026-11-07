@@ -838,6 +838,29 @@ func TestDTRAnswerBridge_ACheckThatCouldNotRunRenamesNothing(t *testing.T) {
 	qualifying := func(line string) shnsdk.Validator {
 		return NewDiscoveredLane(line, "http://validator-"+line+".invalid/fhir", shnsdk.NewFakeValidator())
 	}
+	// cpgAnswer20 is answer20 with its Questionnaire declaring a profile one
+	// lane may not hold; lacksCPG is a lane that does not hold it.
+	const cpgProfile = "http://hl7.org/fhir/uv/cpg/StructureDefinition/cpg-questionnaire"
+	cpgAnswer20 := bytes.Replace(answer20, []byte(`{ "resourceType" : "Questionnaire", "status" : "active"`),
+		[]byte(`{ "resourceType" : "Questionnaire", "meta" : { "profile" : [ "`+cpgProfile+`" ] }, "status" : "active"`), 1)
+	if bytes.Equal(cpgAnswer20, answer20) {
+		t.Fatal("the answer carries no Questionnaire to declare the profile")
+	}
+	lacksCPG := e08Lane{res: regexResult(
+		// As a real lane writes it: against the gateway's own Parameters wrap.
+		profileNotCheckedIssue("Parameters.parameter[0].resource/*Parameters/null*/.parameter[0].resource/*Bundle/null*/.entry[0].resource/*Questionnaire/null*/.meta.profile[0]", cpgProfile),
+		profileNotRetrievedIssue(cpgProfile))}
+	// twoProfileAnswer20 declares cpgProfile and otherProfile on its
+	// Questionnaire; lacksOther is a lane that lacks only the second.
+	const otherProfile = "http://example.org/fhir/StructureDefinition/other-questionnaire"
+	twoProfileAnswer20 := bytes.Replace(cpgAnswer20, []byte(`"`+cpgProfile+`" ]`), []byte(`"`+cpgProfile+`", "`+otherProfile+`" ]`), 1)
+	if bytes.Equal(twoProfileAnswer20, cpgAnswer20) {
+		t.Fatal("the answer carries no declared profile to add to")
+	}
+	lacksOther := e08Lane{res: regexResult(
+		profileNotCheckedIssue("Parameters.parameter[0].resource/*Parameters/null*/.parameter[0].resource/*Bundle/null*/.entry[0].resource/*Questionnaire/null*/.meta.profile[1]", otherProfile),
+		profileNotRetrievedIssue(otherProfile))}
+	lacksCPGAndRegex := e08Lane{res: regexResult(append(lacksCPG.res.Details, timeoutIssue)...)}
 	const couldNotRun = EditNotMadeDTRCheckCouldNotRun
 	strict500 := map[ConformanceEnforcement]int{EnforcementStrict: http.StatusInternalServerError}
 	judged502 := map[ConformanceEnforcement]int{EnforcementStructural: http.StatusBadGateway, EnforcementStrict: http.StatusBadGateway}
@@ -865,12 +888,33 @@ func TestDTRAnswerBridge_ACheckThatCouldNotRunRenamesNothing(t *testing.T) {
 		{name: "toward 2.0, from 2.2", declared: declares20, answer: answer22, lanes: map[string]shnsdk.Validator{"2.2": timeout}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
 		{name: "beside a structural error it is a verdict: not at the line", lanes: map[string]shnsdk.Validator{"2.0": mixed, "2.1": mixed}, refusedAt: judged502},
 		{name: "no lane, then valid: renamed as before", lanes: map[string]shnsdk.Validator{"2.0": nil}, wantRenamed: true},
+		// A profile the package declares that one line's lane lacks and another
+		// line's holds was checked there: the line that lacks it is not the
+		// answer's line, and the search moves on (heldElsewhere).
+		{name: "a profile one line lacks and the next holds: moves on", answer: cpgAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPG}, wantRenamed: true},
+		// No line holds it: a check that could not run.
+		{name: "a profile no line holds: could not run", answer: cpgAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPG, "2.1": lacksCPG}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
+		// The next line holds it but is not the answer's line: not at either
+		// line, nothing renamed, nothing recorded as unchecked.
+		{name: "a profile one line lacks and the next holds, invalid there: not at a line", answer: cpgAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPG, "2.1": invalidHere}, refusedAt: judged502},
+		// Each line lacks the profile the other holds: each was checked at one
+		// line, so neither line's lack is unchecked; the answer is at neither.
+		{name: "each line lacks what the other holds: not at a line", answer: twoProfileAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPG, "2.1": lacksOther}, refusedAt: judged502},
+		// A line that lacks a profile the next line holds, and could not run a
+		// regex check beside it, is not the answer's line either: the search
+		// moves on, as it did when the profile read as any other defect.
+		{name: "a profile one line lacks beside a regex check, the next holds: moves on", answer: cpgAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPGAndRegex}, wantRenamed: true},
+		// The next line's validator did not answer: unknown, as before.
+		{name: "a profile one line lacks, then an outage: could not run", answer: cpgAnswer20, lanes: map[string]shnsdk.Validator{"2.0": lacksCPG, "2.1": outage}, wantNotMade: []string{couldNotRun}, refusedAt: strict500},
 	} {
 		for _, level := range allLevels {
 			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
 				declared, answer := row.declared, row.answer
 				if declared == nil {
-					declared, answer = declares22, answer20
+					declared = declares22
+					if answer == nil {
+						answer = answer20
+					}
 				}
 				r := e08RowFull(t, level, declared, answer, func(lanes map[string]shnsdk.Validator) {
 					for line, v := range row.lanes {

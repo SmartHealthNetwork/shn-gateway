@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -196,8 +197,15 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	var respPayload []byte
 	switch {
 	case set && lr.AnswerStatus != 0:
-		// The wire form a payer gateway framing its system's own 2xx sends.
-		respPayload, err = shnsdk.EncodeHTTPFrame(lr.AnswerStatus, lr.Response.ContentType(), responseBytes(lr))
+		// The wire form a payer gateway framing its system's own 2xx sends,
+		// with the address headers it states for a DTR answer when it has any.
+		if len(lr.AddressHeaders) > 0 {
+			headers := maps.Clone(lr.AddressHeaders)
+			headers["Content-Type"] = lr.Response.ContentType()
+			respPayload, err = shnsdk.EncodeHTTPFrameHeaders(lr.AnswerStatus, headers, responseBytes(lr))
+		} else {
+			respPayload, err = shnsdk.EncodeHTTPFrame(lr.AnswerStatus, lr.Response.ContentType(), responseBytes(lr))
+		}
 		if err != nil {
 			return errResp("stub: EncodeHTTPFrame: " + err.Error()), nil
 		}

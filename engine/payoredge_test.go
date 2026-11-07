@@ -44,7 +44,7 @@ var crdPartnerCoverageCard = []byte(`{"cards":[],"systemActions":[{"type":"updat
 func conformantSubmitBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-1"),
+	b, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-1"),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-1", CoverageRef: "Coverage/MBR-1", MemberID: "MBR-1",
@@ -693,7 +693,7 @@ func conformantUpdateBundle(t *testing.T, payer shnsdk.PayerIdentifier, absolute
 		Payer:         payer,
 	}
 	in.PriorClaim = testSubmissionFor("2.0", in)
-	b, err := shnsdk.BuildConformantClaimUpdateBundleExact(in)
+	b, err := shnsdk.BuildConformantClaimUpdateBundleCarried(in)
 	if err != nil {
 		t.Fatalf("conformantUpdateBundle: %v", err)
 	}

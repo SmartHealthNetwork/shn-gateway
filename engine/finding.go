@@ -28,6 +28,13 @@ type findingContext struct {
 	// before the edit (the finding's PayloadSHA256 is the edited payload's).
 	Edit         relay.EditID
 	SourceSHA256 string
+	// OwnDeclared is set for the check of a questionnaire response the
+	// gateway's own engine filled: every profile it declares is the
+	// gateway's, so each is asked for, as an explicit profile is, and a
+	// validator that does not hold one reads it as a defect, never as a
+	// check that could not run (classifyDeclared). A profile a participant's
+	// own engine declared keeps the reading of any participant declaration.
+	OwnDeclared bool
 }
 
 // withFindingContext tags ctx with the leg metadata for every governed check
@@ -158,6 +165,12 @@ type ConformanceFinding struct {
 	// tried together (to its failure, for one that could not be judged); 0
 	// for a check that called no validator.
 	ValidatorMs int64 `json:"validatorMs,omitempty"`
+	// UnresolvedProfiles names the profiles the checked payload declares in
+	// meta.profile that the validator does not hold, so it was not checked
+	// against them (unresolvedProfileNames): each by its size and digest,
+	// sorted, at most eight named, the rest counted. Set on an unavailable finding they made unavailable, and on
+	// an invalid one beside the defect that decided it.
+	UnresolvedProfiles []string `json:"unresolvedProfiles,omitempty"`
 
 	// binding and tally are the call this finding belongs to, taken from the
 	// request's context where the finding was made (bindFinding); they are

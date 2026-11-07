@@ -3406,9 +3406,28 @@ const (
 // capabilityDeclaration is what this gateway's system takes as a recipient: the
 // network's legs it compiles for its role, and each one its role takes only
 // once its participant configures it whose setting is set (engine.TakenLegs:
-// the payer's attachment request, with PROVIDER_CDEX_TASK_URL).
+// the payer's attachment request, with PROVIDER_CDEX_TASK_URL); and, for a
+// payer, the request frames it serves (declaredRequestFrames).
 func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
-	return shnsdk.CapabilityDeclaration{Legs: networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL}.TakenLegs()), AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes}
+	return shnsdk.CapabilityDeclaration{
+		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL}.TakenLegs()),
+		AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes,
+		RequestFrames:      declaredRequestFrames(cfg.Role),
+	}
+}
+
+// declaredRequestFrames is the request frames a gateway of role declares as
+// its own: a payer's gateway serves every frame this build decodes and
+// v1opsub, since it tags the adaptive addresses it issues, reads a round's
+// operationSubpath and restores the address (E-13). A provider's gateway
+// declares none of its own (nil, sent as nothing), so its registration's set
+// stands. A gateway rolled back to a release that declares none gives back,
+// at its first start, the set this one declared.
+func declaredRequestFrames(role string) []string {
+	if role != "payer" {
+		return nil
+	}
+	return append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1OpSub)
 }
 
 // networkLegs is legs without any leg the SDK does not name: a test profile's,
@@ -3433,11 +3452,13 @@ func nextDeclareRetry(retry time.Duration, slowed bool, slow time.Duration) time
 // declareCapabilities declares d to the registrar, as this gateway's system does
 // each time it starts, and sends it again after a failure until the registrar
 // has it or refuses it with a 409. A failure never stops the gateway: until the
-// declaration lands, a peer reads what the registrar holds. A 409 is final: this
-// holder's list was set when the network was founded and no declaration applies
-// to it, or the registrar holds a declaration issued no earlier. In that second
-// case a later resend could land, but the two share a status, so a gateway whose
-// clock is behind the last declarer's waits for its next start. After
+// declaration lands, a peer reads what the registrar holds. A 409 is final: the
+// registrar holds a declaration issued no earlier, so a gateway whose clock is
+// behind the last declarer's waits for its next start, though a later resend
+// could land; or the holder was founded with the network and the registrar is
+// older than the one that applies such a holder's declaration. For a holder
+// founded with the network, a current registrar applies the declared request
+// frames only, and its legs and limit stay those it was founded with. After
 // declareCapabilitiesAbsentTries answers of 404 or 405 it logs once and tries
 // hourly, in silence: the holder is not registered, or the registrar is older
 // than the declaration, and until one lands the gateway runs as one that declared

@@ -43,7 +43,7 @@ func zoneOwnership() map[Key]Rule {
 
 		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
 		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
-		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-08"}},
+		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-08", "E-12"}},
 		{"pas-claim", rq, resp, OutcomeAnswered}:               {Allowed: own(R, E), Edits: []EditID{"E-10"}},
 		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       {Allowed: own(R, E), Edits: []EditID{"E-10"}},
 		{"coverage-eligibility", rq, resp, OutcomeAnswered}:    relayOnly,

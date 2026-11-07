@@ -42,6 +42,20 @@ func TestInputEditedNotesTheEditOnTheBuildersMessage(t *testing.T) {
 	}
 }
 
+// A claim update carrying a facility's report E-14 re-pointed and a record
+// from the participant's system E-06 re-pointed names both, in the order
+// made, each once.
+func TestInputEditedNamesE14AndE06InTheOrderMade(t *testing.T) {
+	p, err := InputEdited(builtAt20(t), EditFacilityReportSubjectRekey, EditEvidenceSubjectRekey, EditFacilityReportSubjectRekey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Ownership() != OwnershipAuthored || p.Edits() != nil ||
+		!slices.Equal(p.InputEdits(), []EditID{EditFacilityReportSubjectRekey, EditEvidenceSubjectRekey}) {
+		t.Fatalf("noted = %v inputs %v, want authored naming [E-14 E-06]", p, p.InputEdits())
+	}
+}
+
 func TestInputEditedRefuses(t *testing.T) {
 	relayed := Exact(NewBody([]byte(`{"resourceType":"Bundle"}`), OriginIngressRequest), fhirJSON)
 	for _, tc := range []struct {
@@ -106,8 +120,8 @@ func TestTransformedKeepsTheInputEdits(t *testing.T) {
 // The input edits are registered edits, none of them a transform.
 func TestInputEditIDsAreRegisteredAndNotTransforms(t *testing.T) {
 	ids := InputEditIDs()
-	if !slices.Equal(ids, []EditID{EditEvidenceSubjectRekey}) {
-		t.Fatalf("input edits %v, want [E-06]", ids)
+	if !slices.Equal(ids, []EditID{EditEvidenceSubjectRekey, EditFacilityReportSubjectRekey}) {
+		t.Fatalf("input edits %v, want [E-06 E-14]", ids)
 	}
 	for _, id := range ids {
 		if !slices.Contains(EditIDs(), id) || slices.Contains(TransformEditIDs(), id) {

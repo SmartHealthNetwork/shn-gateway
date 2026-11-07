@@ -76,6 +76,18 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 	}
 	ctx = verified
 	r = r.WithContext(ctx)
+	// A round answered at another line than its address names (the line its
+	// frame names, or this payer's own when it cannot answer at that one) is
+	// delivered at the address's line, which its tag binds: carried as sent,
+	// and the difference recorded as any carried mixed-line request is.
+	if a, ok := verifiedRoundAddress(ctx); ok {
+		if answered := shnsdk.LineOf(answerTok); answered != "" && answered != a.line {
+			g.noteLineCarried(ctx, LineCarriedRequest, ObserverEvent{
+				Direction: "ingress", LegType: env.Metadata.TransactionType, CorrelationID: env.Metadata.CorrelationID,
+				Counterpart: env.Metadata.Sender, Detail: "round answered at " + boundedLine(answerTok) + "; its address names " + boundedLine("pa.dtr@"+a.line) + ", delivered there",
+			})
+		}
+	}
 	if isNextQuestion {
 		pci, status, msg := g.bindNextQuestionSubjectContext(ctx, nextQuestionSubject, reqJSON)
 		if status != 0 {

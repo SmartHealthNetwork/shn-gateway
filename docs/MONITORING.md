@@ -33,8 +33,10 @@ nothing from monitoring: an export that fails, or a monitoring setting that is n
 valid, never changes it.
 
 Its `capability-declaration` check (from v1.1.0, with a registrar) says what your gateway's
-declaration of the legs it takes came to. Its `status` is always `ok`, because a gateway that
-has not declared serves as before. `lastSuccess` is when the registrar stored it. `lastError`
+declaration of the legs it takes came to, and from v1.8.0, for a payer, of the request frames it
+serves. Its `status` is always `ok`, because a gateway that has not declared serves as before.
+`lastSuccess` is when the registrar stored it. For a holder founded with the network, the
+registrar stores only the request frames, and its legs stay those it was founded with. `lastError`
 says why it has not been: `failing` (being retried), `not-applied` (a `409`, not resent), or
 `registrar-takes-no-declaration` (a `404` or `405`, tried hourly). Neither is set before the
 first answer. The network's Hub refuses a marked leg when the list the registrar holds lacks it,

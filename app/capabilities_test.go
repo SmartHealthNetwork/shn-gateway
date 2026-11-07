@@ -124,6 +124,38 @@ func TestDeclareCapabilities_SendsTheRolesLegsOnce(t *testing.T) {
 	}
 }
 
+// A payer's gateway declares the request frames it serves, v1opsub among
+// them: it tags the adaptive addresses it issues, reads a round's
+// operationSubpath and restores the address (E-13), so a provider's gateway
+// re-keys toward it and sends it rounds. A provider's gateway declares none of
+// its own: its declaration carries no requestFrames, so its registration's set
+// stands, as before.
+func TestDeclareCapabilities_APayerDeclaresItsRequestFrames(t *testing.T) {
+	want := append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1OpSub)
+	for _, c := range []struct {
+		role   string
+		frames []string
+	}{
+		{"payer", want},
+		{"provider", nil},
+	} {
+		t.Run(c.role, func(t *testing.T) {
+			d := capabilityDeclaration(config{Role: c.role})
+			if (d.RequestFrames == nil) != (c.frames == nil) || !slices.Equal(d.RequestFrames, c.frames) {
+				t.Fatalf("declares request frames %#v, want %#v", d.RequestFrames, c.frames)
+			}
+			url, _, last := capabilitiesRegistrar(t, http.StatusOK)
+			declareCapabilities(t.Context(), registrarTestClient(), url, capabilitiesIdentity(t), d, time.Millisecond, &declarationCell{})
+			if got := last().RequestFrames; (got == nil) != (c.frames == nil) || !slices.Equal(got, c.frames) {
+				t.Fatalf("sent request frames %#v, want %#v", got, c.frames)
+			}
+		})
+	}
+	if !shnsdk.SupportsRequestFrameV1OpSub(capabilityDeclaration(config{Role: "payer"}).RequestFrames) {
+		t.Fatal("a payer's declaration lacks v1opsub")
+	}
+}
+
 // A test profile's leg is not the network's: the SDK refuses it, and one such
 // name would keep the gateway's real legs from being declared at all.
 func TestNetworkLegs(t *testing.T) {

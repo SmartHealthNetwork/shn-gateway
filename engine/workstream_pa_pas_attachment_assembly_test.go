@@ -60,6 +60,8 @@ func attachmentUpdateInputs(line string, absolute, diagnostic bool) shnsdk.Confo
 		Provenance: []byte(`{"resourceType":"Provenance","id":"source-prov","recorded":"2023-11-14T22:13:20Z","target":[{"reference":"QuestionnaireResponse/source-qr"}],"agent":[{"who":{"identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567890"}}}],"opaque":{"preserve":"attribution"}}`)}
 	if diagnostic {
 		out.DiagnosticReport = []byte(`{"resourceType":"DiagnosticReport","id":"source-dr","status":"final","code":{"text":"Synthetic report"},"subject":{"reference":"Patient/MBR-OX"},"opaque":{"preserve":"report"}}`)
+		// The Provenance attributes the report it rides with, by its own id.
+		out.Provenance = bytes.Replace(out.Provenance, []byte(`"QuestionnaireResponse/source-qr"`), []byte(`"DiagnosticReport/source-dr"`), 1)
 	}
 	out.PriorClaim = testSubmissionFor(line, out)
 	return out
@@ -142,7 +144,7 @@ func attachmentCompact(t *testing.T, raw []byte) []byte {
 	return b.Bytes()
 }
 
-func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, orderType string, absolute bool) {
+func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, orderType string, _ bool) {
 	t.Helper()
 	entries := attachmentEntries(t, body)
 	qr := attachmentResource(t, entries, "QuestionnaireResponse")
@@ -176,10 +178,11 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 		newRef := attachmentObject(t, newExt[i]["valueReference"])
 		want := attachmentString(t, oldRef["reference"])
 		if i == 0 {
-			want = attachmentRef(t, attachmentResource(t, entries, "Coverage"), absolute)
+			// Relative on every lane: the build no longer absolutizes.
+			want = attachmentRef(t, attachmentResource(t, entries, "Coverage"), false)
 		}
 		if i == 1 {
-			want = attachmentRef(t, attachmentResource(t, entries, orderType), absolute)
+			want = attachmentRef(t, attachmentResource(t, entries, orderType), false)
 		}
 		if ref := attachmentString(t, newRef["reference"]); ref != want {
 			t.Errorf("context[%d]=%s want %s", i, ref, want)
@@ -199,14 +202,14 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 		t.Error("changed bytes outside the QR resource span")
 	}
 	subject := attachmentObject(t, got["subject"])
-	if ref := attachmentString(t, subject["reference"]); ref != attachmentRef(t, attachmentResource(t, entries, "Patient"), absolute) {
+	if ref := attachmentString(t, subject["reference"]); ref != attachmentRef(t, attachmentResource(t, entries, "Patient"), false) {
 		t.Errorf("subject=%s", ref)
 	}
 	var refs []map[string]string
 	if err := json.Unmarshal(got["otherReferences"], &refs); err != nil {
 		t.Fatal(err)
 	}
-	wants := []string{"#contained", "Observation/outside", "https://elsewhere.test/Patient/MBR-OX", attachmentRef(t, attachmentResourceByID(t, entries, "Organization", "org-cms-payer"), absolute)}
+	wants := []string{"#contained", "Observation/outside", "https://elsewhere.test/Patient/MBR-OX", attachmentRef(t, attachmentResourceByID(t, entries, "Organization", "org-cms-payer"), false)}
 	for i, want := range wants {
 		if refs[i]["reference"] != want {
 			t.Errorf("other ref[%d]=%s want %s", i, refs[i]["reference"], want)
@@ -236,7 +239,7 @@ func assertAttachmentPreservation(t *testing.T, source, body, sdkBody []byte, or
 			for _, ext := range item.Extension {
 				if strings.HasSuffix(ext.URL, "extension-requestedService") {
 					requestedServices++
-					if ext.ValueReference.Reference != attachmentRef(t, attachmentResource(t, entries, orderType), absolute) {
+					if ext.ValueReference.Reference != attachmentRef(t, attachmentResource(t, entries, orderType), false) {
 						t.Errorf("requestedService does not resolve: %s", ext.ValueReference.Reference)
 					}
 				}
@@ -257,7 +260,7 @@ func TestAuthoredPASSubmitPreservesAttachment(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%s/absolute=%t", line, typ, absolute), func(t *testing.T) {
 					in := attachmentInputs(typ, line, absolute)
 					qrBefore, orderBefore := bytes.Clone(in.QR), bytes.Clone(in.SR)
-					sdkBody, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, in)
+					sdkBody, err := shnsdk.BuildConformantClaimBundleAtLineCarried(line, in)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -293,7 +296,7 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/absolute=%t/diagnostic=%t", line, absolute, diagnostic), func(t *testing.T) {
 					in := attachmentUpdateInputs(line, absolute, diagnostic)
 					before, _ := json.Marshal(in)
-					sdkBody, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
+					sdkBody, err := shnsdk.BuildConformantClaimUpdateBundleAtLineCarried(line, in)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -325,7 +328,7 @@ func TestAuthoredPASUpdatePreservesAttachment(t *testing.T) {
 					if diagnostic {
 						targetType = "DiagnosticReport"
 					}
-					if len(targets) != 1 || targets[0]["reference"] != attachmentRef(t, attachmentResource(t, entries, targetType), absolute) {
+					if len(targets) != 1 || targets[0]["reference"] != attachmentRef(t, attachmentResource(t, entries, targetType), false) {
 						t.Errorf("Provenance targets=%v", targets)
 					}
 					if !bytes.Contains(got, []byte(in.OriginalCorr)) {
@@ -343,7 +346,7 @@ func TestAuthoredPASOptionalAttachmentParity(t *testing.T) {
 		for _, qr := range [][]byte{nil, []byte(`{"resourceType":"QuestionnaireResponse","status":"completed","subject":{"reference":"Patient/MBR-OX"}}`)} {
 			in := attachmentInputs("ServiceRequest", "2.0", absolute)
 			in.QR = qr
-			want, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.0", in)
+			want, err := shnsdk.BuildConformantClaimBundleAtLineCarried("2.0", in)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -360,13 +363,13 @@ func TestAuthoredPASOptionalAttachmentParity(t *testing.T) {
 
 func TestAuthoredPASUnsupportedLinePreservesSDKError(t *testing.T) {
 	in := attachmentInputs("DeviceRequest", "2.0", true)
-	_, want := shnsdk.BuildConformantClaimBundleAtLineExact("9.9", in)
+	_, want := shnsdk.BuildConformantClaimBundleAtLineCarried("9.9", in)
 	_, got := authoredSubmitUnderTest("9.9", in)
 	if want == nil || got == nil || got.Error() != want.Error() {
 		t.Fatalf("submit error=%v want %v", got, want)
 	}
 	update := attachmentUpdateInputs("2.0", true, false)
-	_, want = shnsdk.BuildConformantClaimUpdateBundleAtLineExact("9.9", update)
+	_, want = shnsdk.BuildConformantClaimUpdateBundleAtLineCarried("9.9", update)
 	_, got = authoredUpdateUnderTest("9.9", update)
 	if want == nil || got == nil || got.Error() != want.Error() {
 		t.Fatalf("update error=%v want %v", got, want)
@@ -574,7 +577,7 @@ func TestAuthoredPASRejectsInvalidInputs(t *testing.T) {
 func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 	t.Parallel()
 	in := attachmentInputs("DeviceRequest", "2.2", true)
-	body, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.2", in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineCarried("2.2", in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +598,7 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 				root := attachmentObject(t, body)
 				root["entry"], _ = json.Marshal(entries)
 				changed, _ := json.Marshal(root)
-				if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+				if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef); err == nil {
 					t.Fatal("accepted missing or duplicate required identity")
 				}
 			})
@@ -615,7 +618,7 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 			root := attachmentObject(t, body)
 			root["entry"], _ = json.Marshal(entries)
 			changed, _ := json.Marshal(root)
-			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef); err == nil {
 				t.Fatal("accepted distinct second required resource")
 			}
 		})
@@ -654,7 +657,7 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 			root := attachmentObject(t, body)
 			root["entry"], _ = json.Marshal(entries)
 			changed, _ := json.Marshal(root)
-			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef); err == nil {
 				t.Fatal("accepted ambiguous or malformed assembled identity")
 			}
 		})
@@ -670,13 +673,13 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 			root := attachmentObject(t, body)
 			root["entry"], _ = json.Marshal(entries)
 			changed, _ := json.Marshal(root)
-			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+			if _, err := completeAuthoredPASAttachment(changed, in.QR, in.SR, in.CoverageRef); err == nil {
 				t.Fatal("accepted malformed resource type")
 			}
 		})
 	}
 	for _, bad := range [][]byte{[]byte(`{`), []byte(`null`), []byte(`[]`), []byte(`{"resourceType":"Patient","entry":[]}`), []byte(`{"resourceType":"Bundle","entry":null}`)} {
-		if _, err := completeAuthoredPASAttachment(bad, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+		if _, err := completeAuthoredPASAttachment(bad, in.QR, in.SR, in.CoverageRef); err == nil {
 			t.Errorf("accepted malformed bundle %s", bad)
 		}
 	}
@@ -684,7 +687,7 @@ func TestAuthoredPASAssembledIdentityRefusals(t *testing.T) {
 
 func TestAuthoredPASUsesActualAssemblyIdentities(t *testing.T) {
 	in := attachmentInputs("DeviceRequest", "2.2", true)
-	body, err := shnsdk.BuildConformantClaimBundleAtLineExact("2.2", in)
+	body, err := shnsdk.BuildConformantClaimBundleAtLineCarried("2.2", in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +695,7 @@ func TestAuthoredPASUsesActualAssemblyIdentities(t *testing.T) {
 	// assumed by the completion boundary.
 	body = bytes.ReplaceAll(body, []byte("https://shn.example/fhir/"), []byte("https://assembly.example.test/base/"))
 	body = bytes.ReplaceAll(body, []byte("convergence-"), []byte("assembled-"))
-	got, err := completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+	got, err := completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +705,7 @@ func TestAuthoredPASUsesActualAssemblyIdentities(t *testing.T) {
 	annotated := append([]byte(`{"opaque":`), qr...)
 	annotated = append(annotated, ',')
 	annotated = append(annotated, body[1:]...)
-	got, err = completeAuthoredPASAttachment(annotated, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+	got, err = completeAuthoredPASAttachment(annotated, in.QR, in.SR, in.CoverageRef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +725,7 @@ func TestAuthoredPASPairedSourceIsolation(t *testing.T) {
 	qc.Authored = pasTailClock()
 	raw := bytes.ReplaceAll([]byte(contextQR), []byte("Patient/synthetic"), []byte(in.PatientRef))
 	retained := bytes.Clone(raw)
-	source := newRawDTRBuildSource(raw, []byte(sourceTree), qc)
+	source := newRawDTRBuildSource(raw, []byte(sourceTree), qc, false)
 	original, err := source.buildAtLine("2.0")
 	if err != nil {
 		t.Fatal(err)

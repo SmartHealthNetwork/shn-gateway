@@ -36,6 +36,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
+	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -1959,6 +1960,10 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 // operation header and would misread the body.
 var errFramedDTRUnsupported = shnsdk.ErrFramedDTRUnsupported
 
+// errRoundAddressUnsupported refuses a next-question round naming its address
+// to a recipient that does not declare v1opsub, before anything is sent.
+var errRoundAddressUnsupported = errors.New("payer gateway does not read a round's address (operationSubpath); fetch the package again")
+
 // roundTripInner performs one authorized sealed exchange with the counterpart holder
 // through the Hub: authorize(op) → seal(txType/reqFrame) → POST hub
 // /route with a holder assertion → verify the response leg (VerifyBound respOp
@@ -2013,6 +2018,11 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if content.Operation != "" && !shnsdk.SupportsRequestFrameV1Op(recipientHolder.RequestFrames) {
 		return nil, errFramedDTRUnsupported
 	}
+	// A round's address is sent only to a recipient that reads it: one that
+	// does not would drop the header and deliver the round elsewhere.
+	if content.Subpath != "" && (content.Operation == "" || !shnsdk.SupportsRequestFrameV1OpSub(recipientHolder.RequestFrames)) {
+		return nil, errRoundAddressUnsupported
+	}
 	if content.Operation != "" || (content.ProfileID != "" && shnsdk.SupportsRequestFrameV1(recipientHolder.RequestFrames)) {
 		// The body's own media type (a CDS Hooks request is application/json),
 		// or the participant's declared FHIR media type when one was carried.
@@ -2029,6 +2039,9 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		}
 		if content.Operation != "" {
 			headers[shnsdk.FrameHeaderOperation] = content.Operation
+		}
+		if content.Subpath != "" {
+			headers[shnsdk.FrameHeaderOperationSubpath] = content.Subpath
 		}
 		framed, ferr := shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, headers, payload)
 		if ferr != nil {
@@ -2605,6 +2618,10 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 			tried = append(tried, LineVerdictSummary{Line: l, Verdict: findingVerdict(v), Ms: took.Milliseconds()})
 		}
 	}
+	// unresolved is every profile the payload declares that a line's
+	// validator does not hold (classifyFHIRUnchecked), in the order the lines
+	// reported them.
+	var unresolved []string
 	unavailable := func(refused govResult, at string) govResult {
 		if decide(VerdictUnavailable) == Refuse {
 			return refused
@@ -2614,16 +2631,17 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 			Seam: fc.Seam, Whose: whose, Line: at, Profile: profile,
 			Level: mod.Level().String(), Verdict: "unavailable", Decision: Record.String(),
 			PayloadSHA256: sha256hex(resourceJSON), DeclaredLine: declaredLine, Lines: tried,
-			ValidatorMs: spent.Milliseconds(),
+			ValidatorMs: spent.Milliseconds(), UnresolvedProfiles: unresolvedProfileNames(unresolved),
 		})
 		return govResult{}
 	}
 	var (
-		best        shnsdk.Result
-		bestLine    string
-		bestVerdict Verdict
-		answered    bool
-		laned       bool
+		best           shnsdk.Result
+		bestLine       string
+		bestVerdict    Verdict
+		bestUnresolved []string
+		answered       bool
+		laned          bool
 		// valid is set once a line answers valid: validLine is the first such
 		// line (a single-lane check may name none) and validAfter whether a
 		// line was tried before it. A qualifying line may still keep it from
@@ -2637,6 +2655,14 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		met          = map[int]bool{}
 		// unanswered is each line tried whose validator did not answer.
 		unanswered = map[string]bool{}
+		// read is each line whose validator answered other than valid, in
+		// order, and judgedLacked what each line that judged the payload did
+		// not hold (heldElsewhere).
+		read         []laneRead
+		judgedLacked []lacked
+		// outage is set when a line could not be judged for a reason other
+		// than a declared profile its lane does not hold.
+		outage bool
 	)
 	judged := func(lane lineLane) {
 		routedJudged = routedJudged || lane.Decisive
@@ -2708,8 +2734,8 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 			callCtx, cancel = context.WithTimeout(ctx, payerAnswerCandidateTimeout)
 		}
 		callStart := g.exchangeClock()
-		req, reqProfile := validateRequest(resourceJSON, profile)
-		res, err := lane.V.Validate(callCtx, req, reqProfile)
+		askCtx, req, reqProfile := validateRequestAsking(callCtx, resourceJSON, profile)
+		res, err := lane.V.Validate(askCtx, req, reqProfile)
 		took := g.exchangeClock().Sub(callStart)
 		g.validatorMetric(lane.Line, ValidatorLaneRouting, took)
 		spent += took
@@ -2717,10 +2743,12 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		if err != nil {
 			note(lane.Line, VerdictUnavailable, took)
 			unanswered[lane.Line] = true
+			outage = true
 			continue
 		}
 		if res.Valid {
 			judged(lane)
+			judgedLacked = append(judgedLacked, lacked{})
 			if !valid {
 				valid, validLine, validAfter = true, lane.Line, len(tried) > 0
 			}
@@ -2730,15 +2758,56 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 			}
 			continue
 		}
-		verdict := classifyFHIR(res, resourceJSON, lane.Line, profile)
+		verdict, laneUnresolved := classifyDeclared(fc, res, resourceJSON, lane.Line, profile)
 		note(lane.Line, verdict, took)
-		if verdict == VerdictUnavailable {
-			unanswered[lane.Line] = true
+		noted := -1
+		if candidates {
+			noted = len(tried) - 1
+		}
+		read = append(read, laneRead{lane: lane, res: res, verdict: verdict, unresolved: laneUnresolved, noted: noted})
+		if !validatorDidNotJudge(fhirErrors(res)) {
+			// The lane judged the payload: it held every declared profile
+			// it did not report lacking.
+			judgedLacked = append(judgedLacked, lackedOf(laneUnresolved))
+		}
+		if verdict != VerdictUnavailable {
+			judged(lane)
 			continue
 		}
-		judged(lane)
-		if !answered || verdict == VerdictDeeper && bestVerdict != VerdictDeeper {
-			best, bestLine, bestVerdict, answered = res, lane.Line, verdict, true
+		unanswered[lane.Line] = true
+	}
+	// A declared profile one lane could not check and another lane that
+	// judged the payload held (another IG line's profile, say) was checked
+	// there: the lane that lacked it reads as if it were any other defect
+	// (heldElsewhere). Only the profiles no lane that judged the payload held
+	// stay unchecked. The deciding line is then chosen in the lanes' order.
+	excuse := heldElsewhere(judgedLacked)
+	unresolved = nil
+	for i := range read {
+		r := &read[i]
+		if r.verdict == VerdictUnavailable && len(r.unresolved) > 0 {
+			if v, _ := classifyFHIRExcusing(r.res, resourceJSON, r.lane.Line, profile, excuse); v != VerdictUnavailable {
+				r.verdict = v
+				delete(unanswered, r.lane.Line)
+				if r.noted >= 0 {
+					tried[r.noted].Verdict = findingVerdict(v)
+				}
+				judged(r.lane)
+			}
+		}
+		// A profile another lane held is no unresolved profile of the check.
+		r.unresolved = slices.DeleteFunc(r.unresolved, func(p string) bool { return !excuse(p) })
+		if r.verdict == VerdictUnavailable {
+			unresolved = append(unresolved, r.unresolved...)
+			// A lane still unavailable for no profile, or beside its profiles
+			// a check it could not run, is not a profile alone.
+			if len(r.unresolved) == 0 || slices.ContainsFunc(r.res.Details, validatorissue.CouldNotRun) {
+				outage = true
+			}
+			continue
+		}
+		if !answered || r.verdict == VerdictDeeper && bestVerdict != VerdictDeeper {
+			best, bestLine, bestVerdict, bestUnresolved, answered = r.res, r.lane.Line, r.verdict, r.unresolved, true
 		}
 	}
 	for _, lane := range lanes {
@@ -2806,7 +2875,13 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		if anyUnanswered != "" {
 			at = anyUnanswered
 		}
-		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: "validator unavailable"}, at)
+		// A line that could not check a profile the payload declares says
+		// which, named as a finding names it (never payload text).
+		msg := "validator unavailable"
+		if names := unresolvedProfileNames(unresolved); len(names) > 0 && !outage {
+			msg = "profile could not be checked: " + strings.Join(names, ", ")
+		}
+		return unavailable(govResult{Status: http.StatusInternalServerError, Msg: msg}, at)
 	}
 	decision := decide(bestVerdict)
 	g.emitFindingIn(ctx, ConformanceFinding{
@@ -2826,6 +2901,8 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		DeclaredLine:  declaredLine,
 		Lines:         tried,
 		ValidatorMs:   spent.Milliseconds(),
+		// The profiles the line that decided could not check.
+		UnresolvedProfiles: unresolvedProfileNames(bestUnresolved),
 	})
 	if decision == Record {
 		return govResult{}

@@ -136,13 +136,23 @@ func noteStatedAnswer(ctx context.Context, hdr shnsdk.HTTPFrameHeader) {
 	if !ok || sink == nil {
 		return
 	}
-	sink.status, sink.headers = hdr.Status, nil
+	sink.status, sink.headers, sink.address = hdr.Status, nil, nil
 	for _, name := range answerHeaderNames {
 		if v := hdr.Headers[name]; v != "" {
 			if sink.headers == nil {
 				sink.headers = map[string]string{}
 			}
 			sink.headers[name] = v
+		}
+	}
+	// The address headers a payer's gateway states for the requester's
+	// gateway (the re-key, E-12, reads them); never written to a participant.
+	for _, name := range []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags} {
+		if v := hdr.Headers[name]; v != "" {
+			if sink.address == nil {
+				sink.address = map[string]string{}
+			}
+			sink.address[name] = v
 		}
 	}
 }

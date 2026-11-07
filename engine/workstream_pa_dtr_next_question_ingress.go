@@ -3,13 +3,17 @@
 package engine
 
 import (
+	"bytes"
+	"errors"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 
-	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/dtraddress"
 )
 
 // The provider's native ingress for its own DTR client's adaptive rounds
@@ -29,20 +33,18 @@ import (
 //   - POST /Questionnaire/$next-question: the plain route, which names no
 //     payer (a $next-question round carries no member, order or coverage).
 //
-// Temporary seam (tracked in the SHN platform repository): NOT MOUNTED. The
-// production mux (paRoutes) does not mount these routes until the forward and
-// the address tag check land; a row asserts that, so mounting them is a
-// deliberate change. The adaptive address the payer's gateway issues, its tag
-// and the frame headers that carry it are not built yet. Until they are, no
-// round is sent even where the handler runs: every check this gateway makes is
-// made, in order, and a round that passes them all is refused 422 routing,
-// because the payer's gateway cannot verify the address.
-// Invariant: nothing is sent before the payer's gateway can verify the
-// address, so this handler is never more permissive than the forward that
-// replaces the final refusal. Mounting, the pinned ingress surface, the HTTP
-// metric's route patterns, the stability route rows, the hosted edge's
-// forward rule and the advertising (CapabilityStatement, discovery) all land
-// with the forward, as one change.
+// A round that passes every check this gateway makes, in order, is forwarded
+// to its payer naming the address it was called at (operationSubpath); the
+// payer's gateway verifies the address's tag and delivers it there, or refuses
+// it as routing (verifyRoundSubpath). The forward goes only to a payer whose
+// gateway declares v1opsub, as a payer's gateway does from the release that
+// mounts these routes (paRoutes).
+//
+// The provider ingress CapabilityStatement (GET /metadata, the SDK's
+// BuildProviderIngressCapabilityStatement) lists $next-question beside
+// $questionnaire-package: it states exactly the Questionnaire operations the
+// ingress mounts routes for, in both directions
+// (TestProviderIngressStatement_QuestionnaireOperationsAreTheMountedRoutes).
 
 const (
 	// patternDTRNextQuestionPayer, patternDTRNextQuestionFetchServer and
@@ -52,20 +54,14 @@ const (
 	patternDTRNextQuestionFetchServer = "POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question"
 	patternDTRNextQuestionPlain       = "POST /Questionnaire/$next-question"
 
-	// requestFrameV1OpSub is the request-frame token a payer's gateway
-	// declares when it carries an adaptive address's path remainder and
-	// verifies the address it issued. It moves to the SDK with the frame
-	// headers.
-	requestFrameV1OpSub = "v1opsub"
-
 	errNextQuestionNoPayer = "a $next-question round names no payer: it carries no member, order or coverage to route by. " +
 		"Fetch the questionnaire package through this gateway and call the questionnaireAdaptive address it returns"
-	errNextQuestionUnknownPayer = "the adaptive address names no registered payer that takes the questionnaire fetch"
+	errNextQuestionUnknownPayer = "the adaptive address names no registered payer"
 	errNextQuestionNoSubpath    = "the payer's gateway does not support adaptive addresses yet, so this round cannot be carried on the network"
-	errNextQuestionAddress      = "the adaptive address is not one this gateway issues: after the payer it names a line, an address tag, " +
+	errNextQuestionTwoAddresses = "the round's Questionnaire carries more than one adaptive address this gateway issued, so it names no one payer: " +
+		"call the adaptive address the questionnaire names"
+	errNextQuestionAddress = "the adaptive address is not one this gateway issues: after the payer it names a line, an address tag, " +
 		"then any further segments and Questionnaire/$next-question, each segment made only of unreserved characters (A-Z a-z 0-9 - . _ ~) and none of them . or .."
-	errNextQuestionUnverifiable = "the payer's gateway cannot verify this adaptive address yet, so the round is not sent. " +
-		"Call the payer's own $next-question endpoint until adaptive support reaches this network"
 	errNextQuestionNoSubject  = "cannot bind the round to a patient: its QuestionnaireResponse names no subject"
 	errNextQuestionNotPatient = "cannot bind the round to a patient: its QuestionnaireResponse subject is not a Patient reference"
 	errNextQuestionUnheld     = "request patient does not resolve"
@@ -90,8 +86,18 @@ var nextQuestionSuffix = []string{"Questionnaire", "$next-question"}
 
 // nextQuestionAddress is what a per-payer route's path names.
 type nextQuestionAddress struct {
-	payer, line, tag string
-	remainder        []string
+	family, payer, line, tag string
+	remainder                []string
+}
+
+// subpath is the address as the round's request frame names it
+// (shnsdk.FrameHeaderOperationSubpath).
+func (a nextQuestionAddress) subpath() dtraddress.Subpath {
+	s := dtraddress.Subpath{Family: a.family, Line: a.line, Tag: a.tag}
+	if len(a.remainder) > 0 {
+		s.Remainder = "/" + strings.Join(a.remainder, "/")
+	}
+	return s
 }
 
 // parseNextQuestionRest reads the {rest...} of a payer-family route from the
@@ -165,7 +171,11 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 		writeJSON(w, status, map[string]string{"error": msg})
 	}
 
-	var addr nextQuestionAddress
+	var (
+		addr     nextQuestionAddress
+		body     []byte
+		bodyRead bool
+	)
 	switch r.Pattern {
 	case patternDTRNextQuestionPayer:
 		payer, rest, ok := escapedRest(r, "/dtr/payer/")
@@ -173,7 +183,7 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 			refuse(RefusalRouting, http.StatusUnprocessableEntity, errNextQuestionAddress, reasonNextQuestionAddress)
 			return
 		}
-		addr.payer = payer
+		addr.family, addr.payer = dtraddress.FamilyPayer, payer
 		if status, msg, reason := g.nextQuestionPayerRefusal(payer); status != 0 {
 			refuse(RefusalRouting, status, msg, reason)
 			return
@@ -192,7 +202,7 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 			refuse(RefusalRouting, http.StatusUnprocessableEntity, errNextQuestionAddress, reasonNextQuestionAddress)
 			return
 		}
-		addr.payer = payer
+		addr.family, addr.payer = dtraddress.FamilyFetchServer, payer
 		if status, msg, reason := g.nextQuestionPayerRefusal(payer); status != 0 {
 			refuse(RefusalRouting, status, msg, reason)
 			return
@@ -204,13 +214,25 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 		}
 		addr.line, addr.tag = line, tag
 	default:
-		// The plain route: no payer is named. Routing it by the one tagged
-		// address the round's own contained Questionnaire carries (the
-		// design's plain-route rule) is deferred until the payer's gateway
-		// issues tags, so there is a tag to read; until then the plain route
-		// refuses every round.
-		refuse(RefusalRouting, http.StatusUnprocessableEntity, errNextQuestionNoPayer, reasonNextQuestionNoPayer)
-		return
+		// The plain route names no payer: it is routed by the one adaptive
+		// address this gateway issued that the round's own Questionnaire
+		// carries, as if the client had called that address (C5). The
+		// payer's gateway verifies its tag as it verifies any round's.
+		b, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+		if !ok {
+			return
+		}
+		body, bodyRead = b, true
+		a, msg, reason := g.plainRoundAddress(b)
+		if msg != "" {
+			refuse(RefusalRouting, http.StatusUnprocessableEntity, msg, reason)
+			return
+		}
+		addr = a
+		if status, msg, reason := g.nextQuestionPayerRefusal(addr.payer); status != 0 {
+			refuse(RefusalRouting, status, msg, reason)
+			return
+		}
 	}
 
 	// The line must be a pa.dtr contract line the network defines.
@@ -225,18 +247,122 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 	// the resume selection, which serves only follow-ups this gateway builds.
 	// That selection comes with the forward.
 
-	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
-	if !ok {
-		return
+	if !bodyRead {
+		b, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
+		if !ok {
+			return
+		}
+		body = b
 	}
-	if status, msg := g.bindNextQuestionRound(r, body); status != 0 {
+	pci, status, msg := g.bindNextQuestionRound(r, body)
+	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 
-	// Every check passed. Until the payer's gateway can verify the address,
-	// nothing is sent (the seam above).
-	refuse(RefusalRouting, http.StatusUnprocessableEntity, errNextQuestionUnverifiable, reasonNextQuestionUnverifiable)
+	// Every check passed: the round goes to the payer's gateway, which
+	// verifies the address it names and delivers it there (verifyRoundSubpath).
+	g.forwardNextQuestionRound(w, r, addr, pci, body)
+}
+
+// forwardNextQuestionRound carries a checked round to its payer as the
+// package fetch carries its request: the participant's own bytes, at the line
+// the carried selection picks and never rebuilt (refused for its lines only
+// under the participant's own REQUIRE_SHARED_LINE), framed as a next-question
+// operation naming the address it was called at. The payer's answer is
+// checked at this gateway's conformance level as the package answer is, by
+// its own declared profile (no DTR line before 2.2 defines an adaptive
+// QuestionnaireResponse profile), and reaches the client with the adaptive
+// addresses its gateway issued re-keyed (E-12).
+func (g *Gateway) forwardNextQuestionRound(w http.ResponseWriter, r *http.Request, addr nextQuestionAddress, pci string, body []byte) {
+	const legType = "dtr-questionnaire-fetch"
+	child := g.ingressCorrelation(w, r)
+	route, ok := g.selectLegLineOrFail(r.Context(), w, addr.payer, legType, child, carriedRequest)
+	if !ok {
+		return
+	}
+	r = r.WithContext(withFindingContext(r.Context(), findingContext{
+		LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "own",
+	}))
+	request := relay.Exact(relay.NewBody(body, relay.OriginIngressRequest), mediaFHIRJSON)
+	requestKey := contentRequestKey(legType, Content{Payload: request, Carried: true})
+	sent, terr := relay.Transmit(request, relay.Check(requestKey))
+	if terr != nil {
+		g.ownershipRefused(requestKey, terr)
+		writeOwnershipFault(w)
+		return
+	}
+	adapted, _, recordWalk, aerr := g.egressWalk(route, sent, ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: addr.payer})
+	if aerr != nil {
+		writeJSON(w, adaptFailureStatus(aerr), map[string]string{"error": aerr.Error()})
+		return
+	}
+	if !bytes.Equal(adapted, sent) {
+		if g.cfg.RequireSharedLine {
+			exchangeOf(r.Context()).routedFor(http.StatusUnprocessableEntity, reasonDTRLineUnchanged)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgDTRLineUnchanged})
+			return
+		}
+		route = route.asSent()
+	} else if err := recordWalk(); err != nil {
+		writeJSON(w, adaptFailureStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	sub := addr.subpath()
+	ex := g.exchanges.Begin(workstreamPA)
+	content := Content{WorkstreamType: workstreamPA, ProfileID: route.Token, Route: routeInfoFor(route),
+		Payload: request, Carried: true, Operation: shnsdk.FrameOperationNextQuestion, Subpath: sub.String(),
+		MediaType: carriedFHIRMediaType(r.Header.Get("Content-Type"))}
+	var stated statedAnswer
+	answerJSON, err := g.OriginateLeg(withStatedAnswerSink(r.Context(), &stated), r, addr.payer, legType, pci, child, "", content)
+	leg := Leg{Type: legType, Physics: legPhysics(legType), Content: content, Subjects: subjectsOf(pci)}
+	if err != nil {
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
+		// The payer's gateway stopped declaring that it reads a round's
+		// address after the ingress checked it: nothing was sent, refused as
+		// the ingress refuses it.
+		if errors.Is(err, errRoundAddressUnsupported) {
+			exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonNextQuestionNoSubpath)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": errNextQuestionNoSubpath})
+			return
+		}
+		if g.relayOriginationError(w, err) {
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	answerCtx := withFindingContext(r.Context(), findingContext{LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})
+	if len(bytes.TrimSpace(answerJSON)) > 0 && g.carriedAnswerRefused(answerCtx, w, answerJSON, shnsdk.LineOf(route.Token), "pa.dtr", "", g.roundToleratedPayers(addr.payer)) {
+		g.recordLeg(ex.ID, leg.Project(child, "error"))
+		return
+	}
+	relayed := relay.Exact(relay.NewBody(answerJSON, relay.OriginPeerFrame), "application/fhir+json")
+	rekeyed := g.rekeyAnswer(r.Context(), relayed, rekeyContext{payer: addr.payer, line: addr.line, stated: stated, nextQuestion: true, round: &sub})
+	g.recordLeg(ex.ID, leg.Project(child, "ok"))
+	g.writeRelayedAnswer(w, stated, "application/fhir+json", rekeyed, dtrAnswerKey)
+	// The round's answer is in the line its route was sealed at: no answer is
+	// bridged here, so evidence judges it at that line.
+	exchangeOf(r.Context()).answerLine(route.Token)
+}
+
+// roundToleratedPayers is the payer identities a round's answer is judged as
+// coming from, for the participant's own tolerance (D122): a round carries no
+// Coverage to name them, but its payer is known from its address, so they are
+// the identities the participant tolerates that route to that payer by the
+// routing read the package route makes (PayerRouter). None tolerates nothing,
+// and an identity that routes to another payer tolerates nothing here.
+func (g *Gateway) roundToleratedPayers(payer string) []shnsdk.PayerIdentifier {
+	if g.cfg.PayerRouter == nil {
+		return nil
+	}
+	var out []shnsdk.PayerIdentifier
+	for _, p := range g.cfg.ConformanceToleratePeers {
+		if holder, ok := g.cfg.PayerRouter.Resolve(p); ok && holder == payer {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // nextQuestionPayerRefusal is the routing refusal of a round to payer, in the
@@ -254,10 +380,8 @@ func (g *Gateway) nextQuestionPayerRefusal(payer string) (int, string, refusalRe
 	if status, msg := g.framedDTRRefusal(payer); status != 0 {
 		return status, msg, reasonFramedDTRUnsupported
 	}
-	for _, f := range entry.RequestFrames {
-		if f == requestFrameV1OpSub {
-			return 0, "", ""
-		}
+	if shnsdk.SupportsRequestFrameV1OpSub(entry.RequestFrames) {
+		return 0, "", ""
 	}
 	return http.StatusUnprocessableEntity, errNextQuestionNoSubpath, reasonNextQuestionNoSubpath
 }
@@ -271,31 +395,32 @@ func (g *Gateway) nextQuestionPayerRefusal(payer string) (int, string, refusalRe
 // members (Config.RequireKnownMembers), a check it opted into (conformance);
 // another patient the round names is the payload's own consistency
 // (RulePatientMixed), refused at strict only.
-func (g *Gateway) bindNextQuestionRound(r *http.Request, body []byte) (int, string) {
+func (g *Gateway) bindNextQuestionRound(r *http.Request, body []byte) (string, int, string) {
 	ctx := r.Context()
 	subject, named, ok := framedNextQuestionSubjectNamed(body)
 	if !ok {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonNextQuestionNotInput)
-		return http.StatusBadRequest, errNextQuestionNotInput
+		return "", http.StatusBadRequest, errNextQuestionNotInput
 	}
 	if !named {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonNextQuestionNoSubject)
-		return http.StatusUnprocessableEntity, errNextQuestionNoSubject
+		return "", http.StatusUnprocessableEntity, errNextQuestionNoSubject
 	}
 	member, ok := patientMember(subject)
 	if !ok {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonNextQuestionNotPatient)
-		return http.StatusForbidden, errNextQuestionNotPatient
+		return "", http.StatusForbidden, errNextQuestionNotPatient
 	}
-	_, found, err := g.resolveSubjectPCI(ctx, member, body)
+	pci, found, err := g.resolveSubjectPCI(ctx, member, body)
 	if err != nil {
-		return subjectBindingFailure(ctx, err)
+		status, msg := subjectBindingFailure(ctx, err)
+		return "", status, msg
 	}
 	if !found {
 		// Only a participant that requires known members gets here: a check
 		// it opted into, recorded as conformance.
 		exchangeOf(ctx).refusing(RefusalConformance)
-		return http.StatusForbidden, errNextQuestionUnheld
+		return "", http.StatusForbidden, errNextQuestionUnheld
 	}
 	// The fence reads each resource the round carries: the
 	// QuestionnaireResponse itself, bare, or every resource a Parameters
@@ -306,10 +431,10 @@ func (g *Gateway) bindNextQuestionRound(r *http.Request, body []byte) (int, stri
 	fence := newPatientFence(shnsdk.MemberSystem, member, nil, member)
 	for _, res := range nextQuestionResources(body) {
 		if err := fence.check(res); err != nil && g.guard(ctx, KindContent, RulePatientMixed, body) {
-			return http.StatusForbidden, errNextQuestionMixed
+			return "", http.StatusForbidden, errNextQuestionMixed
 		}
 	}
-	return 0, ""
+	return pci, 0, ""
 }
 
 // nextQuestionResources are the resources a $next-question input carries, as
@@ -357,4 +482,55 @@ func dtrContractLines() map[string]bool {
 		}
 	}
 	return out
+}
+
+// plainRoundAddress is the address a round on the plain route is routed by:
+// the one distinct questionnaireAdaptive valueUrl, on any Questionnaire the
+// round carries, that is an address this gateway issued (under its own
+// ingress base, in the re-key's form). None names no payer; two distinct
+// ones name no one payer; either is refused as routing. The same address
+// twice is one. The one address is checked as a per-payer path is
+// (parseNextQuestionRest): a remainder that is not clean is refused as the
+// path would be.
+func (g *Gateway) plainRoundAddress(body []byte) (nextQuestionAddress, string, refusalReason) {
+	none := func() (nextQuestionAddress, string, refusalReason) {
+		return nextQuestionAddress{}, errNextQuestionNoPayer, reasonNextQuestionNoPayer
+	}
+	d, err := relay.Doc(relay.NewBody(body, relay.OriginIngressRequest))
+	if err != nil {
+		return none()
+	}
+	own := strings.TrimRight(g.cfg.IngressBaseURL, "/") + "/dtr/"
+	found := map[string]dtraddress.Issued{}
+	for _, ext := range adaptiveExtensions(d) {
+		v, ok := d.Member(ext.node, "valueUrl")
+		if !ok || d.Kind(v) != relay.KindString {
+			continue
+		}
+		value, err := d.StringValue(v)
+		if err != nil || !strings.HasPrefix(value, own) {
+			continue
+		}
+		if is, ok := dtraddress.FindIssued(value); ok && strings.HasPrefix(value, own+is.Family+"/") {
+			found[value] = is
+		}
+	}
+	switch len(found) {
+	case 0:
+		return none()
+	case 1:
+	default:
+		return nextQuestionAddress{}, errNextQuestionTwoAddresses, reasonNextQuestionTwoAddresses
+	}
+	for _, is := range found {
+		if !dtraddress.CleanRemainder(is.Remainder) {
+			return nextQuestionAddress{}, errNextQuestionAddress, reasonNextQuestionAddress
+		}
+		a := nextQuestionAddress{family: is.Family, payer: is.Payer, line: is.Line, tag: is.Tag}
+		if is.Remainder != "" {
+			a.remainder = strings.Split(strings.TrimPrefix(is.Remainder, "/"), "/")
+		}
+		return a, "", ""
+	}
+	return none()
 }

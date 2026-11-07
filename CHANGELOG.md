@@ -4,6 +4,280 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A PAS request the gateway builds carries the report, its Provenance and the prior Claim as written (v1.8.0)
+
+- **Changed (requester, amendments the gateway builds):** the provider's gateway builds its PAS
+  requests with the SDK's Carried builders (shn-sdk v1.9.0). The update builder carries the
+  report it attaches (UC-04: your system's supplemental report; UC-05: a facility's report and
+  the facility's Provenance) as it reaches the build, apart from the registered edits made to it
+  before (E-06, E-14): under its own id, with its `meta` (`meta.profile` included), member order
+  and whitespace as written, at an entry whose `fullUrl` is built from that id, so the references
+  in it resolve in the bundle under FHIR R4's Bundle rules. The facility's Provenance keeps its
+  `target` as the facility wrote it. Releases before v1.8.0 gave these records bundle-local ids
+  (the Provenance's `target` rewritten to match), dropped their `meta.profile` and re-encoded them.
+  The submitted Claim an amendment carries as its prior Claim is carried byte for byte, where
+  earlier releases compacted it.
+- **Changed (requester, every PAS request the gateway builds):** the orders, Coverage, the
+  persons the member's Coverage names and the payer's Organization keep the `meta.profile` your
+  system wrote, where earlier releases dropped it.
+- **Changed (requester, wherever your gateway runs `$validate` on a PAS request it builds):** the
+  profiles your records declare, which the request now keeps, are in the request your gateway's
+  own `$validate` checks, so each record is checked against them. A record that does not conform
+  to a profile it declares is a defect, and a profile your gateway's validator does not hold is a
+  check that could not run, each decided as any such finding is: for a request sent at the line
+  it was built at, by the conformance level the participant set for its own gateway (nothing is
+  checked at `none`, and no default refuses a payload); for a request module 2 translates
+  between IG lines, a translation a participant opts into (`TRANSLATE_IG_LINES`), by module 2's
+  check of a translated payload, which refuses anything not valid at every level. Earlier
+  releases dropped these profiles from the request before the check; UC-04's report was, as
+  before, also checked on its own against the profiles it declares.
+- **Removed (requester):** the provider's gateway no longer writes a PAS request's references in
+  absolute form, which releases before v1.8.0 did on the origination profiles that relay the
+  reference payer's bytes, unregistered and named nowhere. A request's references resolve under
+  FHIR R4's Bundle rules.
+- **Changed (requester):** the records the provider's gateway adds to a request it built (the
+  clinical records a provider-data request references, the records the order's requester leads
+  to and a dispatched supplier, each where the request does not already hold it, as the Claim's
+  provider or the payer's Organization, say) are spliced into the request's bytes as read from
+  your system. Earlier releases decoded and re-encoded the whole request to add them. A record that reaches the splice and that
+  it cannot carry as read (one that is not exactly one JSON object, one that is not UTF-8 or holds
+  a lone surrogate escape, or one naming a member twice in an object, whatever its case under
+  Unicode case folding; an order's requester or a dispatched supplier with no `resourceType` or
+  `id` spelled exactly, whose entry is never addressed by an id the record does not state) is
+  refused `422`, the fidelity of the gateway's own edit (`a record read from the system of record
+  cannot be carried as read`, and why), and no PAS request is sent.
+  Most such records are answered before the splice, as in earlier releases, by the read that
+  takes them from your system or the edit made to them first, with the status that answers them.
+- **The facility's Provenance target (requester, UC-05):** carried exactly as the facility wrote
+  it, whatever it names; the provider's gateway never rewrites or judges it. The report attached
+  is one with an `id` spelled exactly (a report with none is never the one attached), and where
+  several of the facility's Provenances name it, the one whose `target` also names it in the
+  amendment (the relative form) is taken. The report rides
+  under its own id at the amendment's base, so a `target` the facility wrote as its own
+  `fullUrl` (its server's, or the federated query's `urn:shn:fedquery:<n>`) names no entry of the
+  amendment, and the payer's `pas.update-provenance` check reads it so. Releases before
+  v1.8.0 rewrote the `target` to the report's bundle-local id, an unregistered change, whatever
+  it named.
+- **UC-04's Provenance (requester):** the Provenance the provider's gateway builds for your
+  supplemental report has an id of its own for each amendment (`prov-<the amendment's
+  correlation>`, or `prov-` and a digest of it when that is not a FHIR id), so two amendments
+  attributing one report never share one. Earlier releases
+  gave it the bundle-local id every amendment shared.
+- **Newly refused (requester, every PAS submission and amendment the gateway builds):** two edits
+  of the gateway's own build that cannot be made, checked once right after the build, each refused
+  `422`, the fidelity of the gateway's own build, with nothing sent:
+  - A record the build addresses by its own `resourceType` and `id` (the Coverage, the payer's
+    Organization, the Claim's provider) that states either only in another spelling (`"ID"`, say),
+    or any record whose `resourceType` is spelled so. Such a record has no
+    FHIR id, and the build would address it (its entry's `fullUrl`, and the references the Claim
+    and the Coverage make to it) by an id the participant never gave: `a record read from the
+    system of record cannot be carried as read: it states its resourceType or id only in another
+    spelling`.
+  - A record the build gives an id of its own (the order, the `QuestionnaireResponse`, and the
+    Provenance of an amendment with no report) that spells its id another way, alone or beside its
+    own `id`. The build's id would sit beside that spelling, and a body naming its id twice under
+    case folding is one the network's message integrity does not seal, since it can be read two
+    ways: `a record read from the system of record cannot be carried as read: the build's own id
+    for it cannot be set beside the id it spells another way`. Once the build carries these records
+    as written, a lone member spelled so is carried, as the rest of the record is. A record the build
+    carries under its own id (the Provenance attributing a report, say) that names its id in two
+    spellings is the participant's own ambiguity, never refused as the build's re-id.
+
+  This is a deliberate change: earlier releases, depending on the request, built and sent such a
+  request or answered it as the gateway's own `500`. A report, or the Provenance attributing it,
+  spelled so is refused by the build itself (below); a person the Coverage names spelled so is,
+  as before, refused `422` as a person the request cannot carry.
+- **Newly refused (requester, UC-04 and UC-05):** an amendment whose report or Provenance the
+  build cannot carry as written: one with no id (the gateway never mints one), one that is not
+  exactly one JSON object (a member named twice or spelled in another case among them), one that
+  is not UTF-8 or holds a lone surrogate escape, one past the build's own limits (16 MiB, nesting
+  64 deep, 1,000,000 JSON tokens; the sealed PAS update is capped at 8 MiB in any case), or a
+  bundle in which two entries of one type would share an id (FHIR bdl-7). Each is refused with
+  `422`, the fidelity of the gateway's own build, and no amendment is sent. Earlier releases gave
+  such records ids of their own. A UC-04 report with no id is refused before the build, `500
+  supplemental report missing id`, as before.
+- **Changed (payer):** the payer's gateway reads an amendment's Provenance `target` (the
+  `pas.update-provenance` content check) by the SDK `Responder`'s rule: exactly `<type>/<id>` or
+  exactly the supplemental entry's own `fullUrl`, either one version specific only at the
+  resource's own `meta.versionId`. Newly matched: a version-specific target at the resource's own
+  version. Newly not matched: a reference under another base that ends in the resource's type and
+  id, which under FHIR R4 names another server's resource. The check is a content rule, as
+  before: not run at `none`, recorded at `observe` and `structural`, refused at `strict`.
+- **Not carried as written yet (requester):** the order (`ServiceRequest` or `DeviceRequest`)
+  takes a bundle-local id and is re-encoded; the Coverage, the persons it names and the payer's
+  Organization keep their `meta.profile` but are re-encoded, the Coverage's payor and beneficiary
+  pointed at the request's entries; on an amendment with no report (UC-06, UC-07), the amended
+  `QuestionnaireResponse` and its Provenance take bundle-local ids, the Provenance's `target`
+  pointed at the `QuestionnaireResponse`; and the Claim's requesting provider (a
+  `PractitionerRole` or `Organization`, which may be the order's requester or the dispatched
+  supplier) is re-encoded as the build places it.
+- **Compatibility:** a payer whose own system cannot resolve relative references sees its own
+  system's refusal, carried as sent, for a request a provider's gateway from v1.8.0 builds. A
+  facility's Provenance whose `target` is version specific is now carried so; a payer's gateway
+  before v1.8.0 reads no version-specific target, so at `strict` it refuses that amendment
+  (`pas.update-provenance`), where earlier requesters rewrote the target.
+
+## A questionnaire response the gateway's own engine filled has its declared profiles asked for (v1.8.0)
+
+- **Changed (module 1, the DTR questionnaire response checks):** a response the gateway's own
+  engine filled (its managed `$populate` fill or its automatic fill) declares the gateway's own
+  profiles, the line's DTR profile the gateway adds included. Each is now asked for at the
+  response's DTR check, as the line's DTR profile already was: a validator lane that does not hold
+  one refuses the response as a structural issue where the level refuses one (`structural`,
+  `strict`), and records it at `observe`. As in releases before v1.8.0, it is read as a structural
+  defect, never as a check that could not run. A profile your own `PROVIDER_DTR_POPULATE_URL`
+  engine declared on a response it returned, and that the lane does not hold, is from v1.8.0 a
+  check that could not run, as any profile a payload declares is: an `unavailable` finding at
+  `observe` and `structural`, the gateway's own `500` at `strict`, where releases before v1.8.0
+  refused it `422` at `structural` and `strict`.
+- **The DTR profile the gateway adds** to a response it completes is the one its DTR check then
+  asks for, at every line, so at every level that runs the check the response cannot reach a payer,
+  alone or in a PAS Bundle, without its profile having been checked at its own line.
+
+## The gateway builds on shn-sdk v1.9.0 (v1.8.0)
+
+- **Changed:** the gateway pins shn-sdk v1.9.0.
+
+## A profile a payload declares that the validator does not hold is a check that could not run (v1.8.0)
+
+- **Changed (every `$validate` check the conformance level governs, ingress and egress, and
+  certification):** a resource may declare in `meta.profile` a profile that no package your
+  validator lane loads defines (a facility's own report profile, say). The validator then says it
+  has not checked the resource against that profile. From v1.8.0 that is read as a check that
+  could not run, with the verdict `unavailable`, never a pass and never a defect of the payload,
+  and decided as every check that could not run is: nothing runs at `none`; at `observe` and
+  `structural` an `unavailable` finding is recorded and the message carried; at `strict` the
+  gateway refuses with its own `500`, saying `profile could not be checked: <profiles>`, named as
+  the finding names them. Releases before v1.8.0 read it as a structural defect: recorded at
+  `observe`, refused with `422` at `structural` and `strict`.
+- **Only the payload's own declaration:** the validator's not-checked issue
+  (`VALIDATION_VAL_PROFILE_UNKNOWN_NOT_POLICY`), read on its own, must name the payload's own
+  `meta.profile` element, holding exactly the profile the issue names, and a
+  `Validation_VAL_Profile_Unknown` quoting that profile beside it is read with it; for a `Parameters` body
+  (a questionnaire package answer), which the gateway sends its validator wrapped in another
+  `Parameters`, the element as the validator names it within that wrap. A profile the gateway
+  asks the validator for explicitly stays an error, decided as a structural defect. Beside a
+  structural error the payload is refused for that error wherever the level refuses one, and a
+  Bundle entry's no-match summary does not follow from such a profile: it reads as it would
+  without the profile beside it, and in certification, beside only such a profile, it keeps
+  the line `invalid`.
+- **Only a profile no line held:** where the gateway reads a payload at several lines (a payer's
+  answer at its candidate lines, a certification's lines, and module 2's search for a
+  questionnaire package answer's own line), a profile one line's validator lacks and another's
+  holds (another IG line's own profile, say) was checked there: the line that lacks it reads as
+  before, a structural defect, and the search for an answer's line moves on to the line that
+  holds it. Only a profile no line the gateway consulted holds is a check that could not run; a
+  line that did not answer or stopped without a verdict held nothing, and is an outage, as
+  always.
+- **Where else the verdict shows:** the observer's `validate.result` detail says `validator
+  unavailable`, and the `crd.embedded.validated` outcome is `unavailable`, for an embedded resource
+  declaring such a profile (the observer reports each line's validator alone: where another line
+  held the profile, it says `validator unavailable` for the line that lacks it while the check's
+  finding is structural); module 2's search for a questionnaire package answer's own line
+  records `E-08:check-could-not-run` only when no line it searched held the profile.
+- **A translated payload:** module 2's check of a payload it translated between IG lines, refused
+  at every level, refuses one declaring such a profile with the gateway's own `500` saying so,
+  where releases before v1.8.0 refused it `422` as a structural defect.
+- **Finding:** a finding gains `unresolvedProfiles`, naming the profiles the payload declares
+  that the validator does not hold, on an `unavailable` finding they made unavailable and on an
+  invalid one beside the defect that decided it. Each profile is named by its size and SHA-256,
+  never as written, like every other payload-quoted string a finding keeps: the digest is the SHA-256 of the profile URL's bytes as
+  declared, so you match it by hashing your own profiles' URLs. At most eight are named, sorted,
+  and the rest counted (`and N more`).
+- **Certification:** a `certify:` line whose lane does not hold a profile the payload declares,
+  and found nothing else, is `unavailable` with `error` `profile unavailable: <profiles>` (two
+  named at most); beside unchecked terminology or a regex check that could not run, the profiles
+  are counted (`profiles unavailable: <n>`).
+- **Go API:** `validatorissue.ProfileUnknownNotPolicy` and `validatorissue.ProfileUnknown` name the
+  two issues; `engine.ConformanceFinding` gains `UnresolvedProfiles`;
+  `engine.UnresolvedDeclaredProfilesForTest` is test-only introspection, like
+  `engine.ClassifyFHIRForTest`.
+
+## An adaptive questionnaire's rounds stay on the network (E-12) (v1.8.0)
+
+- **Added (registered edit E-12, `dtr-adaptive-address-rekey`):** on a `$questionnaire-package`
+  or `$next-question` answer a provider's gateway relays to its own DTR client, it re-keys each
+  adaptive address the payer's gateway tagged to its own ingress:
+  - a `valueUrl` to `<ingress base>/dtr/payer/<payer>/<line>/<tag><remainder>`, the remainder
+    after the payer's base kept byte for byte;
+  - a `valueBoolean` `true` to `<ingress base>/dtr/fetch-server/<payer>/<line>/<tag>`.
+
+  The answer names the edit in `X-SHN-Edited` and loses its `ETag`. The re-key is made even where
+  a signature covers the address, so the payer's signature over a re-keyed answer no longer
+  verifies in the provider's copy, as the provider's over a restored request no longer verifies
+  in the payer's (E-13). It is made only toward a payer whose gateway declares the `v1opsub`
+  request frame.
+- **Added (`editsNotMade`):** for an adaptive address not re-keyed, carried as sent:
+  `E-12:payer-gateway-older`, `E-12:not-the-rounds-address`, `E-12:contained-in-package-response`,
+  `E-12:request-carried-a-questionnaire`, `E-12:not-under-base`, `E-12:escaped-address`,
+  `E-12:base-spelled-differently`, `E-12:unreadable-tag`, `E-12:unclean-remainder`,
+  `E-12:unreadable-address`, `E-12:unreadable-answer` and `E-12:address-not-writable`.
+- **Added (provider ingress, `dtr-questionnaire-fetch`):** three routes for the rounds, on the
+  package's own leg, credential and scope: `POST /dtr/payer/{payer}/{rest...}` (the address E-12
+  writes), `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` (a `true`
+  made explicit) and `POST /Questionnaire/$next-question` (routed by the one adaptive address in
+  this gateway's form that the round's contained Questionnaire carries). A round is forwarded
+  naming its address (`operationSubpath`), and the payer's gateway delivers it there only when
+  its tag verifies. A call the package route refuses for its credential or key store is refused
+  the same way. The rounds' own checks refuse as `routing`, apart from a content coding
+  (`integrity`), an input or patient that cannot be bound (`authority`), a patient the system of
+  record does not hold under `REQUIRE_KNOWN_MEMBERS` (`conformance`) and another patient at
+  `strict`. CONFIGURATION lists them in order, per route.
+- **Added (provider ingress):** the CapabilityStatement at `GET /metadata` lists SDC's
+  `$next-question` beside `$questionnaire-package`. A client still calls each round at the
+  `questionnaireAdaptive` address the package names, as DTR 2.2.0 has it do.
+- **Added (payer):** a payer's gateway declares the request frames it serves, `v1opsub` among
+  them, in the capability declaration it makes to the registrar at each start, so providers'
+  gateways re-key addresses toward it and send it rounds. A provider's gateway declares no
+  request frames of its own. A gateway rolled back to an earlier release gives the declaration
+  back at its first start.
+- **Added (payer):** a round framed at another line than its address names is delivered at the
+  address's line and recorded as a line carry (`contract.line-carried`, `LineCarried` `request`).
+- **Changed (payer):** a payer's gateway states no address tags on a `$questionnaire-package`
+  answer at another DTR line than the one the request claims. The tag would bind its own line
+  while the provider's gateway wrote the claimed line into the address, so every round would be
+  refused. The address is carried as sent instead (`E-12:not-under-base` at the provider's
+  gateway), and the client calls the payer directly. A request carried but answered at the line
+  it claims is tagged as usual.
+- **Upgrade note (provider):** make the three round routes reachable at the ingress base before
+  upgrading. A provider whose own proxy, WAF or load balancer admits only the routes earlier
+  releases served must add them. E-12 rewrites every tagged adaptive address to one of them and
+  has no opt-out, so a proxy that blocks them blocks every round.
+- **Changed (monitoring):** the HTTP server metric names the three new routes, so its series
+  bound rises by three method-route pairs.
+- **Changed (docs):** the provider's attachment-request Task section no longer says an adaptive
+  questionnaire's rounds go outside the network.
+
+## An amendment carries a facility's report with only its subject.reference re-pointed (E-14) (v1.8.0)
+
+- **Changed (requester, UC-05):** when the gateway attaches a facility's report, read on the
+  federated-query leg, to a prior-authorization amendment it builds, the only change it makes
+  to the report is the new registered edit E-14 (`facility-report-subject-rekey`): the report's
+  `subject.reference` is replaced with the Claim's patient reference. The `display`,
+  `identifier` and `type` of its `subject`, and every other byte of the report, are the
+  facility's as they reach the build. Releases before v1.8.0 replaced the whole `subject` with
+  `{"reference":<the Claim's patient>}`, dropping its other members, and named no edit. The
+  SDK's PAS update builder carries the report and the facility's Provenance as written (see "A
+  PAS request the gateway builds carries the report, its Provenance and the prior Claim as
+  written").
+- **Precondition, unchanged:** the edit is made only once the report, and the Provenance that
+  attributes it, are shown to be about the Claim's patient. A report about anyone else is
+  refused with `422`, as before, with no edit made.
+- **Carried as sent:** a report whose `subject.reference` is exactly the Claim's patient reference,
+  and one whose `subject` names the member by identifier alone. Releases before v1.8.0 turned
+  an identifier-only subject into a reference; v1.8.0 carries it as the facility wrote it.
+- **Newly refused:** a report a signature covers (in the report, or in the facility's signed
+  `Provenance` that attributes it), when the edit would change it, with
+  `422 signed content cannot be edited (E-14, <carrier>)`, and no amendment is sent. Releases
+  before v1.8.0 replaced the subject of a signed report. A signed report already naming the
+  Claim's patient needs no edit and is carried as the facility wrote it.
+- **Access line:** an amendment that carries a report E-14 changed names `E-14` in
+  `relayEdits` and `requestEdits`, before any `E-06`. It stays `ownership: authored` with its
+  `builder`.
+- **Go API:** `relay.EditFacilityReportSubjectRekey` (`E-14`) is registered on
+  `pas-claim-update`, on `DiagnosticReport.subject.reference`, and is an input edit
+  (`relay.InputEditIDs` is `E-06`, `E-14`).
+
 ## A payer's gateway tags its adaptive questionnaire addresses and restores them (E-13) (v1.7.0)
 
 - **Added (`dtr-questionnaire-fetch`):** on a 2xx answer to a framed `$questionnaire-package` or

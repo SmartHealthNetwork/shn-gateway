@@ -393,7 +393,7 @@ func TestCompleteAuthoredPASRequest_EvidenceUnderTheMembersRecordID(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				out, edits, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, true, row.sorID, member)
+				out, edits, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, row.sorID, member)
 				if (err == nil) != row.ok {
 					t.Fatalf("completion err = %v, want ok %v", err, row.ok)
 				}

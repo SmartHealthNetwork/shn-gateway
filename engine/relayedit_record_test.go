@@ -421,6 +421,9 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		// either.
 		relay.EditDTRAdaptiveAddressRekey:   {"dtr-adaptive-address-rekey", 0},
 		relay.EditDTRAdaptiveAddressRestore: {"dtr-adaptive-address-restore", 0},
+		// E-14 is made to the facility's report in the claim update the
+		// provider's gateway sends: the payer receives it.
+		relay.EditFacilityReportSubjectRekey: {"facility-report-subject-rekey", relay.RoleRecipient},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

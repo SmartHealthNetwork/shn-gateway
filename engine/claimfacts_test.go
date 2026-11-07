@@ -321,7 +321,7 @@ func TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission(t *testing.
 		}
 		submitted := firstClaimEntry(t, sub)
 		in.PriorClaim = rec.prior
-		upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
+		upd, err := shnsdk.BuildConformantClaimUpdateBundleAtLineCarried(line, in)
 		if err != nil {
 			t.Fatalf("%s: %v", line, err)
 		}
@@ -336,7 +336,7 @@ func TestRecordPASSubmission_AmendmentContinuesTheRecordedSubmission(t *testing.
 		}
 		// A resume stating another service category changes the item: "changed".
 		in.PASClaimFacts.ServiceCategory = json.RawMessage(`{"system":"https://codesystem.x12.org/005010/1365","code":"42"}`)
-		upd, err = shnsdk.BuildConformantClaimUpdateBundleAtLineExact(line, in)
+		upd, err = shnsdk.BuildConformantClaimUpdateBundleAtLineCarried(line, in)
 		if err != nil {
 			t.Fatalf("%s: %v", line, err)
 		}
@@ -549,7 +549,7 @@ func TestAmendment_LinksTheAnswerThePayerAskedFor(t *testing.T) {
 				}
 				continue
 			}
-			if len(refs) != 1 || !strings.HasSuffix(refs[0], "DiagnosticReport/convergence-dr-operative") {
+			if len(refs) != 1 || refs[0] != "DiagnosticReport/source-dr" { // the report's own id
 				t.Errorf("%s %s: supportingInfo %v, want the attached report", line, name, refs)
 			}
 			if len(infoSeq) != 1 || len(infoSeq[1]) != 1 || infoSeq[1][0] != 1 || marks[1] != "added" || len(marks) != 1 {
@@ -586,7 +586,7 @@ func TestCompleteAuthoredPASRequest_Deterministic(t *testing.T) {
 	}
 	complete := func(b []byte) []byte {
 		t.Helper()
-		out, _, err := g.completeAuthoredPASRequest(context.Background(), b, in.QR, in.SR, in.CoverageRef, true, in.MemberID, in.MemberID)
+		out, _, err := g.completeAuthoredPASRequest(context.Background(), b, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID)
 		if err != nil {
 			t.Fatal(err)
 		}

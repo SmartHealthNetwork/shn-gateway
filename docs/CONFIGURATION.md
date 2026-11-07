@@ -58,7 +58,7 @@ with an invalid result, is your choice (`CONFORMANCE_ENFORCEMENT` below):
 | `FHIR_VALIDATE_URL` | A FHIR `$validate` endpoint (a HAPI server with the Da Vinci CRD/DTR/PAS + US Core IGs loaded). The production path. |
 | `SHN_FAKE_VALIDATOR` | **Not supported.** From v0.63.0 a released gateway refuses to boot when it is set to any value, at every `CONFORMANCE_ENFORCEMENT` level: it selected a stand-in validator that accepted almost everything, and it remains only in SHN's own test builds. For a first wiring test, run [`deploy/eval`](../deploy/eval/README.md), which pairs the gateway with a real validator; to run your own, use the sidecar below; or, from v0.63.0, run at `CONFORMANCE_ENFORCEMENT=none`, which needs no validator ([below](#running-at-none-without-a-validator)). |
 | `CDS_ADVERTISE_HOOKS` | Optional. A comma-separated list of the CDS Hooks your provider ingress advertises and dispatches, from `order-sign`, `order-select`, `order-dispatch`. Unset advertises every hook the network carries. Set it only to narrow: when no payer your gateway routes to carries a hook's leg, advertising it promises a service that can only fail at routing; a request to a service id you do not advertise is refused with `404` and the ids you offer. A hook the network does not carry refuses to boot. This is an interim override — the network does not yet carry a declaration of the hooks each payer offers, and the listing will derive from routing once it does. |
-| `CONFORMANCE_ENFORCEMENT` | `none` (the default when unset, from v1.0.0), `observe` (the default when unset before v1.0.0), `structural` or `strict`. Payload conformance is your opt-in: left unset, a gateway from v1.0.0 runs no payload check, records no finding and needs no validator; its boot line says `conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is; a carried DTR questionnaire package request is not, and from v1.0.0 the payer's answer to one is, against the operation's output Parameters profile at the lines whose profile constrains the parameter names it uses): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded, and so is a regex check the validator could not run (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`, which a validator gives when a regex overruns its time limit, or, from v1.2.0, `REGEX_MATCH_TIMED_OUT`, for a regex a profile sets), unless an issue that refuses at this level is beside it. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, one step of its stop sequence, so give its container the 45-second stop timeout [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway) gives (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway CHANGELOG.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
+| `CONFORMANCE_ENFORCEMENT` | `none` (the default when unset, from v1.0.0), `observe` (the default when unset before v1.0.0), `structural` or `strict`. Payload conformance is your opt-in: left unset, a gateway from v1.0.0 runs no payload check, records no finding and needs no validator; its boot line says `conformance enforcement=none (CONFORMANCE_ENFORCEMENT unset)`. A level applies only to what each leg's check covers (a resource's declared profiles, else its base FHIR R4 definition; a carried PAS request is not `$validate`d, and from v0.63.0 the payer's answer to one is; a carried DTR questionnaire package request is not, and from v1.0.0 the payer's answer to one is, against the operation's output Parameters profile at the lines whose profile constrains the parameter names it uses): see [INTEGRATION.md](INTEGRATION.md#conformance-enforcement). At `none` no payload conformance check runs (no FHIR profile validation, no CDS Hooks response rules, no content checks) and no finding is recorded. At `observe` every check runs, each defect is recorded as a finding in your gateway's log and observer stream, and the message is carried as sent, apart from the gateway's registered edits (the callback removed, payer identity mapping, and, when the provider opts in with `ENRICH_NATIVE_REQUESTS=true`, prefetch and coverage obtained; participant protocol §7a.4); a validator that cannot be reached is recorded the same way. From v0.60.0, at `observe` a check that can only record does not hold the message: it is queued, and its finding is written when the validator answers. The queue is bounded: a check that finds it full is dropped, and the gateway logs `gateway: observe check dropped` (on the 1st, 2nd, 4th, 8th… drop). One kind of check still waits: the check of a payload this gateway itself translated between IG lines, which refuses at every level. (Before v0.63.0 a payer gateway's checks of the decision ExplanationOfBenefits it built also waited, sharing at most 2 seconds per exchange; from v0.63.0 it builds none.) At `structural` every check runs, a message whose structure is broken (a missing required element, an element the resource does not define, a value of the wrong JSON type or one that cannot be read, a CDS Hooks answer that cannot be read or lacks a required member, a request or answer the gateway cannot read, or a validator result the gateway cannot classify) is refused as at `strict`, and every other defect is recorded as at `observe`. Of FHIR profile issues, only invariants and the validator's recognized issues for a code outside its code list (licensed code systems included) are recorded. From v0.55.0 that includes a code system the validator does not know (`Terminology_TX_System_Unknown`, which it reports as an error only for a system in the HL7 FHIR namespace, a misspelled HL7 system URL included): an unknown code system is recorded and the message relayed when nothing else in it refuses at this level, where earlier releases refused it. Any other terminology issue refuses, and every other FHIR profile issue and every fatal issue refuses; an unreachable validator is recorded, and so is a regex check the validator could not run (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`, which a validator gives when a regex overruns its time limit, or, from v1.2.0, `REGEX_MATCH_TIMED_OUT`, for a regex a profile sets), and, from v1.8.0, a profile the payload itself declares in `meta.profile` that the validator does not hold (`VALIDATION_VAL_PROFILE_UNKNOWN_NOT_POLICY` naming that element and quoting its profile is read so on its own; a `Validation_VAL_Profile_Unknown` quoting the same profile beside it is read with it; the finding names it in `unresolvedProfiles`), unless an issue that refuses at this level is beside it. Such a profile is no defect a no-match summary follows from: an entry's no-match summary (`BUNDLE_BUNDLE_ENTRY_MULTIPLE_PROFILES_NO_MATCH`, `Validation_VAL_Profile_NoMatch`) reads as it would without such a profile beside it, so one nothing else excuses still refuses at this level. Where the payload is read at several lines (a payer's answer at the candidate lines the check consults), such a profile is a check that could not run only when no line the check consulted holds it: one another of those lines holds (another IG line's own profile, say) was checked there, and the line that lacks it reads it as a structural issue. A known limit: the lines consulted are those the check reads the payload at (for a questionnaire package answer, its own name family's: 2.0 and 2.1, or 2.2), so a profile only a lane outside them holds reads as unchecked: carried, recorded at `observe`, never a pass. So does a profile only a lane that did not answer, or stopped without a verdict, would have held: that lane is an outage, recorded and carried at `observe` and `structural` and refused with `500` at `strict`, as any outage is. The observer's `validate.result` reports each lane alone, so where another line held the profile, the lane that lacks it says `validator unavailable` there while the check's finding reads it as structural. Each is a check that could not run, never a pass: at `observe` it is recorded the same way, and at `strict` it refuses with the gateway's own `500`, as an unreachable validator does; for a declared profile the refusal says `profile could not be checked: <profiles>`, naming them as the finding's `unresolvedProfiles` does, where an unreachable validator's says `validator unavailable`. A profile the gateway asks the validator for explicitly is not the payload's declaration, and a validator that does not hold it is a structural issue. Nor is a profile on a questionnaire response the gateway's own engine filled for module 1 (its managed `$populate` fill or its automatic fill, not a response your own `PROVIDER_DTR_POPULATE_URL` engine returned): every profile such a response declares, the line's DTR profile the gateway adds included, is the gateway's own and asked for at its DTR check, so a validator that does not hold one refuses it there as a structural issue. At `strict` a defect refuses the message, and the refusal names the rule and the issues it was based on; an unreachable validator refuses with `500`. A gateway at `observe` waits up to 10 seconds on stop for its queued checks, one step of its stop sequence, so give its container the 45-second stop timeout [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway) gives (Docker's default is 10); a gateway stopped sooner loses the findings of the checks still queued. From v0.62.0, a payer's PAS `$submit` or amendment answer the gateway cannot read (`answer.shape`) is read by the graph rule of its IG line (PAS 2.0.1: every reference resolves, the request Claim's included; 2.1.0: only that `ClaimResponse.request` names the request Claim; 2.2.1: every reference resolves except one to the request Claim, which `request` must name), at the answer's candidate lines, in the order its FHIR profile is certified at, at the routed line and the lines the gateway has a validator lane for (a validator serving several lines judges an answer once, at the first of them): valid on any line is valid, and an answer read at a line after the first is recorded at that line. So a gateway with a 2.1 validator lane carries any PAS answer that names its request Claim, however incomplete for 2.0.1 or 2.2.1, and a rule only one line states (PAS 2.2.1's inquiry-answer rule that a ClaimResponse name its Claim or give a Data Absent Reason) refuses only where every candidate line carries it (gateway CHANGELOG.md, "A PAS answer is read at its IG line"). Network rules refuse at every level: authentication, authority (including a token presented with a request other than the one it was issued for), consent, the patient binding (each gateway identifies the member the request names by its own system), routing, replay, a repeated member name in any body, a coverage eligibility batch of more requests than one exchange is recorded under (`413`, from v0.63.0), and the check of a payload this gateway itself translated between IG lines. From v0.62.0 an answer whose frame states another contract line than its leg was routed at is relayed, and refused only under `REQUIRE_SHARED_LINE=true`. Any other value refuses to boot. |
 | `CONFORMANCE_TOLERATE_PEERS` | Optional, unset by default. From shn-gateway v1.0.0. The payers whose answers your gateway tolerates: payer identities as `<system>\|<value>` (the identity a member's Coverage names, which the exchange is routed by), comma-separated, for example `urn:oid:2.16.840.1.113883.6.300\|00001`. At `structural` or `strict`, a defect the FHIR profile check of a listed payer's DTR or PAS answer would refuse (an answer to a request your gateway sends, or to one it carries for your system through its Da Vinci ingress) is recorded instead and the answer carried; the finding is marked `tolerated: true`. Only that check is tolerated: the content rules on an answer (its IG line's answer graph, `answer.shape`, and its patient linkage, `patient.answer`) and the CDS Hooks answer check refuse as ever, as do network rules and the gateway's own edits; a check that could not run is never tolerated (`500` at `strict`). An answer from an exchange routed by several payer identities is tolerated only when every one is listed. Unset, or empty, tolerates no one: no payer, the network's reference payers included, is exempt by default. The list is logged at boot (`gateway: conformance tolerated peers=…`, `none` when unset); an entry without both parts, or listed twice, refuses to boot. At `none` and `observe` nothing is refused, so the list changes nothing. A hosted gateway cannot set it yet. |
 
 If `FHIR_VALIDATE_URL` is not set (and discovery advertises none), the gateway exits
@@ -251,11 +251,15 @@ lands in the registrar (`UNIQUE(system,value)` globally). Only then does a provi
 
 **What a gateway declares at each start.** From shn-gateway v1.1.0, a gateway with a registrar
 declares the legs it compiles for its `ROLE` (`PUT /register/{id}/capabilities`, signed with its
-own key), so the network refuses a leg it does not take before anything reaches it. You set
+own key), so the network refuses a leg it does not take before anything reaches it. From v1.8.0
+a payer's gateway also declares the request frames it serves; a provider's declares none. You set
 nothing for this. A failure is logged, `gateway: capability declaration not stored`, and the
 gateway keeps running and sends the declaration again until the registrar has it. A `409` is
 logged once and not resent: the registrar holds a declaration issued no earlier, which the next
-start declares over, or your holder was founded with the network and no declaration applies to it.
+start declares over, or your holder was founded with the network and the network's registrar is
+older than the one that applies such a holder's declaration. If your holder was founded with the
+network, a current registrar applies only the request frames your gateway declares; your legs and
+attachment limit stay those it was founded with.
 A `404` or `405` is logged once after four tries and then tried hourly in silence: your holder
 is not registered, or the network's registrar is older than the declaration. Your gateway runs on
 as one that declared nothing, and declares once the registrar takes it, with no restart. The
@@ -286,7 +290,7 @@ nothing there. On every role, a value other than `true` or `false` refuses to bo
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS, CDex or federated query subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS, CDex or federated query subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request, and on a provider's `$next-question` rounds from v1.8.0). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
 | `SHN_ACCEPT_UNKNOWN_MEMBERS` | **No longer read** (from shn-gateway v1.0.0). Carrying members your system of record does not hold is the default, so a gateway that sets it, to any value, logs `gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read` at boot and starts; remove it. Beside `REQUIRE_KNOWN_MEMBERS=true` it no longer refuses to boot: `REQUIRE_KNOWN_MEMBERS` alone decides. Releases before v1.0.0 logged a deprecation warning, and refused to boot when it was set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`. |
 
 ## Documentation attachment size (every role)
@@ -297,7 +301,7 @@ From shn-gateway v1.1.0. A CDex documentation attachment submission (`$submit-at
 |---|---|
 | `ATTACHMENT_CEILING_BYTES` | The largest documentation attachment submission body, in bytes, your gateway sends or accepts. Unset (the default): the network's ceiling, 16777216 (16 MiB). Set a lower positive integer to bound it further. A provider's gateway reads a submission from its system up to it and refuses one over it `413` (`request body too large`, recorded as `routing`) before reading anything in it; a payer's gateway refuses a submission over it the same way before your system is called. The boot log states the value when it is below the network's ceiling. A value above the network's ceiling, zero, a negative number or anything but an integer refuses to boot. |
 | `ATTACHMENT_INFLIGHT_BYTES` | The bytes of documentation attachments and large envelopes your gateway holds at once. Unset (the default): a tenth of the task's memory, and never below `ATTACHMENT_CEILING_BYTES`. The figure comes from the container's cgroup (`memory.max`) when that states a limit, and otherwise, on Amazon ECS, from the task metadata endpoint (`Limits.Memory`): an ECS Fargate container whose task alone has a memory limit has no limit in its cgroup. When neither states it, the budget is 64 MiB (67108864). You set nothing for this. The boot log states the value and where it came from. A provider's gateway counts each submission's stated length, or the whole ceiling when it states none, such as a gzip-coded one. A payer's gateway counts envelopes over 8 MiB, up to the largest envelope any leg may carry; an envelope at or under 8 MiB is never counted. One that states no length is read to 8 MiB and, past that, counted at that largest envelope. A request that does not fit is refused `503` with `Retry-After`, recorded as `routing`, before your system is called: the refusal is transient, so send it again after that wait. A submission it holds must arrive within 30 seconds, which is about 5 Mbit/s for a full one, or it is refused `400`. A value below the ceiling, or anything but an integer, refuses to boot. |
-| `PAYER_ATTACHMENT_MAX_BYTES` | Payer gateways only. The largest single inline attachment (file), in bytes after base64 decoding, your system accepts in one documentation submission. Unset (the default): your gateway declares no limit, which the network reads as unknown, never as zero, and a provider's gateway applies only its own ceiling. Set, it is the value your gateway's capability declaration states (`attachmentMaxBytes`), exactly as you set it, and a provider's gateway sending to you refuses, before sending, a submission carrying any inline file over the smaller of your value and its own ceiling (`413`, recorded as `routing`). Only inline files are measured, each on its own, wherever the submission carries them (a `DocumentReference`'s content, a `QuestionnaireResponse`'s answer): an attachment given by `url`, and content that carries no inline file (a `QuestionnaireResponse` with no attachment answer), are carried; so is a file whose `data` is not well-formed base64, bounded by the ceiling on the whole body. Each start declares what is set, so a start with it unset clears a limit declared before, and a provider's gateway goes back to its own ceiling. A release before v1.1.0 declares nothing, so a limit stays through a rollback to one, until a later start on v1.1.0 or newer replaces it. A holder founded with the network has no declaration, so its limit is not declared. A positive integer up to 9007199254740991 (2^53-1); zero, a negative number or anything but an integer refuses to boot, and a provider gateway refuses to boot with it. |
+| `PAYER_ATTACHMENT_MAX_BYTES` | Payer gateways only. The largest single inline attachment (file), in bytes after base64 decoding, your system accepts in one documentation submission. Unset (the default): your gateway declares no limit, which the network reads as unknown, never as zero, and a provider's gateway applies only its own ceiling. Set, it is the value your gateway's capability declaration states (`attachmentMaxBytes`), exactly as you set it, and a provider's gateway sending to you refuses, before sending, a submission carrying any inline file over the smaller of your value and its own ceiling (`413`, recorded as `routing`). Only inline files are measured, each on its own, wherever the submission carries them (a `DocumentReference`'s content, a `QuestionnaireResponse`'s answer): an attachment given by `url`, and content that carries no inline file (a `QuestionnaireResponse` with no attachment answer), are carried; so is a file whose `data` is not well-formed base64, bounded by the ceiling on the whole body. Each start declares what is set, so a start with it unset clears a limit declared before, and a provider's gateway goes back to its own ceiling. A release before v1.1.0 declares nothing, so a limit stays through a rollback to one, until a later start on v1.1.0 or newer replaces it. A holder founded with the network declares no limit: the registrar keeps the record it was founded with, which has none, whatever your gateway sets. A positive integer up to 9007199254740991 (2^53-1); zero, a negative number or anything but an integer refuses to boot, and a provider gateway refuses to boot with it. |
 
 ## Networking
 
@@ -502,6 +506,16 @@ There is nothing to configure:
   `validatorMs`.
   `validatorMs` is always a finding's whole check; `ms` is always one
   `$validate` call, here and on a `crd.embedded.validated` observation.
+  From v1.8.0 a finding carries `unresolvedProfiles` when the payload declares
+  in `meta.profile` a profile the validator does not hold, so the payload was
+  not checked against it: on the `unavailable` finding such a profile made
+  unavailable, and on an invalid finding beside the defect that decided it. Each
+  profile is named as `profile bytes=<n> sha256=<hex>`, never as written, since
+  it is quoted from the payload: `<n>` is the length in bytes of the profile URL exactly as the
+  payload declares it, `|version` included, and `<hex>` the SHA-256 of those
+  bytes, so you match one to your own profiles by hashing their URLs (for
+  example `printf %s '<url>' | shasum -a 256`). At most eight are named,
+  sorted, the rest counted (`and N more`).
   At `observe` this is the check's time after the answer, which the leg's
   `stages` do not hold.
 - `requestCiphertextHash` and `responseCiphertextHash` are the hashes the
@@ -520,7 +534,10 @@ There is nothing to configure:
   a prior-authorization submission or update this gateway built that carries a
   record from your system it re-pointed to the member (`["E-06"]`: the evidence
   a provider-data request carries, or the supplemental report an update
-  carries). Only the ids: never a value an edit
+  carries); and, from v1.8.0, on a prior-authorization update this gateway
+  built that carries a facility's report whose `subject.reference` it
+  re-pointed to the Claim's patient (`["E-14"]`, or `["E-14","E-06"]` with a
+  record from your system E-06 re-pointed). Only the ids: never a value an edit
   removed or wrote. The ids are
   named once the request has left the gateway: the receiver answered (with
   anything, a refusal included), or the connection failed after the request
@@ -540,7 +557,9 @@ There is nothing to configure:
     that edit. From v1.7.0 an `authored` request names in `relayEdits` a
     registered edit made to a record from your system that its build carries
     (`E-06`, made before the build): the request is still the builder's own,
-    and through the registered transform it names `["E-06","E-09"]`;
+    and through the registered transform it names `["E-06","E-09"]`. From
+    v1.8.0 it so names an edit made to a facility's report an update carries
+    (`E-14`), before any `E-06`;
   - `builder` names the registered builder of a request the gateway built:
     `authored`, or `edited` by the registered transform.
 
@@ -560,7 +579,9 @@ There is nothing to configure:
 - `requestEdits` and `answerEdits` (from v0.63.0) split `relayEdits` by body:
   the edits to the request `ownership` describes, and those to the answer
   (`["E-08"]`). From v1.7.0 `requestEdits` also names an edit made to a record
-  from your system that a request the gateway built carries (`["E-06"]`).
+  from your system that a request the gateway built carries (`["E-06"]`),
+  and from v1.8.0 one made to a facility's report an update the gateway built
+  carries (`["E-14"]`).
   Each is absent when that body names no edit. All four keys are Evolving.
 - `editsNotMade` (from v1.1.0) names each edit the gateway would make
   that it could not make on the call, and why, so the bytes it would have
@@ -585,8 +606,15 @@ There is nothing to configure:
   own system (see [Adaptive questionnaire addresses](#adaptive-questionnaire-addresses-the-payers-tags-and-the-restore-payer)),
   for an address in the form a provider's gateway re-keys to that names this payer:
   `E-13:unclean-remainder` (its remainder breaks the clean-remainder rule), `E-13:not-verified`
-  (its tag does not verify) and `E-13:unreadable-request` (it cannot be rewritten). Absent when
-  empty. Evolving.
+  (its tag does not verify) and `E-13:unreadable-request` (it cannot be rewritten). From v1.8.0,
+  on a DTR answer a provider's gateway relays to its own DTR client (see
+  [Adaptive questionnaire rounds](#adaptive-questionnaire-rounds-the-re-key-and-the-routes-provider)),
+  for an adaptive address it does not re-key: `E-12:payer-gateway-older`,
+  `E-12:not-the-rounds-address`, `E-12:contained-in-package-response`,
+  `E-12:request-carried-a-questionnaire`, `E-12:not-under-base`, `E-12:escaped-address`,
+  `E-12:base-spelled-differently`, `E-12:unreadable-tag`, `E-12:unclean-remainder`,
+  `E-12:unreadable-address`, `E-12:unreadable-answer` and `E-12:address-not-writable`, each
+  described there. Absent when empty. Evolving.
 - `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
   `Retry-After` of a participant's 2xx answer that was not carried, and, from v1.7.0, each
   `operationBase` or `operationAddressTags` a payer's gateway states on a DTR answer that was not
@@ -1548,9 +1576,9 @@ in another case is refused as above (`… the Bundle's entries cannot be read on
   batch of requests: this is the payer's answer, not a network refusal`,
   its own answer, which is relayed to your system. A payer that declares its own endpoint
   (`PAYER_ELIGIBILITY_URL`) receives the batch as you sent it.
-- **Not advertised yet.** The ingress `CapabilityStatement` (`GET /metadata`) does not list
-  this operation until the shn-sdk release that follows shn-gateway v0.62.0. The gateway serves it
-  before then.
+- **Advertised from shn-gateway v1.0.0.** The ingress `CapabilityStatement` (`GET /metadata`)
+  lists this operation, `CoverageEligibilityRequest/$submit`. shn-gateway v0.63.0 serves it
+  without listing it.
 
 **A consented federated query** (from shn-gateway v0.63.0). `POST /Task` takes the Da Vinci CDex
 task-based data request a data consumer sends a data source
@@ -2384,8 +2412,11 @@ payer's identifier for the questionnaire, not an address, and it reaches your sy
 wrote it. Fetch the questionnaire through your gateway's `$questionnaire-package`, which carries
 the fetch on the network. A plain `GET` of the canonical URL goes around the network. For an
 adaptive questionnaire, your DTR client calls `$next-question` at the address the questionnaire's
-`questionnaireAdaptive` extension names, which in v1.7.0 is the payer's own system as the payer
-wrote it. Those rounds go to the payer directly, outside the network.
+`questionnaireAdaptive` extension names. In v1.7.0 that is the payer's own system as the payer
+wrote it, and those rounds go to the payer directly, outside the network. From v1.8.0 your
+gateway re-keys that address to its own ingress wherever the payer's gateway allows it, so the
+rounds stay on the network (see
+[Adaptive questionnaire rounds](#adaptive-questionnaire-rounds-the-re-key-and-the-routes-provider)).
 
 A provider's gateway takes the request only once you set your system's Task endpoint:
 
@@ -2416,8 +2447,8 @@ key's id is its RFC 7638 thumbprint and an `RS256` key has none, as the tenant's
 by SHN Cloud, states; for a UDAP registration (`RS256`), SHN Cloud also publishes a certificate
 over the key, for your registration only: the gateway's client assertion does not carry it. Its
 hosted edge then serves that route to it. A provider the network's provisioning registers itself
-(a founding holder) cannot take the leg yet, whatever it sets: the registry does not take its
-declaration.
+(a founding holder) cannot take the leg yet, whatever it sets: the registrar does not apply the
+legs it declares.
 
 **What reaches your system.** From v1.5.0 the Task is carried to `PROVIDER_CDEX_TASK_URL` as
 the payer sent it, apart from its `payer-url` (below), with the payer's FHIR JSON media type.
@@ -2752,17 +2783,156 @@ Both env vars are **all-or-nothing**: setting one without the other is a startup
 Leaving both unset (the default) disables this mapping entirely — requests forward with
 their payor identifier untouched, the behavior for every deployment that doesn't need it.
 
+## Adaptive questionnaire rounds: the re-key and the routes (provider)
+
+From v1.8.0, with `PROVIDER_DAVINCI_INGRESS=1`, your DTR client's adaptive rounds
+(`$next-question`) stay on the network, on the questionnaire package's own leg
+(`dtr-questionnaire-fetch`), ingress credential and scope. There is no setting for it on your
+gateway.
+
+**Upgrade note.** Make the three round routes below reachable at your ingress base before you
+upgrade to v1.8.0. If your ingress sits behind your own proxy, WAF or load balancer that admits
+only the routes earlier releases served, it must also admit them. From v1.8.0, E-12 rewrites
+every tagged adaptive address your DTR client is given to one of these routes, and it has no
+opt-out. A proxy that blocks them blocks every round your client sends, where before the
+upgrade the client called the payer's own address directly.
+
+**The re-key (registered edit E-12, `dtr-adaptive-address-rekey`).** An adaptive questionnaire
+names its rounds' address in its `sdc-questionnaire-questionnaireAdaptive` extension. On a
+package or `$next-question` answer your gateway relays to your DTR client, it rewrites each such
+address that the payer's gateway tagged (see
+[Adaptive questionnaire addresses](#adaptive-questionnaire-addresses-the-payers-tags-and-the-restore-payer))
+to an address under your own ingress base:
+- a `valueUrl` becomes `<ingress base>/dtr/payer/<payer>/<line>/<tag><remainder>`: only the
+  payer's base is replaced, and the remainder after it is kept byte for byte;
+- a `valueBoolean` `true` becomes `<ingress base>/dtr/fetch-server/<payer>/<line>/<tag>`.
+
+`<line>` is the DTR line the answer was carried at, and `<tag>` the payer's gateway's tag for the
+address. The ingress base is the one your CDex return paths are built under
+(`PROVIDER_DAVINCI_INGRESS_BASE_URL`), so the address is under the base your client fetched the
+package from, as DTR 2.2.0 requires. The answer carries `X-SHN-Edited:
+dtr-adaptive-address-rekey`, its `ETag` is dropped, and the exchange record lists the edit. The
+payer's signature over an address it re-keys, where there is one, no longer verifies in your
+copy. There is no opt-out: carrying the address would send your client's rounds around the
+network. The payer's gateway restores the address before its system sees it (E-13).
+
+E-12 is made only toward a payer whose gateway declares the `v1opsub` request frame. Otherwise,
+and wherever the address cannot be re-keyed exactly, it is carried as sent, and the exchange
+record's `editsNotMade` says why:
+
+| Reason | When |
+|---|---|
+| `E-12:payer-gateway-older` | The payer's gateway does not declare `v1opsub`. |
+| `E-12:not-the-rounds-address` | On a `$next-question` answer, the address is neither the payer's base nor the address the round was delivered to, so the payer's gateway did not tag it. |
+| `E-12:contained-in-package-response` | On a package answer, the address is on a Questionnaire contained in a QuestionnaireResponse, and differs from the tagged top-level entry's. |
+| `E-12:request-carried-a-questionnaire` | The package request carried a Questionnaire, so the payer's gateway tagged nothing in its answer. |
+| `E-12:not-under-base` | The payer's gateway stated no base, the address is not under it, or it gave the address no tag. A payer's gateway states nothing on a package answer at another DTR line than the one the request claims. |
+| `E-12:escaped-address` | The address is written with a JSON escape, so it could not be restored byte for byte. |
+| `E-12:base-spelled-differently` | The address is under the stated base but not spelled as it is. |
+| `E-12:unreadable-tag` | The payer's gateway's tag is not 22 base64url characters. |
+| `E-12:unclean-remainder` | The remainder after the base is not empty or `/`-separated segments of unreserved characters (a trailing slash, `.` or `..` among them). |
+| `E-12:unreadable-address` | The extension's value is neither a URL string nor a boolean. |
+| `E-12:unreadable-answer` | The answer cannot be read as JSON. |
+| `E-12:address-not-writable` | Your gateway cannot write an address of its own: its ingress base is not an absolute http or https URL without user information, query or fragment, or the payer's id or the line is not a usable path segment. |
+
+**The routes.** Your gateway serves the rounds at three routes, beside
+`POST /Questionnaire/$questionnaire-package`:
+
+| Route | Carried |
+|---|---|
+| `POST /dtr/payer/{payer}/{line}/{tag}{remainder}/Questionnaire/$next-question` | To the payer named, at the address E-12 wrote. |
+| `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | To the payer named, at its DTR base: the address E-12 makes explicit for a `true`. |
+| `POST /Questionnaire/$next-question` | Routed by the one adaptive address in this gateway's form that the round's QuestionnaireResponse carries in a contained Questionnaire, for a client that posts its rounds to the base. |
+
+A round is forwarded naming the address it was called at, and the payer's gateway delivers it
+there only when its tag verifies for your provider. Each route refuses a call as the package
+route refuses it for its credential (`401`) and its key store (`503`), and a request naming a
+module builder as the package route refuses it. A literal `.`, `..` or empty path segment is
+answered with a `307` to the cleaned path before any check, and the cleaned path faces every
+check on its own. The round's own checks follow, in the order the gateway makes them.
+
+On `/dtr/payer/…` and `/dtr/fetch-server/…`:
+1. an address naming no payer registered as a payer: `422`
+   `the adaptive address names no registered payer`, recorded as `routing`. Whether that payer
+   takes the questionnaire fetch is not checked here: the Authorization Framework decides it for
+   each round, as for the package request (below);
+2. a payer whose gateway does not accept framed DTR operations: `502`
+   `payer gateway does not support framed DTR operations (upgrade required)`, recorded as
+   `routing`, as on the package route;
+3. a payer whose gateway does not declare `v1opsub`: `422`
+   `the payer's gateway does not support adaptive addresses yet, so this round cannot be carried on the network`,
+   recorded as `routing`;
+4. an address not in the form your gateway issues (an encoded slash or traversal, a segment
+   outside the unreserved characters, a malformed or undefined line or tag): `422`
+   `the adaptive address is not one this gateway issues: …`, recorded as `routing`. A
+   fetch-server address takes no segment after its tag: such a path is not one of the three
+   routes, and is answered `404`;
+5. the body, read now: over the size limit `413` (`routing`), in a content coding the gateway
+   does not decode `415` (`integrity`).
+
+On `POST /Questionnaire/$next-question`, the body is read first (`413`, `415` as above), then:
+1. no adaptive address in this gateway's form, or one whose prefix is not your ingress base
+   exactly: `422`
+   `a $next-question round names no payer: it carries no member, order or coverage to route by. Fetch the questionnaire package through this gateway and call the questionnaireAdaptive address it returns`;
+   more than one distinct address: `422`, naming that; an address whose remainder is not clean:
+   `422`, as on `/dtr/payer/…`; each recorded as `routing`;
+2. the checks on the payer and the line the address names, as 1 to 4 above.
+
+Then, on every route, the round's patient, bound as the package route binds its patient:
+- an input that is not a QuestionnaireResponse or a Parameters carrying one: `400`
+  `parse next-question input failed`, recorded as `authority`;
+- no subject: `422`; a subject that is not a Patient reference: `403`; each recorded as
+  `authority`;
+- your system of record unavailable: its outage answer, as on the package route;
+- by default, a member number the round shares with another person it carries, and no Patient
+  for the member with a birth date and name: `400 cannot identify the patient: …`, recorded as
+  `authority` (with `REQUIRE_KNOWN_MEMBERS=true` the next bullet applies instead);
+- a patient your system of record does not hold: carried by default; with
+  `REQUIRE_KNOWN_MEMBERS=true`, `403 request patient does not resolve`, recorded as
+  `conformance`, the check you opted into;
+- a round naming more than one patient is the payload's own consistency: refused `403` at
+  `strict`, recorded and carried at `observe`, carried at `none`.
+
+Then the round is carried as the package request is: the line selection (refused for its
+lines, as `routing`, only under your own `REQUIRE_SHARED_LINE`, below); a payer whose gateway
+stopped accepting framed DTR operations (`502`, as step 2) or declaring `v1opsub` (`422`, as
+step 3) since the checks above; then the Authorization Framework's and the Hub's checks.
+Last, the payer's gateway: a tag it does not verify is its `422`
+`not an address this payer issued, or its base or key changed; fetch the package again`,
+recorded as `routing` by the payer's gateway, and relayed to your client.
+
+A round is framed at the line your gateway's line selection picks for that payer, as the
+package request is, and is never rebuilt at another. It is refused for its lines, as
+`routing`, only under your own `REQUIRE_SHARED_LINE`. The line in its address is the line the
+payer's gateway tagged the address at. The payer's gateway delivers the round at that line,
+which the tag binds, and records a round framed at another line as a line carry. The payer's answer is carried as sent and checked at your
+gateway's conformance level as the package answer is, and E-12 applies to it again.
+
+**Known limits.** A client that posts its rounds to the plain route reaches the payer only when
+its QuestionnaireResponse carries an address your gateway re-keyed: one that did not fetch the
+package through your gateway, or whose address was carried as sent (any `E-12` reason above),
+is refused. Such a client works when it calls the `questionnaireAdaptive` address the package
+gives it, as DTR asks. A Questionnaire naming two adaptive addresses cannot be routed by the
+plain route, though the client can call either address.
+
+On the hosted gateway service, the edge forwards these three routes for a provider with
+`PROVIDER_DAVINCI_INGRESS=1` from shn-gateway v1.8.0. On an older release it answers them `403`,
+as it does any route that release does not serve.
+
 ## Adaptive questionnaire addresses: the payer's tags and the restore (payer)
 
 An adaptive questionnaire names the address of its `$next-question` rounds in its
 `sdc-questionnaire-questionnaireAdaptive` extension: a `valueUrl` under your DTR base, or
 `valueBoolean` `true` for the base itself. DTR requires that address to sit under the base the
 client fetched the questionnaire from. When a provider's DTR client fetches through its gateway,
-that base is the provider's gateway. So a later provider release re-keys the address to the
-provider's gateway (registered edit E-12), and the client's rounds stay on the network. It does
-so only toward a payer's gateway that declares it restores the address: the `v1opsub` request
-frame in its registry entry. v1.7.0 does not declare it, so no provider's gateway re-keys an
-address toward yours yet. From v1.7.0 your gateway does its part, with nothing to configure:
+that base is the provider's gateway. So from v1.8.0 a provider's gateway re-keys the address to
+itself (registered edit E-12), and the client's rounds stay on the network. It does so only
+toward a payer's gateway that declares it restores the address: the `v1opsub` request frame in
+its registry entry. From v1.8.0 your gateway declares it, with the request frames it serves, in
+the capability declaration it makes to the registrar at each start; v1.7.0 does not, so no
+provider's gateway re-keys an address toward a v1.7.0 gateway. A gateway rolled back to v1.7.0
+gives the declaration back at its first start. From v1.7.0 your gateway does its part, with
+nothing to configure:
 
 - **The base and the tags.** On a 2xx answer to a framed `$questionnaire-package` or
   `$next-question` request, your gateway may state two headers inside the sealed answer frame:
@@ -2783,14 +2953,24 @@ address toward yours yet. From v1.7.0 your gateway does its part, with nothing t
   A tag binds the address to your payer, the provider the answer goes to, the IG line and the
   base. It is keyed from your gateway's own signing identity, so every replica issues and
   verifies the same tags. Nothing is stated when your gateway has no DTR base at the answer's
-  line (or only one with a query or fragment), or cannot read the answer. Your system's answer is relayed exactly as it sent it, and the
+  line (or only one with a query or fragment), or cannot read the answer. From v1.8.0, nothing
+  is stated on a package answer at another DTR line than the one the request claims (a claim
+  your gateway cannot answer as claimed, answered at the line its selection gives): a tag binds
+  the line it was issued at, and the provider's gateway writes the claimed line into the
+  address, so every round would be refused. The address is carried as sent instead, and the
+  client calls your system directly, as without the re-key. A request your gateway carries but
+  answers at the line it claims (a declared line with no ready lane) is tagged as usual, and a
+  round's answer is tagged at its own address's line whatever line the round claims. Your system's answer is relayed exactly as it sent it, and the
   headers ride the frame beside it, never reaching the provider's EHR.
 - **Rounds.** A `$next-question` round a provider's gateway sends naming an address
   (`operationSubpath`) is delivered at that address, under your base, only when its tag
   verifies for that provider. Otherwise it is refused
   `422 not an address this payer issued, or its base or key changed; fetch the package again`,
   recorded as `routing`, and nothing reaches your system. A package request naming an address is
-  refused `400`, recorded as `integrity`.
+  refused `400`, recorded as `integrity`. From v1.8.0, a round framed at another line than its
+  address names is delivered at the address's line, which the tag binds, and the difference is
+  recorded (the `contract.line-carried` event, and `request` in the exchange record's
+  `LineCarried`); it is not refused.
 - **The restore (registered edit E-13, `dtr-adaptive-address-restore`).** Before your gateway
   forwards a `dtr-questionnaire-fetch`, `cdex-attachment-submit`, `pas-claim`, `pas-claim-update`
   or `pas-claim-inquire` request to your system, it restores each adaptive address in it that:
@@ -2814,9 +2994,10 @@ carried as sent, and the exchange record's `editsNotMade` says why:
 
 A request your gateway cannot read as JSON never reaches the restore: each of these legs reads
 the request first and refuses one it cannot read, `400`, before anything is forwarded. So no
-E-13 reason is recorded for it. Until a provider's gateway re-keys an address, a request
-carries none to restore, and none of these is recorded unless a request carries a string in
-the re-keyed form naming your payer from elsewhere.
+E-13 reason is recorded for it. Until a provider's gateway re-keys an address toward yours,
+which needs v1.8.0 on both sides, a request carries none to restore, and none of these is
+recorded unless a request carries a string in the re-keyed form naming your payer from
+elsewhere.
 
 An address in the re-keyed form that names another payer is carried as sent and observed as the
 `dtr.adaptive-address-carried` event. The event carries its kind, direction, leg and correlation
@@ -3303,7 +3484,11 @@ a PAS 2.1 or 2.2 request Bundle that declares its profile) or that read no paylo
 whose errors are a regex check it could not run (`TYPE_SPECIFIC_CHECKS_DT_PRIMITIVE_REGEX_EXCEPTION`,
 which a validator reports on a value that matches its type when a regex overruns its time limit; or, from v1.2.0, `REGEX_MATCH_TIMED_OUT`, for a regex a profile sets), alone or with the
 unchecked terminology above and the no-match summaries on those entries: `unavailable`, with
-`error` `a primitive regex check could not run` (after the terminology reason when there is one). Any other error
+`error` `a primitive regex check could not run` (after the terminology reason when there is one). From v1.8.0 so is a lane
+whose errors say it does not hold a profile the payload declares (`VALIDATION_VAL_PROFILE_UNKNOWN_NOT_POLICY` on the
+payload's own `meta.profile` element, read so on its own, with any `Validation_VAL_Profile_Unknown` for the same profile), alone or with the causes above (a no-match summary or PAS slice-match consequence on an entry follows only from the unchecked terminology or regex check on that entry, never from such a profile, so beside only such a profile it keeps the line `invalid`): `unavailable`, with
+`error` `profile unavailable: <profiles>` (at most two named, as a finding names them), or, beside another cause,
+`profiles unavailable: <count>` after the terminology reason and before the regex one. A profile another candidate line's lane held was checked there: at the line that lacks it, it keeps the line `invalid`. Any other error
 keeps it `invalid`: a structural error, a failed invariant, a code the validator checked and did not
 find (`Unknown code`), a required-binding miss on a code system it holds or under a value set
 it could expand (a code from a system it does not know, where the value set is drawn from

@@ -51,43 +51,65 @@ const (
 
 // dtrAnswerAt checks answer at line against the DTR output Parameters profile,
 // read as SHN's own evidence for E-08, not as a judgment of the payer's answer:
-// it runs at every conformance level and records no finding.
-func (g *Gateway) dtrAnswerAt(ctx context.Context, answer []byte, line string) dtrLineEvidence {
+// it runs at every conformance level and records no finding. A line whose
+// lane answered and found the answer invalid gives its result to read
+// (dtrAnswerSourceLine reads it beside the other lines').
+func (g *Gateway) dtrAnswerAt(ctx context.Context, answer []byte, line string) (dtrLineEvidence, shnsdk.Result, bool) {
 	v, qualifying := g.candidateLaneAt("pa.dtr", line)
 	if qualifying {
-		return dtrLineUnchecked
+		return dtrLineUnchecked, shnsdk.Result{}, false
 	}
 	if v == nil {
-		return dtrNotAtLine
+		return dtrNotAtLine, shnsdk.Result{}, false
 	}
-	req, profile := validateRequest(answer, dtrOutputParametersProfile)
+	askCtx, req, profile := validateRequestAsking(ctx, answer, dtrOutputParametersProfile)
 	start := g.exchangeClock()
-	res, err := v.Validate(ctx, req, profile)
+	res, err := v.Validate(askCtx, req, profile)
 	g.routingValidatorTook(line, g.exchangeClock().Sub(start))
 	switch {
 	case err != nil:
-		return dtrLineUnchecked
+		return dtrLineUnchecked, shnsdk.Result{}, false
 	case res.Valid:
-		return dtrAtLine
-	case classifyFHIR(res, answer, line, dtrOutputParametersProfile) == VerdictUnavailable:
-		return dtrLineUnchecked
+		return dtrAtLine, res, true
 	}
-	return dtrNotAtLine
+	return dtrNotAtLine, res, true
 }
 
 // dtrAnswerSourceLine is the line of answer's own name family it validates at,
 // trying the line the payer was routed at first, with dtrAtLine. A line whose
 // check could not run ends the search with dtrLineUnchecked: the source line is
-// then unknown, and a later line that validates would be a guess at it.
+// then unknown, and a later line that validates would be a guess at it. A line
+// whose lane only lacked a profile the answer declares does not end it: a line
+// whose lane holds that profile (another line's, say) is tried, and the line
+// that lacked it is not the answer's line (classifyAtLines); only when no line
+// that judged the answer held it is the check one that could not run.
 // dtrNotAtLine when it validates at none.
 func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family dtrNameFamily, payerLine string) (string, dtrLineEvidence) {
 	lines := dtrFamilyLines(family)
 	if i := slices.Index(lines, payerLine); i > 0 {
 		lines = append([]string{payerLine}, slices.Delete(slices.Clone(lines), i, i+1)...)
 	}
+	var readLines []string
+	var results []shnsdk.Result
 	for _, line := range lines {
-		if evidence := g.dtrAnswerAt(ctx, answer, line); evidence != dtrNotAtLine {
-			return line, evidence
+		evidence, res, answered := g.dtrAnswerAt(ctx, answer, line)
+		switch {
+		case evidence == dtrAtLine:
+			return line, dtrAtLine
+		case evidence == dtrLineUnchecked:
+			return line, dtrLineUnchecked
+		case !answered:
+			continue
+		}
+		readLines, results = append(readLines, line), append(results, res)
+		if verdicts, lacking := classifyAtLines(readLines, results, answer, dtrOutputParametersProfile); verdicts[len(results)-1] == VerdictUnavailable && !lacking[len(results)-1] {
+			return line, dtrLineUnchecked
+		}
+	}
+	verdicts, _ := classifyAtLines(readLines, results, answer, dtrOutputParametersProfile)
+	for i, v := range verdicts {
+		if v == VerdictUnavailable {
+			return readLines[i], dtrLineUnchecked
 		}
 	}
 	return lines[0], dtrNotAtLine

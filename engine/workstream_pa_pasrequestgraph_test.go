@@ -186,7 +186,7 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 									t.Fatal(e)
 								}
 							}
-							policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs)
+							policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef)
 							if err != nil {
 								t.Fatal("source verification", err)
 							}
@@ -238,7 +238,7 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 							if _, err := retainPASRequestEvidenceWithPolicy(context.Background(), bad, read, policy); err == nil {
 								t.Fatal("same literal outside optional occurrence accepted")
 							}
-							if _, err := authoredPASReferencePolicyFor(bad, in.QR, in.SR, in.CoverageRef, in.AbsoluteRefs); err == nil {
+							if _, err := authoredPASReferencePolicyFor(bad, in.QR, in.SR, in.CoverageRef); err == nil {
 								t.Fatal("post-build source mutation accepted")
 							}
 						}
@@ -311,7 +311,7 @@ func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef, false)
+	policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestAuthoredPASOptionalContextKeepsNestedReferencesStrict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef, false)
+			policy, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -443,7 +443,7 @@ func TestAuthoredPASOptionalContextNeedsActiveIdentities(t *testing.T) {
 			if err != nil {
 				t.Fatal("assembly fixture", err)
 			}
-			if _, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef, false); err == nil {
+			if _, err := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef); err == nil {
 				t.Fatal("optional policy accepted missing active administrative identity")
 			}
 		})
@@ -474,7 +474,7 @@ func TestAuthoredPASOptionalPolicyRejectsDotSegments(t *testing.T) {
 						t.Fatal("assembly fixture", err)
 					}
 					reads := 0
-					policy, policyErr := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef, false)
+					policy, policyErr := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef)
 					reject := id == "." || id == ".."
 					if policyErr != nil {
 						if !reject || policyErr.Error() != "invalid optional order identity" {

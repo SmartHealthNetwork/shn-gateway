@@ -300,3 +300,24 @@ func FindIssued(value string) (Issued, bool) {
 	}
 	return Issued{}, false
 }
+
+// IssuedURL is the address the provider's gateway writes for an address the
+// payer's gateway issued: under its own ingress base,
+// "/dtr/<family>/<payer>/<line>/<tag><remainder>", the payer's participant id
+// path-escaped. The ingress base must be an absolute http or https URL with
+// no user information, query or fragment, as the CDex return paths require,
+// and the payer id a usable path segment.
+func IssuedURL(ingressBase, family, payer, line, tag, remainder string) (string, error) {
+	u, err := url.Parse(ingressBase)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || strings.ContainsAny(ingressBase, "?#") {
+		return "", errors.New("dtraddress: the ingress base is not an absolute http or https URL without user information, query or fragment")
+	}
+	if payer == "" || payer == "." || payer == ".." || strings.ContainsFunc(payer, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return "", errors.New("dtraddress: the payer id is not a usable path segment")
+	}
+	if (family != FamilyPayer && family != FamilyFetchServer) || !ValidLine(line) || !ValidTag(tag) || !CleanRemainder(remainder) ||
+		(family == FamilyFetchServer && remainder != "") {
+		return "", errors.New("dtraddress: not an issued address's family, line, tag and remainder")
+	}
+	return strings.TrimRight(ingressBase, "/") + "/dtr/" + family + "/" + url.PathEscape(payer) + "/" + line + "/" + tag + remainder, nil
+}

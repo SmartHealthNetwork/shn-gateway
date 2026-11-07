@@ -86,9 +86,14 @@ evolving.
   - **E-12 (`dtr-adaptive-address-rekey`):** on the `dtr-questionnaire-fetch`
     answers a provider's gateway relays to its own DTR client, the provider's
     gateway re-keys that address to its own per-payer address, so that the
-    client's `$next-question` rounds stay on the network. It is made from the
-    release that turns it on, and only toward a payer's gateway that declares
-    it restores the address. v1.7.0 does not make it.
+    client's `$next-question` rounds stay on the network. It is made from
+    v1.8.0, and only toward a payer's gateway that declares it restores the
+    address (the `v1opsub` request frame), as a payer's gateway does from
+    v1.8.0. v1.7.0 does not make it. **Upgrade note:** E-12 has no opt-out.
+    A provider whose own proxy, WAF or load balancer admits only the routes
+    earlier releases served must admit the three round routes (Endpoints)
+    at its ingress base before upgrading to v1.8.0, or every round its DTR
+    client sends is blocked there.
   - **E-13 (`dtr-adaptive-address-restore`):** on the requests a payer's gateway
     forwards to its own system on `dtr-questionnaire-fetch` (the package and
     `$next-question`), `cdex-attachment-submit`, `pas-claim`,
@@ -861,6 +866,11 @@ once for each role, as `PATTERN (ROLE)`, and classed by that role's workstream.
 From shn-gateway v1.7.0, `POST /Task` is the one: a provider's federated query
 and a payer's attachment-request Task.
 
+From shn-gateway v1.8.0, a provider's gateway serves DTR's adaptive rounds at
+`POST /Questionnaire/$next-question`, `POST /dtr/payer/{payer}/{rest...}` and
+`POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question`,
+and its ingress CapabilityStatement at `GET /metadata` lists `$next-question`.
+
 The main listener, on `HOST` and `PORT`:
 
 | Item | Class | Owner |
@@ -873,6 +883,9 @@ The main listener, on `HOST` and `PORT`:
 | `GET /cds-services` | PA workstream | PA workstream |
 | `POST /cds-services/{id}` | PA workstream | PA workstream |
 | `POST /Questionnaire/$questionnaire-package` | PA workstream | PA workstream |
+| `POST /Questionnaire/$next-question` | PA workstream | PA workstream |
+| `POST /dtr/payer/{payer}/{rest...}` | PA workstream | PA workstream |
+| `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | PA workstream | PA workstream |
 | `POST /Claim/$submit` | PA workstream | PA workstream |
 | `POST /Claim/$inquire` | PA workstream | PA workstream |
 | `POST /CoverageEligibilityRequest/$submit` | PA workstream, evolving | PA workstream |
@@ -972,9 +985,16 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   Patient your system holds the member under to `Patient/<member id>`, and
   only when the report names that Patient.
 - The amendment is a bundle the gateway builds with the SDK's PAS update
-  builder, which, as before, gives the report its bundle-local id, drops its
-  `meta.profile` and re-encodes it (member order and whitespace) as it places
-  it in the bundle.
+  builder. From shn-gateway v1.8.0 it carries the report as it reaches the
+  build, apart from E-06: under the id your system holds it by, with its
+  `meta` (`meta.profile` included), member order and whitespace as written, at
+  an entry whose `fullUrl` is built from that id, so the references in it
+  resolve in the bundle under FHIR R4's Bundle rules. A report with no id is
+  refused before the build, `500 supplemental report missing id`, as before;
+  one whose id is not a FHIR id is refused by the build (`422`, the fidelity of
+  the gateway's own build). Either way no amendment is sent. Releases before
+  v1.8.0 gave the report a bundle-local id, dropped its `meta.profile` and
+  re-encoded it (member order and whitespace) as they placed it in the bundle.
 - The amendment is refused, and no amendment is sent, when the report has no
   `subject.reference` (`422 supplemental report names no subject.reference`);
   names any other subject (`422 supplemental report's subject is not the
@@ -991,6 +1011,75 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   as your system holds it. A connector whose system holds the patient under
   the member id, and returns the report naming `Patient/<member id>`, is
   unaffected.
+
+### The facility's report on an amendment the gateway builds
+
+**Evolving (v1.0):** amendments the gateway builds are module 1's (`module 1`).
+
+**Behavior change in shn-gateway v1.8.0.**
+
+- When the gateway attaches a facility's report, read on the federated-query leg,
+  to a PAS amendment it builds (UC-05), the only change it makes to the report's
+  content is registered edit E-14 (`facility-report-subject-rekey`): the report's
+  `subject.reference` is replaced with the Claim's patient reference. The rest of
+  the report, the `display`, `identifier` and `type` of its `subject` included, is
+  the facility's as it reaches the build. Releases before v1.8.0 replaced the whole
+  `subject` with `{"reference":<the Claim's patient>}`, dropping its other members,
+  and named no edit.
+- The amendment is a bundle the gateway builds with the SDK's PAS update builder,
+  which carries the report and the facility's Provenance as they reach the build,
+  apart from E-14: under the facility's own ids, with their `meta` (`meta.profile`
+  included), member order and whitespace as written, each at an entry whose
+  `fullUrl` is built from its own id, and the Provenance's `target` as the facility
+  wrote it. A report or Provenance the build cannot carry so is refused (`422`,
+  the fidelity of the gateway's own build), and no amendment is sent: one with
+  no id (the gateway never mints one), one that is not exactly one JSON object
+  (a member named twice or spelled in another case among them), one that is not
+  UTF-8 or holds a lone surrogate escape, or one past the build's own limits
+  (16 MiB, nesting 64 deep, 1,000,000 JSON tokens). The provider's gateway writes no reference of the
+  bundle in absolute form for any payer: the references resolve under FHIR R4's
+  Bundle rules. Releases before v1.8.0 gave the report and the Provenance bundle-local
+  ids (the Provenance's `target` rewritten to match), dropped their
+  `meta.profile`, re-encoded them (member order and whitespace) and, on the
+  origination profiles that relay the reference payer's bytes, wrote the bundle's
+  references, the report's `subject.reference` among them, in absolute form, so a
+  signature over the report or that Provenance no longer verified in the
+  amendment, whether or not E-14 was made. A facility's Provenance whose `target` is
+  version specific (`DiagnosticReport/<id>/_history/<version>`) is now carried so; a
+  payer's gateway before v1.8.0 reads no version-specific target, so at `strict` it
+  refuses that amendment (`pas.update-provenance`), where earlier requesters had
+  rewritten the target to the report's bundle-local id.
+- The edit is made only once the report, and the Provenance that attributes it,
+  are shown to be about the Claim's patient, as before: the report's subject names
+  the member directly, or through a Patient the facility carried with the member
+  identifier. A report about anyone else is refused, as before, with no edit made
+  (`422`, the fidelity of the gateway's own build).
+- A report whose `subject.reference` is exactly the Claim's patient reference is
+  carried as the facility wrote it, and so is one whose `subject` names the member by
+  identifier alone, with no `reference`. Releases before v1.8.0 turned such a
+  subject into a reference.
+- A report a signature covers (a `Signature` in the report, a signed `Provenance`
+  it contains that targets it, or the facility's signed `Provenance` that
+  attributes it) is refused when the edit would change it, `422 signed content
+  cannot be edited (E-14, <carrier>)`, and no amendment is sent. A signed report
+  already naming the Claim's patient needs no edit and is carried as the facility
+  wrote it, as above.
+- The access line's `relayEdits` and `requestEdits` name `E-14` on an amendment
+  that carries a report E-14 changed. The amendment stays `ownership: authored`
+  with its `builder`, since E-14 is made to the report before the build.
+- The facility's Provenance is carried with its `target` exactly as the facility
+  wrote it, whatever it names: the provider's gateway never rewrites or judges it.
+  Whether it names the report is the payer's content check (`pas.update-provenance`):
+  exactly `DiagnosticReport/<id>` or exactly the report's entry `fullUrl`, either
+  one version specific (`…/_history/<version>`) only at the report's own
+  `meta.versionId`. The report rides under its own id at the amendment's base, so a
+  `target` written as the facility's own `fullUrl` (its server's, or the federated
+  query's `urn:shn:fedquery:<n>`) names no entry of the amendment and the payer's
+  check reads it so. Releases before v1.8.0 rewrote the `target` to the report's
+  bundle-local id, whatever it named.
+- **Compatibility:** a payer whose own system cannot resolve relative references
+  sees its own system's refusal, carried as sent, for a request a provider's
+  gateway from v1.8.0 builds.
 
 ### The evidence a provider-data request carries
 
@@ -1013,6 +1102,35 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   `Patient/<member id>` while your system holds the member under another id was carried.
   In your system's own numbering that is another record, so it is now refused.
 - A system that holds the member's Patient under the member id is unaffected.
+- From v1.8.0 every PAS submission and amendment the gateway builds is checked once,
+  right after the build, for two edits of its own build that cannot be made, each
+  refused `422`, the fidelity of the gateway's own build, with nothing sent. First, a
+  record the build addresses by its own `resourceType` and `id` (the Coverage, the
+  payer's Organization, the Claim's provider) that states either only in another
+  spelling (`"ID"`, say), or any record whose `resourceType` is spelled so: such a
+  record has no FHIR id, and the build would address it by an id the participant never
+  gave (`it states its resourceType or id only in another spelling`). Second, a record
+  the build gives an id of its own (the order, the QuestionnaireResponse, and the
+  Provenance of an amendment with no report) that spells its id another way, alone or
+  beside its own `id`: the build's id would sit beside that spelling, in a body the
+  network's message integrity does not seal, since it can be read two ways (`the build's
+  own id for it cannot be set beside the id it spells another way`). Once the build
+  carries these records as written, a lone member spelled so is carried. Each message
+  follows `422 a record read from the system of record cannot be carried as read: `.
+  Earlier releases, depending on the request, built and sent such a request or answered
+  it as the gateway's own `500`. A person the Coverage names spelled so is, as before,
+  refused `422` by the build's own party read.
+- From v1.8.0 the records the gateway adds to a request it built (these clinical
+  records, the records the order's requester leads to and a dispatched supplier, each
+  where the request does not already hold it, as the Claim's provider, which the build
+  re-encodes, say) are spliced into the request's bytes as read. One that reaches the
+  splice and cannot be carried as read (one that is not exactly one JSON object, is not
+  UTF-8 or holds a lone surrogate escape, or names a member twice whatever its case; an
+  order's requester or a dispatched supplier with no `resourceType` or `id` spelled
+  exactly) is refused `422 a record read from the system of record cannot be carried as
+  read: <why>`, the fidelity of the gateway's own edit, and the claim is not sent. Most
+  such records are answered earlier, as in earlier releases, by the read that takes them
+  from your system or by E-06.
 - From v1.7.0 the access line's `relayEdits` names `E-06` on a request the gateway built
   that carries a record E-06 re-pointed, these records or the supplemental report an
   update carries. The request stays `ownership: authored` with its `builder`, since E-06

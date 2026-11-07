@@ -268,7 +268,7 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	case err != nil:
 		detail = "validator unavailable"
 	case res.Valid:
-	case classifyFHIR(res, resourceJSON, "", profile) == VerdictUnavailable:
+	case classifyDeclaredVerdict(findingContextFrom(ctx), res, validatedBody(resourceJSON), askedProfile(ctx, profile)) == VerdictUnavailable:
 		detail = "validator unavailable"
 	default:
 		detail = "invalid"

@@ -19,9 +19,9 @@ const EditedHeader = "X-SHN-Edited"
 
 // headerDisclosedEdits are the registered edits EditedHeader names: the PAS
 // pend's and the attachment-request Task's return-path re-keys, and the
-// adaptive address's restore, made even on signed content, so a failed
-// signature check on the participant's side has an explanation.
-var headerDisclosedEdits = []relay.EditID{relay.EditPASPendReturnRekey, relay.EditCDexTaskReturnRekey, relay.EditDTRAdaptiveAddressRestore}
+// adaptive address's re-key and restore, made even on signed content, so a
+// failed signature check on the participant's side has an explanation.
+var headerDisclosedEdits = []relay.EditID{relay.EditPASPendReturnRekey, relay.EditCDexTaskReturnRekey, relay.EditDTRAdaptiveAddressRekey, relay.EditDTRAdaptiveAddressRestore}
 
 // setEditedHeader adds EditedHeader for each disclosed edit p carries.
 func setEditedHeader(h http.Header, p relay.Payload) {

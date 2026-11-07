@@ -66,7 +66,7 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// system is not the one asking. The participant's own inquiry is carried,
 		// not authored, and has its own row above.
 		k("pas-claim-inquire", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated): {Allowed: paAuthored, Builders: []relay.BuilderID{relay.BuilderSDKPASInquiry}},
-		k("pas-claim-update", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):  {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASUpdate}, InputEdits: paEvidenceInputEdits},
+		k("pas-claim-update", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):  {Allowed: paAuthoredOrTransformed, Edits: paTransform, Builders: []relay.BuilderID{relay.BuilderSDKPASUpdate}, InputEdits: paUpdateInputEdits},
 
 		// Requester to its participant's system: the recipient's answer,
 		// exactly as it arrived, apart from one IG-line bridge.
@@ -74,8 +74,10 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		k("crd-order-select", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):   {Allowed: paRelayed},
 		// A questionnaire package answer from another DTR line reaches the
 		// requester's system under its own line's parameter names.
+		// Its adaptive addresses are re-keyed to the network (E-12).
 		k("dtr-questionnaire-fetch", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: []relay.EditID{relay.EditDTRAnswerLineNames},
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
+			Edits:   []relay.EditID{relay.EditDTRAnswerLineNames, relay.EditDTRAdaptiveAddressRekey},
 		},
 		// A PAS answer reaches the requester's system with a pend's
 		// documentation return address re-keyed to the network.
@@ -170,6 +172,9 @@ var (
 	// carry a record from the participant's own system E-06 re-pointed
 	// (relay.InputEdited).
 	paEvidenceInputEdits = []relay.EditID{relay.EditEvidenceSubjectRekey}
+	// paUpdateInputEdits: a PAS update the gateway builds may also carry a
+	// facility's report E-14 re-pointed at the Claim's patient.
+	paUpdateInputEdits = []relay.EditID{relay.EditEvidenceSubjectRekey, relay.EditFacilityReportSubjectRekey}
 	// paPayerIdentityMapped is a request relayed exactly or with the payer
 	// identity mapped.
 	paPayerIdentityMapped = []relay.EditID{relay.EditPayorEdgeRestamp}

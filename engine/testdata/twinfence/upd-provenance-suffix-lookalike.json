@@ -1,7 +1,7 @@
 {
   "name": "upd-provenance-suffix-lookalike",
   "family": "update-bind",
-  "description": "A longer resource-type name ending in the wanted type/id must not satisfy the suffix tolerance.",
+  "description": "A longer resource-type name ending in the wanted type/id is another resource: a target names the supplemental data only as exactly \u003ctype\u003e/\u003cid\u003e or exactly the entry's own fullUrl (either version specific only at the resource's own meta.versionId).",
   "expect": "reject",
   "rejectContains": "ClaimUpdate Provenance does not target the supplemental data",
   "rejectStatus": 403,

@@ -106,8 +106,8 @@ func TestHTTPServerBound_MON_R18(t *testing.T) {
 	if got := HTTPServerRequestDuration.SeriesBound(); got != want || HTTPStatusErrorPairs() != pairs {
 		t.Errorf("bound %d with %d status and error pairs, want %d with %d", got, HTTPStatusErrorPairs(), want, pairs)
 	}
-	if routes != 76 || len(HTTPStatusCodes) != 900 || want != 730208 {
-		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 76, 900 and 730208", routes, len(HTTPStatusCodes), want)
+	if routes != 79 || len(HTTPStatusCodes) != 900 || want != 759032 {
+		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 79, 900 and 759032", routes, len(HTTPStatusCodes), want)
 	}
 }
 

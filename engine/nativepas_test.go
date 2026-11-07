@@ -107,7 +107,7 @@ func TestNativeSubmit_ConformantRecordsTheDecision(t *testing.T) {
 func serviceRequestSubmitBundle(t *testing.T, infoChanged bool) []byte {
 	t.Helper()
 	sr := []byte(`{"resourceType":"ServiceRequest","id":"sr-x","status":"active","intent":"order","subject":{"reference":"Patient/MBR-COVERED"},"code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"72148","display":"MRI lumbar spine w/o contrast"}]}}`)
-	b, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+	b, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage("MBR-COVERED"), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 		Provider:       testRequestingProvider(),
 		MemberIDSystem: shnsdk.MemberSystem,
 		SR:             sr, PatientRef: "Patient/MBR-COVERED", CoverageRef: "Coverage/MBR-COVERED", MemberID: "MBR-COVERED",
@@ -169,7 +169,7 @@ func loadDeniedClaimResponseBytes(t *testing.T) []byte {
 // TestNativeUpdate_ApprovedFinalizes is the CONFORMANT native update responder
 // (handlePASClaimUpdateNative, the pas-claim-update leg) — the Phase-B analog of
 // TestNativePAS_Update. It drives a CONFORMANT amended re-POST bundle (built by
-// shnsdk.BuildConformantClaimUpdateBundleExact; related[prior] read via parseConformantPASUpdateFacts,
+// shnsdk.BuildConformantClaimUpdateBundleCarried; related[prior] read via parseConformantPASUpdateFacts,
 // NOT the strict ParseClaimBundle the minimized leg uses) through the native-forward path and
 // proves the shadow FinalizeClaimUpdate survived the convergence: approved → verbatim + Finalize
 // Commit + armed Rollback; partner-500-after-Begin → relayed + Rollback (no strand); no prior
@@ -306,9 +306,9 @@ func TestNativeUpdate_AmendAfterResolution(t *testing.T) {
 		name   string
 		bundle func() []byte
 	}{
-		{"an amendment that asked for re-evaluation", func() []byte { return originatorBuiltConformantUpdateBundleProfile(t, true) }},
+		{"an amendment that asked for re-evaluation", func() []byte { return originatorBuiltConformantUpdateBundle(t) }},
 		{"a carry-forward amendment", func() []byte {
-			return stripInfoChangedExtension(t, originatorBuiltConformantUpdateBundleProfile(t, true))
+			return stripInfoChangedExtension(t, originatorBuiltConformantUpdateBundle(t))
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {

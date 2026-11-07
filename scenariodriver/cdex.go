@@ -42,24 +42,14 @@ func FacilityCDexEvidence(member string, now time.Time) (drJSON, provJSON []byte
 	// Source Provenance: targets the disclosed DiagnosticReport, agent = the facility, .policy
 	// cites a consent ref, reason = TREAT. The known holder identity is logical,
 	// matching the facility responder; no Organization resource is invented.
-	prov, err := shnsdk.BuildProvenanceWithIdentifier("DiagnosticReport/dr-uc05-operative",
-		shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "metro-spine"}, now)
+	prov, err := shnsdk.BuildProvenanceRecord(shnsdk.ProvenanceInputs{
+		Target:          "DiagnosticReport/dr-uc05-operative",
+		AgentIdentifier: &shnsdk.ProvenanceIdentifier{System: "http://smarthealth.network/ids/holder", Value: "metro-spine"},
+		// Policy and purpose remain the original CDex disclosure context (FR-32).
+		Policy: "Consent/uc05-treat", PurposeOfUse: shnsdk.PurposeTreatment, Recorded: now,
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("build facility Provenance: %w", err)
-	}
-
-	// Policy and purpose remain the original CDex disclosure context (FR-32).
-	var source map[string]json.RawMessage
-	if err = json.Unmarshal(prov, &source); err != nil {
-		return nil, nil, err
-	}
-	source["policy"], _ = json.Marshal([]string{"Consent/uc05-treat"})
-	source["reason"], _ = json.Marshal([]any{map[string]any{"coding": []any{map[string]string{
-		"system": "http://terminology.hl7.org/CodeSystem/v3-ActReason", "code": shnsdk.PurposeTreatment,
-	}}}})
-	prov, err = json.Marshal(source)
-	if err != nil {
-		return nil, nil, err
 	}
 
 	inner, err := shnsdk.BuildRecordsBundle([][]byte{dr, docref, prov})

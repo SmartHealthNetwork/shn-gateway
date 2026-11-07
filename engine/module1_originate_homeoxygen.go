@@ -330,7 +330,9 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// the store-resolvable Patient ref: the system of record's, read for the CRD request.
 	subjectFHIRRef := "Patient/" + recs.sorID
 	authored := g.cfg.Clock()
-	qrJSON, _, err := g.populator().Populate(ctx, packageJSON, PopulateContext{
+	populator := g.populator()
+	own := ownEngine(populator)
+	qrJSON, _, err := populator.Populate(ctx, packageJSON, PopulateContext{
 		Member:         member,
 		PatientRef:     patientRef,
 		SubjectFHIRRef: subjectFHIRRef,
@@ -363,13 +365,13 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	ctx = withFindingContext(ctx, findingContext{
 		LegType: "dtr-questionnaire-fetch", CorrelationID: dtrCorr, Seam: "originate", Whose: "own",
 	})
-	if status, msg := g.validateFHIRForContract(ctx, qrJSON, "egress", "pa.dtr", dtrLine, baseQRProfile); status != 0 {
+	if status, msg := g.validateFHIRForContract(withOwnDeclaredProfiles(ctx, own), qrJSON, "egress", "pa.dtr", dtrLine, baseQRProfile); status != 0 {
 		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return dispatchResult{}, false
 	}
 
-	source := newRawDTRBuildSource(qrJSON, questionnaireJSON, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef, Authored: authored})
-	qrJSON, status, msg = g.completeDTRContext(ctx, qrJSON, dtrLine, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef})
+	source := newRawDTRBuildSource(qrJSON, questionnaireJSON, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef, Authored: authored}, own)
+	qrJSON, status, msg = g.completeDTRContext(ctx, qrJSON, dtrLine, shnsdk.QRContext{PatientRef: patientRef, CoverageRef: coverageRef, OrderRef: orderRef}, source.declaresOwn())
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
 		return dispatchResult{}, false

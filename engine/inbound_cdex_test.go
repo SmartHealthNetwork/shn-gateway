@@ -452,6 +452,89 @@ func TestCDexEvidence_ReportAndItsProvenance(t *testing.T) {
 	}
 }
 
+// The facility's Provenance is found by the rule a payer reads a target by
+// (shnsdk.ProvenanceTargetNames), against the facility's own records Bundle:
+// "DiagnosticReport/<id>" or exactly the report entry's fullUrl there, version
+// specific only at the report's own meta.versionId. A reference under another
+// base, or naming a version the report does not carry, names no entry of that
+// Bundle, so no Provenance attributes the report.
+func TestCDexEvidence_TheProvenanceByTheTargetRule(t *testing.T) {
+	const reportURL = "https://facility.example/fhir/DiagnosticReport/dr-v"
+	report := `{"resourceType":"DiagnosticReport","id":"dr-v","meta":{"versionId":"4"},"status":"final","code":{"text":"op"},"effectiveDateTime":"2026-01-02"}`
+	records := func(target string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` +
+			`{"fullUrl":"` + reportURL + `","resource":` + report + `},` +
+			`{"fullUrl":"https://facility.example/fhir/Provenance/p1","resource":{"resourceType":"Provenance","id":"p1","target":[{"reference":"` + target + `"}]}}]}`)
+	}
+	for _, row := range []struct {
+		target string
+		found  bool
+	}{
+		{"DiagnosticReport/dr-v", true},
+		{"DiagnosticReport/dr-v/_history/4", true},
+		{reportURL, true},
+		{reportURL + "/_history/4", true},
+		{"DiagnosticReport/dr-v/_history/3", false},
+		{"https://elsewhere.example/fhir/DiagnosticReport/dr-v", false},
+		{"https://facility.example/fhir/SupplementalDiagnosticReport/dr-v", false},
+	} {
+		ev, err := cdexEvidenceEntries(records(row.target))
+		if found := err == nil && ev.provenanceEntry == 1; found != row.found {
+			t.Errorf("target %q: found %v (%v), want %v", row.target, found, err, row.found)
+		}
+	}
+	// The amendment carries the target as written and places the report at its
+	// own entry under the amendment's base, so a target written as the
+	// facility's own fullUrl, which named the report in the facility's records,
+	// names no entry of the amendment: the payer's content check reads it so.
+	// The relative form names the report in both. Whether a carried facility
+	// report should ride under the facility's own fullUrl is an open question,
+	// tracked with the platform's issues.
+	amendment := func(target string) conformantUpdateFacts {
+		return conformantUpdateFacts{provenanceJSON: []byte(`{}`), provenanceAgents: []string{"Organization/metro-spine"},
+			provenanceTargets: []string{target}, hasDR: true, diagnosticReportID: "dr-v", diagnosticReportVersion: "4",
+			diagnosticReportFullURL: "https://shn.example/fhir/DiagnosticReport/dr-v"}
+	}
+	if updateProvenanceDefect(amendment(reportURL)) == "" {
+		t.Error("the facility's own fullUrl named the report entry of the amendment")
+	}
+	if why := updateProvenanceDefect(amendment("DiagnosticReport/dr-v/_history/4")); why != "" {
+		t.Errorf("the relative target: %q, want it to name the report in the amendment too", why)
+	}
+	// Two Provenances attribute the report, one by the relative form and one at
+	// the facility's own fullUrl: the one whose target also names the report in
+	// the amendment is taken, in either order, never the one the payer's
+	// content check reads as attributing nothing there.
+	two := func(first, second string) []byte {
+		prov := func(id, target string) string {
+			return `{"fullUrl":"https://facility.example/fhir/Provenance/` + id + `","resource":{"resourceType":"Provenance","id":"` + id + `","target":[{"reference":"` + target + `"}]}}`
+		}
+		return []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` +
+			`{"fullUrl":"` + reportURL + `","resource":` + report + `},` + prov("p1", first) + `,` + prov("p2", second) + `]}`)
+	}
+	for _, row := range []struct {
+		first, second string
+		want          int
+	}{
+		{"DiagnosticReport/dr-v", reportURL, 1},
+		{reportURL, "DiagnosticReport/dr-v", 2},
+		{reportURL + "/_history/4", "DiagnosticReport/dr-v/_history/4", 2},
+		{"DiagnosticReport/dr-v", "DiagnosticReport/dr-v/_history/4", 2},
+		{reportURL, reportURL + "/_history/4", 2},
+	} {
+		ev, err := cdexEvidenceEntries(two(row.first, row.second))
+		if err != nil || ev.provenanceEntry != row.want {
+			t.Errorf("targets %q then %q: entry %d (%v), want %d", row.first, row.second, ev.provenanceEntry, err, row.want)
+		}
+	}
+	// A target is read by its exact member name, as the payer reads it: a
+	// "Target" names nothing, so it never makes the pick.
+	spelled := bytes.Replace(two("DiagnosticReport/dr-v", reportURL), []byte(`"id":"p1","target"`), []byte(`"id":"p1","Target"`), 1)
+	if ev, err := cdexEvidenceEntries(spelled); err != nil || ev.provenanceEntry != 2 {
+		t.Errorf("a \"Target\" beside an exact target: entry %d (%v), want 2", ev.provenanceEntry, err)
+	}
+}
+
 func TestCDexRecordsBundle_Refusals(t *testing.T) {
 	for name, task := range map[string]string{
 		"not JSON":          `{`,
@@ -621,35 +704,49 @@ func TestCDexRecords_RequesterFence(t *testing.T) {
 	}
 }
 
-// The requester's ClaimUpdate carries the facility's report pointed at the
-// Claim's patient: a disclosed change the requester makes to its own message.
-// Only the subject's value changes; every other byte of the facility's report
-// is kept.
-func TestCDexEvidence_RepointedToClaimPatient(t *testing.T) {
-	got, err := repointEvidenceSubject([]byte(facDR1), "Patient/MBR-UC05")
-	if err != nil {
-		t.Fatal(err)
+// The requester's claim update carries the facility's report naming the
+// Claim's patient: registered edit E-14 replaces the report's
+// subject.reference alone, and every other byte of the facility's report,
+// display, identifier and type in subject included, is kept. A report
+// already naming the Claim's patient, or naming the member by identifier
+// alone, is carried as sent, naming no edit. A signature over the subject
+// (in the report, or the facility's Provenance that attributes it) refuses
+// the edit.
+func TestCDexEvidence_E14RepointsSubjectReferenceAlone(t *testing.T) {
+	const claimPatient = "Patient/MBR-UC05"
+	full := strings.Replace(facDR1, `"subject": { "reference": "Patient/fac-77" }`,
+		`"subject": { "reference": "Patient/fac-77", "type": "Patient", "identifier": { "system": "urn:fac:mrn", "value": "77" }, "display": "J. Johansson" }`, 1)
+	if full == facDR1 {
+		t.Fatal("fixture: no subject to widen")
 	}
-	old := `{ "reference": "Patient/fac-77" }`
-	want := strings.Replace(facDR1, old, `{"reference":"Patient/MBR-UC05"}`, 1)
-	if string(got) != want {
-		t.Fatalf("repointed:\n got %s\nwant %s", got, want)
-	}
-	for name, report := range map[string]string{
-		"not a resource":        `[1]`,
-		"no subject":            `{"resourceType":"DiagnosticReport","id":"d"}`,
-		"subject not an object": `{"resourceType":"DiagnosticReport","id":"d","subject":"Patient/x"}`,
-		"repeated subject":      `{"resourceType":"DiagnosticReport","subject":{"reference":"Patient/a"},"subject":{"reference":"Patient/b"}}`,
-		"trailing content":      `{"resourceType":"DiagnosticReport","subject":{"reference":"Patient/a"}} {}`,
+	prov := `{"resourceType":"Provenance","id":"p","target":[{"reference":"DiagnosticReport/dr-1"}],"recorded":"2026-09-17T00:00:00Z","agent":[{"who":{"display":"f"}}]}`
+	for _, row := range []struct {
+		name, report, want string
+		edits              []relay.EditID
+	}{
+		{"subject.reference re-pointed alone", facDR1,
+			strings.Replace(facDR1, `"reference": "Patient/fac-77"`, `"reference": "Patient/MBR-UC05"`, 1), []relay.EditID{relay.EditFacilityReportSubjectRekey}},
+		{"display, identifier and type kept byte for byte", full,
+			strings.Replace(full, `"reference": "Patient/fac-77"`, `"reference": "Patient/MBR-UC05"`, 1), []relay.EditID{relay.EditFacilityReportSubjectRekey}},
+		{"control: already the Claim's patient", strings.Replace(full, "Patient/fac-77", claimPatient, 1),
+			strings.Replace(full, "Patient/fac-77", claimPatient, 1), nil},
+		{"control: the member by identifier alone", `{"resourceType":"DiagnosticReport","id":"dr-1","subject":{"identifier":{"system":"` + shnsdk.MemberSystem + `","value":"MBR-UC05"},"display":"J"}}`,
+			`{"resourceType":"DiagnosticReport","id":"dr-1","subject":{"identifier":{"system":"` + shnsdk.MemberSystem + `","value":"MBR-UC05"},"display":"J"}}`, nil},
 	} {
-		if _, err := repointEvidenceSubject([]byte(report), "Patient/MBR-UC05"); err == nil {
-			t.Errorf("%s: repointed", name)
-		}
+		t.Run(row.name, func(t *testing.T) {
+			got, edits, err := rekeyFacilityReportSubject([]byte(row.report), []byte(prov), claimPatient)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != row.want || !slices.Equal(edits, row.edits) {
+				t.Fatalf("carried %v:\n got %s\nwant %s (%v)", edits, got, row.want, row.edits)
+			}
+		})
 	}
 	t.Run("a reference that needs escaping", func(t *testing.T) {
-		got, err := repointEvidenceSubject([]byte(facDR2), "Patient/a\"b")
-		if err != nil {
-			t.Fatal(err)
+		got, edits, err := rekeyFacilityReportSubject([]byte(facDR2), []byte(prov), "Patient/a\"b")
+		if err != nil || !slices.Equal(edits, []relay.EditID{relay.EditFacilityReportSubjectRekey}) {
+			t.Fatalf("edits %v: %v", edits, err)
 		}
 		var dr struct {
 			Subject struct{ Reference string } `json:"subject"`
@@ -658,6 +755,46 @@ func TestCDexEvidence_RepointedToClaimPatient(t *testing.T) {
 			t.Fatalf("repointed = %s (%v)", got, err)
 		}
 	})
+	signature := `"modifierExtension":[{"url":"urn:x","valueSignature":{"type":[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}],"when":"2026-01-01T00:00:00Z","who":{"display":"a clinician"}}}],`
+	for _, row := range []struct{ name, report, prov, carrier string }{
+		{"a signature in the report", strings.Replace(facDR2, `"status":"final",`, `"status":"final",`+signature, 1), prov, "Signature in DiagnosticReport"},
+		{"a contained signed Provenance that targets the report", strings.Replace(facDR2, `"status":"final",`, `"status":"final","contained":[`+signedProvenance("DiagnosticReport/dr-2")+`],`, 1), prov, "Provenance.signature"},
+		{"the facility's signed Provenance that attributes the report", facDR2, signedProvenance("DiagnosticReport/dr-2"), "Provenance.signature"},
+	} {
+		t.Run("signed: "+row.name, func(t *testing.T) {
+			_, edits, err := rekeyFacilityReportSubject([]byte(row.report), []byte(row.prov), claimPatient)
+			var signed *relay.SignedContentError
+			if !errors.As(err, &signed) || signed.Error() != "signed content cannot be edited (E-14, "+row.carrier+")" || edits != nil {
+				t.Fatalf("edits %v err %v, want signed content cannot be edited (E-14, %s)", edits, err, row.carrier)
+			}
+		})
+	}
+	t.Run("an unreadable Provenance: no edit made", func(t *testing.T) {
+		var signed *relay.SignedContentError
+		if _, edits, err := rekeyFacilityReportSubject([]byte(facDR2), []byte(`[1]`), claimPatient); err == nil || errors.As(err, &signed) || edits != nil {
+			t.Fatalf("edits %v err %v, want an error that names no signature", edits, err)
+		}
+	})
+	t.Run("control: signed, already the Claim's patient", func(t *testing.T) {
+		report := strings.Replace(facDR2, "Patient/fac-77", claimPatient, 1)
+		got, edits, err := rekeyFacilityReportSubject([]byte(report), []byte(signedProvenance("DiagnosticReport/dr-2")), claimPatient)
+		if err != nil || edits != nil || string(got) != report {
+			t.Fatalf("got %s edits %v err %v, want it carried as sent", got, edits, err)
+		}
+	})
+	for name, report := range map[string]string{
+		"not a resource":         `[1]`,
+		"no subject":             `{"resourceType":"DiagnosticReport","id":"d"}`,
+		"subject not an object":  `{"resourceType":"DiagnosticReport","id":"d","subject":"Patient/x"}`,
+		"reference not a string": `{"resourceType":"DiagnosticReport","id":"d","subject":{"reference":7}}`,
+		"repeated subject":       `{"resourceType":"DiagnosticReport","subject":{"reference":"Patient/a"},"subject":{"reference":"Patient/b"}}`,
+		"repeated reference":     `{"resourceType":"DiagnosticReport","subject":{"reference":"Patient/a","reference":"Patient/b"}}`,
+		"trailing content":       `{"resourceType":"DiagnosticReport","subject":{"reference":"Patient/a"}} {}`,
+	} {
+		if _, _, err := rekeyFacilityReportSubject([]byte(report), []byte(prov), claimPatient); err == nil {
+			t.Errorf("%s: carried", name)
+		}
+	}
 }
 
 func TestShiftDate(t *testing.T) {

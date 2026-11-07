@@ -29,7 +29,9 @@ const LineCarriedEvent = "contract.line-carried"
 const (
 	// LineCarriedRequest: the request went to, or came from, a participant
 	// that shares no declared line with this one, or, a pend's follow-up, was
-	// carried at another line than the pend is pinned at.
+	// carried at another line than the pend is pinned at, or, an adaptive
+	// questionnaire's round, was framed at another line than the address it
+	// was delivered at names.
 	LineCarriedRequest = "request"
 	// LineCarriedAnswer: the answer is stamped with another line than the leg
 	// routed.
@@ -46,6 +48,23 @@ type lineObserverKey struct{}
 
 func withLineObserver(ctx context.Context, observe func(ObserverEvent)) context.Context {
 	return context.WithValue(ctx, lineObserverKey{}, observe)
+}
+
+// requestLineCarriedKey carries the line an inbound request claims when this
+// gateway cannot answer at it as claimed: the request is carried to the
+// participant and answered at the line selection gives, which may be the
+// claimed line itself (a declared line with no ready lane).
+type requestLineCarriedKey struct{}
+
+func withRequestLineCarried(ctx context.Context, claimed string) context.Context {
+	return context.WithValue(ctx, requestLineCarriedKey{}, claimed)
+}
+
+// requestLineCarried is the contract token ctx's inbound request claims when
+// it was carried, "" when it was answered as claimed or claimed nothing.
+func requestLineCarried(ctx context.Context) string {
+	claimed, _ := ctx.Value(requestLineCarriedKey{}).(string)
+	return claimed
 }
 
 // noteLineCarried records that the leg was carried between two lines (where:

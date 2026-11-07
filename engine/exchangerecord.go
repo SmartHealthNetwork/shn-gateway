@@ -226,8 +226,10 @@ type ExchangeRecord struct {
 	// LineCarried says where the leg was carried between two IG lines with
 	// nothing translated, the network's default (LineCarriedValues, each at
 	// most once): LineCarriedRequest when the request went to, or came from,
-	// a participant that shares no declared line with this one, or a pend's
-	// follow-up was carried at another line than the pend is pinned at;
+	// a participant that shares no declared line with this one, a pend's
+	// follow-up was carried at another line than the pend is pinned at, or an
+	// adaptive questionnaire's round was framed at another line than the
+	// address it was delivered at names;
 	// LineCarriedAnswer when the answer was stamped with another line than
 	// the leg routed. Empty when it was not. Not a metric dimension.
 	LineCarried []string
@@ -615,7 +617,8 @@ func (x *exchangeRecorder) sent(p relay.Payload) {
 
 // requestEdits are the registered edits a request this gateway sends
 // carries, in the order made: those made to a participant's record the
-// gateway's own build carries, before it was built (p.InputEdits: E-06), then
+// gateway's own build carries, before it was built (p.InputEdits: E-06,
+// E-14), then
 // those made to the request itself (p.Edits).
 func requestEdits(p relay.Payload) []relay.EditID {
 	return append(p.InputEdits(), p.Edits()...)
@@ -673,12 +676,37 @@ const (
 	// JSON, so whether it carries an address to restore (E-13) is unknown, or
 	// an address found in it could not be rewritten.
 	EditNotMadeAddressUnreadableRequest = "E-13:unreadable-request"
+	// EditNotMadeRekeyPayerGatewayOlder: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyPayerGatewayOlder = "E-12:payer-gateway-older"
+	// EditNotMadeRekeyNotTheRoundsAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyNotTheRoundsAddress = "E-12:not-the-rounds-address"
+	// EditNotMadeRekeyContainedInPackageResponse: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyContainedInPackageResponse = "E-12:contained-in-package-response"
+	// EditNotMadeRekeyRequestCarriedAQuestionnaire: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyRequestCarriedAQuestionnaire = "E-12:request-carried-a-questionnaire"
+	// EditNotMadeRekeyNotUnderBase: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyNotUnderBase = "E-12:not-under-base"
+	// EditNotMadeRekeyEscapedAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyEscapedAddress = "E-12:escaped-address"
+	// EditNotMadeRekeyBaseSpelledDifferently: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyBaseSpelledDifferently = "E-12:base-spelled-differently"
+	// EditNotMadeRekeyUnreadableTag: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyUnreadableTag = "E-12:unreadable-tag"
+	// EditNotMadeRekeyUncleanRemainder: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyUncleanRemainder = "E-12:unclean-remainder"
+	// EditNotMadeRekeyUnreadableAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyUnreadableAddress = "E-12:unreadable-address"
+	// EditNotMadeRekeyUnreadableAnswer: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyUnreadableAnswer = "E-12:unreadable-answer"
+	// EditNotMadeRekeyAddressNotWritable: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	EditNotMadeRekeyAddressNotWritable = "E-12:address-not-writable"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
 var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
 	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake,
-	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest}
+	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest,
+	EditNotMadeRekeyPayerGatewayOlder, EditNotMadeRekeyNotTheRoundsAddress, EditNotMadeRekeyContainedInPackageResponse, EditNotMadeRekeyRequestCarriedAQuestionnaire, EditNotMadeRekeyNotUnderBase, EditNotMadeRekeyEscapedAddress, EditNotMadeRekeyBaseSpelledDifferently, EditNotMadeRekeyUnreadableTag, EditNotMadeRekeyUncleanRemainder, EditNotMadeRekeyUnreadableAddress, EditNotMadeRekeyUnreadableAnswer, EditNotMadeRekeyAddressNotWritable}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).

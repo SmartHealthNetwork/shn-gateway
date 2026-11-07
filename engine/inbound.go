@@ -234,6 +234,7 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 			Direction: "ingress", LegType: env.Metadata.TransactionType, CorrelationID: env.Metadata.CorrelationID,
 			Counterpart: env.Metadata.Sender, Detail: "request claims " + boundedLine(carried) + "; answered at " + answeredAt(answerTok),
 		})
+		r = r.WithContext(withRequestLineCarried(r.Context(), carried))
 	}
 	// The answer line rides the request context so the payer's content seam
 	// (LegResponder — a PUBLIC partner-implementable interface) can build at it

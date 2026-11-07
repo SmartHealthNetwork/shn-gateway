@@ -76,6 +76,8 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			relay.RoleRecipient, relay.DirectionRequest,
 			[]string{"Questionnaire.extension[i].valueUrl (the extension whose url is sdc-questionnaire-questionnaireAdaptive), " +
 				"or its valueBoolean true written back, on any Questionnaire the request carries"}, "replace-value"},
+		{"E-14", "facility-report-subject-rekey", []string{"pas-claim-update"}, relay.RoleRequester, relay.DirectionRequest,
+			[]string{"DiagnosticReport.subject.reference"}, "replace-value"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))

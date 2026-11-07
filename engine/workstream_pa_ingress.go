@@ -496,8 +496,11 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
+	// The adaptive addresses the payer's gateway issued are re-keyed to this
+	// gateway, so the client's next-question rounds stay on the network (E-12).
+	rekeyed := g.rekeyPackageAnswer(r.Context(), answer, recipient, route.Token, stated, body)
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	g.writeRelayedAnswer(w, stated, "application/fhir+json", answer, dtrAnswerKey)
+	g.writeRelayedAnswer(w, stated, "application/fhir+json", rekeyed, dtrAnswerKey)
 	// The line the answer is written in, as adaptAnswer wrote it: the routed
 	// one, or this gateway's own when E-08 carried it across, so evidence judges
 	// the answer at its own line.

@@ -56,12 +56,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		}
 		// The existing HomeOxygen path builds this EXACT call (relaysReferencePayerBytes(provider-data)=true,
 		// no InfoChanged set → default false).
-		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 			Corr: corr, Created: pasTailClock(),
-			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true,
+			ContainedInsurer: true, PayerOrgEntry: true,
 			Payer: shnsdk.CMSPayerIdentity,
 		})
 		if err != nil {
@@ -81,12 +81,12 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
+		want, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity), Coverage: testMemberCoverage(member),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
 			Corr: corr, Created: pasTailClock(),
-			ContainedInsurer: true, AbsoluteRefs: true, PayerOrgEntry: true,
+			ContainedInsurer: true, PayerOrgEntry: true,
 			Payer: shnsdk.CMSPayerIdentity,
 		})
 		if err != nil {
@@ -112,7 +112,7 @@ func TestBuildPASSubmitBundle_ByteParity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildPASSubmitBundle: %v", err)
 		}
-		want, err := shnsdk.BuildConformantClaimBundleExact(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
+		want, err := shnsdk.BuildConformantClaimBundleCarried(shnsdk.ConformantClaimInputs{PASClaimFacts: testClaimFacts(), Coverage: testMemberCoverage(member), Insurer: testPayerOrganization(shnsdk.CMSPayerIdentity),
 			Provider:       testRequestingProvider(),
 			MemberIDSystem: shnsdk.MemberSystem,
 			QR:             qr, SR: order, PatientRef: patientRef, CoverageRef: coverageRef, MemberID: member,
@@ -298,5 +298,46 @@ func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
 	}
 	if x.outcome != ExchangeOther || x.rule != "" {
 		t.Fatalf("recorded %q/%q, want other: an internal error is not a refusal", x.outcome, x.rule)
+	}
+}
+
+// A dispatched supplier, spliced beside the provider the order's requester
+// names, whose record the splice cannot carry as read (a member named in two
+// cases) is refused 422 by the waiting tail: the fidelity of the gateway's own
+// edit at the build, saying so, never the gateway's own 500, and no claim is sent.
+func TestSubmitPASClaim_SupplierNotCarriedAsReadIsAFidelityRefusal(t *testing.T) {
+	env := newInProcessExchange(t)
+	const (
+		member      = "MBR-COVERED"
+		patientRef  = "Patient/" + member
+		coverageRef = "Coverage/" + member
+	)
+	recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+	if status != 0 {
+		t.Fatalf("originCRDRecords: %d %s", status, msg)
+	}
+	realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
+	if status != 0 || !found {
+		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
+	}
+	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
+	if status != 0 {
+		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
+	}
+	order, err := buildDispatchDeviceRequest("dr-tail", patientRef, "Organization/supplier-tail", "E1390", "Stationary oxygen concentrator", "J96.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	order = bytes.Replace(order, []byte(`"resourceType":"DeviceRequest"`), []byte(`"requester":{"reference":"`+OrderingProviderRef+`"},"resourceType":"DeviceRequest"`), 1)
+	supplier := []byte(`{"resourceType":"Organization","id":"supplier-tail","Name":"Another supplier","name":"Tail supplier"}`)
+	x := &exchangeRecorder{}
+	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
+	req := claimRequest(testOrderBody(order, "")).WithContext(ctx)
+	_, status, msg, err = env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: order, supplierJSON: supplier, coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
+	if err != nil || status != http.StatusUnprocessableEntity || !strings.Contains(msg, "cannot be carried as read: it names a member twice, or in another case") {
+		t.Fatalf("submitPASClaim = %d %q %v, want the 422 fidelity refusal", status, msg, err)
+	}
+	if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+		t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
 	}
 }

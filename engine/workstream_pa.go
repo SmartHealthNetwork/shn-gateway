@@ -200,6 +200,16 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("GET /cds-services", noCredential, g.withIngressCorrelation(g.handleCDSDiscovery))
 		route("POST /cds-services/{id}", noCredential, g.ingressRoute(RouteCRD))
 		route("POST /Questionnaire/$questionnaire-package", noCredential, g.ingressRoute(RouteDTR))
+		// The package's adaptive rounds (SDC $next-question) ride the same
+		// leg, route record and credential: at an adaptive address
+		// this gateway issued for a payer (E-12), at a questionnaireAdaptive
+		// of true made explicit for a payer, and at the plain route, routed by
+		// the address the round's own Questionnaire carries.
+		// The patterns are handleDTRIngress's patternDTRNextQuestion*, which it
+		// dispatches on (TestDTRNextQuestionIngress_Mounted).
+		route("POST /dtr/payer/{payer}/{rest...}", noCredential, g.ingressRoute(RouteDTR))
+		route("POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question", noCredential, g.ingressRoute(RouteDTR))
+		route("POST /Questionnaire/$next-question", noCredential, g.ingressRoute(RouteDTR))
 		route("POST /Claim/$submit", noCredential, g.ingressRoute(RoutePAS))
 		route("POST /Claim/$inquire", noCredential, g.ingressRoute(RoutePASInquire))
 		// The base R4 operation a system submits a coverage eligibility

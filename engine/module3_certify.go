@@ -300,6 +300,16 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 	}
 	ctx, cancel := context.WithDeadline(w.ctx, deadline)
 	defer cancel()
+	// lacking is each line that could not check a profile the payload
+	// declares, and answeredLacked what each line that judged the payload did
+	// not hold: a profile another line held was checked there (heldElsewhere).
+	type lackingLine struct {
+		at      int
+		result  shnsdk.Result
+		profile string
+	}
+	var lacking []lackingLine
+	var answeredLacked []lacked
 	for _, line := range e.Candidates {
 		profile, ok := profileFor(e.Species, line, e.LegType)
 		v := LaneVerdict{Line: line, Profile: profile, Issues: []string{}}
@@ -347,24 +357,44 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 				v.State = "valid"
 				v.Valid = true
 				e.Certified = append(e.Certified, line)
+				answeredLacked = append(answeredLacked, lacked{})
 			case validatorDidNotJudge(fhirErrors(result)):
 				// The lane reached no verdict on the payload: it stopped without
 				// one, or read no payload.
 				v.State = "unavailable"
 				v.Error = "certification validator did not judge the payload"
 			default:
-				if systems, regex, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
+				if causes, unchecked := certificationUnchecked(result, job.payload, line, profile); unchecked {
 					// The lane could not check the payload's terminology, or could
-					// not run a primitive's regex check: no verdict on the payload,
-					// so unavailable, never invalid and never valid.
+					// not run a primitive's regex check, or does not hold a
+					// profile the payload declares: no verdict on the payload, so
+					// unavailable, never invalid and never valid.
 					v.State = "unavailable"
-					v.Error = uncheckedReason(systems, regex)
+					v.Error = uncheckedReason(causes)
+					if len(causes.profiles) > 0 {
+						lacking = append(lacking, lackingLine{at: len(e.Verdicts), result: result, profile: profile})
+					}
+					// The line judged the payload: it held every declared
+					// profile it did not report lacking.
+					answeredLacked = append(answeredLacked, lackedOf(causes.profiles))
 				} else {
 					v.State = "invalid"
+					answeredLacked = append(answeredLacked, lackedOf(declaredProfilesNotHeld(result, job.payload, profile)))
 				}
 			}
 		}
 		e.Verdicts = append(e.Verdicts, v)
+	}
+	if len(lacking) > 0 {
+		excuse := heldElsewhere(answeredLacked)
+		for _, l := range lacking {
+			v := &e.Verdicts[l.at]
+			if causes, unchecked := certificationUncheckedExcusing(l.result, job.payload, v.Line, l.profile, excuse); unchecked {
+				v.Error = uncheckedReason(causes)
+			} else {
+				v.State, v.Error = "invalid", ""
+			}
+		}
 	}
 	e.SourceLine = certificationSource(e.Certified, e.TargetLine)
 	return e
@@ -434,9 +464,9 @@ func missedCodingSystems(diagnostics string) (systems []string, ok bool) {
 }
 
 // certificationUnchecked reads an invalid certification result: true when
-// the lane could not check the payload's terminology, or could not run a
-// primitive's regex check, and found nothing else. Every error and fatal issue
-// must be one of:
+// the lane could not check the payload's terminology, could not run a
+// primitive's regex check, or does not hold a profile the payload declares,
+// and found nothing else. Every error and fatal issue must be one of:
 //   - a passed-through verdict that the validator could not check a code
 //     system (uncheckedCodeSystem);
 //   - the required-binding miss that follows from it on the same element
@@ -445,25 +475,37 @@ func missedCodingSystems(diagnostics string) (systems []string, ok bool) {
 //     set for want of that code's system (missedCodingSystems);
 //   - an error the validator gives because it could not run a regex check
 //     (validatorissue.CouldNotRun);
+//   - the validator's not-checked issue for a profile the payload declares
+//     that it does not hold, with its retrieval issue
+//     (excuseUnresolvedDeclaredProfiles);
 //   - a no-match summary or PAS slice-match consequence that follows from
-//     those alone, read exactly as the structural level reads them
-//     (allExcused), on an entry that carries such an issue itself.
+//     the terminology or regex causes alone, read exactly as the structural
+//     level reads them (allExcused), on an entry that carries such a cause
+//     itself; an unresolved declared profile is no such cause.
 //
 // Anything else — a structural error, an invariant, a code the validator
 // checked and did not find, a binding miss on a code system it holds, a fatal
 // issue, an unidentified issue — keeps the answer a verdict: invalid. systems
 // is every code system the lane could not check, sorted; regex reports a regex
 // check that could not run.
-func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string) (systems []string, regex, ok bool) {
+func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string) (uncheckedCauses, bool) {
+	return certificationUncheckedExcusing(res, body, line, profile, anyProfile)
+}
+
+// certificationUncheckedExcusing is certificationUnchecked excusing only the
+// declared profiles excuse accepts (heldElsewhere, across the candidate lines).
+func certificationUncheckedExcusing(res shnsdk.Result, body []byte, line, profile string, excuse func(string) bool) (uncheckedCauses, bool) {
 	errs := fhirErrors(res)
 	if len(errs) == 0 {
-		return nil, false, false
+		return uncheckedCauses{}, false
 	}
+	var c uncheckedCauses
 	for i, e := range errs {
 		if validatorissue.CouldNotRun(e.Issue) {
-			errs[i].excused, regex = true, true
+			errs[i].excused, c.regex = true, true
 		}
 	}
+	c.profiles = excuseUnresolvedDeclaredProfiles(errs, body, profile, excuse)
 	unexpandableAt := map[string]map[string]bool{} // element → code systems a value set there could not be expanded for
 	named := map[string]bool{}
 	for i, e := range errs {
@@ -499,42 +541,74 @@ func certificationUnchecked(res shnsdk.Result, body []byte, line, profile string
 		errs[i].excused = all
 	}
 	// A summary or slice-match consequence is excused only by the unchecked
-	// terminology or regex check on its own entry: an entry with neither has no
-	// such cause.
+	// terminology or regex check on its own entry: an entry with neither has
+	// no such cause. A declared profile the lane does not hold is a check that
+	// did not run, never a defect a summary follows from, so it is no cause,
+	// and needs none itself.
 	unchecked := map[int]bool{}
 	for _, e := range errs {
-		if e.excused {
+		if e.excused && !e.unresolvedProfile {
 			unchecked[e.entry] = true
 		}
 	}
 	if !allExcused(errs, body, line, profile) {
-		return nil, false, false
+		return uncheckedCauses{}, false
 	}
 	for _, e := range errs {
-		if !unchecked[e.entry] {
-			return nil, false, false
+		if !e.unresolvedProfile && !unchecked[e.entry] {
+			return uncheckedCauses{}, false
 		}
 	}
 	for system := range named {
-		systems = append(systems, system)
+		c.systems = append(c.systems, system)
 	}
-	sort.Strings(systems)
-	return systems, regex, true
+	sort.Strings(c.systems)
+	return c, true
 }
 
 // uncheckedReason is the unavailable verdict's authored reason for a lane that
-// could not check terminology (terminologyUnavailableReason) or could not run
-// a primitive's regex check. With both it names one code system, so the
-// reason stays under 256 bytes.
-func uncheckedReason(systems []string, regex bool) string {
+// could not check terminology (terminologyUnavailableReason), could not run a
+// primitive's regex check, or does not hold a profile the payload declares.
+// Profiles alone are named, two at most (namedProfile); beside another cause
+// they are counted. With terminology and a regex check it names one code
+// system. Either way the reason stays under 256 bytes.
+func uncheckedReason(c uncheckedCauses) string {
 	const regexReason = "a primitive regex check could not run"
+	others := len(c.systems) > 0 || c.regex
+	var parts []string
 	switch {
-	case len(systems) == 0:
-		return regexReason
-	case regex:
-		return terminologyReasonNaming(systems, 1) + "; " + regexReason
+	case len(c.systems) > 0 && (c.regex || len(c.profiles) > 0):
+		parts = append(parts, terminologyReasonNaming(c.systems, 1))
+	case len(c.systems) > 0:
+		parts = append(parts, terminologyUnavailableReason(c.systems))
 	}
-	return terminologyUnavailableReason(systems)
+	switch {
+	case len(c.profiles) > 0 && others:
+		parts = append(parts, fmt.Sprintf("profiles unavailable: %d", len(c.profiles)))
+	case len(c.profiles) > 0:
+		parts = append(parts, profileReasonNaming(c.profiles, 2))
+	}
+	if c.regex {
+		parts = append(parts, regexReason)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// profileReasonNaming names at most maxNamed of profiles (namedProfile) and
+// counts the rest.
+func profileReasonNaming(profiles []string, maxNamed int) string {
+	names := make([]string, 0, maxNamed)
+	for _, p := range profiles {
+		if len(names) == maxNamed {
+			break
+		}
+		names = append(names, namedProfile(p))
+	}
+	reason := "profile unavailable: " + strings.Join(names, ", ")
+	if more := len(profiles) - len(names); more > 0 {
+		reason += fmt.Sprintf(" and %d more", more)
+	}
+	return reason
 }
 
 // terminologyUnavailableReason is the unavailable verdict's authored reason,

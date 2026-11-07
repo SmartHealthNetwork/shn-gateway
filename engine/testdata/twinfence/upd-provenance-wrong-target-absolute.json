@@ -1,7 +1,7 @@
 {
   "name": "upd-provenance-wrong-target-absolute",
   "family": "update-bind",
-  "description": "The absolutized spelling of a wrong-id target is still a wrong id; the spelling tolerance must not widen into any-target-will-do.",
+  "description": "A wrong-id target in absolute form is still a wrong id: a target names the supplemental data only as exactly \u003ctype\u003e/\u003cid\u003e or exactly the entry's own fullUrl (either version specific only at the resource's own meta.versionId), never any target ending in a type and id.",
   "expect": "reject",
   "rejectContains": "ClaimUpdate Provenance does not target the supplemental data",
   "rejectStatus": 403,

@@ -151,9 +151,9 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 	if haveCov && covBene == "" && refuses(RuleRequestShape) {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
 	}
-	// Extract the member id tolerantly: the br-payer-targeting lane (provider-data) ABSOLUTIZES
-	// bundle refs so a real Da Vinci payer (br-payer) resolves them ("https://shn.example/fhir/
-	// Patient/MBR" not "Patient/MBR"); the mirrored demo lane keeps relative refs. pasMemberFromRef
+	// Extract the member id tolerantly: a requester may write a bundle's references absolute
+	// ("https://shn.example/fhir/Patient/MBR" not "Patient/MBR"), as SDK requesters before
+	// shn-sdk v1.9.0 and gateways before v1.8.0 did on the reference-payer lane. pasMemberFromRef
 	// reads the bare id from either form, so SHN's member bind works regardless of base
 	// while the patient-consistency fence below still compares the SAME member identity.
 	member := pasMemberFromRef(claimPat)
@@ -481,8 +481,9 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 
 // pasMemberFromRef returns the bare member id from a Patient reference, tolerating BOTH a
 // relative ref ("Patient/MBR") and an absolute fullUrl ("https://host/base/Patient/MBR").
-// The br-payer-targeting lane (provider-data) absolutizes bundle refs (so br-payer resolves them);
-// SHN's member bind must read the id regardless of base. Identical to the old strings.TrimPrefix(...,"Patient/")
+// A requester may write a bundle's references absolute (SDK requesters before shn-sdk v1.9.0
+// and gateways before v1.8.0 did on the reference-payer lane); SHN's member bind must read the
+// id regardless of base. Identical to the old strings.TrimPrefix(...,"Patient/")
 // for the relative case (LastIndex hits index 0). A ref with no "Patient/" segment is returned
 // unchanged, so the downstream ResolvePatient fails closed (unknown member).
 // A versioned reference names the same patient: Patient/<id>/_history/<version>
@@ -885,16 +886,20 @@ func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byt
 // (it returns only {member, qrJSON, srJSON, hasDR}). These are exactly the fields the inbound
 // update gate enforces against (the FR-32 arms mirror workstream_pa_dtr_inbound.go:393-424).
 type conformantUpdateFacts struct {
-	provenanceJSON     []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
-	provenanceAgents   []string // Provenance.agent[].who reference or qualified business identifier
-	provenanceTargets  []string // Provenance.target[].reference
-	provenancePolicies []string // Provenance.policy[] (UC-05 consent cite — surfaced, not yet enforced)
-	hasDR              bool     // a DiagnosticReport entry is present (DR-variant supplemental data)
-	diagnosticReportID string   // DiagnosticReport.id
-	qrID               string   // QuestionnaireResponse.id (the QR-variant supplemental data)
-	relatedClaim       string   // Claim.related[0].claim.identifier.value (the amendment's distinguishing field, FR-21)
-	claimCorrelation   string   // Claim.identifier[].value where system=="urn:shn:correlation", or "" (Finding A: partner-supplied leg corr)
-	claimIdentifiers   []string // every Claim.identifier[].value of that same Claim
+	provenanceJSON          []byte   // the Provenance resource bytes, or nil (FR-32: REQUIRED on the update leg)
+	provenanceAgents        []string // Provenance.agent[].who reference or qualified business identifier
+	provenanceTargets       []string // Provenance.target[].reference
+	provenancePolicies      []string // Provenance.policy[] (UC-05 consent cite — surfaced, not yet enforced)
+	hasDR                   bool     // a DiagnosticReport entry is present (DR-variant supplemental data)
+	diagnosticReportID      string   // DiagnosticReport.id
+	diagnosticReportVersion string   // DiagnosticReport.meta.versionId, or "" (metaVersionIDOf)
+	diagnosticReportFullURL string   // the DiagnosticReport entry's fullUrl
+	qrID                    string   // QuestionnaireResponse.id (the QR-variant supplemental data)
+	qrVersion               string   // QuestionnaireResponse.meta.versionId, or "" (metaVersionIDOf)
+	qrFullURL               string   // the QuestionnaireResponse entry's fullUrl
+	relatedClaim            string   // Claim.related[0].claim.identifier.value (the amendment's distinguishing field, FR-21)
+	claimCorrelation        string   // Claim.identifier[].value where system=="urn:shn:correlation", or "" (Finding A: partner-supplied leg corr)
+	claimIdentifiers        []string // every Claim.identifier[].value of that same Claim
 }
 
 // parseConformantPASUpdateFacts is readConformantPASUpdateFacts refusing every
@@ -928,6 +933,7 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 	var probe struct {
 		ResourceType string `json:"resourceType"`
 		Entry        []struct {
+			FullURL  string          `json:"fullUrl"`
 			Resource json.RawMessage `json:"resource"`
 		} `json:"entry"`
 	}
@@ -1013,6 +1019,8 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 				return conformantUpdateFacts{}, http.StatusBadRequest, "parse update QR entry failed"
 			}
 			f.qrID = qr.Id
+			f.qrVersion = metaVersionIDOf(e.Resource)
+			f.qrFullURL = e.FullURL
 		case "DiagnosticReport":
 			var dr struct {
 				Id string `json:"id"`
@@ -1022,6 +1030,8 @@ func readConformantPASUpdateFacts(bundleJSON []byte, refuses func(rule string) b
 			}
 			f.hasDR = true
 			f.diagnosticReportID = dr.Id
+			f.diagnosticReportVersion = metaVersionIDOf(e.Resource)
+			f.diagnosticReportFullURL = e.FullURL
 		case "Provenance":
 			f.provenanceJSON = e.Resource
 			var prov struct {
@@ -1117,24 +1127,22 @@ func updateProvenanceDefect(f conformantUpdateFacts) string {
 	if len(f.provenanceAgents) == 0 {
 		return "ClaimUpdate Provenance missing agent"
 	}
-	var wantTarget string
+	wantType, wantID, wantVersion, wantURL := "QuestionnaireResponse", f.qrID, f.qrVersion, f.qrFullURL
 	if f.hasDR {
 		if f.diagnosticReportID == "" {
 			return "supplemental DiagnosticReport missing id"
 		}
-		wantTarget = "DiagnosticReport/" + f.diagnosticReportID
-	} else {
-		if f.qrID == "" {
-			return "supplemental QuestionnaireResponse missing id"
-		}
-		wantTarget = "QuestionnaireResponse/" + f.qrID
+		wantType, wantID, wantVersion, wantURL = "DiagnosticReport", f.diagnosticReportID, f.diagnosticReportVersion, f.diagnosticReportFullURL
+	} else if f.qrID == "" {
+		return "supplemental QuestionnaireResponse missing id"
 	}
 	for _, ref := range f.provenanceTargets {
-		// Tolerate the br-payer-targeting lane's ABSOLUTE refs: absolutizeBundleRefs rewrites
-		// Provenance.target to its absolute fullUrl (".../DiagnosticReport/<id>") so a real
-		// Da Vinci payer resolves it. Match either the relative wantTarget or any ref ending
-		// in "/<wantTarget>" — same absolutization-tolerance as pasMemberFromRef.
-		if ref == wantTarget || strings.HasSuffix(ref, "/"+wantTarget) {
+		// The SDK Responder's rule (shnsdk.ProvenanceTargetNames): exactly the relative
+		// "<type>/<id>" or exactly the supplemental entry's own fullUrl, version specific
+		// only at the resource's own meta.versionId. A version the resource does not carry,
+		// or a reference under another base, names no entry of the Bundle (FHIR R4 Bundle
+		// resolution), whatever its path ends in.
+		if shnsdk.ProvenanceTargetNames(ref, wantURL, wantType, wantID, wantVersion) {
 			return ""
 		}
 	}
@@ -1250,4 +1258,17 @@ func (g *Gateway) refuseAfterPayerAnswered(w http.ResponseWriter, r *http.Reques
 		msg = withPayerAnsweredNote(msg)
 	}
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, detail)
+}
+
+// metaVersionIDOf is a resource's meta.versionId when it is a string, else "",
+// read by exact member name as FHIR JSON names them. It is read apart from the
+// resource's typed decode, so a versionId of another type is no version, never
+// a refusal of the record.
+func metaVersionIDOf(raw []byte) string {
+	var r, meta map[string]json.RawMessage
+	var v string
+	if json.Unmarshal(raw, &r) != nil || json.Unmarshal(r["meta"], &meta) != nil || json.Unmarshal(meta["versionId"], &v) != nil {
+		return ""
+	}
+	return v
 }

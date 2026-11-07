@@ -52,11 +52,11 @@ const testSubmittedCategoryCoding = `{"system":"https://codesystem.x12.org/00501
 func testSubmissionFor(line string, in shnsdk.ConformantClaimUpdateInputs) shnsdk.PASPriorClaim {
 	facts := in.PASClaimFacts
 	facts.ServiceCategory = json.RawMessage(testSubmittedCategoryCoding)
-	out, err := shnsdk.BuildConformantClaimBundleAtLineExact(line, shnsdk.ConformantClaimInputs{PASClaimFacts: facts,
+	out, err := shnsdk.BuildConformantClaimBundleAtLineCarried(line, shnsdk.ConformantClaimInputs{PASClaimFacts: facts,
 		Provider: in.Provider, Coverage: in.Coverage, Insurer: in.Insurer, MemberIDSystem: in.MemberIDSystem,
 		QR: in.QR, SR: in.SR, PatientRef: in.PatientRef, CoverageRef: in.CoverageRef, MemberID: in.MemberID,
 		Corr: in.OriginalCorr, Created: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),
-		ContainedInsurer: in.ContainedInsurer, AbsoluteRefs: in.AbsoluteRefs, PayerOrgEntry: in.PayerOrgEntry, Payer: in.Payer,
+		ContainedInsurer: in.ContainedInsurer, PayerOrgEntry: in.PayerOrgEntry, Payer: in.Payer,
 	})
 	if err != nil {
 		panic("build the submission: " + err.Error())

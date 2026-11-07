@@ -183,11 +183,9 @@ func resourceReferences(v any) []string {
 // entry on the order entry's base. The order must name the first record as its
 // requester. A record the Bundle already holds (a PractitionerRole or
 // Organization the request names as its provider) is carried once, and must
-// be the same record. With absolute references (the reference payer's
-// lane), the references these entries make resolvable are written as the
-// entries' fullUrls, as the builder writes every other reference that names
-// an entry.
-func carryOrderRequester(body []byte, records [][]byte, absolute bool) ([]byte, error) {
+// be the same record. The references these entries make resolvable stay as
+// written: they resolve against the entries' fullUrls (FHIR R4).
+func carryOrderRequester(body []byte, records [][]byte) ([]byte, error) {
 	if len(records) == 0 {
 		return body, nil
 	}
@@ -199,20 +197,33 @@ func carryOrderRequester(body []byte, records [][]byte, absolute bool) ([]byte, 
 	if err := json.Unmarshal(bundle["entry"], &entries); err != nil {
 		return nil, err
 	}
+	originalEntries := len(entries)
 	type head struct {
-		ResourceType string `json:"resourceType"`
-		ID           string `json:"id"`
-		Requester    struct {
-			Reference string `json:"reference"`
-		} `json:"requester"`
+		ResourceType, ID, Requester string
 	}
+	// headOf reads a resource's type, id and requester reference by their exact
+	// member names (exactMembers): a member spelled in another case is not one.
 	headOf := func(raw []byte) (head, error) {
-		var h head
-		if err := json.Unmarshal(raw, &h); err != nil {
-			return h, err
+		m, err := exactMembers(raw)
+		if err != nil {
+			return head{}, err
+		}
+		h := head{ResourceType: exactString(m, "resourceType"), ID: exactString(m, "id")}
+		if requester, err := exactMembers(m["requester"]); err == nil {
+			h.Requester = exactString(requester, "reference")
 		}
 		if h.ResourceType == "" || h.ID == "" {
 			return h, fmt.Errorf("resource has no type or id")
+		}
+		return h, nil
+	}
+	// recordHeadOf is headOf for a record read from the participant's system:
+	// one with no resourceType or id spelled exactly is not carried as read, and
+	// its entry's fullUrl is never built from an id the record does not state.
+	recordHeadOf := func(raw []byte) (head, error) {
+		h, err := headOf(raw)
+		if err != nil {
+			return h, fmt.Errorf("%w: it has no resourceType or no id, spelled exactly", errRecordNotCarried)
 		}
 		return h, nil
 	}
@@ -220,6 +231,8 @@ func carryOrderRequester(body []byte, records [][]byte, absolute bool) ([]byte, 
 	var order head
 	byKey := map[string]int{}
 	for i, e := range entries {
+		// Every entry the build placed states its type and id exactly: the
+		// build refused any other first (builtEntriesNamed).
 		h, err := headOf(e["resource"])
 		if err != nil {
 			return nil, err
@@ -244,17 +257,16 @@ func carryOrderRequester(body []byte, records [][]byte, absolute bool) ([]byte, 
 	if orderAt < 0 {
 		return nil, fmt.Errorf("no order in the request")
 	}
-	first, err := headOf(records[0])
+	first, err := recordHeadOf(records[0])
 	if err != nil {
 		return nil, err
 	}
 	rootKey := first.ResourceType + "/" + first.ID
-	if ref := order.Requester.Reference; ref != rootKey && ref != base+"/"+rootKey {
+	if ref := order.Requester; ref != rootKey && ref != base+"/"+rootKey {
 		return nil, fmt.Errorf("the order's requester %q does not name the carried record %s", ref, rootKey)
 	}
-	carried := map[int]bool{}
 	for _, rec := range records {
-		h, err := headOf(rec)
+		h, err := recordHeadOf(rec)
 		if err != nil {
 			return nil, err
 		}
@@ -268,80 +280,17 @@ func carryOrderRequester(body []byte, records [][]byte, absolute bool) ([]byte, 
 			if existing != full || !sameJSONResource(entries[at]["resource"], rec) {
 				return nil, fmt.Errorf("conflicting entry for %s", key)
 			}
-			carried[at] = true
 			continue
 		}
 		encodedURL, _ := json.Marshal(full)
 		entries = append(entries, map[string]json.RawMessage{"fullUrl": encodedURL, "resource": append(json.RawMessage(nil), rec...)})
 		byKey[key] = len(entries) - 1
-		carried[len(entries)-1] = true
 	}
-	if absolute {
-		rewrite := func(ref string) (string, bool) {
-			if _, ok := byKey[ref]; ok && !strings.HasPrefix(ref, "#") {
-				return base + "/" + ref, true
-			}
-			return ref, false
-		}
-		// The order: only its requester, the reference this change resolves.
-		var o map[string]any
-		if err := decodePASObject(entries[orderAt]["resource"], &o); err != nil {
-			return nil, err
-		}
-		if req, ok := o["requester"].(map[string]any); ok {
-			if s, ok := req["reference"].(string); ok {
-				if abs, changed := rewrite(s); changed {
-					req["reference"] = abs
-					if entries[orderAt]["resource"], err = json.Marshal(o); err != nil {
-						return nil, err
-					}
-				}
-			}
-		}
-		// The carried records: every reference that names an entry.
-		for at := range carried {
-			var r map[string]any
-			if err := decodePASObject(entries[at]["resource"], &r); err != nil {
-				return nil, err
-			}
-			if rewriteReferences(r, rewrite) {
-				if entries[at]["resource"], err = json.Marshal(r); err != nil {
-					return nil, err
-				}
-			}
-		}
+	var added []bundleEntryBytes
+	for _, e := range entries[originalEntries:] {
+		added = append(added, bundleEntryBytes{fullURL: e["fullUrl"], resource: e["resource"]})
 	}
-	if bundle["entry"], err = json.Marshal(entries); err != nil {
-		return nil, err
-	}
-	return json.Marshal(bundle)
-}
-
-// rewriteReferences applies rewrite to every reference string in a decoded
-// resource and reports whether any changed.
-func rewriteReferences(v any, rewrite func(string) (string, bool)) bool {
-	changed := false
-	switch x := v.(type) {
-	case map[string]any:
-		for k, c := range x {
-			if s, ok := c.(string); ok && k == "reference" {
-				if out, ok := rewrite(s); ok {
-					x[k], changed = out, true
-				}
-				continue
-			}
-			if rewriteReferences(c, rewrite) {
-				changed = true
-			}
-		}
-	case []any:
-		for _, c := range x {
-			if rewriteReferences(c, rewrite) {
-				changed = true
-			}
-		}
-	}
-	return changed
+	return spliceBundleEntries(body, originalEntries, added)
 }
 
 // msgNoPayerRecord is the refusal of a prior-authorization request whose payer
@@ -363,7 +312,7 @@ func buildModuleOnePASSubmit(line string, in shnsdk.ConformantClaimInputs, reque
 		return nil, errNoPayerRecord
 	}
 	return buildAuthoredPASSubmit(line, in, func(body []byte) ([]byte, error) {
-		return carryOrderRequester(body, requester, in.AbsoluteRefs)
+		return carryOrderRequester(body, requester)
 	})
 }
 
@@ -371,25 +320,6 @@ func buildModuleOnePASSubmit(line string, in shnsdk.ConformantClaimInputs, reque
 // as the submission it amends.
 func buildModuleOnePASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, requester [][]byte) ([]byte, error) {
 	return buildAuthoredPASUpdate(line, in, func(body []byte) ([]byte, error) {
-		return carryOrderRequester(body, requester, in.AbsoluteRefs)
+		return carryOrderRequester(body, requester)
 	})
-}
-
-// relativeReferences is resource with every reference under base written
-// relative ("Type/id"): the inverse of the absolute form carryOrderRequester
-// and the builder write. A resource it cannot read comes back unchanged.
-func relativeReferences(resource []byte, base string) []byte {
-	var r map[string]any
-	if decodePASObject(resource, &r) != nil {
-		return resource
-	}
-	rewriteReferences(r, func(ref string) (string, bool) {
-		rel, ok := strings.CutPrefix(ref, base+"/")
-		return rel, ok
-	})
-	out, err := json.Marshal(r)
-	if err != nil {
-		return resource
-	}
-	return out
 }

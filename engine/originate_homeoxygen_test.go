@@ -155,6 +155,9 @@ type fakePopulator struct {
 	canonical string
 }
 
+// gatewayEngine: the test's stand-in for the gateway's managed fill.
+func (fakePopulator) gatewayEngine() {}
+
 func (f fakePopulator) Populate(_ context.Context, _ []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
 	// Echo back the requested subject + advertised canonical (so the fences pass) AND nested
 	// quantity answers for linkIds 2.2 (O₂-sat) / 2.3 (PaO₂) — the SAME shape the real operated
@@ -368,11 +371,10 @@ func homeOxygenApprovedClaimResponse() []byte {
 
 // ---- the test ----
 
-// TestHandleHomeOxygen drives the full headless order-dispatch chain off provider data:
-// it asserts the handler returns 200, originated crd-order-DISPATCH (not order-select),
-// sourced the order from OpenOrder (the code is never a literal), and resolved the
-// supplier via ResolveByReference of the order's performer.
-func TestHandleHomeOxygen(t *testing.T) {
+// homeOxygenRig is the home-oxygen origination's hermetic gateway, with
+// populator filling the questionnaire and validator checking every payload.
+func homeOxygenRig(t *testing.T, populator Populator, validator shnsdk.Validator) (*homeOxygenSoR, *homeOxygenSubstrate, *Gateway) {
+	t.Helper()
 	authzPub, authzPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
 	_, provSignPriv := genED25519(t)
@@ -438,14 +440,36 @@ func TestHandleHomeOxygen(t *testing.T) {
 		HubTransportPub:    authzPub,
 		HubURL:             fakeBase,
 		Reg:                reg,
-		Validator:          shnsdk.NewFakeValidator(),
+		Validator:          validator,
 		SoR:                sor,
 		Store:              base,
 		Clock:              clock,
 		NPI:                "1234567893",
 		OriginationProfile: "provider-data",
 		Client:             &http.Client{Transport: stub},
-	}, WithPopulator(fakePopulator{canonical: canonical}))
+	}, WithPopulator(populator))
+
+	return sor, stub, gw
+}
+
+// runHomeOxygen originates the home-oxygen scenario on homeOxygenRig and
+// returns the answer.
+func runHomeOxygen(t *testing.T, populator Populator, validator shnsdk.Validator) (int, string) {
+	t.Helper()
+	_, _, gw := homeOxygenRig(t, populator, validator)
+	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
+	rec := httptest.NewRecorder()
+	gw.handleHomeOxygen(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// TestHandleHomeOxygen drives the full headless order-dispatch chain off provider data:
+// it asserts the handler returns 200, originated crd-order-DISPATCH (not order-select),
+// sourced the order from OpenOrder (the code is never a literal), and resolved the
+// supplier via ResolveByReference of the order's performer.
+func TestHandleHomeOxygen(t *testing.T) {
+	sor, stub, gw := homeOxygenRig(t, fakePopulator{canonical: "http://smarthealth.network/fhir/Questionnaire/home-oxygen"}, shnsdk.NewFakeValidator())
+	performerRef := sor.performerRef
 
 	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
 	rec := httptest.NewRecorder()

@@ -122,7 +122,10 @@ func originatedBuilders() map[string][]relay.BuilderID {
 // bytes it did not build.
 func TestEveryLineSelectionNamesItsBuilder(t *testing.T) {
 	t.Parallel()
-	const nativeIngress = "workstream_pa_ingress.go"
+	// The native ingress files: the package fetch and the other routes, and
+	// the next-question rounds, which carry the participant's own bytes as
+	// the package fetch does.
+	nativeIngress := []string{"workstream_pa_ingress.go", "workstream_pa_dtr_next_question_ingress.go"}
 	fset, files := engineFiles(t)
 	// leg is the position of each selection's leg-type argument (-1: it takes a
 	// contract, and only the wrappers call it).
@@ -138,7 +141,7 @@ func TestEveryLineSelectionNamesItsBuilder(t *testing.T) {
 	}
 	calls := 0
 	for name, f := range files {
-		native := filepath.Base(name) == nativeIngress
+		native := slices.Contains(nativeIngress, filepath.Base(name))
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {

@@ -160,7 +160,15 @@ func TestSeededPersona_SubmitAndInquiryNameTheSameProvider(t *testing.T) {
 
 			submitRef := bundleClaimProvider(t, submit)
 			inquiryRef := bundleClaimProvider(t, inquiry.Body)
-			if submitRef != inquiryRef {
+			// Compared as each resolves in its Bundle (FHIR R4): a relative
+			// reference against the entries' base.
+			resolved := func(ref string) string {
+				if strings.Contains(ref, ":") {
+					return ref
+				}
+				return "https://shn.example/fhir/" + ref
+			}
+			if resolved(submitRef) != resolved(inquiryRef) {
 				t.Fatalf("the submission names %q and the inquiry about it names %q — a payer matching on the provider identifier would find nothing",
 					submitRef, inquiryRef)
 			}
