@@ -283,6 +283,17 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
 		return true
 	}
+	// The Authorization Framework limiting this gateway (its 429): this
+	// gateway's own 503, nothing sent, with the Framework's Retry-After only as
+	// it sent it.
+	var limited *authzLimited
+	if errors.As(err, &limited) {
+		if limited.retryAfter != "" {
+			w.Header().Set("Retry-After", limited.retryAfter)
+		}
+		writeUnavailable(w, limited.Error())
+		return true
+	}
 	// The Authorization Framework not answering is the network being
 	// unavailable, not a verdict: this gateway's own 503, and nothing was sent.
 	if errors.Is(err, errAuthzUnreachable) {

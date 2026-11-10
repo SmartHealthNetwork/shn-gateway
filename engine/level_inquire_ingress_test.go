@@ -148,6 +148,23 @@ func TestLevelInquireIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T)
 	}
 }
 
+// An inquiry answer that repeats a member name only under case folding
+// ("language" and "Language") is read one way only too: refused at every level,
+// never relayed.
+func TestLevelInquireIngress_AnswerCaseFoldedRepeatRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
+	answer := []byte(strings.Replace(string(levelInquiryPayerAnswer(t)), `"language": "en"`, `"language": "en", "Language": "en"`, 1))
+	if string(answer) == string(levelInquiryPayerAnswer(t)) {
+		t.Fatal("fixture: no member name repeated")
+	}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env, rec, ev := levelInquireRow(t, level, levelInquiry(t, "MBR-COVERED", ""), answer)
+			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, `payer inquiry answer repeats the JSON member \"Language\" in the top-level object: it can be read two ways, so it is not carried`)
+		})
+	}
+}
+
 // A readable, bound answer is recorded "ok" at every level, and nothing is
 // skipped.
 func TestLevelInquireIngress_ReadableAnswerRecordedOK(t *testing.T) {

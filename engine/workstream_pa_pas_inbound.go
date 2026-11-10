@@ -529,8 +529,8 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // conformant request by this payer's own system, forward the bundle to the responder (native relays the
 // bundle byte-verbatim to the real RI's /Claim/$submit AND records the submit-cell ledger write;
 // an injected LegResponder adjudicates in-process AND records the same write), and relay the
-// response. The response member-fence (R-7) and response egress-$validate (R-8) are
-// namespace-aware: on by default, standing down only for a foreign/relayed result; explained below.
+// response. The response member-fence (R-7) is namespace-aware: on by default, standing down
+// only for a foreign result; explained below. The response is never egress-$validated (R-8).
 //
 // Store side-effects: BOTH responder paths return a Commit — RecordPendedClaim on pend (the
 // load-bearing pend→update handoff depends on it) and the decision on approve/deny. "Pure relay" is
@@ -539,10 +539,8 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // Commit, THEN write — so a response-leg failure can never orphan the pend ledger. (A Commit-nil
 // result simply relays.)
 //
-// Response member-fence (R-7) + response egress-$validate (R-8) are now NAMESPACE-AWARE:
-// both run BY DEFAULT (a non-relaying LegResponder answers in SHN's OWN member namespace and
-// produces SHN-shaped output — both flags false) and stand DOWN only when the responder declares the
-// result foreign/relayed by its per-result flags (native-forward path). The bound REQUEST above + the
+// Response member-fence (R-7) is NAMESPACE-AWARE: it runs BY DEFAULT and stands DOWN only when the
+// responder declares the result foreign by its per-result flag (native-forward path). The bound REQUEST above + the
 // substrate's correlation-binding (the response reaches only this exchange's originator) remain the
 // backstop on the relay path. OWD-G6 / FR-36.
 //
@@ -553,11 +551,12 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 // (handleCRDNativeInbound has no response fence at all — but the reason differs: CRD cards carry no
 // patient ref, whereas a ClaimResponse does.)
 //
-// R-8 (egress-$validate iff !ResponseRelayed()): a verbatim foreign RI's Da Vinci PAS output declares
-// its source contract. SHN does not stamp or certify unchanged foreign bytes,
-// so $validating it would 422 a valid response — the relay stands down (br-payer validates its own
-// output). A non-relayed response IS egress-$validated. This mirrors the DTR near-relay,
-// CRD-native, and the minimized pas-claim case.
+// R-8: a verbatim foreign RI's Da Vinci PAS output declares its source
+// contract. SHN does not stamp or certify unchanged foreign bytes, so
+// $validating it would 422 a valid response — the relay stands down
+// (br-payer validates its own output). Ownership admits only a relayed answer
+// on this leg (admit, below), so no answer this gateway built reaches it and
+// the response is never egress-$validated.
 func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, subjectPCI, status, msg := g.conformantPASBindContext(r.Context(), bundleJSON)
 	if status != 0 {
@@ -640,15 +639,6 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8: a verbatim foreign relay carries Da
-	// Vinci PAS content which this gateway did not assemble). The
-	// non-relaying LegResponder produces SHN-shaped output (an authored Response) → $validated, matching the
-	// minimized pas-claim handler's response egress-$validate.
-	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim")
-	if status != 0 {
-		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaim, env, tok, answerTok, status, msg, nil)
-		return
-	}
 	// Build the response leg BEFORE committing payer state so a response-leg
 	// failure (unknown requester, seal, encode) cannot orphan the pended-claim ledger.
 	//
@@ -712,12 +702,11 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // SHN preserves bytes + enforces authority/FR-32 here, exactly as handlePASNativeInbound and the DTR
 // near-relay do — NOT a place to "restore parity" with an ingress-$validate.
 //
-// Response member-fence (R-7) + response egress-$validate (R-8) are NAMESPACE-AWARE,
-// mirror of the conformant submit leg: both run BY DEFAULT (a non-relaying LegResponder, both flags
-// false) and stand DOWN only when the result is declared foreign/relayed by its per-result flags (a real
-// RI responds in its OWN patient namespace, so a response-subject == bound-member check / $validating
-// its Da Vinci profiles is a category error for a verbatim relay) — the flags keep this leg
-// symmetric with submit so the native relay stands the response fence/$validate down.
+// Response member-fence (R-7) is NAMESPACE-AWARE, mirror of the conformant submit leg: it runs BY
+// DEFAULT and stands DOWN only when the result is declared foreign by its per-result flag (a real RI
+// responds in its OWN patient namespace, so a response-subject == bound-member check is a category
+// error for a verbatim relay). As on submit, ownership admits only a relayed answer, so the response
+// is never egress-$validated (R-8).
 // (The minimized pas-claim-update leg's (C) fence stays LIVE on its own leg until that leg is deleted.)
 func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, bundleJSON []byte, answerTok string) {
 	boundPatientRef, subjectPCI, status, msg := g.conformantPASUpdateBindContext(r.Context(), bundleJSON)
@@ -793,14 +782,6 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 	// The flag keeps the leg symmetric with submit so the native relay (both flags set) stands the
 	// member-fence down. Re-adds the (C) fence before the minimized pas-claim-update leg is deleted (OWD-G6).
 	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim-update", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
-		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// Egress-$validate the RESPONSE iff !ResponseRelayed() (R-8), mirror of the conformant submit
-	// handler: a non-relaying LegResponder produces locally assembled output (validated); a foreign verbatim relay
-	// (a relayed Response) is preserved bytes-only. Assembly is certified explicitly against PAS.
-	status, msg = g.validatePASResult(r.Context(), result, answerTok, "pas-claim-update")
-	if status != 0 {
 		g.refuseAfterPayerAnswered(w, r, pasLeg, legPASClaimUpdate, env, tok, answerTok, status, msg, nil)
 		return
 	}
@@ -1166,27 +1147,6 @@ func stampForBuiltAnswer(result LegResult, answerTok string) string {
 		return ""
 	}
 	return answerTok
-}
-
-// validatePASResult certifies an answer THIS GATEWAY PRODUCED against the exact
-// PAS response profile for the line it was built at. A RELAYED answer is the
-// participant's own message: this gateway neither wrote it nor can vouch for the
-// line it was written at, so it is not certified here — the reference-closure rule
-// (validateNativePASResponse) is what every PAS answer passes, relayed or not.
-//
-// There is no third case. The terminal-response assembly that used to sit between
-// them — a payer's pend replaced by a later polled approval, certified as SHN's
-// own — is gone, and with it the whole class of failure where a payer's own
-// extension made SHN's validator refuse SHN's copy of the payer's decision.
-func (g *Gateway) validatePASResult(ctx context.Context, result LegResult, answerTok, leg string) (int, string) {
-	responseFHIR, err := g.admit(result.Response, answerKey(leg, relay.OutcomeAnswered))
-	if err != nil {
-		return http.StatusInternalServerError, errOwnershipFault
-	}
-	if result.ResponseRelayed() {
-		return 0, ""
-	}
-	return g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.pas", shnsdk.LineOf(answerTok), "")
 }
 
 // payerAnswerRead tracks whether a payer gateway read its participant's answer

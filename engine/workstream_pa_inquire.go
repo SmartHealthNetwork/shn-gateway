@@ -494,7 +494,7 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // this gateway.
 func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	forward, refused, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
+	forward, refused, err := n.payorEdgeRequest(ctx, in, payorEdgeInquiryBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
 	}
@@ -628,21 +628,6 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		stop()
 	}
 	if status, msg := g.fenceResponseSubjectWith(r.Context(), "pas-claim-inquire", boundPatientRef, env.Metadata.CorrelationID, result, read.refuses); status != 0 {
-		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
-		return
-	}
-	// The direction flips here, as it does on every inbound leg that answers with
-	// bytes it built itself. handleInbound tagged this context with the peer's
-	// inquiry — right for everything above — but everything validated from here
-	// on is THIS participant's own build: the answer when this gateway produced
-	// it (validatePASResult certifies only that case; a relayed answer returns
-	// early, being the payer's own message). Retag
-	// rather than re-tag from scratch, so the leg and the correlation id
-	// handleInbound resolved are carried, not re-derived.
-	fc := findingContextFrom(r.Context())
-	fc.Whose = "own"
-	ctx := withFindingContext(r.Context(), fc)
-	if status, msg := g.validatePASResult(ctx, result, answerTok, "pas-claim-inquire"); status != 0 {
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}

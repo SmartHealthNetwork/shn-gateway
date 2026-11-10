@@ -177,7 +177,7 @@ func questionnaireHasSubject(b []byte) bool {
 		Subject *json.RawMessage `json:"subject"`
 	}
 	if err := json.Unmarshal(b, &probe); err != nil {
-		return false // malformed → no valid subject; egress-$validate catches shape
+		return false // malformed → no subject read
 	}
 	return probe.Subject != nil
 }
@@ -202,7 +202,7 @@ func packageQuestionnaireHasSubject(b []byte) bool {
 		} `json:"entry"`
 	}
 	if err := json.Unmarshal(b, &bundle); err != nil {
-		return false // malformed → no valid subject; egress-$validate catches shape
+		return false // malformed → no subject read
 	}
 	for _, e := range bundle.Entry {
 		var probe struct {

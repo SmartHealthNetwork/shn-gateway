@@ -454,22 +454,22 @@ func TestCRDIngressNeverCarriesAnotherPatientsCoverage(t *testing.T) {
 func TestFHIRServerCoverageValueFillFence(t *testing.T) {
 	fence := newPatientFence(shnsdk.MemberSystem, strangerMember, nil, "", strangerMember).forPrefetch()
 	own := coverageSearchset(strangerMember, "00001")
-	if v, status, msg := fhirServerCoverageValue([]byte(own), nil, "https://example.com:8443/fhir", fence); status != 0 || v == nil {
+	if v, status, msg := fhirServerCoverageValue([]byte(own), nil, nil, "https://example.com:8443/fhir", fence); status != 0 || v == nil {
 		t.Fatalf("the member's own coverage: %d %s", status, msg)
 	}
 	other := coverageSearchset("someone-else", "00001")
-	if v, status, msg := fhirServerCoverageValue([]byte(other), nil, "https://example.com:8443/fhir", fence); status != http.StatusBadGateway || msg != fillFencedOtherPatient || v != nil {
+	if v, status, msg := fhirServerCoverageValue([]byte(other), nil, nil, "https://example.com:8443/fhir", fence); status != http.StatusBadGateway || msg != fillFencedOtherPatient || v != nil {
 		t.Fatalf("another patient's coverage: %d %q %s", status, msg, v)
 	}
 	// Another patient's Coverage the routing choice did not pick is not
 	// carried, so it is not what the fence refuses; one it picks is.
 	mixed := strings.Replace(statusSearchset("cancelled:00001", "active:00001"), "Patient/"+strangerMember, "Patient/someone-else", 1)
-	if v, status, msg := fhirServerCoverageValue([]byte(mixed), nil, "https://example.com:8443/fhir", fence); status != 0 || bytes.Contains(v, []byte("someone-else")) {
+	if v, status, msg := fhirServerCoverageValue([]byte(mixed), nil, nil, "https://example.com:8443/fhir", fence); status != 0 || bytes.Contains(v, []byte("someone-else")) {
 		t.Fatalf("an unchosen Coverage: %d %q %s", status, msg, v)
 	}
 	mixed = strings.Replace(statusSearchset("cancelled:00001", "active:00001"), "Patient/"+strangerMember, "Patient/someone-else", 2)
 	mixed = strings.Replace(mixed, "Patient/someone-else", "Patient/"+strangerMember, 1)
-	if v, status, msg := fhirServerCoverageValue([]byte(mixed), nil, "https://example.com:8443/fhir", fence); status != http.StatusBadGateway || msg != fillFencedOtherPatient || v != nil {
+	if v, status, msg := fhirServerCoverageValue([]byte(mixed), nil, nil, "https://example.com:8443/fhir", fence); status != http.StatusBadGateway || msg != fillFencedOtherPatient || v != nil {
 		t.Fatalf("another patient's chosen Coverage: %d %q %s", status, msg, v)
 	}
 }
@@ -519,7 +519,7 @@ func TestFHIRServerCarriedEntries(t *testing.T) {
 			[]string{"match " + cov("c1", "active", "Organization/o1"), "include " + org("o1")}, 1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			entries, total, ok := fhirServerCarriedEntries(row.answer, row.payor, "https://ehr.example/fhir")
+			entries, total, ok := fhirServerCarriedEntries(row.answer, readPayors(row.payor), nil, "https://ehr.example/fhir")
 			if !ok {
 				t.Fatal("not read")
 			}
@@ -533,7 +533,7 @@ func TestFHIRServerCarriedEntries(t *testing.T) {
 			}
 		})
 	}
-	if _, _, ok := fhirServerCarriedEntries([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Organization","id":"o1"}}]}`), nil, ""); ok {
+	if _, _, ok := fhirServerCarriedEntries([]byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Organization","id":"o1"}}]}`), nil, nil, ""); ok {
 		t.Fatal("an answer with no Coverage was carried")
 	}
 }
@@ -726,7 +726,7 @@ func TestFHIRServerCarriedEntriesAbsolutePayorReference(t *testing.T) {
 		"a versioned reference never":             {bundle(cov("c0", lower+"/_history/2"), cov("c1", "Organization/o1")), read, []string{""}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			entries, _, ok := fhirServerCarriedEntries(row.answer, row.payor, base)
+			entries, _, ok := fhirServerCarriedEntries(row.answer, readPayors(row.payor), nil, base)
 			if !ok {
 				t.Fatal("not read")
 			}
@@ -788,12 +788,13 @@ func TestFHIRServerCarriedEntriesFollowRouting(t *testing.T) {
 		answer []byte
 		want   []string // the included Organizations' ids
 	}{
-		"two payors, both in the answer: the first only": {bundle(covWith(`{"reference":"Organization/o1"},{"reference":"Organization/o2"}`), org("o1", "00001"), org("o2", "00002")), []string{"o1"}},
-		"a reference beside an inline identifier: none":  {bundle(covWith(`{"reference":"Organization/o9","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}`), org("o9", "OTHER")), nil},
-		"a contained payor: none":                        {bundle(strings.Replace(covWith(`{"reference":"#p"}`), `"payor"`, `"contained":[{"resourceType":"Organization","id":"p","identifier":[{"system":"s","value":"v"}]}],"payor"`, 1), org("p", "00001")), nil},
+		"two payors, both in the answer: both":                  {bundle(covWith(`{"reference":"Organization/o1"},{"reference":"Organization/o2"}`), org("o1", "00001"), org("o2", "00002")), []string{"o1", "o2"}},
+		"a reference beside an inline identifier: it":           {bundle(covWith(`{"reference":"Organization/o9","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}`), org("o9", "OTHER")), []string{"o9"}},
+		"a self-pay payor beside the payer's: the payer's only": {bundle(covWith(`{"reference":"Patient/m"},{"reference":"Organization/o1"}`), org("o1", "00001"), `{"resource":{"resourceType":"Patient","id":"m"}}`), []string{"o1"}},
+		"a contained payor: none":                               {bundle(strings.Replace(covWith(`{"reference":"#p"}`), `"payor"`, `"contained":[{"resourceType":"Organization","id":"p","identifier":[{"system":"s","value":"v"}]}],"payor"`, 1), org("p", "00001")), nil},
 	} {
 		t.Run(name, func(t *testing.T) {
-			entries, total, ok := fhirServerCarriedEntries(row.answer, nil, "https://example.com/fhir")
+			entries, total, ok := fhirServerCarriedEntries(row.answer, nil, nil, "https://example.com/fhir")
 			if !ok || total != 1 {
 				t.Fatalf("ok %v, total %d", ok, total)
 			}
@@ -845,10 +846,12 @@ func TestCRDIngressCarryFenceRefusesTheOrganizationRead(t *testing.T) {
 	}
 }
 
-// Through the ingress: a Coverage routed by its own payor identifier carries
-// no Organization, even one its payor also references and the answer holds
-// (routing never read it), at every level.
-func TestCRDIngressCarriesNoOrganizationRoutingDidNotResolve(t *testing.T) {
+// Through the ingress: every payor counts, so a Coverage's carried search
+// result includes the Organization of every payor routing resolved: the one a
+// payor references beside its own identifier, and a second payor's, wherever
+// the payer routing chose is named (the payer reads every payor too), at
+// every level.
+func TestCRDIngressCarriesEveryPayorOrganizationRoutingResolved(t *testing.T) {
 	t.Parallel()
 	search := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"c0","status":"active","beneficiary":{"reference":"Patient/` + strangerMember + `"},` +
 		`"payor":[{"reference":"Organization/o9","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}},{"reference":"Organization/o2"}]}},` +
@@ -866,7 +869,7 @@ func TestCRDIngressCarriesNoOrganizationRoutingDidNotResolve(t *testing.T) {
 			}
 			sent := sentRequest(t, env)
 			got := carriedSearchsetOf(t, sent)
-			if len(got.matches) != 1 || len(got.includes) != 0 || bytes.Contains(sent, []byte("OTHER")) || bytes.Contains(sent, []byte("00002")) {
+			if len(got.matches) != 1 || len(got.includes) != 2 || !bytes.Contains(sent, []byte(`"OTHER"`)) || !bytes.Contains(sent, []byte(`"00002"`)) {
 				t.Fatalf("carried %+v", got)
 			}
 		})
@@ -902,4 +905,13 @@ func TestCRDIngressCarriesThePayorAnUnchosenCoverageShadows(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readPayors is the payor Organizations routing read, as fhirServerRouting
+// keeps them: none, or payor.
+func readPayors(payor []byte) [][]byte {
+	if payor == nil {
+		return nil
+	}
+	return [][]byte{payor}
 }

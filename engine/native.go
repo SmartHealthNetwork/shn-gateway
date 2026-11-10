@@ -177,7 +177,9 @@ func forwardHeadersFrom(ctx context.Context) http.Header {
 
 // WithBackendHeaders sets fixed request headers for a partner system that
 // routes on one (PAYER_DAVINCI_BACKEND_HEADERS). Every request to the partner's
-// bases carries them; the token endpoint never does. nil or empty ⇒ nothing added.
+// bases carries them; the token endpoint never does, and neither does a
+// redirect hop to another origin than the request's own. nil or empty ⇒
+// nothing added.
 // X-Correlation-Id is never one of them: on a request to the partner's system
 // it is only ever the leg's id, set by the gateway.
 func WithBackendHeaders(h http.Header) NativeOption {
@@ -191,6 +193,9 @@ func WithBackendHeaders(h http.Header) NativeOption {
 				delete(n.backendHeaders, k)
 			}
 		}
+		// They were configured for the partner's own origin: a redirect to
+		// another origin carries none of them, as it carries no Authorization.
+		n.client = smartauth.ParticipantClientWith(n.client, n.backendHeaders)
 	}
 }
 
@@ -290,7 +295,7 @@ func NewNativeResponder(client *http.Client, baseURL string, clock func() time.T
 	if clock == nil {
 		clock = time.Now
 	}
-	n := &nativeResponder{client: client, baseURL: baseURL, clock: clock}
+	n := &nativeResponder{client: smartauth.ParticipantClient(client), baseURL: baseURL, clock: clock}
 	n.states = workstreamNativeStates(n)
 	for _, o := range opts {
 		o(n)
@@ -445,7 +450,11 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		logDeadlineSpent(ctx, label, leg, n.backendDeadline)
 		return upstreamReply{}, LegResult{}, &deadlineSpent{deadline: n.backendDeadline}
 	}
-	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, base+path, bytes.NewReader(body))
+	// A call its connector sends again with a refreshed credential after a 401
+	// is noted on the record as one more call, and why.
+	refreshCtx, refresh := smartauth.WithCredentialRefreshObservation(callCtx)
+	refreshCtx, redirects := smartauth.WithRedirectObservation(refreshCtx)
+	req, err := http.NewRequestWithContext(refreshCtx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request build failed: %w", label, err)
 	}
@@ -496,6 +505,22 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		callStart = n.now()
 	}
 	resp, err := n.client.Do(req)
+	x.resent(refresh.Resends())
+	x.redirected(redirects.Hops())
+	// The system redirected the forward from https to http: the hop was not
+	// sent (smartauth.CheckRedirect). The system answered, with its 3xx, and
+	// the request was sent to it, so it is refused as delivered on message
+	// integrity (responderFailed).
+	// The response is the system's own 3xx. A token endpoint's downgrade has
+	// none (the request was never sent), and fails as any token failure
+	// does, below.
+	if err != nil && errors.Is(err, smartauth.ErrCleartextRedirect) && resp != nil {
+		x.backend(resp.StatusCode, x.since(n.now, callStart), BackendHTTP3xx)
+		x.sent(p)
+		systemAnswered(ctx)
+		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s redirected from https to http: %w", label, err), sent: true, cleartextRedirect: true}
+	}
 	if err != nil {
 		class := callEndedClass(callCtx, backendClass(0, err))
 		if timedOut() {

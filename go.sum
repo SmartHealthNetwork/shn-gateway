@@ -1,5 +1,5 @@
-github.com/SmartHealthNetwork/shn-sdk v1.9.0 h1:v/T7ru35GV9ngW0/5eN44xHjVGlPX8lnbYjfcaFzqLw=
-github.com/SmartHealthNetwork/shn-sdk v1.9.0/go.mod h1:/tO7P2eTrLo1tsAdETap6/394UcdtdMpyXgYbLblKhc=
+github.com/SmartHealthNetwork/shn-sdk v1.10.0 h1:6++om4eq1u8Dj+Lm+R89EhmpKjYkUBqwrClMF58EOpI=
+github.com/SmartHealthNetwork/shn-sdk v1.10.0/go.mod h1:/tO7P2eTrLo1tsAdETap6/394UcdtdMpyXgYbLblKhc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=

@@ -10,6 +10,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -343,10 +345,17 @@ func countTransformed(g *Gateway) *int {
 	return n
 }
 
-// A questionnaire request this gateway built (carryUnchanged): a walk to the
-// payer's line that would change it is not applied and not recorded; by
-// default the request goes at its build line, and the setting refuses it as
-// routing. A walk that changes nothing is applied and recorded.
+// A questionnaire request this gateway built (carryUnchanged), by the line it
+// was built at, on a route that reaches the payer's 2.1 by walking from this
+// gateway's 2.0, with a step that would change it:
+//   - built at the payer's 2.1, as every caller builds it: sent as built on a
+//     route naming 2.1 with no chain; no walk runs and nothing is recorded;
+//   - built at the build line 2.0: a walk that changes nothing is applied and
+//     recorded; one that would change it is not applied, and the request is
+//     carried at 2.0 (its frame names the line its bytes were built at), or
+//     refused as routing under the setting;
+//   - built at any other line: refused as the gateway's own fault at every
+//     level, with nothing sent or carried.
 func TestLineCarry_BuiltQuestionnaireRequestAWalkWouldChange(t *testing.T) {
 	fake := shnsdk.NewFakeValidator()
 	route := legRoute{Token: "pa.dtr@2.1", BuildLine: "2.0", Chain: chainFor("pa.dtr", "2.0", "2.1")}
@@ -354,35 +363,96 @@ func TestLineCarry_BuiltQuestionnaireRequestAWalkWouldChange(t *testing.T) {
 		t.Fatal("no pa.dtr 2.0->2.1 chain")
 	}
 	body := []byte(`{"resourceType":"Parameters"}`)
-	newGateway := func(require bool) (*Gateway, *int) {
+	newGateway := func(require bool) (*Gateway, *int, *[]ObserverEvent) {
+		var failed []ObserverEvent
 		g := &Gateway{cfg: Config{TranslateIGLines: true, HolderID: "provider", Clock: func() time.Time { return time.Unix(1700000000, 0).UTC() },
-			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}), RequireSharedLine: require}}
-		return g, countTransformed(g)
+			ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": fake, "2.1": fake}), RequireSharedLine: require,
+			Observer: func(e ObserverEvent) {
+				if e.Kind == "leg.failed" {
+					failed = append(failed, e)
+				}
+			}}}
+		return g, countTransformed(g), &failed
 	}
 	walkSeesBytes(t, envelopeEgressLegs, "dtr-questionnaire-fetch")
 
-	g, transformed := newGateway(false)
-	if sent, status, msg := g.carryUnchanged(route, body, "corr-1", "payer"); status != 0 || !reflect.DeepEqual(sent, route) || *transformed != 1 {
-		t.Fatalf("an unchanged walk = %+v %d %q (%d transformed), want the route, recorded once", sent, status, msg, *transformed)
+	g, transformed, _ := newGateway(false)
+	if sent, status, msg := g.carryUnchanged(context.Background(), route, body, "2.0", "corr-1", "payer"); status != 0 || !reflect.DeepEqual(sent, route) || *transformed != 1 {
+		t.Fatalf("built at the build line, an unchanged walk = %+v %d %q (%d transformed), want the route, recorded once", sent, status, msg, *transformed)
 	}
 
 	walked := swapStep(t, "pa.dtr")
 	route.Chain = chainFor("pa.dtr", "2.0", "2.1") // the steps a chain holds are copied when it is built
-	g, transformed = newGateway(false)
-	sent, status, msg := g.carryUnchanged(route, body, "corr-1", "payer")
-	if *walked != 1 || status != 0 || sent.Token != "pa.dtr@2.0" || sent.BuildLine != "2.0" || sent.Chain != nil || *transformed != 0 {
-		t.Fatalf("default = %+v %d %q (walked %d, %d transformed), want carried at pa.dtr@2.0, nothing recorded", sent, status, msg, *walked, *transformed)
+	for _, level := range allLevels {
+		g, transformed, failed := newGateway(true)
+		g.cfg.ConformanceEnforcement = level
+		sent, status, msg := g.carryUnchanged(context.Background(), route, body, "2.1", "corr-1", "payer")
+		want := legRoute{Token: "pa.dtr@2.1", BuildLine: "2.1"}
+		if status != 0 || !reflect.DeepEqual(sent, want) || *transformed != 0 || len(*failed) != 0 {
+			t.Fatalf("at %s, built at the payer's line = %+v %d %q (%d transformed, %d failed), want %+v as built, nothing recorded", level, sent, status, msg, *transformed, len(*failed), want)
+		}
 	}
-	g, transformed = newGateway(true)
-	if _, status, msg := g.carryUnchanged(route, body, "corr-1", "payer"); status != http.StatusUnprocessableEntity || !strings.Contains(msg, "cannot be carried to the payer's line unchanged") || *transformed != 0 {
+	if *walked != 0 {
+		t.Fatalf("a request built at the payer's line was walked %d times", *walked)
+	}
+
+	g, transformed, _ = newGateway(false)
+	sent, status, msg := g.carryUnchanged(context.Background(), route, body, "2.0", "corr-1", "payer")
+	if *walked != 1 || status != 0 || sent.Token != "pa.dtr@2.0" || sent.BuildLine != "2.0" || sent.Chain != nil || *transformed != 0 {
+		t.Fatalf("built at the build line, a changing walk = %+v %d %q (walked %d, %d transformed), want carried at pa.dtr@2.0, nothing recorded", sent, status, msg, *walked, *transformed)
+	}
+	g, transformed, _ = newGateway(true)
+	if _, status, msg := g.carryUnchanged(context.Background(), route, body, "2.0", "corr-1", "payer"); status != http.StatusUnprocessableEntity || !strings.Contains(msg, "cannot be carried to the payer's line unchanged") || *transformed != 0 {
 		t.Fatalf("required = %d %q (%d transformed), want the 422 and nothing recorded", status, msg, *transformed)
+	}
+
+	for _, level := range allLevels {
+		g, transformed, failed := newGateway(false)
+		g.cfg.ConformanceEnforcement = level
+		ctx, rec := recordingCtx()
+		sent, status, msg := g.carryUnchanged(ctx, route, body, "2.2", "corr-1", "payer")
+		if status != http.StatusInternalServerError || !strings.Contains(msg, "built at line 2.2, neither the line it is sent at (2.1) nor this gateway's build line (2.0)") || sent.Token != "" || *transformed != 0 || len(*failed) != 1 {
+			t.Fatalf("at %s, built at another line = %+v %d %q (%d transformed, %d failed), want the gateway's own 500, nothing carried or recorded, one leg.failed", level, sent, status, msg, *transformed, len(*failed))
+		}
+		if rec.rule != RefusalFidelity || rec.refusalStage != vocab.RefusalStageVerify {
+			t.Fatalf("at %s recorded refusal %q at %q, want %s at %s: the gateway's own fault", level, rec.rule, rec.refusalStage, RefusalFidelity, vocab.RefusalStageVerify)
+		}
+	}
+}
+
+// Production's questionnaire request is built at the payer's line and its leg
+// is an envelope leg, whose bytes no walk step sees: even with a step that
+// would change them in the chain, it goes at the payer's line, no step is
+// handed the bytes, and nothing is refused.
+func TestLineCarry_EnvelopeQuestionnaireRequestIsNeverCarried(t *testing.T) {
+	if !envelopeEgressLegs["dtr-questionnaire-fetch"] {
+		t.Fatal("the questionnaire request is no longer an envelope leg: its carry must build at the line it frames (see carryUnchanged)")
+	}
+	walked := swapStep(t, "pa.dtr")
+	route := legRoute{Token: "pa.dtr@2.1", BuildLine: "2.0", Chain: chainFor("pa.dtr", "2.0", "2.1")}
+	if len(route.Chain) == 0 {
+		t.Fatal("no pa.dtr 2.0->2.1 chain")
+	}
+	var failed int
+	g := &Gateway{cfg: Config{TranslateIGLines: true, HolderID: "provider", Clock: func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator(), "2.1": shnsdk.NewFakeValidator()}),
+		Observer: func(e ObserverEvent) {
+			if e.Kind == "leg.failed" {
+				failed++
+			}
+		}}}
+	for _, builtAt := range []string{"2.1", "2.0"} {
+		sent, status, msg := g.carryUnchanged(context.Background(), route, []byte(`{"resourceType":"Parameters"}`), builtAt, "corr-1", "payer")
+		if status != 0 || sent.Token != "pa.dtr@2.1" || *walked != 0 || failed != 0 {
+			t.Fatalf("built at %s = %+v %d %q (step walked %d, %d leg.failed), want sent at the payer's line pa.dtr@2.1, no step handed the bytes, nothing refused", builtAt, sent, status, msg, *walked, failed)
+		}
 	}
 }
 
 // The same through a workflow that builds and sends the questionnaire request
-// (the CRD dispatch): the leg goes out at the build line, with no chain, and
-// the carry is recorded, by default; under the setting the workflow is refused
-// before the questionnaire request is sent.
+// (the CRD dispatch): built at the payer's line, it is sent as built, with no
+// walk, even with a step that would change it in the chain and the envelope
+// exemption removed; under the setting too, since nothing would be carried.
 func TestLineCarry_DispatchQuestionnaireAWalkWouldChange(t *testing.T) {
 	const performerRef = "Organization/org-dme-ox"
 	orderJSON, err := buildHomeOxygenDeviceRequest("dr-ox", "Patient/MBR-OX", performerRef)
@@ -432,23 +502,14 @@ func TestLineCarry_DispatchQuestionnaireAWalkWouldChange(t *testing.T) {
 					t.Fatalf("a walk that was not applied was recorded: %+v", e)
 				}
 			}
-			if *walked != 1 {
-				t.Fatalf("the swapped step ran %d times, want 1 (%d %s)", *walked, rec.Code, rec.Body)
+			// Built at the payer's 2.1, the line it is sent at, the request
+			// goes as built: no walk runs, so nothing is carried, recorded or
+			// refused, under the setting or not.
+			if *walked != 0 {
+				t.Fatalf("the swapped step ran %d times on a request built at the payer's line (%d %s)", *walked, rec.Code, rec.Body)
 			}
-			if require {
-				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "cannot be carried to the payer's line unchanged") || len(sent) != 0 {
-					t.Fatalf("required = %d %s (%d questionnaire requests sent), want 422 before it is sent", rec.Code, rec.Body, len(sent))
-				}
-				return
-			}
-			if rec.Code != http.StatusOK {
-				t.Fatalf("default = %d %s, want answered", rec.Code, rec.Body)
-			}
-			if len(sent) != 1 || sent[0].Route == nil || sent[0].Route.Token != "pa.dtr@2.0" || len(sent[0].Route.Chain) != 0 {
-				t.Fatalf("questionnaire requests %+v, want one at its build line pa.dtr@2.0 with no chain", sent)
-			}
-			if carried != 1 {
-				t.Fatalf("%d %s events for the questionnaire leg, want 1", carried, LineCarriedEvent)
+			if rec.Code != http.StatusOK || len(sent) != 1 || sent[0].Route == nil || sent[0].Route.Token != "pa.dtr@2.1" || len(sent[0].Route.Chain) != 0 || carried != 0 {
+				t.Fatalf("= %d %s (questionnaire requests %+v, %d carry events), want one sent as built at pa.dtr@2.1 with no chain", rec.Code, rec.Body, sent, carried)
 			}
 		})
 	}
@@ -491,17 +552,13 @@ func TestLineCarry_OrderQuestionnaireAWalkWouldChange(t *testing.T) {
 					t.Fatalf("a walk that was not applied was recorded: %+v", e)
 				}
 			}
-			if *walked != 1 {
-				t.Fatalf("the swapped step ran %d times, want 1 (%d %s)", *walked, rec.Code, rec.Body)
+			// As for the dispatch: built at the payer's 2.1, the request goes
+			// as built, with no walk.
+			if *walked != 0 {
+				t.Fatalf("the swapped step ran %d times on a request built at the payer's line (%d %s)", *walked, rec.Code, rec.Body)
 			}
-			if require {
-				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "cannot be carried to the payer's line unchanged") || len(sent) != 0 {
-					t.Fatalf("required = %d %s (%d questionnaire requests sent), want 422 before it is sent", rec.Code, rec.Body, len(sent))
-				}
-				return
-			}
-			if len(sent) != 1 || sent[0].Route == nil || sent[0].Route.Token != "pa.dtr@2.0" || len(sent[0].Route.Chain) != 0 || carried != 1 {
-				t.Fatalf("questionnaire requests %+v (%d carry events; answer %d %s), want one at its build line pa.dtr@2.0 with no chain, recorded", sent, carried, rec.Code, rec.Body)
+			if len(sent) != 1 || sent[0].Route == nil || sent[0].Route.Token != "pa.dtr@2.1" || len(sent[0].Route.Chain) != 0 || carried != 0 {
+				t.Fatalf("questionnaire requests %+v (%d carry events; answer %d %s), want one sent as built at pa.dtr@2.1 with no chain", sent, carried, rec.Code, rec.Body)
 			}
 		})
 	}

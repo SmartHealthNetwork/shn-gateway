@@ -943,7 +943,11 @@ func TestOriginator_InquiryNamesTheCoverageTheSubmissionCarried(t *testing.T) {
 		if !found || status != 0 {
 			t.Fatalf("routing coverage: %v %d %q", found, status, msg)
 		}
-		insurer, status, msg, _ := gw.memberPayerOrganization(context.Background(), submitted)
+		pid, routed, _, _, _ := gw.routedPayerIdentifier(context.Background(), submitted)
+		if !routed {
+			t.Fatal("the submitted coverage routes to no payer")
+		}
+		insurer, _, status, msg, _ := gw.memberPayerOrganization(context.Background(), submitted, pid)
 		if status != 0 {
 			t.Fatalf("payer organization: %d %q", status, msg)
 		}

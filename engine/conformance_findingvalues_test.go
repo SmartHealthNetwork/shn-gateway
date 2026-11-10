@@ -191,79 +191,85 @@ func TestPinnedFindingContext_UC01EligibilityEgress(t *testing.T) {
 
 // ---- Inbound family (the answer half of handleInbound's tag) ----
 
-// TestPinnedFindingContext_InboundEgress drives handlePASNativeInbound
-// directly, pre-tagged exactly as handleInbound sets it for an inbound
-// pas-claim leg (Whose "peer", the REQUEST's own direction) — proving the
-// direction-flip retag added after g.admit (before the payer's own
-// ClaimResponse/side-effect FHIR are validated) actually reaches the check
-// as Whose "own".
-func TestPinnedFindingContext_InboundEgress(t *testing.T) {
-	g, requester := newInboundTestGateway(t, true)
-	spy := &findingSpyValidator{}
-	g.cfg.Validator = spy
-	// A conformant terminal PAS response Bundle, sealed as an answer this
-	// responder AUTHORED (testResponse — ResponseRelayed() false), which is
-	// what validatePASResult certifies; a relayedResponse would stand the
-	// egress check down (R-8) and there would be no call to read the tag off.
-	// ResponseSubjectForeign stands the member-fence down (the fixture's own
-	// subject, SubscriberExample, is not MBR-COVERED).
-	answer := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
-	commits, rollbacks := 0, 0
-	result := LegResult{
-		Response: testResponse(answer), ResponseSubjectForeign: true,
-		Commit:   func() error { commits++; return nil },
-		Rollback: func() { rollbacks++ },
+// A payer's gateway answers the DTR and PAS legs with its participant's own
+// answer, relayed as sent (TestPayerAnswersAreAdmittedOnlyAsRelayed). Each
+// handler flips the context handleInbound tagged with the peer's request
+// after admit: what it judges from there on is its own participant's answer,
+// so a defect it records there reads Whose "own", on the leg and correlation
+// handleInbound resolved. The rows below drive a relayed answer with a defect
+// at observe, so the defect is recorded and the answer carried.
+
+// answerFindings captures the conformance findings g records.
+func answerFindings(g *Gateway) *[]ConformanceFinding {
+	var findings []ConformanceFinding
+	g.cfg.Observer = func(e ObserverEvent) {
+		var f ConformanceFinding
+		if e.Kind == ConformanceObservedEvent && json.Unmarshal([]byte(e.Detail), &f) == nil {
+			findings = append(findings, f)
+		}
 	}
-	g.cfg.Responder = pasResultResponder{result: result}
-	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-
-	env := shnsdk.Envelope{}
-	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-pas-inbound-1", requester.ID
-	tok := shnsdk.Token{Subject: pci, CorrelationID: env.Metadata.CorrelationID}
-	req := conformantPASBundleWithQR(t, "MBR-COVERED")
-
-	r := newSignedInboundRequest(t, g, requester.ID)
-	r = r.WithContext(withFindingContext(r.Context(), findingContext{
-		LegType: "pas-claim", CorrelationID: env.Metadata.CorrelationID,
-		Seam: paCatalog["pas-claim"].Seam, Whose: "peer",
-	}))
-	rec := httptest.NewRecorder()
-	g.handlePASNativeInbound(rec, r, env, tok, req, "pa.pas@2.0")
-
-	if commits != 1 || rollbacks != 0 || rec.Code != http.StatusOK {
-		t.Fatalf("commits=%d rollbacks=%d status=%d body=%s — fixture is not reaching the egress checks cleanly",
-			commits, rollbacks, rec.Code, rec.Body.String())
-	}
-	call := spy.nth(t, 1, "Bundle")
-	assertTag(t, "inbound egress (this payer's own authored response, after the admit direction-flip)", call.fc, wantTag{
-		legType: "pas-claim", whose: "own", seam: "payer-native", corrPresent: true,
-	})
+	return &findings
 }
 
-// TestPinnedFindingContext_PayerDTREgress drives handleDTRInbound
-// (workstream_pa_dtr_inbound.go) directly, pre-tagged exactly as handleInbound sets it for an
-// inbound dtr-questionnaire-fetch leg — proving the direction-flip retag at
-// workstream_pa_dtr_inbound.go:92-94 (after g.admit, before the payer's own $questionnaire-package
-// answer is validated) actually reaches the check as Whose "own". This is
-// the row that closes the gap the re-review found: this exact retag had no
-// test at all.
-func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
+// assertAnswerFinding pins the one finding a row's relayed answer records.
+func assertAnswerFinding(t *testing.T, label string, findings []ConformanceFinding, legType, corr string) {
+	t.Helper()
+	if len(findings) != 1 {
+		t.Fatalf("%s: %d findings, want the answer's one: %+v", label, len(findings), findings)
+	}
+	f := findings[0]
+	if f.LegType != legType || f.Whose != "own" || f.Seam != paCatalog[legType].Seam || f.CorrelationID != corr {
+		t.Fatalf("%s: finding leg %q whose %q seam %q correlation %q, want %q own %q %q (the flip must retag what handleInbound resolved)",
+			label, f.LegType, f.Whose, f.Seam, f.CorrelationID, legType, paCatalog[legType].Seam, corr)
+	}
+}
+
+// unreadablePASAnswer is a relayed answer no PAS answer read accepts.
+var unreadablePASAnswer = []byte(`{"resourceType":"Patient","id":"not-an-answer"}`)
+
+func TestPinnedFindingContext_InboundAnswer(t *testing.T) {
+	for _, leg := range []string{"pas-claim", "pas-claim-update", "pas-claim-inquire"} {
+		t.Run(leg, func(t *testing.T) {
+			g, requester := newInboundTestGateway(t, true)
+			g.cfg.ConformanceEnforcement = EnforcementObserve
+			findings := answerFindings(g)
+			g.cfg.Responder = pasResultResponder{result: LegResult{Response: relayedResponse(unreadablePASAnswer), ResponseSubjectForeign: true}}
+			pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
+			env := shnsdk.Envelope{}
+			env.Metadata.CorrelationID, env.Metadata.Sender = "corr-"+leg+"-inbound-1", requester.ID
+			tok := shnsdk.Token{Subject: pci, CorrelationID: env.Metadata.CorrelationID}
+			r := newSignedInboundRequest(t, g, requester.ID)
+			r = r.WithContext(withFindingContext(r.Context(), findingContext{
+				LegType: leg, CorrelationID: env.Metadata.CorrelationID, Seam: paCatalog[leg].Seam, Whose: "peer",
+			}))
+			rec := httptest.NewRecorder()
+			switch leg {
+			case "pas-claim":
+				g.handlePASNativeInbound(rec, r, env, tok, conformantPASBundleWithQR(t, "MBR-COVERED"), "pa.pas@2.0")
+			case "pas-claim-update":
+				g.handlePASUpdateNativeInbound(rec, r, env, tok, originatorBuiltConformantUpdateBundle(t), "pa.pas@2.0")
+			default:
+				g.handlePASInquireInbound(rec, r, env, tok, inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), "pa.pas@2.0")
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("want the relayed answer carried, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			assertAnswerFinding(t, leg+" answer", *findings, leg, env.Metadata.CorrelationID)
+		})
+	}
+}
+
+func TestPinnedFindingContext_PayerDTRAnswer(t *testing.T) {
 	g, requester := newInboundTestGateway(t, true)
-	spy := &findingSpyValidator{}
-	g.cfg.Validator = spy
-	// An authored (not relayed) package: ResponseRelayed() must be false or
-	// the egress check under test is skipped by the R-8 near-relay rule
-	// (workstream_pa_dtr_inbound.go's own comment on this exact call site).
-	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-	g.cfg.Responder = pasResultResponder{result: LegResult{Response: testResponse(pkg)}}
+	g.cfg.ConformanceEnforcement = EnforcementObserve
+	findings := answerFindings(g)
+	// A package whose Questionnaire carries a subject: a defect of the
+	// payer's own answer, recorded at observe and carried.
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","status":"active","subject":{"reference":"Patient/MBR-COVERED"}}}]}`)
+	g.cfg.Responder = pasResultResponder{result: LegResult{Response: relayedResponse(pkg)}}
 	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-
 	env := shnsdk.Envelope{}
-	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-dtr-egress-1", requester.ID
-	// A $questionnaire-package input sent naming the operation, for the
-	// covered member the token authorizes.
-	req := dtrFramedPackageFor(t, g)
-
+	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-dtr-answer-1", requester.ID
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{
@@ -271,121 +277,11 @@ func TestPinnedFindingContext_PayerDTREgress(t *testing.T) {
 		Seam: paCatalog["dtr-questionnaire-fetch"].Seam, Whose: "peer",
 	}))
 	rec := httptest.NewRecorder()
-	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: pci}, req, "pa.dtr@2.0")
-
+	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: pci}, dtrFramedPackageFor(t, g), "pa.dtr@2.0")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s — fixture is not reaching the egress check cleanly", rec.Code, rec.Body.String())
+		t.Fatalf("want the relayed package carried, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	call := spy.nth(t, 1, "Bundle")
-	assertTag(t, "payer DTR egress (this payer's own questionnaire-package answer, after the admit direction-flip)", call.fc, wantTag{
-		legType: "dtr-questionnaire-fetch", whose: "own", seam: "payer-native", corrPresent: true,
-	})
-}
-
-// TestPinnedFindingContext_InboundUpdateEgress drives
-// handlePASUpdateNativeInbound directly, pre-tagged exactly as handleInbound
-// sets it for an inbound pas-claim-update leg — proving the direction-flip
-// retag at workstream_pa_pas_inbound.go:413-415 actually reaches the check as Whose "own".
-// The other unguarded row the re-review found; mirrors
-// TestPinnedFindingContext_InboundEgress's pattern on the amendment leg —
-// the check under test is validatePASResult's validateFHIRForContract call,
-// the one arm it has for an answer this gateway produced.
-func TestPinnedFindingContext_InboundUpdateEgress(t *testing.T) {
-	t.Parallel()
-	g, requester := newInboundTestGateway(t, true)
-	spy := &findingSpyValidator{}
-	g.cfg.Validator = spy
-	// A conformant terminal PAS response Bundle, sealed as AUTHORED
-	// (testResponse — ResponseRelayed() false) so validatePASResult certifies
-	// it rather than standing down under R-8. ResponseSubjectForeign stands
-	// the member-fence down (the fixture's own subject, SubscriberExample, is
-	// not MBR-COVERED) — the same posture a real RI-relayed answer carries.
-	answer := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
-	result := LegResult{Response: testResponse(answer), ResponseSubjectForeign: true}
-	g.cfg.Responder = pasResultResponder{result: result}
-	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-
-	env := shnsdk.Envelope{}
-	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-pas-update-inbound-1", requester.ID
-	tok := shnsdk.Token{Subject: pci, CorrelationID: env.Metadata.CorrelationID}
-	req := originatorBuiltConformantUpdateBundle(t)
-
-	r := newSignedInboundRequest(t, g, requester.ID)
-	r = r.WithContext(withFindingContext(r.Context(), findingContext{
-		LegType: "pas-claim-update", CorrelationID: env.Metadata.CorrelationID,
-		Seam: paCatalog["pas-claim-update"].Seam, Whose: "peer",
-	}))
-	rec := httptest.NewRecorder()
-	g.handlePASUpdateNativeInbound(rec, r, env, tok, req, "pa.pas@2.0")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s — fixture is not reaching the egress check cleanly", rec.Code, rec.Body.String())
-	}
-	call := spy.nth(t, 1, "Bundle")
-	assertTag(t, "inbound update egress (this payer's own authored amendment response, after the admit direction-flip)", call.fc, wantTag{
-		legType: "pas-claim-update", whose: "own", seam: "payer-native", corrPresent: true,
-	})
-}
-
-// TestPinnedFindingContext_InboundInquireEgress drives handlePASInquireInbound
-// directly, pre-tagged exactly as handleInbound sets it for an inbound
-// pas-claim-inquire leg — proving the direction-flip retag in workstream_pa_inquire.go
-// actually reaches the check as Whose "own". The third PAS leg, and the last
-// one to get its flip: the inquiry leg arrived after the submit and amendment
-// legs, so the flip was written without a row of its own and a later edit
-// could have dropped it with every test still green — the exact defect class
-// the census in conformance_sources_test.go cannot see.
-//
-// The correlation-id assertion below is the reason this row is not redundant
-// with a Whose-only check. The flip must RETAG the context handleInbound
-// already resolved, not build a new one: a replacement
-// withFindingContext(..., findingContext{LegType: …, Whose: "own", Seam: …})
-// would satisfy every other field here and silently drop the inherited
-// correlation id, leaving every finding this leg emits untraceable to the
-// exchange that raised it. So this row pins the id's VALUE against the
-// envelope's, not merely assertTag's presence.
-func TestPinnedFindingContext_InboundInquireEgress(t *testing.T) {
-	g, requester := newInboundTestGateway(t, true)
-	spy := &findingSpyValidator{}
-	g.cfg.Validator = spy
-	// The synthetic 2.0/2.1 inquiry answer (a response Bundle — the shape
-	// validatePASInquiryAnswer accepts), sealed as AUTHORED (testResponse —
-	// ResponseRelayed() false) so validatePASResult certifies it rather than
-	// standing down under R-8. ResponseSubjectForeign stands the member fence
-	// down: the fixture answers in the payer's own namespace
-	// (SubscriberExample), not MBR-COVERED — the posture a real relayed RI
-	// answer carries.
-	answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")
-	g.cfg.Responder = pasResultResponder{result: LegResult{
-		Response: testResponse(answer), ResponseSubjectForeign: true,
-	}}
-	pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
-
-	env := shnsdk.Envelope{}
-	env.Metadata.CorrelationID, env.Metadata.Sender = "corr-pas-inquire-inbound-1", requester.ID
-	tok := shnsdk.Token{Subject: pci, CorrelationID: env.Metadata.CorrelationID}
-	req := inquiryBundle("MBR-COVERED", "", "TRN-1", "72148")
-
-	r := newSignedInboundRequest(t, g, requester.ID)
-	r = r.WithContext(withFindingContext(r.Context(), findingContext{
-		LegType: "pas-claim-inquire", CorrelationID: env.Metadata.CorrelationID,
-		Seam: paCatalog["pas-claim-inquire"].Seam, Whose: "peer",
-	}))
-	rec := httptest.NewRecorder()
-	g.handlePASInquireInbound(rec, r, env, tok, req, "pa.pas@2.0")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d body=%s — fixture is not reaching the egress check cleanly", rec.Code, rec.Body.String())
-	}
-	const label = "inbound inquiry egress (this payer's own authored inquiry answer, after the direction flip)"
-	call := spy.nth(t, 1, "Bundle")
-	assertTag(t, label, call.fc, wantTag{
-		legType: "pas-claim-inquire", whose: "own", seam: "payer-native", corrPresent: true,
-	})
-	if call.fc.CorrelationID != env.Metadata.CorrelationID {
-		t.Errorf("%s: CorrelationID = %q, want the envelope's own %q — the flip must carry handleInbound's id, not re-derive it",
-			label, call.fc.CorrelationID, env.Metadata.CorrelationID)
-	}
+	assertAnswerFinding(t, "payer DTR answer", *findings, "dtr-questionnaire-fetch", env.Metadata.CorrelationID)
 }
 
 // ---- DTR family (including the adaptive path) + PAS family ----
@@ -649,8 +545,17 @@ func TestPinnedFindingContext_FederatedQueryIngress(t *testing.T) {
 	// records Bundle. The demo lane is the lane whose payer answers were once
 	// exempt from the check; the facility's answer never was, and is checked as
 	// itself.
-	call := spy.nth(t, 1, "Task")
+	// The data request Task this gateway built is checked first, at egress,
+	// as its own; the facility's answer after it, as the peer's.
+	request := spy.nth(t, 1, "Task")
+	assertTag(t, "federated query egress (the data request this gateway built)", request.fc, wantTag{
+		legType: "federated-query", whose: "own", seam: "originate", corrPresent: true,
+	})
+	call := spy.nth(t, 2, "Task")
 	assertTag(t, "federated query ingress (the facility's answer, as the requesting provider sees it)", call.fc, wantTag{
 		legType: "federated-query", whose: "peer", seam: "originate", corrPresent: true,
 	})
+	if request.fc.CorrelationID != call.fc.CorrelationID {
+		t.Fatalf("the request's check names correlation %q, its answer's %q: one leg", request.fc.CorrelationID, call.fc.CorrelationID)
+	}
 }

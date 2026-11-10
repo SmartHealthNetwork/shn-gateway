@@ -94,7 +94,15 @@ func checkTag(id string) (endpointcert.Tag, bool) {
 func tagCheckTargets(rec *endpointcert.Recorder, targets []checks.Target, client *http.Client) []checks.Target {
 	for i := range targets {
 		if tag, ok := checkTag(targets[i].ID); ok {
-			targets[i].Client = rec.Client(tag, client)
+			// Under the redirect policy every client that reaches a
+			// participant's system has: never https to http, and no
+			// Authorization to another origin, nor any header the target
+			// is configured to carry (PAYER_DAVINCI_BACKEND_HEADERS).
+			targets[i].Client = smartauth.ParticipantClientWith(rec.Client(tag, client), targets[i].Headers)
+		}
+		if len(targets[i].Headers) > 0 {
+			// The authenticated read carries the same configured headers.
+			targets[i].AuthClient = smartauth.ParticipantClientWith(targets[i].AuthClient, targets[i].Headers)
 		}
 	}
 	return targets

@@ -439,3 +439,42 @@ func TestBuild_BackendTimeoutReachesTheResponder(t *testing.T) {
 		t.Fatalf("after %s: %v, want the payer system's timeout at 1s", waited, err)
 	}
 }
+
+// A call to the participant's system sent a second time after a 401 reaches the
+// access line under backend.resends, each with its closed reason and the
+// challenge as observed; a record with none carries no resends member.
+func TestAccessLineFor_BackendResends(t *testing.T) {
+	rec := refusedRecord()
+	rec.BackendCalls = 3
+	rec.BackendResends = []engine.BackendResend{{Reason: engine.BackendResendCredentialRefreshed, Challenge: "invalid_token"}}
+	b, err := json.Marshal(accessLineFor(rec).Backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"status":503,"latencyMs":250,"errorClass":"http-5xx","calls":3,"resends":[{"reason":"credential-refreshed-after-401","challenge":"invalid_token"}]}`
+	if string(b) != want {
+		t.Fatalf("backend\n got %s\nwant %s", b, want)
+	}
+	if b, _ := json.Marshal(accessLineFor(refusedRecord()).Backend); strings.Contains(string(b), "resends") {
+		t.Fatalf("a record with no resend rendered %s", b)
+	}
+}
+
+// The redirect hops the participant's system answered with reach the access
+// line under backend.redirects, each by its closed class; a record with none
+// carries no redirects member.
+func TestAccessLineFor_BackendRedirects(t *testing.T) {
+	rec := refusedRecord()
+	rec.BackendRedirects = []string{"cross-origin", "https-to-http-refused"}
+	b, err := json.Marshal(accessLineFor(rec).Backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"status":503,"latencyMs":250,"errorClass":"http-5xx","calls":2,"redirects":["cross-origin","https-to-http-refused"]}`
+	if string(b) != want {
+		t.Fatalf("backend\n got %s\nwant %s", b, want)
+	}
+	if b, _ := json.Marshal(accessLineFor(refusedRecord()).Backend); strings.Contains(string(b), "redirects") {
+		t.Fatalf("a record with no redirect rendered %s", b)
+	}
+}

@@ -505,6 +505,9 @@ type crdDtrResult struct {
 	// carrying a plan identifier: a submission naming a minted payer organization
 	// is one this participant's own inquiry can never match.
 	insurer []byte
+	// insurerRef is the reference of the payor insurer is the Organization of:
+	// the payor routing chose (memberPayerOrganization).
+	insurerRef string
 	// member is the BARE member id this exchange originated for — the value the
 	// Patient carries as its member identifier and the one a payer matches an
 	// inquiry on. It rides beside coverageRef, which stays the Reference-shaped
@@ -717,7 +720,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// only when the system supplies it, as a referenced parameter), so a
 	// record the system cannot supply is refused at that claim's build
 	// (pasClaimSourcesAt), after the legs this request can still send.
-	realPayerOrg, payerOrgStatus, payerOrgMsg, payerOrgErr := g.memberPayerOrganization(ctx, realCov)
+	realPayerOrg, realPayerRef, payerOrgStatus, payerOrgMsg, payerOrgErr := g.memberPayerOrganization(ctx, realCov, payer)
 
 	srJSON, status, msg, err := g.orderSourceContext(ctx, member, system, code)
 	if status != 0 {
@@ -827,7 +830,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 			// handleUC08 asserts the PAS result is DENIED (502 on any approval), so a
 			// not-covered order can never yield an auth. Not-covered carries no questionnaire
 			// (NeedsDTR=false) → return the built order straight for the PAS submit.
-			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, pasDeferred: deferred}, true
+			return crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, insurerRef: realPayerRef, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, pasDeferred: deferred}, true
 		}
 		// AI-1: a coverage denial STOPS — never routes DTR/PAS. (adversarial Row 1)
 		// Explicit terminal stop; patient-facing denial UX is deferred.
@@ -853,7 +856,7 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 	// Both are live: the reference payer advertises one on the L8000 and G0151
 	// families (so both route DTR) and none on E0424, which is PA-decided off the
 	// request alone and goes straight to PAS.
-	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, pasDeferred: deferred,
+	res := crdDtrResult{srJSON: srJSON, patientRef: patientRef, coverageRef: coverageRef, coverage: realCov, insurer: realPayerOrg, insurerRef: realPayerRef, member: member, memberSystem: recs.memberSystem, sorID: recs.sorID, pci: pci, payer: payer, recipient: recipient, pasDeferred: deferred,
 		crdOrder: answer.updatedOrder, crdAssertionID: answer.assertionID}
 	if cov.NeedsDTR() {
 		canonical := shnsdk.StripCanonicalVersion(cov.Questionnaires[0])
@@ -881,8 +884,8 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		// It is sent in a request frame naming the operation, and only to a payer
 		// that declares framed DTR operations. The questionnaire request is the
 		// same at every line apart from the input profile's own cardinalities,
-		// which the builder checks at the selected line; the walk to the payer's
-		// line changes no byte of it (envelopeEgressLegs).
+		// which the builder checks at the selected line; it is sent as built, at
+		// that line, with no walk (carryUnchanged).
 		if status, msg := g.framedDTRRefusal(recipient); status != 0 {
 			refuseOriginRouting(ctx, w, http.StatusUnprocessableEntity, msg, reasonFramedDTRUnsupported)
 			return crdDtrResult{}, false
@@ -893,12 +896,12 @@ func (g *Gateway) runCRDThenDTROrder(w http.ResponseWriter, r *http.Request, mem
 		if failOriginRead(ctx, w, res.pasDeferred.payerOrgStatus, res.pasDeferred.payerOrgMsg, res.pasDeferred.payerOrgErr) {
 			return crdDtrResult{}, false
 		}
-		dtrReq, dtrPayload, err := originatedPackageRequest(res.dtrLine, recs, res.dtrOrder(), cov.Questionnaires[0], res.crdAssertionID, res.coverage, res.insurer, g.referencedLeftOut(dtrCorr, recipient))
+		dtrReq, dtrPayload, err := originatedPackageRequest(res.dtrLine, recs, res.dtrOrder(), cov.Questionnaires[0], res.crdAssertionID, res.insurerRef, res.insurer, g.referencedLeftOut(dtrCorr, recipient))
 		if err != nil {
 			g.refuseBuildFailure(ctx, w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 			return crdDtrResult{}, false
 		}
-		sendRoute, carryStatus, carryMsg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient)
+		sendRoute, carryStatus, carryMsg := g.carryUnchanged(ctx, route, dtrReq, res.dtrLine, dtrCorr, recipient)
 		if carryStatus != 0 {
 			writeJSON(w, carryStatus, map[string]string{"error": withCarriedLegs(r.Context(), carryMsg)})
 			return crdDtrResult{}, false
@@ -2448,6 +2451,21 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fqCorr := g.cfg.CorrelationGen()
+		// The data request is this gateway's own build: checked at egress,
+		// on the lane the facility's answer is checked on (the federated
+		// query names no contract line), against the profile its builder
+		// pinned, asked for.
+		pinned, err := pinnedProfile(queryJSON)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "build query failed: "+err.Error())})
+			return
+		}
+		if status, msg := g.validateFHIRForContract(withFindingContext(ctx, findingContext{
+			LegType: "federated-query", CorrelationID: fqCorr, Seam: "originate", Whose: "own",
+		}), queryJSON, "egress", "", "", pinned); status != 0 {
+			writeJSON(w, status, map[string]string{"error": afterLegs(r.Context(), msg)})
+			return
+		}
 		// custodian = facility.ID so the Authorization Framework gates consent for THIS source per leg (FR-25).
 		sent, failed := g.sendLeg(ctx, r, legSend{
 			Workstream: workstreamFQS, Leg: "federated-query", Recipient: facility.ID, PCI: res.pci, Corr: fqCorr, Custodian: facility.ID,

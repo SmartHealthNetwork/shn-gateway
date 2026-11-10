@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -365,5 +366,300 @@ func TestUnknownPayerFailsClosed(t *testing.T) {
 	stub.mu.Unlock()
 	if len(got) != 0 {
 		t.Fatalf("no leg should have been sealed/sent to the Hub, got %v", got)
+	}
+}
+
+// TestRecipientForSoR_ChoosesByDirectoryNotPosition: origination routes the
+// member's own Coverage by the identifier the payer directory resolves,
+// wherever the payor Organization lists it, and returns that identifier (the
+// one an origination site reuses as the emitted payer), never the NPI in first
+// position. No registered identifier is refused naming them; two registered
+// ones naming different payers are ambiguous.
+func TestRecipientForSoR_ChoosesByDirectoryNotPosition(t *testing.T) {
+	const (
+		npi = `{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}`
+		ein = `{"system":"http://terminology.hl7.org/NamingSystem/USEIN","value":"7239994834"}`
+		reg = `{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}`
+	)
+	coverage := func(identifiers string) []byte {
+		return []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/m"},` +
+			`"contained":[{"resourceType":"Organization","id":"p","identifier":[` + identifiers + `]}],"payor":[{"reference":"#p"}]}`)
+	}
+	router, _ := NewConfigPayerRouter([]PayerDirectoryEntry{
+		{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078", HolderID: "acme-health"},
+		{System: "http://terminology.hl7.org/NamingSystem/USEIN", Value: "7239994834", HolderID: "other-payer"},
+	})
+	g := &Gateway{cfg: Config{PayerRouter: router}}
+	ctx := context.Background()
+
+	holder, pid, status, msg := g.recipientForSoR(ctx, coverage(npi+","+reg))
+	if status != 0 || holder != "acme-health" || pid != (shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"}) {
+		t.Fatalf("registered identifier after an NPI: got (%q, %v, %d, %q), want acme-health by 00078", holder, pid, status, msg)
+	}
+	if _, _, status, msg := g.recipientForSoR(ctx, coverage(npi)); status != http.StatusUnprocessableEntity ||
+		!strings.HasPrefix(msg, "no registered payer for identifier http://hl7.org/fhir/sid/us-npi|1234567893: name the payer by an identifier the network registers for that payer") {
+		t.Fatalf("no registered identifier: got (%d, %q)", status, msg)
+	}
+	if _, _, status, msg := g.recipientForSoR(ctx, coverage(ein+","+reg)); status != http.StatusUnprocessableEntity || msg != msgCoverageNamesTwoPayers {
+		t.Fatalf("two payers: got (%d, %q), want 422 %q", status, msg, msgCoverageNamesTwoPayers)
+	}
+}
+
+// TestRecipientForSoR_AFailedReadIsTheSystemsWhenNoPayerIsFound: a payor known
+// by its own identifier already names its payer, so its reference is never
+// read: a read that would fail stops nothing, and an unregistered identifier
+// is the routing refusal it always was. A payor with no identifier of its own
+// whose read fails leaves the payer unknown; the Organization that failed to
+// load may have named it, so the answer is the system's failure (unknown is
+// not empty), never a routing refusal.
+func TestRecipientForSoR_AFailedReadIsTheSystemsWhenNoPayerIsFound(t *testing.T) {
+	const reg = `{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}`
+	router, _ := NewConfigPayerRouter([]PayerDirectoryEntry{
+		{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078", HolderID: "acme-health"},
+	})
+	g := &Gateway{cfg: Config{PayerRouter: router, SoR: refReadFails{SystemOfRecord: newCensusSoR(), ref: "Organization/payer-org"}}}
+	coverage := func(payors string) []byte {
+		return []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/m"},` +
+			`"contained":[{"resourceType":"Organization","id":"p","identifier":[` + reg + `]}],"payor":[` + payors + `]}`)
+	}
+	unavailable, _ := SoRFailureResponse(&SoRReadError{Kind: SoRUnavailable})
+	for name, row := range map[string]struct {
+		payors string
+		status int
+		holder string
+	}{
+		"a registered inline identifier":                                 {`{"reference":"Organization/payer-org","identifier":` + reg + `}`, 0, "acme-health"},
+		"an unregistered inline identifier, its Organization never read": {`{"reference":"Organization/payer-org","identifier":{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}}`, http.StatusUnprocessableEntity, ""},
+		"a registered payor, then one whose read fails":                  {`{"reference":"#p"},{"reference":"Organization/payer-org"}`, unavailable, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			holder, _, status, msg := g.recipientForSoR(context.Background(), coverage(row.payors))
+			if status != row.status || holder != row.holder {
+				t.Fatalf("got (%q, %d, %q), want (%q, %d)", holder, status, msg, row.holder, row.status)
+			}
+		})
+	}
+}
+
+// TestPayorCandidates_SeveralEntriesSDKTwin records a known difference from the
+// published SDK twin. The gateway reads a payor reference several Organization
+// entries of a Bundle answer as the union of their identifiers (resolveAmong),
+// and the payer directory decides; shn-sdk v1.10.0's CoveragePayerCandidates
+// given the whole Bundle takes the first entry. Nothing published promises the
+// first entry. When the SDK reads the union too, this row fails: make it an
+// equality row in the change that moves the gateway's pin to that release.
+func TestPayorCandidates_SeveralEntriesSDKTwin(t *testing.T) {
+	const (
+		npi = `{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}`
+		ein = `{"system":"http://terminology.hl7.org/NamingSystem/USEIN","value":"7239994834"}`
+		cms = `{"system":"urn:oid:2.16.840.1.113883.6.300","value":"%s"}`
+	)
+	bundle := []byte(`{"resourceType":"Bundle","type":"collection","entry":[` +
+		`{"resource":{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/m"},"payor":[{"reference":"Organization/p"}]}},` +
+		`{"resource":{"resourceType":"Organization","id":"p","identifier":[` + npi + `,` + strings.Replace(cms, "%s", "00001", 1) + `]}},` +
+		`{"resource":{"resourceType":"Organization","id":"p","identifier":[` + npi + `,` + ein + `,` + strings.Replace(cms, "%s", "00002", 1) + `]}}]}`)
+	id := func(system, value string) shnsdk.PayerIdentifier {
+		return shnsdk.PayerIdentifier{System: system, Value: value}
+	}
+	var (
+		nID   = id("http://hl7.org/fhir/sid/us-npi", "1234567893")
+		eID   = id("http://terminology.hl7.org/NamingSystem/USEIN", "7239994834")
+		c1    = id("urn:oid:2.16.840.1.113883.6.300", "00001")
+		c2    = id("urn:oid:2.16.840.1.113883.6.300", "00002")
+		sdk   = [][]shnsdk.PayerIdentifier{{nID, c1}}
+		ours  = [][]shnsdk.PayerIdentifier{{nID, c1, eID, c2}}
+		equal = func(a, b [][]shnsdk.PayerIdentifier) bool {
+			return len(a) == len(b) && (len(a) == 0 || slices.Equal(a[0], b[0]))
+		}
+	)
+	got, err := shnsdk.CoveragePayerCandidates(bundle, nil)
+	if err != nil || !equal(got, sdk) {
+		t.Fatalf("the SDK twin: %v %v, want its first entry %v; if it now reads the union, make this an equality row", got, err, sdk)
+	}
+	refs := readBundleRefs(bundle)
+	got, err = shnsdk.CoveragePayerCandidates(refs.firstCoverage(), refs.resolver())
+	if err != nil || !equal(got, ours) {
+		t.Fatalf("the gateway: %v %v, want the union %v", got, err, ours)
+	}
+}
+
+// TestCoveragesNameOnePayer_ByThePayersOwnIdentity: a payer's gateway reading its
+// own member's Coverages knows who it is (the identities its holder publishes on
+// the network feed). They name it when each carries one of its own identities on
+// some payor, in any position; otherwise, as with no identity known, when they
+// name the same identifiers in any order. Never by an identifier's position: a
+// first NPI shared, then different identifiers, is ambiguous.
+func TestCoveragesNameOnePayer_ByThePayersOwnIdentity(t *testing.T) {
+	const cms = "urn:oid:2.16.840.1.113883.6.300"
+	p := shnsdk.PayerIdentifier{System: cms, Value: "00001"}
+	npi := shnsdk.PayerIdentifier{System: "http://hl7.org/fhir/sid/us-npi", Value: "1234567893"}
+	other := shnsdk.PayerIdentifier{System: cms, Value: "00078"}
+	ein := shnsdk.PayerIdentifier{System: "http://terminology.hl7.org/NamingSystem/USEIN", Value: "7239994834"}
+	reg := shnsdk.NewRegistry()
+	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", PayerIDs: []shnsdk.PayerIdentifier{p}})
+	payer := &Gateway{cfg: Config{Role: "payer", HolderID: "payer", Reg: reg}}
+	// candidates is a Coverage's identifiers as routing reads them, every payor.
+	candidates := func(payors string) []shnsdk.PayerIdentifier {
+		t.Helper()
+		cands, err := shnsdk.CoveragePayerCandidates([]byte(`{"resourceType":"Coverage","id":"c","status":"active",`+
+			`"beneficiary":{"reference":"Patient/m"},"payor":[`+payors+`]}`), nil)
+		if err != nil || len(cands) != 1 {
+			t.Fatalf("candidates of %s: %v %v", payors, cands, err)
+		}
+		return cands[0]
+	}
+	inline := func(id shnsdk.PayerIdentifier) string {
+		return `{"identifier":{"system":"` + id.System + `","value":"` + id.Value + `"}}`
+	}
+	for name, row := range map[string]struct {
+		lists [][]shnsdk.PayerIdentifier
+		one   bool
+	}{
+		"its identity, and its identity beside an NPI":          {[][]shnsdk.PayerIdentifier{{p}, {p, npi}}, true},
+		"a shared NPI only, without its identity: the same set": {[][]shnsdk.PayerIdentifier{{npi}, {npi}}, true},
+		"a first NPI, then different identifiers, none its own": {[][]shnsdk.PayerIdentifier{{npi, other}, {npi, ein}}, false},
+		"its identity on one, an NPI only on the other":         {[][]shnsdk.PayerIdentifier{{p}, {npi}}, false},
+		"its identity at payor[1], beside one at payor[0]": {[][]shnsdk.PayerIdentifier{
+			candidates(inline(npi) + "," + inline(p)), candidates(inline(p))}, true},
+		"another payer's identity and its own": {[][]shnsdk.PayerIdentifier{{other}, {p}}, false},
+	} {
+		t.Run("payer/"+name, func(t *testing.T) {
+			if got := payer.coveragesNameOnePayer(row.lists); got != row.one {
+				t.Fatalf("got %v, want %v", got, row.one)
+			}
+		})
+	}
+	g := &Gateway{}
+	for name, row := range map[string]struct {
+		lists [][]shnsdk.PayerIdentifier
+		one   bool
+	}{
+		"the same set in another order":       {[][]shnsdk.PayerIdentifier{{p, npi}, {npi, p}}, true},
+		"the same first identifier, one more": {[][]shnsdk.PayerIdentifier{{p}, {p, npi}}, false},
+		"different identifiers":               {[][]shnsdk.PayerIdentifier{{p}, {other}}, false},
+	} {
+		t.Run("no directory/"+name, func(t *testing.T) {
+			if got := g.coveragesNameOnePayer(row.lists); got != row.one {
+				t.Fatalf("got %v, want %v", got, row.one)
+			}
+		})
+	}
+}
+
+// TestMemberPayerOrganization_ThePayorNamingTheRoutedPayer: a payor naming the
+// routed payer by its identifier alone references no record, so the record is
+// the Organization of a later payor that lists it, never none (a request
+// naming its payer inline first and by its Organization after is not left
+// without an insurer record).
+func TestMemberPayerOrganization_ThePayorNamingTheRoutedPayer(t *testing.T) {
+	pid := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"}
+	coverage := []byte(`{"resourceType":"Coverage","id":"c1","contained":[{"resourceType":"Organization","id":"org",` +
+		`"identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}]}],` +
+		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}},{"reference":"#org"}]}`)
+	org, ref, status, msg, _ := (&Gateway{}).memberPayerOrganization(context.Background(), coverage, pid)
+	if status != 0 || ref != "#org" || !bytes.Contains(org, []byte(`"id":"org"`)) {
+		t.Fatalf("got (%s, %q, %d, %q), want the contained Organization by #org", org, ref, status, msg)
+	}
+}
+
+// TestRecipientForSoR_ATypedPayorIsNotRead: a payor stating its type already
+// settles what it names (a Patient names no payer), so its reference is never
+// read: a read that would fail stops nothing, and the payer beside it routes.
+func TestRecipientForSoR_ATypedPayorIsNotRead(t *testing.T) {
+	router, _ := NewConfigPayerRouter([]PayerDirectoryEntry{
+		{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078", HolderID: "acme-health"},
+	})
+	g := &Gateway{cfg: Config{PayerRouter: router, SoR: refReadFails{SystemOfRecord: newCensusSoR(), ref: "Patient/m"}}}
+	coverage := []byte(`{"resourceType":"Coverage","id":"c1","status":"active","beneficiary":{"reference":"Patient/m"},` +
+		`"contained":[{"resourceType":"Organization","id":"p","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}]}],` +
+		`"payor":[{"type":"Patient","reference":"Patient/m"},{"reference":"#p"}]}`)
+	if holder, _, status, msg := g.recipientForSoR(context.Background(), coverage); status != 0 || holder != "acme-health" {
+		t.Fatalf("got (%q, %d, %q), want acme-health", holder, status, msg)
+	}
+}
+
+// TestRecipientForCoverages_EachCoverageItsOwnRefusal: what one Coverage's
+// payor references left in doubt never colours another's refusal: a Coverage
+// whose payor nothing resolves is refused as itself, whatever an earlier one
+// read.
+func TestRecipientForCoverages_EachCoverageItsOwnRefusal(t *testing.T) {
+	router, _ := NewConfigPayerRouter([]PayerDirectoryEntry{
+		{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078", HolderID: "acme-health"},
+	})
+	g := &Gateway{cfg: Config{PayerRouter: router}}
+	const urn = "urn:uuid:5e7a0c1d-0000-4000-8000-0000000000a1"
+	refs := &payorRefs{disagree: payorDisagreesInRequest, local: []bundleRefEntry{
+		{urn, "Organization", "o", []byte(`{"resourceType":"Organization","id":"o"}`)},
+		{urn, "Patient", "m", []byte(`{"resourceType":"Patient","id":"m"}`)},
+	}}
+	a := []byte(`{"resourceType":"Coverage","id":"a","payor":[{"reference":"` + urn + `","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}}]}`)
+	b := []byte(`{"resourceType":"Coverage","id":"b","payor":[{"reference":"Organization/missing"}]}`)
+	if _, _, status, msg, _ := g.recipientForCoverages([][]byte{a}, refs); status != 0 {
+		t.Fatalf("Coverage a: %d %q, want routed", status, msg)
+	}
+	if _, _, status, msg, _ := g.recipientForCoverages([][]byte{b}, refs); status != http.StatusUnprocessableEntity || msg != noPayerIdentifier {
+		t.Fatalf("Coverage b after a: %d %q, want 422 %q", status, msg, noPayerIdentifier)
+	}
+}
+
+// TestFHIRServerCarriedEntries_AReferenceAnotherPrefetchValueAnswers: routing
+// resolves a payor reference among the request's other prefetch values too, so
+// the carry reads it so: that payor counts (not carried again: it is in the
+// request already), and the Organization read for the next payor is carried.
+func TestFHIRServerCarriedEntries_AReferenceAnotherPrefetchValueAnswers(t *testing.T) {
+	answer := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"c0","status":"active",` +
+		`"beneficiary":{"reference":"Patient/m"},"payor":[{"reference":"Organization/a"},{"reference":"Organization/b"}]}}]}`)
+	orgA := []byte(`{"resourceType":"Organization","id":"a","identifier":[{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}]}`)
+	orgB := []byte(`{"resourceType":"Organization","id":"b","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}`)
+	entries, total, ok := fhirServerCarriedEntries(answer, [][]byte{orgB}, []bundleRefEntry{{"", "Organization", "a", orgA}}, "https://ehr.example/fhir")
+	if !ok || total != 1 {
+		t.Fatalf("ok %v total %d", ok, total)
+	}
+	var includes int
+	for _, e := range entries {
+		if e.mode == "include" {
+			includes++
+			if e.res.Page != 1 {
+				t.Fatalf("included %+v, want the Organization read (page 1)", e.res)
+			}
+		}
+	}
+	if includes != 1 {
+		t.Fatalf("%d includes, want the Organization read for payor[1]: %+v", includes, entries)
+	}
+}
+
+// TestMemberPayerOrganization_ATypedPayorIsNotRead: a payor stating another type
+// than Organization references no payer's record, even when it carries the
+// routed payer's identifier: its reference is never read, so a read that would
+// fail stops nothing, and no record is named for it.
+func TestMemberPayerOrganization_ATypedPayorIsNotRead(t *testing.T) {
+	pid := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00078"}
+	g := &Gateway{cfg: Config{SoR: refReadFails{SystemOfRecord: newCensusSoR(), ref: "Practitioner/dr1"}}}
+	coverage := []byte(`{"resourceType":"Coverage","id":"c1","payor":[{"type":"Practitioner","reference":"Practitioner/dr1",` +
+		`"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00078"}}]}`)
+	org, ref, status, msg, _ := g.memberPayerOrganization(context.Background(), coverage, pid)
+	if status != 0 || org != nil || ref != "" {
+		t.Fatalf("got (%s, %q, %d, %q), want no record and no read", org, ref, status, msg)
+	}
+}
+
+// TestFHIRServerCarriedEntries_ATypedPayorCarriesNothing: routing reads nothing
+// from the reference of a payor stating another type than Organization, so the
+// carried coverage search result includes nothing for it, even an Organization
+// the answer holds under that reference.
+func TestFHIRServerCarriedEntries_ATypedPayorCarriesNothing(t *testing.T) {
+	answer := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"c0","status":"active",` +
+		`"beneficiary":{"reference":"Patient/m"},"payor":[{"type":"Practitioner","reference":"Organization/x",` +
+		`"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}},` +
+		`{"resource":{"resourceType":"Organization","id":"x","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}]}}]}`)
+	entries, total, ok := fhirServerCarriedEntries(answer, nil, nil, "https://ehr.example/fhir")
+	if !ok || total != 1 {
+		t.Fatalf("ok %v total %d", ok, total)
+	}
+	for _, e := range entries {
+		if e.mode == "include" {
+			t.Fatalf("included %+v, want nothing for a payor typed Practitioner", e)
+		}
 	}
 }

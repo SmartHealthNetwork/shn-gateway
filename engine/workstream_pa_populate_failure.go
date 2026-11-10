@@ -5,6 +5,8 @@ package engine
 import (
 	"context"
 	"errors"
+
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 )
 
 // PopulateFailure describes a native population failure without payload data.
@@ -30,11 +32,18 @@ const (
 	populateReasonNon2xx            = "non_2xx"
 	populateReasonInvalidJSON       = "invalid_json"
 	populateReasonWrongResourceType = "wrong_resource_type"
+	// populateReasonCleartextRedirect: the engine redirected the populate
+	// request from https to http, and the hop was not sent
+	// (smartauth.ErrCleartextRedirect); Status is the redirect's.
+	populateReasonCleartextRedirect = "https_to_http_refused"
 )
 
 func populateBoundaryFailure(stage string, status int, err error) *PopulateFailure {
 	reason := populateReasonOther
 	switch {
+	case stage == populateStageTransport && errors.Is(err, smartauth.ErrCleartextRedirect):
+		// The engine's own redirect; a token endpoint's is a token failure.
+		reason = populateReasonCleartextRedirect
 	case errors.Is(err, context.Canceled):
 		reason = populateReasonCanceled
 	case errors.Is(err, context.DeadlineExceeded):

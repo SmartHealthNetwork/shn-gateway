@@ -106,11 +106,14 @@ func (g *Gateway) crdIngressRecipient(ctx context.Context, prepared crdIngressRe
 		refs.next, unresolved, fhirStatus, fhirMsg, readErr = g.sentPayorResolver(ctx, prepared.sentPayor)
 	}
 	recipient, _, status, msg, reason := g.recipientForCoverages(coverageResources(coverage), refs)
-	if *readErr != nil {
+	// A failed or refused read decides only when no payer is found: the
+	// record it could not read may have named it (unknown is not empty).
+	// A payor with an identifier of its own is never read (payorRefs.named).
+	if status != 0 && *readErr != nil {
 		status, msg := SoRFailureResponse(*readErr)
 		return "", status, msg, ""
 	}
-	if *fhirStatus != 0 {
+	if status != 0 && *fhirStatus != 0 {
 		if sent {
 			// The request carried a coverage: its refusal is that coverage's
 			// (no payer identifier), with the read's reason and status.

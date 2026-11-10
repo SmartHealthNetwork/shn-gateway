@@ -3797,7 +3797,8 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 		valid := false
 		switch note.Stage {
 		case "request_build", "token_acquisition", "transport", "body_read":
-			valid = note.Reason == "canceled" || note.Reason == "deadline" || note.Reason == "other"
+			valid = note.Reason == "canceled" || note.Reason == "deadline" || note.Reason == "other" ||
+				(note.Stage == "transport" && note.Reason == "https_to_http_refused")
 		case "http_status":
 			valid = note.Reason == "non_2xx"
 		case "qr_extract":

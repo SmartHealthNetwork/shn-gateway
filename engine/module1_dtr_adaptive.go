@@ -143,6 +143,11 @@ func (g *Gateway) nextQuestionLeg(ctx context.Context, r *http.Request, res crdD
 	if line := shnsdk.LineOf(route.Token); line != res.dtrLine {
 		return nil, http.StatusBadGateway, fmt.Sprintf("next-question routed at DTR line %q, the package was fetched at %q", line, res.dtrLine), nil
 	}
+	// The round is built at the payer's line, the line its package was fetched
+	// at: it is sent as built, on a route naming that line with no chain, so no
+	// walk runs over it and no translation is recorded (as carryUnchanged
+	// sends the questionnaire request).
+	route = legRoute{Token: route.Token, BuildLine: res.dtrLine, Pinned: route.Pinned}
 	// The round is the SDC $next-question operation's own input, named in the
 	// request frame; a payer that has not declared framed DTR operations is
 	// refused before anything is sent.

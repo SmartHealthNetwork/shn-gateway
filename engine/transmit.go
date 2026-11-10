@@ -219,6 +219,16 @@ func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg in
 		attestAnswerRefused(w, RefusalRouting, errResponseTooLarge)
 		return
 	}
+	// The system redirected the forward from https to http, and the hop was
+	// not sent (smartauth.ErrCleartextRedirect): refused on message
+	// integrity, as delivered (the system answered, with its 3xx, and may
+	// have acted). A token endpoint's downgrade never reaches here: nothing
+	// was sent, and it is answered as a token failure.
+	if uf := (*upstreamFailure)(nil); errors.As(err, &uf) && uf.cleartextRedirect {
+		exchangeOf(r.Context()).refused(RefusalIntegrity)
+		attestAnswerRefused(w, RefusalIntegrity, fmt.Sprintf(errCleartextRedirectFor, responderParty(leg.tx)))
+		return
+	}
 	status, msg := g.responderFailure(r.Context(), leg.tx, err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
 	// The answer is this gateway's, but the record says whose failure it was:
@@ -321,6 +331,11 @@ type upstreamFailure struct {
 	// timedOut: the call ran past the responder's own deadline
 	// (WithBackendDeadline) while the request was still live.
 	timedOut bool
+	// cleartextRedirect: the system answered the request with a redirect
+	// from https to http, and the hop was not sent: refused on message
+	// integrity, as delivered (responderFailed). Set only where the system's
+	// own answer was the redirect, never for a token endpoint's.
+	cleartextRedirect bool
 }
 
 func (e *upstreamFailure) Error() string { return e.err.Error() }
@@ -343,8 +358,15 @@ const (
 	errDeadlineSpentFor = "the %[1]s's gateway ran out of time before it could send this request to the %[1]s's system; the %[1]s's system did not receive it"
 )
 
+// errCleartextRedirectFor is the reason a forward is refused when the
+// recipient's system redirected it from https to http (smartauth.CheckRedirect):
+// the hop is not sent, whatever its origin, since a 307 or 308 replays the
+// body. It names the recipient's role (responderParty).
+const errCleartextRedirectFor = "the %[1]s's system redirected this request from https to http, where it would travel in cleartext: it was not sent there"
+
 // The answers above for the payer's system, every provider's leg's.
 var (
+	errCleartextRedirect        = fmt.Sprintf(errCleartextRedirectFor, "payer")
 	errUpstreamNotReached       = fmt.Sprintf(errUpstreamNotReachedFor, "payer")
 	errUpstreamNoUsableAnswer   = fmt.Sprintf(errUpstreamNoUsableAnswerFor, "payer")
 	errUpstreamTimedOut         = fmt.Sprintf(errUpstreamTimedOutFor, "payer")

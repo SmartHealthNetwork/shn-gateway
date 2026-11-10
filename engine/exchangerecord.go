@@ -141,6 +141,25 @@ type ExchangeRecord struct {
 	// every call made.
 	Backend      *BackendCall
 	BackendCalls int
+	// BackendResends names, for each call to the participant's own system its
+	// connector sent a second time, why it did (a BackendResend): the system
+	// answered 401 to the credential the call carried, and the call was sent
+	// once more, the same request with a refreshed credential, as a direct
+	// client would. BackendCalls counts each resend as a call. Nil when there
+	// was none.
+	BackendResends []BackendResend
+	// BackendRedirects is the class of each redirect hop the participant's
+	// own system, or its authorization server's token endpoint, answered
+	// with, over every call to it, in order (smartauth.RedirectValues; never a
+	// URL): same-origin and cross-origin for a hop followed (a cross-origin
+	// hop, and every later hop of its chain, is sent without the bearer or
+	// configured headers), https-to-http-refused for a downgrade that was not
+	// sent, which ends its call (a read fails with BackendHTTP3xx; the
+	// forward is refused on message integrity; a token request fails as a
+	// token failure), and token-redirect-refused for any other redirect of a
+	// token request, never followed, which fails it as a token failure. Nil
+	// when no answer asked for one.
+	BackendRedirects []string
 	// Stages is the time an inbound leg spent in each stage of its answer
 	// (LegStages); nil on an ingress call.
 	Stages *LegStages
@@ -300,6 +319,23 @@ type BackendCall struct {
 	// ErrorClass is "" for a usable 2xx answer, else one of BackendErrorClasses.
 	ErrorClass string
 }
+
+// BackendResend is one call to the participant's own system sent a second
+// time. Reason is one of BackendResendReasons. Challenge is what the 401's
+// WWW-Authenticate said, as observed (smartauth.ChallengeValues): it is
+// recorded, never used to decide whether to resend.
+type BackendResend struct {
+	Reason    string
+	Challenge string
+}
+
+// BackendResendCredentialRefreshed: the participant's system answered 401 to
+// the credential the call carried, and the call was sent once more with a
+// refreshed one.
+const BackendResendCredentialRefreshed = "credential-refreshed-after-401"
+
+// BackendResendReasons is the closed list BackendResend.Reason draws from.
+var BackendResendReasons = []string{BackendResendCredentialRefreshed}
 
 // FindingSummary counts the conformance findings recorded for one call.
 type FindingSummary struct {
@@ -626,6 +662,11 @@ func requestEdits(p relay.Payload) []relay.EditID {
 
 // Why an edit was not made (ExchangeRecord.EditsNotMade).
 const (
+	// EditNotMadePayorEdgeNoCoverage: the payer identity mapping (E-03) was not
+	// made because the request a payer's gateway forwards to its own system
+	// carries no Coverage, so it names no payor identifier to re-key; the request
+	// is carried as sent.
+	EditNotMadePayorEdgeNoCoverage = "E-03:no-coverage"
 	// EditNotMadeNoStructuralPayerURL: a PAS Task in the answer names a
 	// payer-url input that is not a string valueUrl, so the return-path
 	// re-key (E-10) has no value to replace.
@@ -703,7 +744,7 @@ const (
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
-var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
+var EditNotMadeValues = []string{EditNotMadePayorEdgeNoCoverage, EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
 	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake,
 	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest,
 	EditNotMadeRekeyPayerGatewayOlder, EditNotMadeRekeyNotTheRoundsAddress, EditNotMadeRekeyContainedInPackageResponse, EditNotMadeRekeyRequestCarriedAQuestionnaire, EditNotMadeRekeyNotUnderBase, EditNotMadeRekeyEscapedAddress, EditNotMadeRekeyBaseSpelledDifferently, EditNotMadeRekeyUnreadableTag, EditNotMadeRekeyUncleanRemainder, EditNotMadeRekeyUnreadableAddress, EditNotMadeRekeyUnreadableAnswer, EditNotMadeRekeyAddressNotWritable}
@@ -945,6 +986,30 @@ func (x *exchangeRecorder) backend(status int, latency time.Duration, class stri
 		x.forwarded = true
 		x.cut = x.cut || class == BackendCancelled
 	})
+}
+
+// resent notes each call to the participant's own system its connector sent a
+// second time after a 401 (smartauth.CredentialRefreshObservation): one more
+// call each, and why.
+func (x *exchangeRecorder) resent(challenges []string) {
+	if len(challenges) == 0 {
+		return
+	}
+	x.with(func() {
+		for _, c := range challenges {
+			x.rec.BackendCalls++
+			x.rec.BackendResends = append(x.rec.BackendResends, BackendResend{Reason: BackendResendCredentialRefreshed, Challenge: c})
+		}
+	})
+}
+
+// redirected notes the redirect hops a call to the participant's own system
+// was answered with (smartauth.RedirectObservation), each by its class.
+func (x *exchangeRecorder) redirected(hops []string) {
+	if len(hops) == 0 {
+		return
+	}
+	x.with(func() { x.rec.BackendRedirects = append(x.rec.BackendRedirects, hops...) })
 }
 
 // trackForward notes that the operation's forward to the participant's own
@@ -1195,6 +1260,10 @@ func sorClass(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, smartauth.ErrCleartextRedirect) && !smartauth.IsTokenAcquisitionError(err):
+		// The system redirected the read from https to http, and the hop
+		// was not sent. A token endpoint's downgrade is a token failure.
+		return BackendHTTP3xx
 	case errors.Is(err, context.DeadlineExceeded):
 		return BackendTimeout
 	case errors.Is(err, context.Canceled):

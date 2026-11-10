@@ -324,7 +324,7 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 	restore := n.adaptiveRestore(ctx, in)
 	var request relay.Payload
 	if carrier != 0 {
-		mapped, lr, err := n.payorEdgeRequest(in, carrier, fhirJSON, nil, restore)
+		mapped, lr, err := n.payorEdgeRequest(ctx, in, carrier, fhirJSON, nil, restore)
 		if err != nil || lr.Status != 0 {
 			return lr, err
 		}

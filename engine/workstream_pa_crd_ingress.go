@@ -890,16 +890,16 @@ func (g *Gateway) readsFHIRServer() bool {
 // fhirServerRouting is a coverage read through the request's own fhirServer:
 // the read, the leg it serves and the deadline every read for it shares.
 // sentPayor marks the read of the payor Organization of a coverage the EHR
-// itself sent (sentPayorResolver), recorded and logged as that. payor is the
-// payor Organization fhirServerPayor read, exactly as the server answered,
-// once routing read one: for a coverage read through fhirServer it is carried
-// with it (E-07); for a coverage the EHR sent it is never carried.
+// itself sent (sentPayorResolver), recorded and logged as that. payors are the
+// payor Organizations fhirServerPayor read, exactly as the server answered,
+// in the order read: for a coverage read through fhirServer they are carried
+// with it (E-07); for a coverage the EHR sent they are never carried.
 type fhirServerRouting struct {
 	leg       string
 	read      fhirServerRead
 	deadline  time.Time
 	sentPayor bool
-	payor     []byte
+	payors    [][]byte
 }
 
 // fhirServerBudget is the time every read through fhirServer for one request
@@ -962,27 +962,36 @@ func (g *Gateway) coverageFromFHIRServer(ctx context.Context, routing *fhirServe
 	return routingCoverages(value), value, 0, ""
 }
 
-// fhirServerPayor returns the resolver of a payor Organization the coverage
-// read did not resolve: one read of it on the request's fhirServer, within the
-// coverage read's deadline, recorded like it, and kept as routing.payor. A
-// second Organization, or a refused read, resolves nothing and leaves the
-// refusal in *status and *msg.
+// fhirServerPayorReadsMax is how many payor Organizations fhirServerPayor reads
+// for one request: as many as a routing refusal names identifiers
+// (unregisteredPayersListed), well above any Coverage.payor count a profile
+// allows (1..1, or a handful under R4's 1..*). It is fhirServerTooManyPayors's
+// "(5)".
+const fhirServerPayorReadsMax = 5
+
+// fhirServerPayor returns the resolver of the payor Organizations the coverage
+// read did not resolve: one read of each distinct Organization on the
+// request's fhirServer, within the coverage read's deadline, recorded like it,
+// and kept in routing.payors in the order read. Every payor counts, so each
+// payor routing needs (one with no identifier of its own, payorRefs.named) is
+// read. More than fhirServerPayorReadsMax Organizations, or a refused read,
+// resolves nothing further and leaves the refusal in *status and *msg.
 func (g *Gateway) fhirServerPayor(ctx context.Context, routing *fhirServerRouting) (resolve func(string) ([]byte, bool), status *int, msg *string) {
 	status, msg = new(int), new(string)
-	var readID string
-	var org []byte
+	read := map[string][]byte{}
 	resolve = func(ref string) ([]byte, bool) {
 		id, ok := payorOrganizationID(ref, routing.read.base)
-		switch {
-		case !ok || *status != 0:
-			return nil, false
-		case readID == id:
-			return org, true
-		case readID != "":
-			*status, *msg = http.StatusUnprocessableEntity, fhirServerTwoPayors
+		if !ok || *status != 0 {
 			return nil, false
 		}
-		readID = id
+		if org, done := read[id]; done {
+			return org, org != nil
+		}
+		if len(read) == fhirServerPayorReadsMax {
+			*status, *msg = http.StatusUnprocessableEntity, fhirServerTooManyPayors
+			return nil, false
+		}
+		read[id] = nil
 		ctx, cancel := context.WithDeadline(ctx, routing.deadline)
 		defer cancel()
 		value, query, st, m := g.fhirServerReader().readOrganization(ctx, routing.read, id)
@@ -995,9 +1004,9 @@ func (g *Gateway) fhirServerPayor(ctx context.Context, routing *fhirServerRoutin
 			*status, *msg = st, m
 			return nil, false
 		}
-		org = value
-		routing.payor = value
-		return org, true
+		read[id] = value
+		routing.payors = append(routing.payors, value)
+		return value, true
 	}
 	return resolve, status, msg
 }
@@ -1039,7 +1048,7 @@ const (
 	noPayerSendPayor         = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway could not read; send the payor Organization with the coverage, or a payor identifier"
 	noPayerUnreadRef         = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway could not resolve; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"
 	noPayerIdentifierOnlyRef = noPayerIdentifier + ": Coverage.payor is a reference to an Organization the gateway does not read; send a payor identifier with the coverage"
-	noPayerSentTwoRefs       = noPayerIdentifier + ": the request's coverages name more than one payor Organization by reference alone"
+	noPayerSentTooManyRefs   = noPayerIdentifier + ": the request's coverages name more payor Organizations by reference alone than this gateway reads for one request (5)"
 	noPayerUnresolvedURN     = noPayerIdentifier + ": Coverage.payor is a urn reference no Bundle entry's fullUrl matches; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"
 )
 
@@ -1115,12 +1124,12 @@ const fhirServerReadPrefix = "no coverage to route by: "
 // coverage the EHR sent, as the request is answered: the request carried a
 // coverage, so the read's reason follows the prefix of any coverage without a
 // payer instead ("no payer identifier on member coverage: fhirServer holds no
-// Organization for the coverage's payor"), and two Organizations by reference
-// alone are that refusal's own reason (noPayerSentTwoRefs). The status is the
-// read's.
+// Organization for the coverage's payor"), and more Organizations by reference
+// alone than the gateway reads are that refusal's own reason
+// (noPayerSentTooManyRefs). The status is the read's.
 func sentPayorRefusal(msg string) string {
-	if msg == fhirServerTwoPayors {
-		return noPayerSentTwoRefs
+	if msg == fhirServerTooManyPayors {
+		return noPayerSentTooManyRefs
 	}
 	return noPayerIdentifier + ": " + strings.TrimPrefix(msg, fhirServerReadPrefix)
 }

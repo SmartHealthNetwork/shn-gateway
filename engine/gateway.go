@@ -269,13 +269,12 @@ type Config struct {
 	// Da Vinci endpoint (NewNativeResponder); a partner MAY inject any LegResponder.
 	Responder LegResponder
 	// PayerDavinciNative reports that the payer Responder native-forwards the read-only
-	// legs to a REAL partner Da Vinci endpoint (PAYER_DAVINCI_BASE_URL set). When true the
-	// DTR $questionnaire-package response is a FOREIGN Da Vinci Bundle (dtr-std-questionnaire /
-	// dtr-questionnaireresponse profiles) that SHN — which hosts US Core only — cannot
-	// $validate; like the conformant crd-order-select / pas-claim legs (R-8),
-	// the DTR response is a NEAR-RELAY: the trust-critical subject fence still runs, but the
-	// engine does NOT foreign-$validate it. false ⇒ an SHN-produced, US-Core-resolvable
-	// package, which still egress-$validates byte-identically. FR-G28.
+	// legs to a REAL partner Da Vinci endpoint (PAYER_DAVINCI_BASE_URL set). It changes
+	// nothing the engine does: the DTR $questionnaire-package response is the payer
+	// participant's own answer, relayed as sent (ownership admits nothing else on that
+	// leg), and, like the conformant crd-order-select / pas-claim legs (R-8), it is
+	// never egress-$validated either way; the trust-critical subject fence still runs
+	// on it. FR-G28.
 	PayerDavinciNative bool
 	// ProviderCDexTaskURL is the provider's own Task endpoint, the full URL a
 	// payer's attachment-request Task is carried to (PROVIDER_CDEX_TASK_URL).
@@ -808,34 +807,84 @@ func (g *Gateway) recipientForWith(coverageJSON []byte, resolveRef func(string) 
 	if g.cfg.PayerRouter == nil {
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgNoPayerRouter, reasonNoPayerRouter
 	}
-	parsed, err := shnsdk.ParseCoveragePayer(coverageJSON, resolveRef)
+	cands, err := shnsdk.CoveragePayerCandidates(coverageJSON, resolveRef)
+	if err != nil {
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifierFor(err), reasonNoPayerIdentifier
+	}
+	return g.routeCandidates(cands)
+}
+
+// noPayerIdentifierFor is the refusal of a coverage whose payer cannot be read: for a payor after
+// payor[0] whose reference resolves to nothing (every payor counts, and the payer an unknown one
+// names is unknown, so the network does not route past it), the refusal naming it; else the bare
+// refusal, which callers refine for payor[0] as they always have.
+func noPayerIdentifierFor(err error) string {
+	var unresolved *shnsdk.UnresolvedPayorError
+	if errors.As(err, &unresolved) && unresolved.Index > 0 {
+		return fmt.Sprintf("%s: payor[%d] %s cannot be read as a payer Organization with an identifier, so the coverage's payer is unknown",
+			noPayerIdentifier, unresolved.Index, quotedBounded(unresolved.Reference))
+	}
+	return noPayerIdentifier
+}
+
+// routeCandidates routes a coverage by the payer directory, never by an identifier's position
+// or system: among every identifier each Coverage's payor names (shnsdk.CoveragePayerCandidates),
+// the ones the directory resolves must name one holder (shnsdk.ChooseRegisteredPayer). The
+// identifier it returns is the first, in document order, that names that holder. A coverage
+// naming none the directory resolves is refused naming them and how a payer is named; one whose
+// identifiers name more than one holder is ambiguous. Callers check PayerRouter first.
+func (g *Gateway) routeCandidates(cands [][]shnsdk.PayerIdentifier) (string, shnsdk.PayerIdentifier, int, string, refusalReason) {
+	pid, holder, err := shnsdk.ChooseRegisteredPayer(cands, g.cfg.PayerRouter.Resolve)
+	var unregistered *shnsdk.NoRegisteredPayerError
 	switch {
+	case err == nil:
+		return holder, pid, 0, "", ""
 	case errors.Is(err, shnsdk.ErrAmbiguousCoveragePayer):
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgCoverageNamesTwoPayers, reasonCoverageNamesTwoPayers
-	case err != nil:
+	case errors.As(err, &unregistered):
+		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, unregisteredPayers(unregistered.Candidates, remedyCoveragePayor), reasonUnregisteredPayer
+	default:
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 	}
-	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
-	if !ok {
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, unregisteredPayer(parsed), reasonUnregisteredPayer
-	}
-	return holder, parsed, 0, "", ""
 }
 
 // Routing refusals of a coverage that names no payer this gateway can route
-// to. msgUnregisteredPayer is followed by the identifier the coverage names
-// (unregisteredPayer); the record keeps the sentence alone.
+// to. msgUnregisteredPayer is followed by the identifiers the coverage names
+// and how a payer is named (unregisteredPayers); the record keeps the sentence
+// alone.
 const (
 	msgNoPayerRouter          = "no payer router configured"
 	msgCoverageNamesTwoPayers = "ambiguous coverage for routing: the coverage names more than one payer"
 	msgUnregisteredPayer      = "no registered payer for identifier"
 )
 
-// unregisteredPayer is the refusal of a payer identifier no participant
-// registers, naming it.
-func unregisteredPayer(p shnsdk.PayerIdentifier) string {
-	return msgUnregisteredPayer + " " + p.System + "|" + p.Value
+// remedyCoveragePayor is the remedy unregisteredPayers names for a coverage: where a payer
+// identifier the network registers goes, and the published page that lists them.
+const remedyCoveragePayor = "name the payer by an identifier the network registers for that payer, " +
+	"on the Organization that Coverage.payor references (see the Participant Wire Protocol §1a, Participant directory)"
+
+// unregisteredPayers is the refusal of a coverage none of whose payer identifiers a participant
+// registers: each identifier it names (at most unregisteredPayersListed, each bounded), then
+// remedy.
+func unregisteredPayers(cands []shnsdk.PayerIdentifier, remedy string) string {
+	names := make([]string, 0, min(len(cands), unregisteredPayersListed))
+	for _, c := range cands[:min(len(cands), unregisteredPayersListed)] {
+		names = append(names, bounded(c.System+"|"+c.Value))
+	}
+	var list string
+	switch n := len(names); {
+	case len(cands) > unregisteredPayersListed:
+		list = strings.Join(names, ", ") + " and " + strconv.Itoa(len(cands)-unregisteredPayersListed) + " more"
+	case n == 1:
+		list = names[0]
+	default:
+		list = strings.Join(names[:n-1], ", ") + " or " + names[n-1]
+	}
+	return msgUnregisteredPayer + " " + list + ": " + remedy
 }
+
+// unregisteredPayersListed is how many identifiers unregisteredPayers names before "and N more".
+const unregisteredPayersListed = 5
 
 // recipientFor resolves the payer holder from the patient's own Coverage (FR-G40) using the provider
 // SoR as the external-payor resolver — the origination default. Thin wrapper over recipientForWith
@@ -1265,8 +1314,8 @@ var errTokenUnverified = errors.New("authorize answer's token does not verify")
 // for the leg, or the Authorization Framework unavailable or failing. The
 // record names the refusal, on authority, and its AuthorizeError says why. The
 // wrapped error is what the caller is answered from, so the wire is what it was
-// without the wrapper: 503 for an unreachable Framework, else the opaque
-// "authorization failed".
+// without the wrapper: 503 for an unreachable or limiting Framework, else a 502
+// naming the failure's class (authzFailureAnswer).
 type requestNoAuthority struct{ err error }
 
 func (e *requestNoAuthority) Error() string { return e.err.Error() }
@@ -1333,11 +1382,78 @@ var errAuthzUnreachable = errors.New("the authorization service could not be rea
 // authzRefusal is the Authorization Framework's refusal on a network rule it
 // states in its 502 answer's "rule" (PARTICIPANT_PROTOCOL §4.1): the audit
 // rule, a decision it could not record, is the only one it states. The record
-// names the rule and the Framework; the caller's answer is the opaque
-// "authorization failed" every other failed authorize answer gets.
+// names the rule and the Framework; the caller is told the decision could not
+// be recorded and nothing was sent (msgAuthzNotRecorded), never the rule's name.
 type authzRefusal struct{ rule string }
 
-func (e *authzRefusal) Error() string { return "authorization failed" }
+func (e *authzRefusal) Error() string { return msgAuthzNotRecorded }
+
+// What the caller of a request leg no authority could be obtained for is told
+// (authzFailureAnswer): the Framework's status and the failure's class, and that
+// nothing was sent, never the Framework's body or a header of its answer but a
+// well-formed Retry-After on a 429 (authzLimited).
+const (
+	msgAuthzNotRecorded = "the authorization service could not record its decision, so this leg was not sent"
+	msgAuthzNoToken     = "the authorization service's answer carried no token this leg can use, so this leg was not sent"
+	msgAuthzUnreadable  = "the authorization service's answer could not be read, so this leg was not sent"
+	msgAuthzFailed      = "the authorization service failed, so this leg was not sent"
+	msgAuthzLimited     = "the authorization service is limiting this gateway, so this leg was not sent"
+)
+
+// errAuthzAnswerUnreadable marks an authorize answer whose body could not be
+// read after its status arrived.
+var errAuthzAnswerUnreadable = errors.New("read authorize answer")
+
+// authzLimited is the Framework's 429: it is limiting this gateway. Transient,
+// as for an authorization service that cannot be reached (it unwraps to
+// errAuthzUnreachable, so the leg is recorded, counted and answered as one),
+// but answered with its own text, and with its Retry-After when the Framework
+// sent exactly one well-formed value (retryAfter, as sent; empty for none: an
+// absent or malformed one is never replaced by a value of this gateway's).
+type authzLimited struct{ retryAfter string }
+
+func (e *authzLimited) Error() string { return msgAuthzLimited }
+func (e *authzLimited) Unwrap() error { return errAuthzUnreachable }
+
+// wellFormedRetryAfter is h's Retry-After when it holds exactly one value
+// that is a delay in whole seconds or an HTTP date in its preferred form
+// (IMF-fixdate, RFC 9110 §5.6.7: GMT, the weekday its date falls on), as sent;
+// otherwise empty.
+func wellFormedRetryAfter(h http.Header) string {
+	vs := h.Values("Retry-After")
+	if len(vs) != 1 {
+		return ""
+	}
+	v := vs[0]
+	if n := len(v); n > 0 && n <= 10 && strings.Trim(v, "0123456789") == "" {
+		return v
+	}
+	if t, err := time.Parse(http.TimeFormat, v); err == nil && t.Format(http.TimeFormat) == v {
+		return v
+	}
+	return ""
+}
+
+// authzFailureAnswer is what the caller of a request leg is told when no
+// authority could be obtained for it and the Framework neither denied it nor
+// stated a rule nor went unanswered: by the Framework's status (a 4xx is its
+// refusal of this gateway's own request), by an answer with no token this leg
+// can use, by an answer that could not be read, or, for anything else, that it
+// failed.
+func authzFailureAnswer(err error) string {
+	var se *shnsdk.StatusError
+	switch {
+	case errors.As(err, &se) && se.Code >= 400 && se.Code < 500:
+		return fmt.Sprintf("the authorization service refused this gateway's request (answered %d), so this leg was not sent", se.Code)
+	case errors.As(err, &se):
+		return fmt.Sprintf("the authorization service failed (answered %d), so this leg was not sent", se.Code)
+	case errors.Is(err, errAuthzNoToken), errors.Is(err, errTokenUnverified):
+		return msgAuthzNoToken
+	case errors.Is(err, errAuthzAnswerUnreadable):
+		return msgAuthzUnreadable
+	}
+	return msgAuthzFailed
+}
 
 // authzStatedRules are the rules a Framework 502 is read for. A rule outside
 // them, or none, leaves the answer what it was: a failure, in which no
@@ -1678,7 +1794,7 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, shnsdk.MaxResponseBytes))
 	if err != nil {
-		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("read authorize answer: %w", err)
+		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w: %w", errAuthzAnswerUnreadable, err)
 	}
 	// A 403 is a policy/consent DENIAL (not a transport failure); surface it as
 	// the typed sentinel so callers can distinguish it from the Authorization
@@ -1691,6 +1807,12 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	// retried: the request reached that proxy.
 	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
 		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
+	}
+	// A 429 is the Framework limiting this gateway: transient, as above, and
+	// not retried here; the caller is told when to resend only as the
+	// Framework said.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return shnsdk.Token{}, false, TokenUnavailable, &authzLimited{retryAfter: wellFormedRetryAfter(resp.Header)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if rule := authzStatedRule(resp.StatusCode, respBody); rule != "" {
@@ -2087,22 +2209,24 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	tok, err := g.authorizeLeg(r, reqFrame, op, pci, correlationID, custodian, sha256hex(env.Ciphertext))
 	if err != nil {
 		// Preserve a genuine authority DENIAL as the typed sentinel (UC-05's
-		// no-consent branch depends on telling it apart from an authz outage); any
-		// other authorize failure stays an opaque "authorization failed".
+		// no-consent branch depends on telling it apart from an authz outage);
+		// any other authorize failure is answered by its class
+		// (authzFailureAnswer), with nothing of the Framework's answer.
 		if errors.Is(err, errAuthorizationDenied) {
 			return nil, errAuthorizationDenied
 		}
 		// The Framework's refusal on a rule it states: recorded as that
-		// refusal, answered as every other failure is.
+		// refusal, answered that the decision could not be recorded.
 		var refusal *authzRefusal
 		if errors.As(err, &refusal) {
 			return nil, refusal
 		}
-		// Authz never answered: this leg was not sent. The cause rides along
-		// for the leg's own records; the caller's answer is the fixed text.
+		// Authz never answered, or is limiting this gateway: this leg was not
+		// sent, and the caller's answer is that class's own fixed text
+		// (relayOriginationError). Any other failure is answered by its class.
 		cause := err
 		if !errors.Is(err, errAuthzUnreachable) {
-			cause = fmt.Errorf("authorization failed")
+			cause = errors.New(authzFailureAnswer(err))
 		}
 		// No authority could be obtained, so the leg is refused on authority
 		// here, before the network sees it. A requester that left refused

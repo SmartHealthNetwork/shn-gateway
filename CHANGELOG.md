@@ -4,6 +4,253 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A token request follows no redirect (v1.9.0)
+
+- **Changed (every role, SMART Backend Services to your own system):** the gateway's token
+  request to your authorization server (`FHIR_TOKEN_URL`, `PAYER_DAVINCI_TOKEN_URL`,
+  `PROVIDER_DTR_POPULATE_TOKEN_URL`, `PROVIDER_CDEX_TOKEN_URL`) follows no redirect, whatever
+  the redirect's origin or code, at every conformance level: its body is your client's
+  credential (the client secret, or the signed assertion), and OAuth defines no redirect of
+  it. A `3xx` answer fails the token request as a token endpoint that does not answer fails
+  it: no token could be obtained, so the call that needed it is not sent and fails as it
+  does when your authorization server cannot be reached. That holds for every `3xx`, one with
+  no `Location` or with one that cannot be read included. A redirect from `https` to `http` is
+  refused and recorded as any request's is (`https-to-http-refused`); any other failure names
+  the answer's status and the origin its `Location` named, if any, never its path or query.
+- **Added (exchange record):** the access line's `backend.redirects` names a token request's
+  refused redirect `token-redirect-refused`.
+
+## A request goes to the payer the network registers for any identifier of any payor (v1.9.0)
+
+- **Changed (requester):** a provider's gateway routes a PAS, CRD, DTR or coverage eligibility
+  request, and an exchange it originates from its own records, by the identifiers the payer
+  directory registers (shn-sdk v1.10.0's `ChooseRegisteredPayer`), read from every payor of the
+  Coverage, never by position. An Organization that lists an NPI or an EIN before its payer
+  identifier, or a registered payor after an unregistered one, now goes to that payer. Earlier
+  releases read only the first identifier of `payor[0]` and refused such a request `422 no
+  registered payer for identifier <the NPI>`. A request whose payors name their payer first
+  behaves as before, except as below.
+- **Changed (requester):** these are refused `422` (routing), before any leg, at every
+  conformance level:
+  - no identifier is registered: `no registered payer for identifier <identifiers>: name the
+    payer by an identifier the network registers for that payer, on the Organization that
+    Coverage.payor references (see the Participant Wire Protocol §1a, Participant directory)`,
+    or, on the eligibility insurer path, naming the insurer Organization the request names;
+  - the identifiers name two different registered payers, including an Organization that
+    earlier releases routed by its first identifier: as ambiguous;
+  - a payor after `payor[0]` with no inline identifier that names no payer the gateway can read
+    (its reference resolves to nothing, to an Organization with no identifier, or to another
+    kind of resource): `no payer identifier on member coverage: payor[<i>] "<reference>" cannot
+    be read as a payer Organization with an identifier, so the coverage's payer is unknown`
+    (on a coverage eligibility request, `no payer to route the eligibility request by: …,
+    payor[<i>] "<reference>" cannot be read as …`).
+  `payor[0]`'s own refusals are unchanged, and it is refused even when a later payor names a
+  payer. A `Patient` or `RelatedPerson` payor (self-pay) names no payer and is passed over; its
+  identifiers never appear in a refusal.
+- **Changed (requester):** a payor reference that several entries of the request answer, every
+  one an Organization, names every identifier they name, and the directory decides as it does
+  across payors: identifiers no participant registers are passed over, and two registered payers
+  are ambiguous. Several entries that are not all Organizations are refused `422 no payer
+  identifier on member coverage: Coverage.payor matches more than one resource of the request,
+  and not every one is an Organization` (`… more than one entry of the Bundle …` for a PAS
+  Bundle). Earlier releases routed several entries only when they named the same payer
+  identifier.
+- **Changed (requester):** a payor that carries an identifier of its own already names its payer:
+  its reference counts when what the request carries resolves it, and is never read from the
+  system of record or the EHR's `fhirServer` to route. A failed read of another payor's
+  Organization leaves that payor unknown; when no payer is then found, a system-of-record read's
+  failure is that system's (`502`, or `503` when it is unavailable), never a routing refusal, and
+  a `fhirServer` read's is that read's refusal.
+- **Changed (requester):** through the request's `fhirServer`, the gateway reads each payor
+  Organization routing needs (one with no identifier of its own that nothing the request or the
+  search answers), up to five for one request, and, on a coverage it read through `fhirServer`,
+  carries each in `prefetch.coverage` (nothing is carried for a coverage the EHR sent). Earlier
+  releases read one and refused a second (`… name more than one payor Organization by reference
+  alone`); more than five are now refused `422 no coverage to route by: fhirServer's coverages
+  name more payor Organizations by reference alone than this gateway reads for one request (5)`
+  (for a coverage the EHR sent, `no payer identifier on member coverage: the request's coverages
+  name more payor Organizations by reference alone than this gateway reads for one request (5)`).
+- **Changed (requester):** a request the gateway builds from the participant's own records names
+  the payer it routes to: a PAS Claim's insurer, and an inquiry's, is the Organization of the
+  payor routing chose, never a payor named only because it is first; a questionnaire request
+  carries the Organization of every payor of its Coverages as the system supplied it, and a CDS
+  Hooks request's carried coverage search result includes the Organization of every payor
+  routing resolved.
+- **Changed (payer):** with the payer identity mapping on, a payer's gateway maps the
+  identifier of every payor that names one of its own (its inline identifier or, failing that,
+  the identifier the Organization it references lists, wherever it sits; edit E-03), and leaves
+  every other identifier as sent. Earlier releases mapped only `payor[0]`, by its inline
+  identifier, else its Organization's first identifier, and refused a Coverage whose first
+  identifier was not one of the payer's own. A Coverage none of whose payors names one of the
+  payer's own is still refused, judged by `payor[0]`, as before.
+- **Changed (payer):** a payer's gateway answering a coverage eligibility request from its own
+  records reads a member's several Coverages as naming it when each carries one of its own
+  identities (those it publishes on the network feed and, with the mapping on, its configured
+  and backend identities) on some payor, in any position; otherwise, as with no identity known,
+  when the payer directory resolves their identifiers to one holder, or, when it resolves none of
+  them, when they name the same identifiers in any order. Earlier releases compared the Coverages'
+  first identifiers, so Coverages agreeing only on a first NPI and naming different identifiers
+  after it were answered; they are now ambiguous (`422 ambiguous coverage for routing: the
+  member's Coverage records do not name one payer`), unless each carries one of the payer's own
+  identities, or the payer directory resolves them to one holder.
+
+## The gateway builds on shn-sdk v1.10.0 (v1.9.0)
+
+- **Changed:** the gateway pins shn-sdk v1.10.0. Payer routing uses its new
+  `CoveragePayerCandidates` and `ChooseRegisteredPayer` (see "A request goes to the payer the
+  network registers for any identifier of any payor"). Every SDK function the gateway called
+  before answers as before for what it reads, and it reads none of the decision detail v1.10.0
+  adds (`OtherReasons`, an `A6` approval's review action).
+
+## A redirect from your own system is never followed to http, and never carries your token or configured headers elsewhere (v1.9.0)
+
+- **Changed (every role, every call to your own system):** when your system of record,
+  your Da Vinci endpoint in native-forward mode, your CDS service listing, your Task
+  endpoint, your `$populate` engine, or a connectivity check (`/internal/checks`) is
+  answered with a redirect, the gateway follows it as a direct client would, with two
+  rules, whether or not the call carries a token. (A token request to your authorization
+  server follows no redirect at all: see "A token request follows no redirect".) A redirect
+  to another origin (another scheme, host or port) is followed
+  without `Authorization` and without any header you configure in
+  `PAYER_DAVINCI_BACKEND_HEADERS`, whatever its name or value, and neither is sent after
+  the first hop to another origin, for the rest of the redirect chain, even when it
+  leads back to your system: another origin chose that hop's path, and with a `307` or
+  `308` its method and body. Your system answers such a request as it chooses (a `401`,
+  say), and that is the answer, with no fresh token fetched. A chain of redirects within
+  your system's own origin keeps your token and those headers on every hop. Every other
+  header of the request is carried as a direct client would carry it. A `401` from
+  another origin is its answer, with no fresh token fetched. **A redirect from
+  `https` to `http` is never followed, whatever its origin, at every conformance level**:
+  a `307` or `308` would send the request's body in cleartext (for a token request, your
+  client secret or signed assertion). A read your system redirects that way fails as a
+  read your system cannot answer does, and a token request as one your authorization
+  server does not answer. A forwarded
+  operation is refused `502` on message integrity, attested delivered: the requester's caller
+  is told your system received the request, since it answered, and to check its outcome
+  before resending. A search of your system of record still follows no redirect at all.
+- **Added (exchange record):** the access line's `backend.redirects` names each redirect
+  your system or your authorization server's token endpoint answered a call with, in
+  order, by its class and never its URL: `same-origin`, `cross-origin`,
+  `https-to-http-refused` for the downgrade that was not followed, or
+  `token-redirect-refused` for a token request's redirect, which is never followed. A forward, or a read of
+  your CDS service listing, it ends records your system's `3xx` status with
+  `backend.errorClass` `http-3xx`; a read of your system of record it ends has
+  `backend.errorClass` `http-3xx`. A `$populate`
+  request it ends writes `gateway: populate_failure` with stage `transport`, reason
+  `https_to_http_refused` and the redirect's status.
+
+## A 401 from your own system gets one fresh token, and the request is sent once more (v1.9.0)
+
+- **Changed (every role, SMART Backend Services to your own system):** when your system
+  of record, your Da Vinci endpoint in native-forward mode (its CDS service listing
+  included), your Task endpoint (`PROVIDER_CDEX_TASK_URL`), or your `$populate` engine
+  answers `401` to the token the gateway cached, the gateway drops that token, fetches a
+  new one from your authorization server and sends the same request once more, byte for
+  byte the same apart from `Authorization` (its correlation id included), as a direct
+  SMART client does. **Your own system may now see a request twice when it answers `401`
+  to an expired token, as with a direct client.** That includes a PAS submission: a `401`
+  is your system refusing the credential before acting on the request. Only once: a `401`
+  to the fresh token too is your system's answer, passed back as it is. A `403`, or any
+  other status, is never resent, and a request whose body cannot be read again is not
+  resent (the next request goes with a fresh token). If the fresh token cannot be
+  obtained, your system's `401` is the answer, as before. Requests refused together with
+  the same token share one fresh token. A system that answers `401` for a reason other
+  than the token (a key it checks in front of the token, a scope it never grants) now
+  costs a token request and a second send for each request. Before, the gateway kept
+  sending the cached token until it aged out, so every request failed until then.
+- **Added (exchange record):** the access line's `backend.resends` names each call sent a
+  second time: `reason` `credential-refreshed-after-401`, and `challenge`, what the `401`'s
+  `WWW-Authenticate` said, recorded as observed and never used to decide (`invalid_token`,
+  `other` or `none`). `backend.calls` counts each resend. A resend to your `$populate`
+  engine, or by the connectivity checks (`/internal/checks`), is made the same way but is on
+  no access line.
+
+## With the payer identity mapping on, a PAS inquiry with no Coverage is carried as sent (v1.9.0)
+
+- **Changed (payer, payer backend identity mapping):** a PAS `Claim/$inquire` that reaches
+  your gateway carrying no `Coverage` anywhere is forwarded to your own system as it arrived,
+  apart from the registered address restore (E-13), at every conformance level, as it already
+  is without the mapping. Before, with
+  `PAYER_DAVINCI_PAYOR_OWN` and `PAYER_DAVINCI_PAYOR_BACKEND` set, it was refused `400 payer
+  backend identity mapping: inbound Coverage carries no resolvable payor identifier`. Such
+  an inquiry names no payor for the mapping to re-stamp, and the network has already routed
+  it to you; whether a Coverage is missing is your own system's to answer. An inquiry that
+  holds a Coverage only where the mapping does not read one is still refused with that 400:
+  the mapping reads only the Bundle's own entries spelled exactly `"resourceType": "Coverage"`,
+  so an inquiry whose only Coverage is, for example, contained, nested in another resource, or
+  an entry that spells `resourceType` or `Coverage` in another case is refused. A submission or
+  amendment with no Coverage is refused as before.
+- **Added (exchange record):** `editsNotMade` gains `E-03:no-coverage`, recorded when the
+  mapping is on and a PAS inquiry, a CDS Hooks request or a DTR `$questionnaire-package`
+  request your gateway forwards to your own system carries no Coverage anywhere, so the
+  mapping made no edit (for a `$questionnaire-package` request, at `none` and `observe`: at
+  `structural` and `strict` such a request is refused first). A CDS Hooks or DTR request with no Coverage was already forwarded as
+  it arrived; its record now says so.
+- **Unchanged (provider):** a provider's gateway routes an inquiry by its own Coverage, so one
+  with no Coverage is still refused before any leg, at every level, as routing (`422 no payer
+  identifier on member coverage`).
+
+## The provider's `$populate` call is sent as a FHIR operation call (v1.9.0)
+
+- **Changed (provider, `PROVIDER_DTR_POPULATE_URL`):** the SDC `Questionnaire/$populate` request the gateway sends
+  to your own populate engine (`PROVIDER_DTR_POPULATE_URL`) carries `Content-Type:
+  application/fhir+json`, as a direct FHIR client sends it; it was `application/json`. A provider
+  system that parsed only `application/json` now receives `application/fhir+json`, which a FHIR
+  server must accept. `Accept` lists `application/fhir+json` first and still lists
+  `application/json` second, so an engine that answers as `application/json` is read as before.
+  The request's body is unchanged.
+
+## A request leg no authority could be obtained for tells its caller why (v1.9.0)
+
+- **Changed (requester):** when the Authorization Framework gives no authority for a request
+  leg, the leg is still not sent and its record is unchanged, but the caller's answer names the
+  Framework's status and the failure's class in place of the opaque `502 authorization failed`.
+  It never carries the Framework's own `error` text, nor a header of its answer apart from a
+  `429`'s `Retry-After` (below). The answers, as
+  `{"error": …}` or an `OperationOutcome` on the FHIR operation routes:
+  - a `502` with `"rule":"audit"`: `502` `the authorization service could not record its
+    decision, so this leg was not sent`;
+  - any other `4xx` but `403` and `429`: `502` `the authorization service refused this gateway's request
+    (answered N), so this leg was not sent`;
+  - any other status: `502` `the authorization service failed (answered N), so this leg was
+    not sent`;
+  - a `2xx` with no token the leg can use, or one that does not verify for it: `502` `the
+    authorization service's answer carried no token this leg can use, so this leg was not sent`;
+  - an answer whose body could not be read: `502` `the authorization service's answer could not
+    be read, so this leg was not sent`;
+  - any other failure: `502` `the authorization service failed, so this leg was not sent`.
+- **Changed (requester):** a Framework `429` is the gateway's own `503` `the authorization
+  service is limiting this gateway, so this leg was not sent`, not retried, carrying the
+  Framework's `Retry-After` only when it sent exactly one value that is a delay in whole seconds
+  or an HTTP date in its preferred form (IMF-fixdate), and none otherwise. It is recorded, and counted in `LegOutcome`, as the
+  Framework unavailable (`unreachable`), as a Framework that cannot be reached is: the access
+  line's `authorizeError`, and `answerError` for a 429 on an answer's authorize call. Before, a
+  Framework `429` was `502 authorization failed`, with `authorizeError` `other`, and counted
+  `failed` in `LegOutcome`.
+- **Unchanged:** `403` is `403 authorization denied`; no answer, a `503` or a `504` is the
+  `503` that the authorization service could not be reached. A responder's own failure to
+  authorize its answer before its system has answered is still a plain `502` to the Hub, which
+  relays only its status.
+
+## The CDex data request is checked at egress (v1.9.0)
+
+- **Changed (module 1, UC-05):** the CDex data request Task the gateway builds and sends a
+  facility is now checked at egress, at your conformance level, against the profile it declares
+  in `meta.profile` (`cdex-task-data-request`), by the same validator that checks the facility's
+  answer. A defect is recorded at `observe` and the request sent; it is refused `422 egress
+  validation failed: …` before the request is sent at `strict`, and at `structural` for a
+  structural issue (a deeper one, an invariant or a code outside its code list, is recorded and
+  the request sent). A
+  validator that cannot be reached refuses `500 validator unavailable` at `strict` and is recorded
+  at `observe` and `structural`. Nothing is checked at `none`. A validator that does not hold the
+  profile reads it as a structural issue: with your own validator at `structural` or `strict`,
+  load `hl7.fhir.us.davinci-cdex` 2.1.0, or every data request is refused (the supplied validator
+  image loads it). The PAS submission was already sent when the data request is refused: the
+  payer's pend stands, and the answer says which legs were carried.
+- **Removed (payer's gateway):** the egress check of a `$questionnaire-package`, PAS submission,
+  update or inquiry answer the gateway built itself. A payer's gateway answers those legs only with
+  its participant's own answer, relayed as sent, so the check could never run.
+
 ## A PAS request the gateway builds carries the report, its Provenance and the prior Claim as written (v1.8.0)
 
 - **Changed (requester, amendments the gateway builds):** the provider's gateway builds its PAS

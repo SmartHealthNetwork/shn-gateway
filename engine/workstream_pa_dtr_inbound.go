@@ -115,9 +115,9 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		g.refuseInbound(w, r, legDTR, env, tok, answerTok, http.StatusInternalServerError, errOwnershipFault, nil)
 		return
 	}
-	// The direction flips here: the $questionnaire-package answer validated below is
-	// THIS participant's own build, not the peer's request handleInbound tagged the
-	// context with.
+	// The direction flips here: what is judged from here on is THIS participant's own
+	// $questionnaire-package answer, relayed as it sent it, not the peer's request
+	// handleInbound tagged the context with.
 	fc := findingContextFrom(ctx)
 	fc.Whose = "own"
 	ctx = withFindingContext(ctx, fc)
@@ -140,33 +140,13 @@ func (g *Gateway) handleDTRInbound(w http.ResponseWriter, r *http.Request, env s
 		g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	// Egress $validate is a NEAR-RELAY for a verbatim foreign package (FR-G28, R-8
-	// precedent): a real br-payer's $questionnaire-package response carries FOREIGN Da Vinci
-	// DTR profiles (dtr-std-questionnaire / dtr-questionnaireresponse) that SHN — hosting US
-	// Core only — cannot resolve, so a foreign-$validate would 422 a conformant payer
-	// response. The trust-critical subject fence above still runs (no Questionnaire may carry
-	// a subject); we skip ONLY the profile-resolution $validate the conformant crd/pas native
-	// legs also skip. An SHN-PRODUCED package (a non-relaying LegResponder) is egress-$validated.
-	//
-	// The predicate is result.ResponseRelayed() — the per-RESULT truth the native DTR case
-	// sets — rather than the deployment-wide PayerDavinciNative flag it replaces. The two
-	// coincide today (a native-forward payer always routes dtr-questionnaire-fetch to native,
-	// and app.go sets PayerDavinciNative exactly when that forward is wired), so this is a
-	// precision change, not a behavior change: it just stops a hypothetical SHN-produced
-	// DTR leg on a native deployment from skipping validation it should get.
-	//
-	// F7: an SHN-produced package would be built at the ANSWER LINE, so it must be validated
-	// on THAT line's lane — DTR 2.2 requires a QuestionnaireResponse entry that the 2.0 IG
-	// does not, and checking 2.2 bytes against a 2.0 lane is exactly the wrong-lane failure
-	// the seam exists to prevent. Today a payer's DTR answer is always its partner's bytes
-	// (a relayed Response), so this branch is the guard for a partner-injected occupant that
-	// produces its own package rather than relaying one.
-	if !result.ResponseRelayed() {
-		if status, msg := g.validateFHIRForContract(ctx, responseFHIR, "egress", "pa.dtr", shnsdk.LineOf(answerTok), ""); status != 0 {
-			g.refuseInbound(w, r, legDTR, env, tok, answerTok, status, msg, nil)
-			return
-		}
-	}
+	// No egress $validate: the package is the payer participant's own,
+	// relayed as it sent it (FR-G28, R-8). A real br-payer's
+	// $questionnaire-package response carries Da Vinci DTR profiles this
+	// gateway did not assemble and cannot vouch for, so certifying it would
+	// refuse a conformant payer's answer. Ownership admits only a relayed answer
+	// on this leg (admit, above), so no package this gateway built reaches
+	// here; the subject fence above is what the relay passes.
 	// Stamp honesty: a verbatim foreign package is relayed UNSTAMPED (the same rule as the PAS
 	// relay); an SHN-produced package is stamped at the line it was built at.
 	g.respondLeg(w, r, "payer-coverage", "dtr-questionnaire", "dtr-questionnaire-fetch", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
@@ -399,12 +379,13 @@ func docText(d *relay.Document, obj relay.NodeID, key string) string {
 // (RuleSubjectPCI when the participant requires known members). That, a request
 // that cannot be read and a coverage parameter that is not a Coverage refuse
 // at every level. The rest is the request's own content, not checked at
-// none, recorded at observe and refused at strict with strict's status and
-// body: no coverage, a Coverage with no beneficiary, a patient-bearing
-// reference naming no Patient and a Patient with no id (RuleRequestShape),
-// and more than one patient (RulePatientMixed). Below strict the request is
-// bound by its subject and forwarded as sent; a request left with no subject
-// at all refuses at every level, with strict's refusal.
+// none and recorded at observe: no coverage, a Coverage with no beneficiary, a
+// patient-bearing reference naming no Patient and a Patient with no id
+// (RuleRequestShape, refused at structural and strict), and more than one
+// patient (RulePatientMixed, refused at strict), each refusal with strict's
+// status and body. Where it is not refused, the request is bound by its subject
+// and forwarded as sent; a request left with no subject at all refuses at every
+// level, with strict's refusal.
 func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte) (pci string, status int, msg string) {
 	d, err := relay.Doc(relay.NewBody(body, relay.OriginPeerFrame))
 	if err != nil || d.Kind(d.Root()) != relay.KindObject || docText(d, d.Root(), "resourceType") != "Parameters" {

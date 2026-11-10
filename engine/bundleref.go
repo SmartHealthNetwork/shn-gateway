@@ -16,6 +16,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -96,22 +97,30 @@ type refResolution int
 const (
 	refResolved  refResolution = iota
 	refNoEntry                 // no entry answers the reference
-	refAmbiguous               // several entries answer it, and they do not name one payer
+	refAmbiguous               // several entries answer it, and not every one is an Organization
 )
 
 // resolve returns the entry ref names (entryAnswers). The owner's fullUrl gives
 // a relative reference no base of its own: a relative reference names every
-// entry with that type and id. Several entries resolve as the first of them
-// only when each is an Organization naming the same payer identifier, read as
-// routing reads it (shnsdk.ParseOrganizationIdentifier); otherwise they are
-// ambiguous.
+// entry with that type and id. Several Organization entries that answer it
+// resolve, for routing, as one Organization naming every identifier they name
+// (resolveAmong); several entries not all Organizations are ambiguous.
 func (b bundleRefs) resolve(ref string) (json.RawMessage, refResolution) {
 	return resolveAmong(b.entries, ref)
 }
 
-// resolveAmong is resolve's rule over any set of entries: the ones ref names
-// (entryAnswers) resolve as the first of them only when each is an
-// Organization naming the same payer identifier.
+// resolveAmong is resolve's rule over any set of entries: the one ref names
+// (entryAnswers), or, when several Organizations answer it, the payor's
+// identifiers are every identifier they name, in document order, each once
+// (shnsdk.OrganizationIdentifiers), and the payer directory decides among
+// them as it does across payors (routeCandidates): identifiers no participant
+// registers are passed over, one registered holder routes, two are ambiguous.
+// No entry is picked over another, and nothing is judged by an identifier's
+// position. What it returns then is a routing-only Organization holding those
+// identifiers: it is read only for them, never carried or filled into a
+// message. A message the gateway builds names the payor by the payor's own
+// reference, which is the same however many entries answer it. Several
+// entries that are not all Organizations are ambiguous.
 func resolveAmong(entries []bundleRefEntry, ref string) (json.RawMessage, refResolution) {
 	var matches []json.RawMessage
 	for _, e := range entries {
@@ -119,18 +128,34 @@ func resolveAmong(entries []bundleRefEntry, ref string) (json.RawMessage, refRes
 			matches = append(matches, e.resource)
 		}
 	}
-	if len(matches) == 0 {
+	switch {
+	case len(matches) == 0:
 		return nil, refNoEntry
+	case len(matches) == 1:
+		return matches[0], refResolved
 	}
-	// An entry naming no payer reads as the zero identifier, which no named
-	// one equals.
-	first, _ := shnsdk.ParseOrganizationIdentifier(matches[0])
-	for _, m := range matches[1:] {
-		if pid, named := shnsdk.ParseOrganizationIdentifier(m); !named || pid != first {
+	var ids []shnsdk.PayerIdentifier
+	for _, m := range matches {
+		if typ, _ := entryHead(m); typ != "Organization" {
 			return nil, refAmbiguous
 		}
+		for _, id := range shnsdk.OrganizationIdentifiers(m) {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
 	}
-	return matches[0], refResolved
+	return routingOrganization(ids), refResolved
+}
+
+// routingOrganization is the routing-only Organization resolveAmong answers for
+// several Organization entries: their identifiers, and nothing else.
+func routingOrganization(ids []shnsdk.PayerIdentifier) json.RawMessage {
+	b, _ := json.Marshal(struct {
+		ResourceType string                   `json:"resourceType"`
+		Identifier   []shnsdk.PayerIdentifier `json:"identifier"`
+	}{"Organization", append([]shnsdk.PayerIdentifier{}, ids...)})
+	return b
 }
 
 // entryAnswers is whether a Bundle entry with this fullUrl, resource type and
@@ -165,9 +190,9 @@ func referenceIsAbsolute(ref string) bool {
 }
 
 // payorMiss says, in the participant's terms, why coverage names no payer
-// identifier routing can read, or "" when it cannot tell. It reads the same
-// payor, in the same order, as routing does (shnsdk.ParseCoveragePayer) and
-// echoes nothing from the body.
+// identifier routing can read, or "" when it cannot tell. It reads payor[0],
+// whose refusals refine routing's bare one (a later payor routing cannot read
+// is named by noPayerIdentifierFor), and echoes nothing from the body.
 func (b bundleRefs) payorMiss(coverage json.RawMessage) string {
 	if coverage == nil {
 		if !b.readable {
@@ -215,7 +240,7 @@ func (b bundleRefs) payorMiss(coverage json.RawMessage) string {
 	org, how := b.resolve(ref)
 	switch {
 	case how == refAmbiguous:
-		return "Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"
+		return "Coverage.payor matches more than one entry of the Bundle, and not every one is an Organization"
 	case how == refNoEntry && referenceIsAbsolute(ref):
 		return "Coverage.payor is an absolute reference that is no entry's fullUrl: the payor Organization must be an entry of the Bundle"
 	case how == refNoEntry:
@@ -282,11 +307,11 @@ func carriedRefs(resources [][]byte) []bundleRefEntry {
 const (
 	// payorDisagreesInRequest is the reason a request's own resources answer
 	// its Coverage's payor reference without naming one payer.
-	payorDisagreesInRequest = "Coverage.payor matches more than one resource of the request, and they do not name one payer"
+	payorDisagreesInRequest = "Coverage.payor matches more than one resource of the request, and not every one is an Organization"
 	// payorDisagreesWithSearch is the reason for a Coverage the system of
 	// record supplied: the request's resources and the records that system's
 	// Coverage search returned answer the reference without naming one payer.
-	payorDisagreesWithSearch = "Coverage.payor matches more than one resource of the request and the system of record's Coverage search, and they do not name one payer"
+	payorDisagreesWithSearch = "Coverage.payor matches more than one resource of the request and the system of record's Coverage search, and not every one is an Organization"
 )
 
 // payorRefs resolves a CDS Hooks or $questionnaire-package request's payor
@@ -304,6 +329,10 @@ type payorRefs struct {
 	next      func(ref string) ([]byte, bool)
 	disagreed bool
 	resolved  []byte
+	// named holds the references of the Coverage being read (candidates)
+	// that routing does not need read (unreadPayorRefs): they are resolved
+	// among local alone and never read through next.
+	named map[string]bool
 }
 
 func (p *payorRefs) resolve(ref string) ([]byte, bool) {
@@ -315,7 +344,7 @@ func (p *payorRefs) resolve(ref string) ([]byte, bool) {
 	case how == refAmbiguous:
 		p.disagreed = true
 		return nil, false
-	case p.next == nil:
+	case p.next == nil || p.named[ref]:
 		return nil, false
 	}
 	res, ok := p.next(ref)
@@ -323,6 +352,50 @@ func (p *payorRefs) resolve(ref string) ([]byte, bool) {
 		p.resolved = res
 	}
 	return res, ok
+}
+
+// candidates is shnsdk.CoveragePayerCandidates of coverage, its payor
+// references resolved by resolve: a payor that carries an identifier of its
+// own has its reference resolved among what the request carries alone, never
+// read from the system of record or the request's fhirServer.
+func (p *payorRefs) candidates(coverage []byte) ([][]shnsdk.PayerIdentifier, error) {
+	p.named, p.disagreed = unreadPayorRefs(coverage), false
+	defer func() { p.named = nil }()
+	return shnsdk.CoveragePayerCandidates(coverage, p.resolve)
+}
+
+// unreadPayorRefs is the set of payor references of coverage that routing never
+// needs read: every payor naming them either carries an identifier (with a
+// system and a value) of its own, which already names its payer, or states a
+// type (Reference.type) other than Organization, which already settles that it
+// names none (self-pay) or an unknown one.
+func unreadPayorRefs(coverage []byte) map[string]bool {
+	var probe struct {
+		Payor []struct {
+			Reference  string          `json:"reference"`
+			Type       json.RawMessage `json:"type"`
+			Identifier *struct {
+				System string `json:"system"`
+				Value  string `json:"value"`
+			} `json:"identifier"`
+		} `json:"payor"`
+	}
+	if json.Unmarshal(coverage, &probe) != nil {
+		return nil
+	}
+	named := map[string]bool{}
+	for _, p := range probe.Payor {
+		if p.Reference == "" {
+			continue
+		}
+		var stated string
+		typed := json.Unmarshal(p.Type, &stated) == nil && stated != "" && stated != "Organization"
+		unread := typed || (p.Identifier != nil && p.Identifier.System != "" && p.Identifier.Value != "")
+		if v, seen := named[p.Reference]; !seen || v {
+			named[p.Reference] = unread
+		}
+	}
+	return named
 }
 
 // coverageResources returns the Coverages a coverage value holds: the value
@@ -368,7 +441,8 @@ func coverageResources(coverage []byte) [][]byte {
 }
 
 // recipientForCoverages routes covs as recipientForWith routes a Bundle of
-// Coverages (they must name one payer), each Coverage read alone, so that
+// Coverages (they must name one payer, by the holder the payer directory
+// resolves for their identifiers, never by position), each Coverage read alone, so that
 // every payor reference resolves through refs and none among a Bundle's
 // entries without the agreement rule. A payor refs leaves in doubt is
 // refused with refs' reason, and one that resolved to a resource naming no
@@ -379,11 +453,17 @@ func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string,
 	if g.cfg.PayerRouter == nil {
 		return "", none, http.StatusUnprocessableEntity, msgNoPayerRouter, reasonNoPayerRouter
 	}
-	var first shnsdk.PayerIdentifier
-	for i, c := range covs {
+	var lists [][]shnsdk.PayerIdentifier
+	for _, c := range covs {
 		refs.resolved = nil
-		pid, err := shnsdk.ParseCoveragePayer(c, refs.resolve)
+		cands, err := refs.candidates(c)
+		var unresolved *shnsdk.UnresolvedPayorError
 		switch {
+		case errors.As(err, &unresolved) && unresolved.Index > 0:
+			// A payor after payor[0] the request leaves unknown is named, as
+			// on every other path (noPayerIdentifierFor), before payor[0]'s
+			// own refinements: what refs last resolved is another payor's.
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifierFor(err), reasonNoPayerIdentifier
 		case err != nil && refs.disagreed:
 			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier + ": " + refs.disagree, reasonNoPayerIdentifier
 		case err != nil && refs.resolved != nil:
@@ -392,20 +472,15 @@ func (g *Gateway) recipientForCoverages(covs [][]byte, refs *payorRefs) (string,
 			}
 			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 		case err != nil:
-			return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
-		case i > 0 && pid != first:
-			return "", none, http.StatusUnprocessableEntity, msgCoverageNamesTwoPayers, reasonCoverageNamesTwoPayers
+			return "", none, http.StatusUnprocessableEntity, noPayerIdentifierFor(err), reasonNoPayerIdentifier
 		}
-		first = pid
+		lists = append(lists, cands...)
 	}
 	if len(covs) == 0 {
 		return "", none, http.StatusUnprocessableEntity, noPayerIdentifier, reasonNoPayerIdentifier
 	}
-	holder, ok := g.cfg.PayerRouter.Resolve(first)
-	if !ok {
-		return "", none, http.StatusUnprocessableEntity, unregisteredPayer(first), reasonUnregisteredPayer
-	}
-	return holder, first, 0, "", ""
+	// The Coverages must name one payer: the holder the directory resolves for each.
+	return g.routeCandidates(lists)
 }
 
 // The reasons coveragePayorRecords gives for a payor reference it leaves out.
@@ -414,14 +489,16 @@ const (
 	payorRefSeveralAnswer = "several-answer"
 )
 
-// coveragePayorRecords resolves the payor reference each of coverages names
-// outside itself (coveragePayorRef: not contained, not an identifier) against
-// bundle, the Bundle the coverages came in, by entryAnswers' rule (resolve),
-// each distinct reference once, and returns the Organizations they name in
-// order, as bundle holds them, each record once. known is a record the caller already holds for
-// knownRef, answered when no entry of bundle does. A reference that no entry
-// and no known record answers, or that several different Organizations
-// answer, adds nothing: leftOut, when not nil, is told the reason
+// coveragePayorRecords resolves every payor reference each of coverages names
+// outside itself (coveragePayorRefs: not contained, not an identifier; every
+// payor counts, as routing reads them) against bundle, the Bundle the
+// coverages came in, by entryAnswers' rule, each distinct reference once, and
+// returns the Organizations they name in order, as bundle holds them, each
+// record once. known is a record the caller already holds for knownRef (the
+// payor routing chose, memberPayerOrganization), answered when no entry of
+// bundle does. A reference that no entry and no known record answers, or that
+// several different Organizations answer (no record is picked over another),
+// adds nothing: leftOut, when not nil, is told the reason
 // (payorRefNoneAnswers, payorRefSeveralAnswer) and the reference's resource
 // type (referenceResourceType). A reference that answers with a record that
 // is not an Organization adds nothing and is not told. Nothing is minted.
@@ -434,28 +511,64 @@ func coveragePayorRecords(bundle []byte, coverages [][]byte, knownRef string, kn
 	}
 	var out [][]byte
 	seen := map[string]bool{}
+	add := func(record []byte) {
+		if !slices.ContainsFunc(out, func(o []byte) bool { return bytes.Equal(o, record) }) {
+			out = append(out, record)
+		}
+	}
 	for _, c := range coverages {
-		ref := coveragePayorRef(c)
-		if ref == "" || strings.HasPrefix(ref, "#") || seen[ref] {
-			continue
-		}
-		seen[ref] = true
-		record, how := refs.resolve(ref)
-		if how == refNoEntry && ref == knownRef && len(known) > 0 {
-			record, how = known, refResolved
-		}
-		switch how {
-		case refResolved:
-			if resourceTypeOf(record) == "Organization" && !slices.ContainsFunc(out, func(o []byte) bool { return bytes.Equal(o, record) }) {
-				out = append(out, record)
+		for _, ref := range coveragePayorRefs(c) {
+			if strings.HasPrefix(ref, "#") || seen[ref] {
+				continue
 			}
-		case refAmbiguous:
-			tell(payorRefSeveralAnswer, ref)
-		default:
-			tell(payorRefNoneAnswers, ref)
+			seen[ref] = true
+			var orgs [][]byte
+			answered := false
+			for _, e := range refs.entries {
+				if !entryAnswers(ref, e.fullURL, e.typ, e.id) {
+					continue
+				}
+				answered = true
+				if resourceTypeOf(e.resource) == "Organization" && !slices.ContainsFunc(orgs, func(o []byte) bool { return bytes.Equal(o, e.resource) }) {
+					orgs = append(orgs, e.resource)
+				}
+			}
+			switch {
+			case !answered && ref == knownRef && len(known) > 0:
+				if resourceTypeOf(known) == "Organization" {
+					add(known)
+				}
+			case !answered:
+				tell(payorRefNoneAnswers, ref)
+			case len(orgs) == 1:
+				add(orgs[0])
+			case len(orgs) > 1:
+				tell(payorRefSeveralAnswer, ref)
+			}
 		}
 	}
 	return out
+}
+
+// coveragePayorRefs is the reference of every payor of coverage that has one,
+// in document order, but a self-pay payor's (selfPayPayor): it names no payer.
+func coveragePayorRefs(coverage []byte) []string {
+	var probe struct {
+		Payor []struct {
+			Reference string          `json:"reference"`
+			Type      json.RawMessage `json:"type"`
+		} `json:"payor"`
+	}
+	if json.Unmarshal(coverage, &probe) != nil {
+		return nil
+	}
+	var refs []string
+	for _, p := range probe.Payor {
+		if p.Reference != "" && !selfPayPayor(coverage, p.Type, p.Reference) {
+			refs = append(refs, p.Reference)
+		}
+	}
+	return refs
 }
 
 // resourceTypeOf is resource's resourceType, or "" when it is not a JSON

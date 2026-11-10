@@ -16,9 +16,17 @@ import (
 // checks it, and seals it under its builder. The two module 1 requests sealed
 // before the walk (the questionnaire-package request, carryUnchanged, and the
 // inquiry, inquireContinuation) take the walk on egressWalk only when it
-// changes no byte; otherwise they are carried as built, at their build line,
-// or refused as routing under REQUIRE_SHARED_LINE. They are checked at their
-// own sites, and sent sealed through sendLeg.
+// changes no byte; otherwise the inquiry is carried as built, at its build
+// line, or refused as routing under REQUIRE_SHARED_LINE. The questionnaire
+// request is built at the payer's line and sent as built, with no walk
+// (carryUnchanged). They are sent sealed through sendLeg. The inquiry is
+// checked at its own site, at the line it is sent at, against its inquiry
+// profile. The questionnaire-package request has no egress check yet: it
+// carries the participant's order, and its certification must read errors
+// inside that carried record as the PAS submission's does, which it does not
+// yet do. The CDex data request module 1 sends a facility, which no walk
+// reaches and no contract line governs, is checked at its own site against the
+// profile its builder pinned, asked for.
 
 // moduleBuild is a request module 1 built at its route's build line, for
 // egressBuild to take to its leg.

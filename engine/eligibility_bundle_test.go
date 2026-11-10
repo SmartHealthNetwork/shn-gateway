@@ -202,7 +202,7 @@ func TestEligibilityBundle_UnroutableSubmissionIsRefused(t *testing.T) {
 		"patient": map[string]any{"reference": "urn:uuid:patient"}, "insurer": map[string]any{"reference": "Organization/payer-1"}}},
 		[2]any{"urn:uuid:patient", patient},
 		[2]any{"urn:uuid:a", map[string]any{"resourceType": "Organization", "id": "payer-1", "identifier": []any{eligibilityPayorIdentifier("00001")}}},
-		[2]any{"urn:uuid:b", map[string]any{"resourceType": "Organization", "id": "payer-1", "identifier": []any{eligibilityPayorIdentifier("99999")}}})
+		[2]any{"urn:uuid:b", map[string]any{"resourceType": "Organization", "id": "payer-1", "identifier": []any{eligibilityPayorIdentifier("00002")}}})
 	noPayer := eligibilityWith(t, anotherHeldMember, map[string]any{"insurer": map[string]any{"display": "the plan"}})
 	for name, row := range map[string]struct {
 		body []byte
@@ -220,11 +220,14 @@ func TestEligibilityBundle_UnroutableSubmissionIsRefused(t *testing.T) {
 		"two coverage entries answering one reference": {eligFAISBundle(t, [2]any{"", request}, [2]any{"urn:uuid:patient", patient},
 			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:coverage", coverage}),
 			"ambiguous reference for routing: more than one entry of the eligibility request's Bundle answers \"urn:uuid:coverage\""},
-		"two entries answering one reference": {twoOrgs, "ambiguous reference for routing: more than one entry of the eligibility request's Bundle answers \"Organization/payer-1\""},
+		// Two Organization entries answering the insurer reference name
+		// every identifier they name, and the payer directory decides: two
+		// registered payers are ambiguous.
+		"two entries answering one reference, naming two registered payers": {twoOrgs, eligibilityInsurerTwoPayers},
 	} {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				env, rec, x := runEligibilityIngress(t, level, row.body, nil)
+				env, rec, x := runEligibilityIngressRouted(t, level, row.body, nil, twoRegisteredPayers(t))
 				refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, jsonEscaped(row.msg))
 				wantRefusal(t, x, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalRouting)
 			})

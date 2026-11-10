@@ -10,6 +10,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -37,7 +38,18 @@ const (
 	// own entries are its siblings). A reference found in neither place is
 	// refused.
 	payorEdgeCDSHooksPrefetch
+	// payorEdgeInquiryBundle: a PAS inquiry Bundle, mapped as
+	// payorEdgeClaimBundle is. One that carries no Coverage at all has no payor
+	// to re-key and is carried as sent (carriesNoCoverage): the network has
+	// already routed it to this payer.
+	payorEdgeInquiryBundle
 )
+
+// errPayorEdgeNoCoverage is a request whose carrier allows it to carry no
+// Coverage (carriesNoCoverage) and that carries none: the mapping has no payor
+// to re-key, so the request goes as sent, and the record names the edit not
+// made (EditNotMadePayorEdgeNoCoverage).
+var errPayorEdgeNoCoverage = errors.New("payer backend identity mapping: the request carries no Coverage")
 
 // payorEdgeRefused is a request the payer-identity mapping refuses: the
 // status and message the requester is answered with.
@@ -183,8 +195,10 @@ func (l payorLocator) absentOrNull(obj relay.NodeID, key string) bool {
 // carriesNoCoverage reports whether a request on carrier that yields no
 // Coverage to map carries none at all, so that the mapping has no payor to
 // map and the request is sent as it arrived. It is never so for a Claim
-// Bundle, which names its payer on its Coverage. A Parameters request may
-// legitimately carry no coverage parameter. A CDS
+// Bundle (a submission or amendment), which names its payer on its Coverage. A
+// PAS inquiry Bundle carries none when no object anywhere in it is a Coverage
+// (holdsCoverage). A Parameters request may legitimately carry no coverage
+// parameter. A CDS
 // Hooks request carries none only when both hold: where the Coverage is read
 // is empty (prefetchCoverageEmpty), and no object anywhere in the request is a
 // Coverage (holdsCoverage). The network routed it to this payer, and this
@@ -199,6 +213,9 @@ func (l payorLocator) carriesNoCoverage(carrier payorEdgeCarrier) bool {
 		return true
 	case payorEdgeCDSHooksPrefetch:
 		return l.prefetchCoverageEmpty() && !l.holdsCoverage()
+	case payorEdgeInquiryBundle:
+		root := l.d.Root()
+		return l.d.Kind(root) == relay.KindObject && l.text(root, "resourceType") == "Bundle" && !l.holdsCoverage()
 	}
 	return false
 }
@@ -281,7 +298,7 @@ func (l payorLocator) sites(carrier payorEdgeCarrier) (coverages, claims []relay
 		return nil, nil, nil
 	}
 	switch carrier {
-	case payorEdgeClaimBundle:
+	case payorEdgeClaimBundle, payorEdgeInquiryBundle:
 		if l.text(root, "resourceType") != "Bundle" {
 			return nil, nil, nil
 		}
@@ -340,27 +357,51 @@ func (l payorLocator) identifierTarget(ident relay.NodeID) (payorTarget, bool) {
 }
 
 // party resolves a Reference element (a Coverage's payor, a Claim's
-// insurer) owned by resource owner: its inline identifier first; otherwise
-// the Organization its reference names, found among owner's contained
+// insurer) owned by resource owner: its inline identifier when it is one of
+// own; otherwise the Organization its reference names, when it lists one of
+// own (as a provider's routing reads both, shnsdk.CoveragePayerCandidates);
+// otherwise the inline identifier, when there is one, which the caller
+// refuses as another payer's, as before (an inline identifier never makes its
+// reference a refusal of its own). Without an inline identifier, the
+// Organization its reference names, found among owner's contained
 // resources ("#id") or among scope (entryAnswers: an exactly equal fullUrl,
 // or a reference exactly "Type/id"). A version-specific (_history) or
 // otherwise differently spelled reference is not resolved, so it is refused
-// rather than guessed. The Organization's identity is its first identifier with a
-// non-empty system and value. ref is the reference text, for a refusal to
-// name.
-func (l payorLocator) party(el, owner relay.NodeID, scope []resourceSlot) (t payorTarget, res partyResolution, ref string) {
+// rather than guessed. The Organization's identity is the first of its identifiers,
+// in document order, that is one of own (the payer's own identities), wherever
+// it sits among them; when none is, its first identifier with a non-empty system
+// and value, which the caller refuses as another payer's. ref is the reference
+// text, for a refusal to name.
+func (l payorLocator) party(el, owner relay.NodeID, scope []resourceSlot, own []shnsdk.PayerIdentifier) (t payorTarget, res partyResolution, ref string) {
 	if l.d.Kind(el) != relay.KindObject {
 		return payorTarget{}, partyNoIdentity, ""
 	}
+	var inline payorTarget
+	hasInline := false
 	if ident, ok := l.d.Member(el, "identifier"); ok {
-		if inline, ok := l.identifierTarget(ident); ok {
+		inline, hasInline = l.identifierTarget(ident)
+		if hasInline && slices.Contains(own, inline.identity) {
 			return inline, partyFound, ""
 		}
 	}
 	ref = l.text(el, "reference")
+	if hasInline {
+		if ref != "" {
+			if t, res, _ := l.partyByReference(ref, owner, scope, own); res == partyFound && slices.Contains(own, t.identity) {
+				return t, partyFound, ref
+			}
+		}
+		return inline, partyFound, ""
+	}
 	if ref == "" {
 		return payorTarget{}, partyNoIdentity, ""
 	}
+	return l.partyByReference(ref, owner, scope, own)
+}
+
+// partyByReference resolves the Organization ref names (party's rule without an
+// inline identifier).
+func (l payorLocator) partyByReference(ref string, owner relay.NodeID, scope []resourceSlot, own []shnsdk.PayerIdentifier) (t payorTarget, res partyResolution, _ string) {
 	var matches []relay.NodeID
 	if id, ok := strings.CutPrefix(ref, "#"); ok {
 		for _, c := range l.arrayMember(owner, "contained") {
@@ -389,10 +430,20 @@ func (l payorLocator) party(el, owner relay.NodeID, scope []resourceSlot) (t pay
 	if l.text(org, "resourceType") != "Organization" {
 		return payorTarget{}, partyNoIdentity, ref
 	}
+	var first payorTarget
+	found := false
 	for _, ident := range l.arrayMember(org, "identifier") {
-		if first, ok := l.identifierTarget(ident); ok {
-			return first, partyFound, ref
+		t, ok := l.identifierTarget(ident)
+		switch {
+		case !ok:
+		case slices.Contains(own, t.identity):
+			return t, partyFound, ref
+		case !found:
+			first, found = t, true
 		}
+	}
+	if found {
+		return first, partyFound, ref
 	}
 	return payorTarget{}, partyNoIdentity, ref
 }
@@ -417,12 +468,13 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 //
 // A request that carries no Coverage at all (carriesNoCoverage) has no payor
 // to map and is sent as it arrived; a Claim Bundle with no
-// Coverage is refused as one naming no readable payer. Otherwise every
-// Coverage's routing payor (payor[0], the one payer routing reads) must name
-// exactly one payer identity, and it must be one of own: a Coverage naming no
-// readable payer, or a payer none of own covers, is refused, and so is a
-// request whose Coverages name different payers. A reference that resolves
-// to no resource, or to several, is refused naming the reference.
+// Coverage is refused as one naming no readable payer. Otherwise every payor
+// of every Coverage counts (Coverage.payor carries no ordering meaning): each
+// payor naming one of own is mapped, and no other; a Coverage none of whose
+// payors names one of own (judged, when none does, by payor[0]: a Coverage
+// naming no readable payer, or a payer none of own covers) is refused, and so
+// is a request whose Coverages name different payers. A reference that
+// resolves to no resource, or to several, is refused naming the reference.
 //
 // A Claim's insurer is resolved the same way, and mapped when it names own.
 // An insurer that names another identity (a payer may name itself by NPI on
@@ -436,34 +488,69 @@ func referenceRefusal(ref string, res partyResolution) *payorEdgeRefused {
 // mapped as usual. refusesInsurer nil refuses. Only string values that differ
 // from backend are replaced, so a mapping to the identity the request already
 // carries makes no edit.
+//
+// A request whose carrier allows no Coverage and that carries none
+// (carriesNoCoverage) returns errPayorEdgeNoCoverage: nothing to map, the
+// request goes as sent, and a PAS inquiry's insurer is left as sent too, since
+// no Coverage names this payer.
 func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.PayerIdentifier, backend shnsdk.PayerIdentifier, refusesInsurer func() bool) ([]relay.Op, error) {
 	l := payorLocator{d: d}
 	coverages, claims, scope := l.sites(carrier)
 	if len(coverages) == 0 {
 		if l.carriesNoCoverage(carrier) {
-			return nil, nil
+			// The record says the request carries no Coverage only when no
+			// object anywhere in it is one: a Parameters request is carried
+			// without a coverage parameter whatever else it holds.
+			if carrier == payorEdgeParametersCoverage && l.holdsCoverage() {
+				return nil, nil
+			}
+			return nil, errPayorEdgeNoCoverage
 		}
 		return nil, payorEdgeMismatch(own, shnsdk.PayerIdentifier{}, false)
 	}
-	var targets []payorTarget
+	// Every payor of a Coverage counts (Coverage.payor carries no ordering
+	// meaning): each payor element naming one of the payer's own identities is
+	// mapped, and nothing else. A Coverage none of whose payors names one is
+	// judged by payor[0], as before: refused as another payer's, or for a
+	// reference that resolves to nothing or to several. reps holds one target
+	// per Coverage, for the agreement check across Coverages.
+	var targets, reps []payorTarget
 	for _, c := range coverages {
 		payors := l.arrayMember(c, "payor")
 		if len(payors) == 0 {
 			return nil, payorEdgeMismatch(own, shnsdk.PayerIdentifier{}, false)
 		}
-		t, res, ref := l.party(payors[0], c, scope)
-		switch res {
+		var mine []payorTarget
+		var first payorTarget
+		var firstRes partyResolution
+		var firstRef string
+		for i, p := range payors {
+			t, res, ref := l.party(p, c, scope, own)
+			if i == 0 {
+				first, firstRes, firstRef = t, res, ref
+			}
+			if res == partyFound && slices.Contains(own, t.identity) {
+				mine = append(mine, t)
+			}
+		}
+		if len(mine) > 0 {
+			targets = append(targets, mine...)
+			reps = append(reps, mine[0])
+			continue
+		}
+		switch firstRes {
 		case partyFound:
-			targets = append(targets, t)
+			targets = append(targets, first)
+			reps = append(reps, first)
 		case partyNoTarget, partySeveralTargets:
-			return nil, referenceRefusal(ref, res)
+			return nil, referenceRefusal(firstRef, firstRes)
 		default:
 			return nil, payorEdgeMismatch(own, shnsdk.PayerIdentifier{}, false)
 		}
 	}
-	for _, t := range targets[1:] {
-		if t.identity != targets[0].identity {
-			a, b := targets[0].identity, t.identity
+	for _, t := range reps[1:] {
+		if t.identity != reps[0].identity {
+			a, b := reps[0].identity, t.identity
 			return nil, &payorEdgeRefused{
 				status: http.StatusUnprocessableEntity,
 				message: fmt.Sprintf("payer backend identity mapping: the request's Coverages name more than one payer "+
@@ -471,7 +558,7 @@ func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.P
 			}
 		}
 	}
-	if got := targets[0].identity; !slices.Contains(own, got) {
+	if got := reps[0].identity; !slices.Contains(own, got) {
 		return nil, payorEdgeMismatch(own, got, true)
 	}
 	for _, c := range claims {
@@ -479,7 +566,7 @@ func locatePayorEdge(d *relay.Document, carrier payorEdgeCarrier, own []shnsdk.P
 		if !ok {
 			continue
 		}
-		t, res, ref := l.party(ins, c, scope)
+		t, res, ref := l.party(ins, c, scope, own)
 		switch {
 		case res == partyNoTarget || res == partySeveralTargets:
 			if refusesInsurer == nil || refusesInsurer() {

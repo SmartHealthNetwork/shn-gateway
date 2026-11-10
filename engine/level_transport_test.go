@@ -454,9 +454,9 @@ func TestLevelPayerPAS_NoCoverage(t *testing.T) {
 	}
 }
 
-// With the payer identity mapping configured, the payer's own system is
-// addressed by the Coverage's payor: a bundle with no Coverage refuses at
-// every level.
+// With the payer identity mapping configured, a submission or amendment with
+// no Coverage refuses at every level. An inquiry with none is carried as sent
+// instead: it names no payor to re-key (TestPayorEdge_InquiryWithNoCoverageIsCarriedAtEveryLevel).
 func TestLevelPayerPAS_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
 	t.Parallel()
 	update, _ := updateBundle(t, "Coverage")
@@ -465,8 +465,6 @@ func TestLevelPayerPAS_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testi
 			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
 		"amendment": {leg: "pas-claim-update", body: update, opts: withIdentityMapping(),
 			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
-		"inquiry": {leg: "pas-claim-inquire", body: bundleWithout(t, []byte(levelInquiry(t, "MBR-COVERED", "")), "Coverage"), opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "inbound Coverage carries no resolvable payor identifier"},
 	})
 }
 

@@ -44,7 +44,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if err != nil || refused.Status != 0 {
 		return refused, err
 	}
-	request, refused, err := n.applyPayorEdgeToCRDRequest(in)
+	request, refused, err := n.applyPayorEdgeToCRDRequest(ctx, in)
 	if err != nil || refused.Status != 0 {
 		return refused, err
 	}
@@ -173,6 +173,6 @@ func certifyCDSHooksAnswer(ctx context.Context, mod conformanceModule, emit func
 // and no Coverage anywhere else in the body (relaylocate.go, carriesNoCoverage). A
 // Coverage naming no readable payor, or another payer, is refused, and so is a request
 // whose only Coverage is outside prefetch.coverage.
-func (n *nativeResponder) applyPayorEdgeToCRDRequest(in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(in, payorEdgeCDSHooksPrefetch, "application/json", nil, nil)
+func (n *nativeResponder) applyPayorEdgeToCRDRequest(ctx context.Context, in relay.Body) (relay.Payload, LegResult, error) {
+	return n.payorEdgeRequest(ctx, in, payorEdgeCDSHooksPrefetch, "application/json", nil, nil)
 }

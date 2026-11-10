@@ -15,8 +15,9 @@
 //     with a 422. A Claim's insurer reference (on a Claim Bundle) that resolves to no
 //     resource or to several is the request's own content (RuleInsurer): not checked
 //     at none, recorded at observe and left as sent, refused at strict with the same 422.
-//   - It changes only the payer identifier's system and value strings (inline on the
-//     Coverage's routing payor, payor[0], or on the Organization it references) and, on
+//   - It changes only the payer identifier's system and value strings (inline on each
+//     Coverage payor that names one of this payer's identities, or on the Organization
+//     such a payor references, the identifier that is one of them) and, on
 //     a Claim Bundle, the Claim insurer's when it names this payer (an
 //     insurer naming another identity is left as sent). The
 //     edit is the registered payer-identity edit (E-03, a PA row in pa/paedits), made by relay.Apply:
@@ -39,6 +40,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -104,6 +106,26 @@ func (n *nativeResponder) ownPayerIdentities() []shnsdk.PayerIdentifier {
 // request this responder sends its payer's system is then addressed by the payer its
 // Coverages name.
 func (n *nativeResponder) mapsPayerIdentity() bool { return n.payorEdgeOwn != nil }
+
+// ownRecordIdentities is every payer identity this responder's payer is known by when
+// the mapping is on: the identities it answers for (ownPayerIdentities) and the
+// backend identity its own system knows itself by. nil when the mapping is off.
+func (n *nativeResponder) ownRecordIdentities() []shnsdk.PayerIdentifier {
+	if n.payorEdgeOwn == nil {
+		return nil
+	}
+	own := n.ownPayerIdentities()
+	if n.payorEdgeBackend != nil && !slices.Contains(own, *n.payorEdgeBackend) {
+		own = append(own, *n.payorEdgeBackend)
+	}
+	return own
+}
+
+// ownRecordIdentifier is implemented by a responder that knows the payer identities
+// its own system names itself by (nativeResponder).
+type ownRecordIdentifier interface {
+	ownRecordIdentities() []shnsdk.PayerIdentifier
+}
 
 // payerIdentityMapper is implemented by a responder that can map the payer identity
 // (nativeResponder).
@@ -189,7 +211,7 @@ func payorEdgeRefusal(own []shnsdk.PayerIdentifier, got shnsdk.PayerIdentifier, 
 // not resolve (locatePayorEdge); nil refuses it, which is what a carrier with no Claim
 // passes. restore are the restore (E-13) operations for in (adaptiveRestore),
 // made in the same change as the mapping.
-func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarrier, contentType string, refusesInsurer func() bool, restore []relay.Op) (relay.Payload, LegResult, error) {
+func (n *nativeResponder) payorEdgeRequest(ctx context.Context, in relay.Body, carrier payorEdgeCarrier, contentType string, refusesInsurer func() bool, restore []relay.Op) (relay.Payload, LegResult, error) {
 	var none relay.Payload
 	if n.payorEdgeOwn == nil {
 		p, err := restoredRequest(in, contentType, restore)
@@ -200,6 +222,11 @@ func (n *nativeResponder) payorEdgeRequest(in relay.Body, carrier payorEdgeCarri
 		return none, LegResult{Status: http.StatusBadRequest, Message: "payer backend identity mapping: request is not one well-formed JSON document"}, nil
 	}
 	ops, err := locatePayorEdge(doc, carrier, n.ownPayerIdentities(), *n.payorEdgeBackend, refusesInsurer)
+	if errors.Is(err, errPayorEdgeNoCoverage) {
+		exchangeOf(ctx).editNotMade(EditNotMadePayorEdgeNoCoverage)
+		p, err := restoredRequest(in, contentType, restore)
+		return p, LegResult{}, err
+	}
 	var refused *payorEdgeRefused
 	if errors.As(err, &refused) {
 		return none, refused.legResult(), nil

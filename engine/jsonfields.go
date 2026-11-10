@@ -8,24 +8,6 @@ import (
 // jsonfields.go holds small readers and writers of FHIR JSON fields that the
 // core and module 1 both use. They name no workstream.
 
-// coveragePayorRef reads the payer organization a Coverage names.
-func coveragePayorRef(coverage []byte) string {
-	var probe struct {
-		Payor []struct {
-			Reference string `json:"reference"`
-		} `json:"payor"`
-	}
-	if json.Unmarshal(coverage, &probe) != nil {
-		return ""
-	}
-	for _, p := range probe.Payor {
-		if p.Reference != "" {
-			return p.Reference
-		}
-	}
-	return ""
-}
-
 func jsonString(s string) []byte {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)

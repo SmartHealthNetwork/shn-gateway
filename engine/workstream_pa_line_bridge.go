@@ -22,10 +22,11 @@ func (paWorkstream) lineBridge() lineBridgeRows {
 // Membership means egressAdapt walks
 // route.Chain for the routing/observer story but never hands the bytes to a
 // step function — safe only because dtr-questionnaire-fetch's payload is
-// the operation's own input, carried to the payer's line unchanged: the
-// ingress and the originator refuse a walk that would change a byte of it
-// (handleDTRIngress, carryUnchanged), so no pa.dtr compat-manifest step
-// ever rewrites it.
+// the operation's own input, carried to the payer's line unchanged: a walk
+// that would change a byte of it is never applied (handleDTRIngress carries
+// the participant's request as sent; carryUnchanged sends the gateway's own
+// as built, at the payer's line it was built at, with no walk), so no pa.dtr
+// compat-manifest step ever rewrites it.
 //
 // CRD legs (crd-order-select, crd-order-dispatch) must NEVER join this set:
 // their arm-3 byte-identity rests on the identity chain genuinely RUNNING

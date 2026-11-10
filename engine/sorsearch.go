@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
@@ -121,8 +122,17 @@ func (e *SearchError) Error() string {
 }
 
 // Unwrap is the structural cause of a malformed page, if any: a page that
-// repeats a member name is relay.ErrDuplicateKey.
+// repeats a member name is relay.ErrDuplicateKey, and a page redirected from
+// https to http is smartauth.ErrCleartextRedirect.
 func (e *SearchError) Unwrap() error { return e.cause }
+
+// SearchCleartextRedirect is the failure of a search page the system of
+// record redirected from https to http: refused as every redirect of a search
+// is (malformed, "redirect refused"), with the hop not sent, and the cause
+// smartauth.ErrCleartextRedirect, so the record names it.
+func SearchCleartextRedirect() *SearchError {
+	return &SearchError{Outcome: SearchMalformed, Reason: "redirect refused", cause: smartauth.ErrCleartextRedirect}
+}
 
 // SearchPage is what ParseSearchPage reads from one page.
 type SearchPage struct {

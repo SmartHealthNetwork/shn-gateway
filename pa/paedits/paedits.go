@@ -62,12 +62,15 @@ func Rows() []relay.Edit {
 			},
 			Kind: relay.EditKindReplaceValue,
 			Precondition: "Only when the payer gateway's identity mapping is configured (it is off by default), " +
-				"and only string tokens that differ from the mapped identity. Every Coverage is mapped by its " +
-				"routing payor (payor[0]): one naming a different payer is refused, never skipped; Coverages " +
-				"naming different payers are refused; a reference that resolves to no resource or to several is " +
-				"refused. The referenced Organization's identity is its first identifier with a non-empty system " +
-				"and value, found in the Coverage's contained resources, the Bundle, or the sibling resources of " +
-				"the Parameters or prefetch. A claim's insurer is resolved the same way (an unresolved or " +
+				"and only string tokens that differ from the mapped identity. Every payor of a Coverage counts " +
+				"(Coverage.payor carries no ordering meaning): each payor element naming one of the payer's own " +
+				"identities is mapped, and no other; a Coverage none of whose payors names one is refused as " +
+				"another payer's, never skipped (judged by payor[0], as is a reference that resolves to no " +
+				"resource or to several); Coverages naming different payers are refused. The referenced Organization, found in the Coverage's contained resources, the Bundle, or " +
+				"the sibling resources of the Parameters or prefetch, is named by the first of its identifiers, in " +
+				"document order, that is one of the payer's own network identities, wherever it sits among them " +
+				"(only that identifier is mapped); when none is, by its first identifier with a non-empty system " +
+				"and value, which is refused as another payer's. A claim's insurer is resolved the same way (an unresolved or " +
 				"ambiguous reference is refused) and is mapped only when it names this payer; an insurer naming " +
 				"another identity is left as sent.",
 			Authority: "The payer gateway's configured mapping from its network identity to the identity " +

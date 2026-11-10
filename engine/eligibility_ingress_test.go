@@ -95,7 +95,17 @@ func eligibilityIngressPost(body []byte) *http.Request {
 // caller's answer and the one exchange record.
 func runEligibilityIngress(t *testing.T, level ConformanceEnforcement, body, answer []byte) (*inProcessExchange, *httptest.ResponseRecorder, ExchangeRecord) {
 	t.Helper()
+	return runEligibilityIngressRouted(t, level, body, answer, nil)
+}
+
+// runEligibilityIngressRouted is runEligibilityIngress with the provider's
+// payer directory replaced by router, when not nil.
+func runEligibilityIngressRouted(t *testing.T, level ConformanceEnforcement, body, answer []byte, router PayerRouter) (*inProcessExchange, *httptest.ResponseRecorder, ExchangeRecord) {
+	t.Helper()
 	env := newInProcessExchange(t)
+	if router != nil {
+		env.originator.cfg.PayerRouter = router
+	}
 	env.originator.cfg.ConformanceEnforcement = level
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 	var got exchangeRecords

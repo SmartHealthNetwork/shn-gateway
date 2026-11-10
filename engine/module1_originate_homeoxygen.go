@@ -156,7 +156,7 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	// submission names it, and so does every inquiry about the submission. A
 	// record the system cannot supply is refused at the PAS claim's build, the
 	// first leg that carries it (pasClaimSourcesAt).
-	realPayerOrg, payerOrgStatus, payerOrgMsg, payerOrgErr := g.memberPayerOrganization(ctx, realCov)
+	realPayerOrg, realPayerRef, payerOrgStatus, payerOrgMsg, payerOrgErr := g.memberPayerOrganization(ctx, realCov, payer)
 	// The request's claim input is readable, or it is refused here, before any
 	// leg; what it states is checked at the PAS claim's build.
 	if !pasOriginationRequestOrFail(w, r) {
@@ -274,12 +274,12 @@ func (g *Gateway) runCRDDispatch(w http.ResponseWriter, r *http.Request, member,
 	if failOriginRead(ctx, w, payerOrgStatus, payerOrgMsg, payerOrgErr) {
 		return dispatchResult{}, false
 	}
-	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID, realCov, realPayerOrg, g.referencedLeftOut(dtrCorr, recipient))
+	dtrReq, dtrPayload, err := originatedPackageRequest(dtrLine, recs, dispatchQuestionnaireOrder(answer, orderJSON), cov.Questionnaires[0], answer.assertionID, realPayerRef, realPayerOrg, g.referencedLeftOut(dtrCorr, recipient))
 	if err != nil {
 		g.refuseBuildFailure(r.Context(), w, recipient, "dtr-questionnaire-fetch", "build questionnaire-package request failed: "+err.Error(), err)
 		return dispatchResult{}, false
 	}
-	sendRoute, carryStatus, carryMsg := g.carryUnchanged(route, dtrReq, dtrCorr, recipient)
+	sendRoute, carryStatus, carryMsg := g.carryUnchanged(ctx, route, dtrReq, dtrLine, dtrCorr, recipient)
 	if carryStatus != 0 {
 		writeJSON(w, carryStatus, map[string]string{"error": withCarriedLegs(r.Context(), carryMsg)})
 		return dispatchResult{}, false

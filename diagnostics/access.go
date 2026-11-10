@@ -182,6 +182,29 @@ type AccessBackend struct {
 	LatencyMs  int64  `json:"latencyMs"`
 	ErrorClass string `json:"errorClass,omitempty"`
 	Calls      int    `json:"calls"`
+	// Resends names each call to the participant's own system sent a second
+	// time, and why (engine.ExchangeRecord.BackendResends); Calls counts each.
+	Resends []AccessResend `json:"resends,omitempty"`
+	// Redirects is the class of each redirect hop the participant's own system,
+	// or its authorization server's token endpoint, answered with, in order
+	// (engine.ExchangeRecord.BackendRedirects), never a URL: "same-origin" or
+	// "cross-origin" for a hop followed (a cross-origin one, and every later
+	// hop of its chain, without the bearer or configured headers),
+	// "https-to-http-refused" for a downgrade that was not sent, and
+	// "token-redirect-refused" for any other redirect of a token request,
+	// which is never followed.
+	Redirects []string `json:"redirects,omitempty"`
+}
+
+// AccessResend is one call to the participant's own system sent a second time.
+// Reason is engine.BackendResendReasons' value (today only
+// "credential-refreshed-after-401": its system answered 401 to the credential
+// the call carried, and the same request was sent once more with a refreshed
+// one). Challenge is what the 401's WWW-Authenticate said, as observed and never
+// used to decide: "invalid_token", "other" or "none".
+type AccessResend struct {
+	Reason    string `json:"reason"`
+	Challenge string `json:"challenge"`
 }
 
 // AccessFindings summarizes the conformance findings a call's checks recorded.

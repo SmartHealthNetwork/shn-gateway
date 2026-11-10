@@ -41,7 +41,7 @@ func NewNativePopulator(client *http.Client, url string) *nativePopulator {
 // must return promptly and support concurrent calls. A nil observer is disabled;
 // the old constructor is equivalent to passing nil here.
 func NewNativePopulatorWithFailureObserver(client *http.Client, url string, observer func(PopulateFailure)) *nativePopulator {
-	return &nativePopulator{client: client, url: url, observer: observer}
+	return &nativePopulator{client: smartauth.ParticipantClient(client), url: url, observer: observer}
 }
 
 func (n *nativePopulator) Populate(ctx context.Context, packageJSON []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
@@ -100,8 +100,10 @@ func (n *nativePopulator) post(ctx context.Context, body []byte) ([]byte, int, *
 	if err != nil {
 		return nil, 0, populateBoundaryFailure(populateStageRequestBuild, 0, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	// $populate is a FHIR operation, so the request goes out as a direct FHIR client
+	// sends one; application/json stays acceptable in the answer.
+	req.Header.Set("Content-Type", mediaFHIRJSON)
+	req.Header.Set("Accept", mediaFHIRJSON+", "+mediaJSON)
 	resp, err := n.client.Do(req)
 	if err != nil {
 		stage := populateStageTransport

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -439,10 +440,12 @@ func resolveEntry(entries []bundleRefEntry, ref, typ string) (json.RawMessage, r
 // resolves a reference of that form (eligibilityRemedy) and the reference
 // itself.
 const (
-	eligibilityNoPayer         = "no payer to route the eligibility request by: neither its insurer nor the payor of a Coverage it carries names a payer identifier, inline or on an Organization it carries"
-	eligibilityCoverageNoPayer = "no payer to route the eligibility request by: its insurer names no payer identifier, and a coverage it names in insurance names none, as the payor of a Coverage it carries, inline or on an Organization it carries"
-	eligibilityTwoPayers       = "the eligibility request names more than one payer: its coverages name different payors, and one request goes to one payer"
-	eligibilityBatchTwoPayers  = "the eligibility requests name more than one payer: one submission goes to one payer, so send the requests for each payer separately"
+	eligibilityNoPayer          = "no payer to route the eligibility request by: neither its insurer nor the payor of a Coverage it carries names a payer identifier, inline or on an Organization it carries"
+	eligibilityCoverageNoPayer  = "no payer to route the eligibility request by: its insurer names no payer identifier, and a coverage it names in insurance names none, as the payor of a Coverage it carries, inline or on an Organization it carries"
+	eligibilityPayorUnknown     = "no payer to route the eligibility request by: its insurer names no payer identifier, and a coverage it names in insurance names a payor the gateway cannot read"
+	eligibilityTwoPayers        = "the eligibility request names more than one payer: its coverages name different payors, and one request goes to one payer"
+	eligibilityInsurerTwoPayers = "the eligibility request names more than one payer: its insurer's identifiers name different payers, and one request goes to one payer"
+	eligibilityBatchTwoPayers   = "the eligibility requests name more than one payer: one submission goes to one payer, so send the requests for each payer separately"
 
 	eligibilityInsurerUnresolved  = "no payer to route the eligibility request by: its insurer is a reference to an Organization the gateway could not resolve, and no coverage it names in insurance names a payer"
 	eligibilityCoverageUnresolved = "no payer to route the eligibility request by: its insurer names no payer identifier, and a coverage it names in insurance is a reference to a Coverage the gateway could not resolve"
@@ -452,6 +455,12 @@ const (
 	// reference, in eligibilityRemedy's text.
 	eligibilityRemedyInsurer = "the payer identifier on the insurer reference"
 	eligibilityRemedyPayor   = "a payor identifier"
+
+	// remedyEligibilityInsurer is remedyCoveragePayor's counterpart for an
+	// eligibility request routed by its insurer: the identifier goes on the
+	// insurer Organization the request names.
+	remedyEligibilityInsurer = "name the payer by an identifier the network registers for that payer, " +
+		"on the insurer Organization the request names (see the Participant Wire Protocol §1a, Participant directory)"
 
 	// eligibilityRemedyHeldCoverage is what resolves the payor of a Coverage
 	// read from the system of record: its own resources, or that system.
@@ -493,6 +502,7 @@ func eligibilityRemedy(ref, resourceType, identifier string) (remedy string, ok 
 // exact member names.
 type eligibilityReference struct {
 	Reference  string                 `json:"reference"`
+	Type       json.RawMessage        `json:"type"`
 	Identifier *eligibilityIdentifier `json:"identifier"`
 }
 
@@ -512,26 +522,57 @@ func (g *Gateway) eligibilityRecipient(ctx context.Context, subs []eligibilitySu
 	if g.cfg.PayerRouter == nil {
 		return "", http.StatusUnprocessableEntity, "no payer router configured", reasonNoPayerRouter
 	}
-	var pid shnsdk.PayerIdentifier
+	// Each request names one payer, decided by the payer directory, never by
+	// an identifier's position: the holder its registered identifiers name, or
+	// none, with the identifiers it names (pick). Then every request must name
+	// the same one.
+	type pick struct {
+		holder      string
+		pid         shnsdk.PayerIdentifier
+		cands       []shnsdk.PayerIdentifier
+		fromInsurer bool
+	}
+	picks := make([]pick, len(subs))
 	for i, sub := range subs {
-		p, status, msg, reason := eligibilityRequestPayer(sub, g.eligibilitySoRRead(ctx, members[i]))
+		lists, fromInsurer, status, msg, reason := eligibilityRequestPayer(sub, g.eligibilitySoRRead(ctx, members[i]))
+		if status == 0 {
+			pid, holder, err := shnsdk.ChooseRegisteredPayer(lists, g.cfg.PayerRouter.Resolve)
+			var unregistered *shnsdk.NoRegisteredPayerError
+			switch {
+			case err == nil:
+				picks[i] = pick{holder: holder, pid: pid}
+			case errors.As(err, &unregistered):
+				picks[i] = pick{pid: unregistered.Candidates[0], cands: unregistered.Candidates, fromInsurer: fromInsurer}
+			case errors.Is(err, shnsdk.ErrAmbiguousCoveragePayer) && fromInsurer:
+				status, msg, reason = http.StatusUnprocessableEntity, eligibilityInsurerTwoPayers, reasonEligibilityRequestTwoPayers
+			case errors.Is(err, shnsdk.ErrAmbiguousCoveragePayer):
+				status, msg, reason = http.StatusUnprocessableEntity, eligibilityTwoPayers, reasonEligibilityRequestTwoPayers
+			default:
+				status, msg, reason = http.StatusUnprocessableEntity, eligibilityNoPayer, reasonEligibilityNoPayer
+			}
+		}
 		if status != 0 {
 			if len(subs) > 1 {
 				msg = "request " + strconv.Itoa(i) + " of the batch: " + msg
 			}
 			return "", status, msg, reason
 		}
-		if i > 0 && p != pid {
-			return "", http.StatusUnprocessableEntity, fmt.Sprintf("%s (request 0 names %s|%s, request %d names %s|%s)",
-				eligibilityBatchTwoPayers, pid.System, pid.Value, i, p.System, p.Value), reasonEligibilityTwoPayers
+	}
+	first := picks[0]
+	for i, p := range picks[1:] {
+		if p.holder != first.holder || (first.holder == "" && !sameIdentifierSet(p.cands, first.cands)) {
+			return "", http.StatusUnprocessableEntity, fmt.Sprintf("%s (request 0 names %s, request %d names %s)",
+				eligibilityBatchTwoPayers, bounded(first.pid.System+"|"+first.pid.Value), i+1, bounded(p.pid.System+"|"+p.pid.Value)), reasonEligibilityTwoPayers
 		}
-		pid = p
 	}
-	holder, found := g.cfg.PayerRouter.Resolve(pid)
-	if !found {
-		return "", http.StatusUnprocessableEntity, "no registered payer for identifier " + pid.System + "|" + pid.Value, reasonUnregisteredPayer
+	if first.holder == "" {
+		remedy := remedyCoveragePayor
+		if first.fromInsurer {
+			remedy = remedyEligibilityInsurer
+		}
+		return "", http.StatusUnprocessableEntity, unregisteredPayers(first.cands, remedy), reasonUnregisteredPayer
 	}
-	return holder, 0, "", ""
+	return first.holder, 0, "", ""
 }
 
 // eligibilityScope is where a reference written in one resource resolves: a
@@ -654,6 +695,33 @@ func newEligibilityScope(contained []json.RawMessage, entries []bundleRefEntry, 
 	return s
 }
 
+// statedTypeOtherThan reports whether a Reference states a type (Reference.type) other
+// than want.
+func statedTypeOtherThan(stated json.RawMessage, want string) bool {
+	var t string
+	return json.Unmarshal(stated, &t) == nil && t != "" && t != want
+}
+
+// selfPay reports, by structure, whether a payor is self-pay (Coverage.payor's Patient and
+// RelatedPerson targets): its Reference.type when it states one; else the resource its reference
+// resolves to among what the request carries, or the type its literal reference names. It reads
+// nothing from the system of record: a relative reference's type is its literal one.
+func (s eligibilityScope) selfPay(ref *eligibilityReference) bool {
+	var declared string
+	if json.Unmarshal(ref.Type, &declared) == nil && declared != "" {
+		return declared == "Patient" || declared == "RelatedPerson"
+	}
+	carried := s
+	carried.sor = nil
+	for _, t := range []string{"Patient", "RelatedPerson"} {
+		if res, _, status, _ := carried.resolve(ref.Reference, t); status == 0 && res != nil {
+			return true
+		}
+	}
+	t := literalReferenceType(ref.Reference)
+	return t == "Patient" || t == "RelatedPerson"
+}
+
 // resolve is the resource of resourceType that ref names in the scope; a
 // refusal when that reference names more than one resource, or the system of
 // record's read of it fails. unresolved is true when nothing answers ref: no
@@ -710,40 +778,55 @@ func (s eligibilityScope) fromSoR(ref, resourceType string) bool {
 	return true
 }
 
-// payer is the payer identifier a payor or insurer Reference written in the
-// scope's resource names: its own identifier, else the first identifier of
-// the Organization it references. unresolved is true when it names no payer
-// identifier and its reference resolves to no Organization.
-func (s eligibilityScope) payer(ref *eligibilityReference) (pid shnsdk.PayerIdentifier, unresolved bool, status int, msg string) {
-	var none shnsdk.PayerIdentifier
+// payer is every payer identifier a payor or insurer Reference written in
+// the scope's resource names, as shnsdk.CoveragePayerCandidates reads a payor:
+// its own identifier, then each identifier of the Organization it references,
+// each once, in document order. unresolved is true when it names no payer
+// identifier and its reference resolves to no Organization. A Reference that
+// carries its own identifier already names its payer: its reference is
+// resolved among what the request carries alone, never read from the system
+// of record (a failed read of any other is the system's, returned).
+func (s eligibilityScope) payer(ref *eligibilityReference) (cands []shnsdk.PayerIdentifier, unresolved bool, status int, msg string) {
 	if ref == nil {
-		return none, false, 0, ""
+		return nil, false, 0, ""
 	}
 	if id := ref.Identifier; id != nil && id.System != "" && id.Value != "" {
-		return shnsdk.PayerIdentifier{System: id.System, Value: id.Value}, false, 0, ""
+		cands = []shnsdk.PayerIdentifier{{System: id.System, Value: id.Value}}
+		// It already names its payer: its reference is resolved among what
+		// the request carries alone, never read from the system of record
+		// (as on every routing path, payorRefs.named).
+		s.sor = nil
 	}
 	org, unresolved, status, msg := s.resolve(ref.Reference, "Organization")
+	if len(cands) > 0 {
+		unresolved, status, msg = false, 0, ""
+	}
 	if org == nil {
-		return none, unresolved, status, msg
+		return cands, unresolved, status, msg
 	}
 	var o struct {
 		Identifier []eligibilityIdentifier `json:"identifier"`
 	}
 	if decodeMessage(org, &o) != nil {
-		return none, false, 0, ""
+		// An Organization that cannot be read one way only adds nothing;
+		// the payor's own identifier still counts.
+		return cands, false, 0, ""
 	}
+	// Every identifier the Organization carries, each once, in document order:
+	// the payer is chosen among them by the payer directory, never by position.
 	for _, id := range o.Identifier {
-		if id.System != "" && id.Value != "" {
-			return shnsdk.PayerIdentifier{System: id.System, Value: id.Value}, false, 0, ""
+		p := shnsdk.PayerIdentifier{System: id.System, Value: id.Value}
+		if p.System != "" && p.Value != "" && !slices.Contains(cands, p) {
+			cands = append(cands, p)
 		}
 	}
-	return none, false, 0, ""
+	return cands, false, 0, ""
 }
 
 // eligibilityRequestPayer is the payer a submitted CoverageEligibilityRequest
 // names: its insurer, the recipient of the request, by identifier or by an
-// Organization it carries; else the first payor of each Coverage it carries
-// and names in insurance, which must all name one payer. A reference resolves
+// Organization it carries; else every payor of each Coverage it carries and
+// names in insurance, which must all name one payer. A reference resolves
 // as a FHIR reader of the request resolves it (eligibilityScope): a "#id"
 // among the referring resource's contained resources, anything else among the
 // entries of the Bundle carrying the request, one resource of the expected
@@ -754,8 +837,7 @@ func (s eligibilityScope) payer(ref *eligibilityReference) (pid shnsdk.PayerIden
 // a reader taking member names exactly reads it. A payer named only by a
 // reference nothing resolves is refused naming that reference and what
 // resolves it.
-func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) (shnsdk.PayerIdentifier, int, string, refusalReason) {
-	var none shnsdk.PayerIdentifier
+func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) (lists [][]shnsdk.PayerIdentifier, fromInsurer bool, status int, msg string, reason refusalReason) {
 	// resourceType is in the view so that a request naming it in another
 	// case, which a FHIR reader sees no type on, does not read one way only.
 	var req struct {
@@ -767,16 +849,19 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 		} `json:"insurance"`
 	}
 	if err := decodeMessage(sub.request, &req); err != nil {
-		return none, http.StatusBadRequest, "parse eligibility request failed", ""
+		return nil, false, http.StatusBadRequest, "parse eligibility request failed", ""
 	}
 	scope := newEligibilityScope(req.Contained, sub.entries, sor)
-	pid, insurerUnresolved, status, msg := scope.payer(req.Insurer)
-	if status != 0 || pid != none {
-		return pid, status, msg, eligibilityReadReason(status)
+	insurer, insurerUnresolved, status, msg := scope.payer(req.Insurer)
+	if status != 0 {
+		return nil, false, status, msg, eligibilityReadReason(status)
 	}
-	// Every coverage the request names must name a payer, and all of them
-	// the same one: a coverage naming none is not passed over for another.
-	var found shnsdk.PayerIdentifier
+	if len(insurer) > 0 {
+		return [][]shnsdk.PayerIdentifier{insurer}, true, 0, "", ""
+	}
+	// Every coverage the request names must name a payer (and all of them the
+	// same one, which eligibilityRecipient decides by the payer directory): a
+	// coverage naming none is not passed over for another.
 	for i, ins := range req.Insurance {
 		if ins.Coverage == nil {
 			continue
@@ -784,16 +869,16 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 		at := "insurance[" + strconv.Itoa(i) + "].coverage " + quotedBounded(ins.Coverage.Reference)
 		cov, unresolved, status, msg := scope.resolve(ins.Coverage.Reference, "Coverage")
 		if status != 0 {
-			return none, status, msg, eligibilityReadReason(status)
+			return nil, false, status, msg, eligibilityReadReason(status)
 		}
 		if remedy, ok := eligibilityRemedy(ins.Coverage.Reference, "Coverage", eligibilityRemedyInsurer); unresolved && ok {
-			return none, http.StatusUnprocessableEntity, eligibilityCoverageUnresolved + "; " + remedy + ": " + at, reasonEligibilityNoPayer
+			return nil, false, http.StatusUnprocessableEntity, eligibilityCoverageUnresolved + "; " + remedy + ": " + at, reasonEligibilityNoPayer
 		}
 		var c struct {
 			Payor []*eligibilityReference `json:"payor"`
 		}
-		var pid shnsdk.PayerIdentifier
-		var payorUnresolved bool
+		var cands []shnsdk.PayerIdentifier
+		var payorUnresolved, payor0Unknown bool
 		held := scope.fromSoR(ins.Coverage.Reference, "Coverage")
 		if cov != nil && decodeMessage(cov, &c) == nil && len(c.Payor) > 0 {
 			// A Coverage the request contains shares the request's contained
@@ -816,36 +901,90 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 				}
 				covScope = newEligibilityScope(own.Contained, entries, sor)
 			}
-			if pid, payorUnresolved, status, msg = covScope.payer(c.Payor[0]); status != 0 {
-				return none, status, msg, eligibilityReadReason(status)
+			// Every payor counts (Coverage.payor carries no ordering meaning):
+			// the payer is chosen among all their identifiers. A self-pay payor
+			// (a Patient or RelatedPerson, by type) names no payer and adds
+			// nothing. Any other payor after payor[0] that names no payer the
+			// request lets the gateway read makes the payer unknown: refused,
+			// naming it. When payor[0] yields nothing, the refusals below name
+			// it, as before.
+			for i, payor := range c.Payor {
+				// Self-pay is decided first, by type: it adds nothing, not
+				// even an inline identifier (a member's own).
+				if payor != nil && covScope.selfPay(payor) {
+					continue
+				}
+				var more []shnsdk.PayerIdentifier
+				var unresolved bool
+				if payor != nil && statedTypeOtherThan(payor.Type, "Organization") {
+					// A payor that states a type other than Organization (or
+					// the self-pay ones above) is outside R4's Coverage.payor
+					// targets: it names a payer by its own identifier alone,
+					// and its reference is never read (as unreadPayorRefs).
+					if id := payor.Identifier; id != nil && id.System != "" && id.Value != "" {
+						more = []shnsdk.PayerIdentifier{{System: id.System, Value: id.Value}}
+					}
+				} else {
+					var status int
+					var msg string
+					more, unresolved, status, msg = covScope.payer(payor)
+					if status != 0 {
+						return nil, false, status, msg, eligibilityReadReason(status)
+					}
+				}
+				// The first payor that names no payer leaves the coverage's
+				// payer unknown, and nothing after it is read
+				// (shnsdk.CoveragePayerCandidates stops there too): payor[0]
+				// keeps its own refusals below; a later one is named.
+				if i == 0 && len(more) == 0 {
+					payorUnresolved, payor0Unknown = unresolved, true
+					break
+				}
+				if i > 0 && len(more) == 0 {
+					ref := ""
+					if payor != nil {
+						ref = payor.Reference
+					}
+					return nil, false, http.StatusUnprocessableEntity, fmt.Sprintf("%s: %s, payor[%d] %s cannot be read as a payer Organization with an identifier, so the coverage's payer is unknown",
+						eligibilityPayorUnknown, at, i, quotedBounded(ref)), reasonEligibilityNoPayer
+				}
+				for _, p := range more {
+					if !slices.Contains(cands, p) {
+						cands = append(cands, p)
+					}
+				}
 			}
 		}
+		// payor[0] that names no payer leaves the coverage's payer unknown
+		// whatever a later payor names, as on every other path
+		// (shnsdk.CoveragePayerCandidates): refused with payor[0]'s texts.
+		if payor0Unknown {
+			cands = nil
+		}
 		switch {
-		case pid == none && payorUnresolved:
+		case len(cands) == 0 && payorUnresolved:
 			remedy, ok := eligibilityRemedy(c.Payor[0].Reference, "Organization", eligibilityRemedyPayor)
 			if !ok {
-				return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
+				return nil, false, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
 			}
 			if held {
 				// Nothing the request carries resolves a payor of a
 				// Coverage read from the system of record.
 				remedy = eligibilityRemedyHeldCoverage
 			}
-			return none, http.StatusUnprocessableEntity, eligibilityPayorUnresolved + "; " + remedy + ": " + at + ", payor " + quotedBounded(c.Payor[0].Reference), reasonEligibilityNoPayer
-		case pid == none:
-			return none, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
-		case found != none && pid != found:
-			return none, http.StatusUnprocessableEntity, eligibilityTwoPayers, reasonEligibilityRequestTwoPayers
+			return nil, false, http.StatusUnprocessableEntity, eligibilityPayorUnresolved + "; " + remedy + ": " + at + ", payor " + quotedBounded(c.Payor[0].Reference), reasonEligibilityNoPayer
+		case len(cands) == 0:
+			return nil, false, http.StatusUnprocessableEntity, eligibilityCoverageNoPayer + ": " + at, reasonEligibilityNoPayer
 		}
-		found = pid
+		lists = append(lists, cands)
 	}
-	if found == none {
+	if len(lists) == 0 {
 		if remedy, ok := eligibilityRemedy(req.Insurer.Reference, "Organization", eligibilityRemedyInsurer); insurerUnresolved && ok {
-			return none, http.StatusUnprocessableEntity, eligibilityInsurerUnresolved + "; " + remedy + ": insurer " + quotedBounded(req.Insurer.Reference), reasonEligibilityNoPayer
+			return nil, false, http.StatusUnprocessableEntity, eligibilityInsurerUnresolved + "; " + remedy + ": insurer " + quotedBounded(req.Insurer.Reference), reasonEligibilityNoPayer
 		}
-		return none, http.StatusUnprocessableEntity, eligibilityNoPayer, reasonEligibilityNoPayer
+		return nil, false, http.StatusUnprocessableEntity, eligibilityNoPayer, reasonEligibilityNoPayer
 	}
-	return found, 0, "", ""
+	return lists, false, 0, "", ""
 }
 
 // eligibilityReadReason is the recorded reason of a refusal an eligibility

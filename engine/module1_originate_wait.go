@@ -743,12 +743,22 @@ func (g *Gateway) inquiryRecords(ctx context.Context, cont Continuation) (shnsdk
 	// itself — a perfectly ordinary FHIR shape, and the one the demo roster's own
 	// records use — as a coverage naming a record the system does not hold. Two
 	// readings of one fact, and this one was wrong.
-	if coveragePayorRef(out.Coverage) == "" {
-		return out, http.StatusBadGateway, "the coverage names no payer organization, and an inquiry must name one", nil
-	}
-	insurer, status, msg, err := g.memberPayerOrganization(ctx, out.Coverage)
+	// The payer is the one the submission was routed to: the payor routing
+	// chooses names it (memberPayerOrganization), never the first one.
+	pid, routed, status, msg, err := g.routedPayerIdentifier(ctx, out.Coverage)
 	if status != 0 {
 		return out, status, msg, err
+	}
+	if !routed {
+		return out, http.StatusBadGateway, "the coverage names no payer this gateway routes to, and an inquiry must name one", nil
+	}
+	var insurer []byte
+	insurer, _, status, msg, err = g.memberPayerOrganization(ctx, out.Coverage, pid)
+	if status != 0 {
+		return out, status, msg, err
+	}
+	if insurer == nil {
+		return out, http.StatusBadGateway, "the coverage names no payer organization, and an inquiry must name one", nil
 	}
 	out.Insurer = insurer
 	return out, 0, "", nil

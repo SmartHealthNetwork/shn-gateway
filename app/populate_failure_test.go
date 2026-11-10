@@ -311,7 +311,7 @@ func populateFailureApp(t *testing.T, populate map[string]string, out io.Writer)
 
 func TestPopulateFailureEvidenceRejectsUnknownFields(t *testing.T) {
 	for _, n := range []engine.PopulateFailure{
-		{Stage: "CANARY-STAGE", Reason: "other"}, {Stage: "transport", Reason: "CANARY-REASON"}, {Stage: "transport", Reason: "non_2xx"}, {Stage: "qr_extract", Reason: "other", Status: 200}, {Stage: "http_status", Reason: "invalid_json", Status: 503}, {Stage: "http_status", Reason: "non_2xx", Status: 99}, {Stage: "http_status", Reason: "non_2xx", Status: 600}, {Stage: "http_status", Reason: "non_2xx", Status: -1},
+		{Stage: "CANARY-STAGE", Reason: "other"}, {Stage: "transport", Reason: "CANARY-REASON"}, {Stage: "transport", Reason: "non_2xx"}, {Stage: "body_read", Reason: "https_to_http_refused"}, {Stage: "http_status", Reason: "https_to_http_refused", Status: 307}, {Stage: "qr_extract", Reason: "other", Status: 200}, {Stage: "http_status", Reason: "invalid_json", Status: 503}, {Stage: "http_status", Reason: "non_2xx", Status: 99}, {Stage: "http_status", Reason: "non_2xx", Status: 600}, {Stage: "http_status", Reason: "non_2xx", Status: -1},
 	} {
 		var out bytes.Buffer
 		populateFailureObserver(&out)(n)
@@ -330,6 +330,7 @@ func TestPopulateFailureEvidenceSchemaAndConcurrentOutput(t *testing.T) {
 			notes = append(notes, engine.PopulateFailure{Stage: stage, Reason: reason})
 		}
 	}
+	notes = append(notes, engine.PopulateFailure{Stage: "transport", Reason: "https_to_http_refused", Status: 307})
 	notes = append(notes, engine.PopulateFailure{Stage: "http_status", Reason: "non_2xx", Status: 100}, engine.PopulateFailure{Stage: "http_status", Reason: "non_2xx", Status: 599}, engine.PopulateFailure{Stage: "qr_extract", Reason: "invalid_json", Status: 200}, engine.PopulateFailure{Stage: "qr_extract", Reason: "wrong_resource_type", Status: 200})
 	var wg sync.WaitGroup
 	for _, n := range notes {

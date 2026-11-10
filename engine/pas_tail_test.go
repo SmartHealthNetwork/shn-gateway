@@ -206,7 +206,11 @@ func TestSubmitClaimAndResolve_BridgedEgressRefusesAtNone(t *testing.T) {
 	if status != 0 || !found {
 		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
 	}
-	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
+	pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
+	if !routed {
+		t.Fatal("the member's coverage routes to no payer")
+	}
+	realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
@@ -252,7 +256,11 @@ func TestSubmitPASClaim_UnstatedClaimFactIsBuildStage(t *testing.T) {
 	if status != 0 || !found {
 		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
 	}
-	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
+	pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
+	if !routed {
+		t.Fatal("the member's coverage routes to no payer")
+	}
+	realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}
@@ -320,7 +328,11 @@ func TestSubmitPASClaim_SupplierNotCarriedAsReadIsAFidelityRefusal(t *testing.T)
 	if status != 0 || !found {
 		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
 	}
-	realPayerOrg, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov)
+	pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
+	if !routed {
+		t.Fatal("the member's coverage routes to no payer")
+	}
+	realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
 	if status != 0 {
 		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 	}

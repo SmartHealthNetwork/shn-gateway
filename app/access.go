@@ -32,6 +32,10 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	}
 	if b := r.Backend; b != nil {
 		line.Backend = &diagnostics.AccessBackend{Status: b.Status, LatencyMs: b.Latency.Milliseconds(), ErrorClass: b.ErrorClass, Calls: r.BackendCalls}
+		for _, rs := range r.BackendResends {
+			line.Backend.Resends = append(line.Backend.Resends, diagnostics.AccessResend{Reason: rs.Reason, Challenge: rs.Challenge})
+		}
+		line.Backend.Redirects = r.BackendRedirects
 	}
 	if st := r.Stages; st != nil {
 		line.Stages = &diagnostics.AccessStages{

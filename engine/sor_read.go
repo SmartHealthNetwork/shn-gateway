@@ -11,6 +11,7 @@ import (
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
@@ -227,14 +228,32 @@ type SoRReadError struct {
 	// name (SoRInvalidAnswer), so it can be read two ways. Unwrap reports it
 	// as relay.ErrDuplicateKey; it is a structural fact, not the cause's text.
 	repeatsAMember bool
+	// cleartextRedirect: the system redirected the read from https to http,
+	// and the hop was not sent (SoRCleartextRedirect). Unwrap reports it as
+	// smartauth.ErrCleartextRedirect.
+	cleartextRedirect bool
 }
 
-// Unwrap reports an answer that repeats a member name as relay.ErrDuplicateKey.
+// Unwrap reports an answer that repeats a member name as
+// relay.ErrDuplicateKey, and a read redirected from https to http as
+// smartauth.ErrCleartextRedirect.
 func (e *SoRReadError) Unwrap() error {
-	if e != nil && e.repeatsAMember {
+	switch {
+	case e != nil && e.repeatsAMember:
 		return relay.ErrDuplicateKey
+	case e != nil && e.cleartextRedirect:
+		return smartauth.ErrCleartextRedirect
 	}
 	return nil
+}
+
+// SoRCleartextRedirect is the read error for a read the participant's own
+// system redirected from https to http (smartauth.ErrCleartextRedirect): the
+// hop was not sent, so the read failed as an unavailable system's does
+// (SoRUnavailable), and the record names it (class http-3xx, and the refused
+// hop in ExchangeRecord.BackendRedirects).
+func SoRCleartextRedirect() *SoRReadError {
+	return &SoRReadError{Kind: SoRUnavailable, cleartextRedirect: true}
 }
 
 // SoRInvalidAnswer is the read error for an answer of the participant's own
@@ -330,7 +349,11 @@ func noteRead(ctx context.Context) (context.Context, func(class string)) {
 		return ctx, nil
 	}
 	start := x.clock()
-	return context.WithValue(ctx, sorReadNotedKey{}, true), func(class string) {
+	readCtx, refresh := smartauth.WithCredentialRefreshObservation(context.WithValue(ctx, sorReadNotedKey{}, true))
+	readCtx, redirects := smartauth.WithRedirectObservation(readCtx)
+	return readCtx, func(class string) {
+		x.resent(refresh.Resends())
+		x.redirected(redirects.Hops())
 		x.read(0, x.clock().Sub(start), readEndedClass(ctx, class))
 	}
 }

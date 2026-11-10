@@ -13,6 +13,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 )
@@ -79,12 +81,16 @@ var crdLegHooks = map[string][]string{
 // DiscoverCDSServices reads a CDS service listing from base + "/cds-services".
 // A non-2xx answer, an unreadable body or a listing without a services array
 // is an error; an entry without an id or a hook is an error too. headers are
-// the partner's fixed request headers (WithBackendHeaders), nil for none.
+// the partner's fixed request headers (WithBackendHeaders), nil for none; a
+// redirect to another origin carries none of them.
 func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, headers http.Header) ([]CDSService, error) {
 	ctx, cancel := context.WithTimeout(ctx, cdsServiceListingTimeout)
 	defer cancel()
 	url := base + "/cds-services"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	client = smartauth.ParticipantClientWith(client, headers)
+	refreshCtx, refresh := smartauth.WithCredentialRefreshObservation(ctx)
+	refreshCtx, redirects := smartauth.WithRedirectObservation(refreshCtx)
+	req, err := http.NewRequestWithContext(refreshCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("engine: build GET %s: %w", url, err)
 	}
@@ -98,6 +104,16 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 		started = x.clock()
 	}
 	resp, err := client.Do(req)
+	x.resent(refresh.Resends())
+	x.redirected(redirects.Hops())
+	// The response is the system's own 3xx; a token endpoint's downgrade has
+	// none, and fails as any token failure does, below.
+	if err != nil && errors.Is(err, smartauth.ErrCleartextRedirect) && resp != nil {
+		// Redirected from https to http: the hop was not sent, and the read
+		// fails on the system's 3xx.
+		x.read(resp.StatusCode, x.since(x.clock, started), backendClass(resp.StatusCode, nil))
+		return nil, fmt.Errorf("engine: GET %s: %w", url, err)
+	}
 	if err != nil {
 		x.read(0, x.since(x.clock, started), callEndedClass(ctx, backendClass(0, err)))
 		return nil, fmt.Errorf("engine: GET %s: %w", url, err)

@@ -122,45 +122,85 @@ type TokenSource struct {
 	acquiring chan struct{}
 	cached    string
 	exp       time.Time
-	noted     sync.Once // Observer fires once per TokenSource, not per refresh
+	// gen counts the tokens fetched: a 401 names the generation it refused,
+	// so a later fetch is never dropped for it, even one that returns the same
+	// string.
+	gen   uint64
+	noted sync.Once // Observer fires once per TokenSource, not per refresh
 }
 
 // Token returns a bearer valid for at least RefreshSkew, minting a fresh one if
 // the cache is empty or near expiry.
 func (s *TokenSource) Token(ctx context.Context) (string, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		s.mu.Lock()
-		if s.acquiring == nil {
-			s.acquiring = make(chan struct{})
-			s.mu.Unlock()
-			break
-		}
-		done := s.acquiring
-		s.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-done:
-		}
+	tok, _, err := s.token(ctx)
+	return tok, err
+}
+
+// token is Token with the generation of the token it returns.
+func (s *TokenSource) token(ctx context.Context) (string, uint64, error) {
+	if err := s.acquire(ctx); err != nil {
+		return "", 0, err
 	}
-	defer func() { s.mu.Lock(); close(s.acquiring); s.acquiring = nil; s.mu.Unlock() }()
+	defer s.release()
 	skew := s.RefreshSkew
 	if skew == 0 {
 		skew = defaultRefreshSkew
 	}
 	if s.cached != "" && s.clock().Add(skew).Before(s.exp) {
-		return s.cached, nil
+		return s.cached, s.gen, nil
 	}
 	tok, ttl, err := s.fetch(ctx)
 	if err != nil {
-		return "", err // fail-closed: do not return the stale cache
+		return "", 0, err // fail-closed: do not return the stale cache
 	}
+	s.gen++
 	s.cached = tok
 	s.exp = s.clock().Add(ttl)
-	return tok, nil
+	return tok, s.gen, nil
+}
+
+// acquire takes the source's one slot for reading or changing its cached
+// token: one request at a time fetches, and the others wait for its token.
+func (s *TokenSource) acquire(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		if s.acquiring == nil {
+			s.acquiring = make(chan struct{})
+			s.mu.Unlock()
+			return nil
+		}
+		done := s.acquiring
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+	}
+}
+
+func (s *TokenSource) release() {
+	s.mu.Lock()
+	close(s.acquiring)
+	s.acquiring = nil
+	s.mu.Unlock()
+}
+
+// invalidate drops the cached token if it is still generation gen, the one a
+// resource server refused: a newer token another request already fetched is
+// kept, so requests refused together with the same token share one fresh one.
+func (s *TokenSource) invalidate(ctx context.Context, gen uint64) error {
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+	if s.gen == gen {
+		s.cached, s.exp = "", time.Time{}
+	}
+	return nil
 }
 
 func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duration, err error) {
@@ -201,11 +241,25 @@ func (s *TokenSource) fetch(ctx context.Context) (token string, ttl time.Duratio
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
-	resp, err := hc.Do(req)
+	// The token endpoint is the participant's own authorization server, and
+	// the form is the client's credential (its secret or signed assertion): a
+	// redirect is never followed, whatever its origin or code, and the fetch
+	// fails as it does when the endpoint does not answer. Every 3xx answer is
+	// caught below net/http's redirect handling (tokenRedirectTransport), so a
+	// 300, a redirect with no Location or with one net/http cannot parse is
+	// refused the same way, and no error carries the Location's path or query
+	// (net/http's URL error would). The caller's client is not changed.
+	seen := &tokenRedirect{}
+	tc := *hc
+	tc.Transport = &tokenRedirectTransport{base: hc.Transport, seen: seen}
+	resp, err := tc.Do(req)
 	if err != nil {
 		return "", 0, &TokenTransportError{Cause: err}
 	}
 	defer resp.Body.Close()
+	if seen.status != 0 {
+		return "", 0, &TokenTransportError{Cause: seen.refuse(req.Context())}
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenBody+1))
 	if err != nil {
 		return "", 0, &TokenTransportError{Cause: err}
@@ -327,4 +381,53 @@ func (c withoutClientTrace) Value(key any) any {
 		return nil
 	}
 	return v
+}
+
+// tokenRedirect is the 3xx a token endpoint answered: its status, the origin
+// its Location named (empty when it named none net/http could read), and
+// whether that Location went from https to http.
+type tokenRedirect struct {
+	status    int
+	origin    string
+	cleartext bool
+}
+
+// refuse records the refused hop on ctx's RedirectObservation and is the
+// fetch's failure: ErrCleartextRedirect for a hop from https to http, else a
+// TokenRedirectError.
+func (r *tokenRedirect) refuse(ctx context.Context) error {
+	class, err := RedirectTokenRefused, error(&TokenRedirectError{StatusCode: r.status, Origin: r.origin})
+	if r.cleartext {
+		class, err = RedirectCleartextRefused, ErrCleartextRedirect
+	}
+	if o := redirectObservationFrom(ctx); o != nil {
+		o.hop(class)
+	}
+	return err
+}
+
+// tokenRedirectTransport notes a token endpoint's 3xx answer and removes its
+// Location, so net/http hands the answer back instead of following it or
+// failing on a Location it cannot parse.
+type tokenRedirectTransport struct {
+	base http.RoundTripper
+	seen *tokenRedirect
+}
+
+func (t *tokenRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil || resp.StatusCode/100 != 3 {
+		return resp, err
+	}
+	t.seen.status = resp.StatusCode
+	if loc, perr := req.URL.Parse(resp.Header.Get("Location")); perr == nil && resp.Header.Get("Location") != "" && loc.Host != "" {
+		t.seen.origin = strings.ToLower(loc.Scheme) + "://" + loc.Host
+		t.seen.cleartext = strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(loc.Scheme, "http")
+	}
+	resp.Header.Del("Location")
+	return resp, nil
 }

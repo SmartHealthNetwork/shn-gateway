@@ -144,3 +144,27 @@ func TestPopulate_QuestionnaireBytesExact(t *testing.T) {
 		}
 	})
 }
+
+// The populate request is a FHIR operation call to the provider's own system, so it
+// goes out as a direct FHIR client sends one: Content-Type application/fhir+json, and
+// Accept naming application/fhir+json first, then application/json.
+func TestNativePopulator_SendsTheFHIRMediaType(t *testing.T) {
+	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":{"resourceType":"Questionnaire","url":"http://example.org/q"}}]}`)
+	pc := PopulateContext{PatientRef: "Patient/MBR-COVERED", SubjectFHIRRef: "Patient/pat-mbrcovered-provider"}
+	var contentType, accept []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentType, accept = r.Header.Values("Content-Type"), r.Header.Values("Accept")
+		w.Header().Set("Content-Type", "application/fhir+json")
+		_, _ = w.Write([]byte(`{"resourceType":"QuestionnaireResponse","status":"in-progress","questionnaire":"http://example.org/q","subject":{"reference":"Patient/pat-mbrcovered-provider"}}`))
+	}))
+	defer srv.Close()
+	if _, _, err := NewNativePopulator(srv.Client(), srv.URL+"/Questionnaire/$populate").Populate(context.Background(), pkg, pc); err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	if len(contentType) != 1 || contentType[0] != "application/fhir+json" {
+		t.Errorf("Content-Type = %q, want exactly application/fhir+json", contentType)
+	}
+	if len(accept) != 1 || accept[0] != "application/fhir+json, application/json" {
+		t.Errorf("Accept = %q, want application/fhir+json first, then application/json", accept)
+	}
+}

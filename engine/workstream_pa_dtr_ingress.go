@@ -478,17 +478,24 @@ func (g *Gateway) dtrRoutingCoverage(ctx context.Context, out *dtrIngressRequest
 	}
 	if len(covs) > 1 {
 		refs, _, readErr := g.dtrPayorRefs(ctx, out)
-		var first shnsdk.PayerIdentifier
-		for i, c := range covs {
-			pid, perr := shnsdk.ParseCoveragePayer(c, refs.resolve)
+		// As readMemberCoverage: a failed read decides only when the records
+		// then do not name one payer, since the record that failed to load
+		// may have named it.
+		var lists [][]shnsdk.PayerIdentifier
+		for _, c := range covs {
+			cands, perr := refs.candidates(c)
+			if perr != nil {
+				lists = nil
+				break
+			}
+			lists = append(lists, cands...)
+		}
+		if lists == nil || !g.coveragesNameOnePayer(lists) {
 			if *readErr != nil {
 				status, msg := SoRFailureResponse(*readErr)
 				return nil, status, msg
 			}
-			if perr != nil || (i > 0 && pid != first) {
-				return nil, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the member's Coverage records do not name one payer"
-			}
-			first = pid
+			return nil, http.StatusUnprocessableEntity, "ambiguous coverage for routing: the member's Coverage records do not name one payer"
 		}
 	}
 	return covs[0], 0, ""
@@ -527,7 +534,9 @@ func (g *Gateway) dtrIngressRecipient(ctx context.Context, prepared dtrIngressRe
 	var payers []shnsdk.PayerIdentifier
 	for _, cov := range prepared.coverages {
 		holder, pid, status, msg, reason := g.recipientForCoverages([][]byte{cov}, refs)
-		if *readErr != nil {
+		// A failed read decides only when no payer is found: the record that
+		// failed to load may have named it (unknown is not empty).
+		if status != 0 && *readErr != nil {
 			status, msg := SoRFailureResponse(*readErr)
 			return "", nil, status, msg, ""
 		}

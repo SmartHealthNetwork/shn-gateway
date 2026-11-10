@@ -342,6 +342,23 @@ func TestLevelPASIngress_AnswerDuplicateKeyRefusesAtEveryLevel(t *testing.T) {
 	}
 }
 
+// A payer answer that repeats a member name only under case folding ("outcome"
+// and "Outcome" in one object) is read one way only too: refused at every level,
+// never relayed.
+func TestLevelPASIngress_AnswerCaseFoldedRepeatRefusesAtEveryLevel(t *testing.T) {
+	t.Parallel()
+	answer := []byte(strings.Replace(assemblyRealPending, `"outcome":"queued"`, `"outcome":"queued","Outcome":"queued"`, 1))
+	if string(answer) == assemblyRealPending {
+		t.Fatal("fixture: no member name repeated")
+	}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env, rec, ev := levelPASRow(t, level, pasIngressBundle("00001", ""), answer)
+			wantAnswerRefusedAtEveryLevel(t, env, rec, ev, http.StatusBadGateway, `payer PAS response repeats the JSON member \"Outcome\" in entry[0].resource: it can be read two ways, so it is not carried; the payer's system received and answered this request: check its outcome before resending`)
+		})
+	}
+}
+
 // A readable, bound answer is recorded from its decision at every level, and
 // nothing is skipped.
 func TestLevelPASIngress_ReadableAnswerRecordsItsDecision(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -639,6 +640,14 @@ func bareRefSearchset(refs ...string) string {
 	return `{"resourceType":"Bundle","type":"searchset","entry":[` + strings.Join(entries, ",") + `]}`
 }
 
+// organizationByPath answers a read of Organization/<id> with the payer
+// Organization id, identified by payerValue.
+func organizationByPath(payerValue string) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ehrAnswer(200, "application/fhir+json", payorOrganization(path.Base(r.URL.Path), payerValue))(w, r)
+	}
+}
+
 func payorOrganization(id, payerValue string) string {
 	return `{"resourceType":"Organization","id":"` + id + `","identifier":[{"system":"urn:oid:2.16.840.1.113883.6.300","value":"` + payerValue + `"}]}`
 }
@@ -798,8 +807,10 @@ func TestCRDIngressFHIRServerRefusals(t *testing.T) {
 		"the Organization redirected": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("o1"), func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/fhir/Organization/o2", http.StatusFound)
 		}), 2, 412, fhirServerRedirected},
-		"two Organizations by reference alone": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("o1", "o2"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001"))),
-			2, 422, fhirServerTwoPayors},
+		// Every payor counts: each Organization is read, up to
+		// fhirServerPayorReadsMax; one more is refused.
+		"more Organizations by reference alone than the gateway reads": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("o1", "o2", "o3", "o4", "o5", "o6"), organizationByPath("00001")),
+			1 + fhirServerPayorReadsMax, 422, fhirServerTooManyPayors},
 		"an Organization on another server": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("https://other.example/fhir/Organization/o1"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001"))),
 			1, 422, "no payer identifier on member coverage"},
 		"a dot-segment Organization reference": {FHIRServerReadPrivate, ehrRoutes(bareRefSearchset("Organization/.."), ehrAnswer(200, "application/json", payorOrganization("o1", "00001"))),
@@ -1285,5 +1296,67 @@ func TestFHIRServerReadAcceptsAMediaTypeWithParameters(t *testing.T) {
 				t.Fatalf("Organization read: %d %q", status, msg)
 			}
 		})
+	}
+}
+
+// Every payor counts, and the gateway reads on the request's fhirServer only
+// the payor Organizations routing needs: one with no identifier of its own
+// that nothing the request or the search answers. At every level:
+//   - two payors each naming their Organization by reference alone are both
+//     read, and the request routes, carrying both (earlier releases routed
+//     by the first and never read the second);
+//   - a payor carrying an identifier of its own is never read, even beside a
+//     reference whose read would fail: it already names its payer;
+//   - a later payor with no identifier of its own whose read fails leaves
+//     the coverage's payer unknown: the read's refusal.
+func TestCRDIngressFHIRServerReadsOnlyThePayorsRoutingNeeds(t *testing.T) {
+	cms := func(v string) string { return `{"system":"urn:oid:2.16.840.1.113883.6.300","value":"` + v + `"}` }
+	search := func(payors string) string {
+		return `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"Coverage","id":"c0","status":"active",` +
+			`"beneficiary":{"reference":"Patient/` + strangerMember + `"},"payor":[` + payors + `]}}]}`
+	}
+	failing := func(w http.ResponseWriter, r *http.Request) { ehrAnswer(500, "", "")(w, r) }
+	for name, row := range map[string]struct {
+		handler  func(http.ResponseWriter, *http.Request)
+		calls    int32
+		status   int
+		msg      string
+		includes int
+	}{
+		"two payors by reference alone, both read": {ehrRoutes(search(`{"reference":"Organization/o1"},{"reference":"Organization/o2"}`), func(w http.ResponseWriter, r *http.Request) {
+			value := "00001"
+			if path.Base(r.URL.Path) == "o2" {
+				value = "99999"
+			}
+			organizationByPath(value)(w, r)
+		}), 3, http.StatusOK, "", 2},
+		"a payor with its own identifier is not read": {ehrRoutes(search(`{"reference":"Organization/o9","identifier":`+cms("00001")+`}`), failing), 1, http.StatusOK, "", 0},
+		"a payor with its own identifier beside one read": {ehrRoutes(search(`{"reference":"Organization/o9","identifier":`+cms("00001")+`},{"reference":"Organization/o2"}`), organizationByPath("99999")),
+			2, http.StatusOK, "", 1},
+		"a later payor with no identifier of its own, its read failing": {ehrRoutes(search(`{"identifier":`+cms("00001")+`},{"reference":"Organization/o2"}`), failing),
+			2, http.StatusPreconditionFailed, fhirServerAnswered, 0},
+	} {
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				e := newEHRServer(t, row.handler)
+				env, _ := fhirServerEnv(t, e, FHIRServerReadPrivate)
+				env.originator.cfg.ConformanceEnforcement = level
+				rec := httptest.NewRecorder()
+				env.originator.handleCRDIngress(rec, crdIngressPost(fhirServerRequest(e.base)))
+				if e.calls.Load() != row.calls {
+					t.Fatalf("fhirServer read %d times, want %d", e.calls.Load(), row.calls)
+				}
+				if row.status != http.StatusOK {
+					refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
+					return
+				}
+				if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+					t.Fatalf("answer %d %s, %d legs; want routed once", rec.Code, rec.Body, env.routeHitCount())
+				}
+				if got := carriedSearchsetOf(t, sentRequest(t, env)); len(got.includes) != row.includes {
+					t.Fatalf("carried %d Organizations, want %d: %+v", len(got.includes), row.includes, got)
+				}
+			})
+		}
 	}
 }

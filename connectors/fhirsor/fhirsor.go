@@ -16,6 +16,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirclient"
 )
@@ -40,8 +41,15 @@ func New(fc *fhirclient.Client) *SoR {
 // (e.g. config-driven wiring or conformance tests) that have a URL + an optional
 // pre-configured http.Client (e.g. carrying SMART Backend Services auth) rather
 // than a pre-built fhirclient. hc==nil uses a default client.
+//
+// The client reads under smartauth.ParticipantClient's redirect policy: a
+// redirect from https to http is never followed, whether or not hc carries a
+// bearer.
 func NewFromURL(baseURL string, hc *http.Client) *SoR {
-	return New(fhirclient.New(baseURL, hc))
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	return New(fhirclient.New(baseURL, smartauth.ParticipantClient(hc)))
 }
 
 var _ engine.SystemOfRecordFHIRBase = (*SoR)(nil)

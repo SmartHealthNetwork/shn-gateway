@@ -454,59 +454,6 @@ func TestDTRRelayedPackageUnstamped(t *testing.T) {
 	})
 }
 
-// TestDTREgressValidatesOnAnswerLine (review finding 1): the payer builds its
-// $questionnaire-package at the ANSWER LINE, so the egress $validate must run on
-// THAT line's lane. This gateway has only a 2.0 lane, so an answer at 2.2 must fail
-// closed on the missing lane rather than being silently checked against the 2.0 IG.
-// If workstream_pa_dtr_inbound.go regresses to passing "" the validate lands on the canonical lane and
-// this test goes green-when-it-should-not — hence the paired 2.0 control.
-func TestDTREgressValidatesOnAnswerLine(t *testing.T) {
-	pkg := []byte(`{"resourceType":"Bundle","type":"collection","entry":[]}`)
-	run := func(t *testing.T, answerTok string) (*httptest.ResponseRecorder, inboundTestRequester) {
-		t.Helper()
-		g, requester := newInboundTestGateway(t, true)
-		g.cfg.Responder = dtrRelayResponder{body: pkg} // SHN-produced ⇒ egress-validated
-		// Explicitly laned: 2.0 only. 2.2 is therefore UNLANED (fail-closed).
-		g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": shnsdk.NewFakeValidator()})
-		env, err := shnsdk.Seal(shnsdk.Metadata{
-			Sender: requester.ID, Recipient: "payer", TransactionType: "dtr-questionnaire-fetch",
-			AuthorityFrame: "payer-coverage", Timestamp: g.cfg.Clock().Format(time.RFC3339),
-			CorrelationID: "corr-dtr-2",
-		}, dtrFramedPackageFor(t, g), g.cfg.Identity.EncPub)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := httptest.NewRecorder()
-		r := newSignedInboundRequest(t, g, requester.ID)
-		r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
-		g.handleDTRInbound(rec, r, env, shnsdk.Token{Operation: "dtr-questionnaire-fetch", Subject: coveredPCI(t, g), CorrelationID: "corr-dtr-2"},
-			dtrFramedPackageFor(t, g), answerTok)
-		return rec, requester
-	}
-
-	t.Run("laned answer line validates and answers", func(t *testing.T) {
-		if rec, _ := run(t, "pa.dtr@2.0"); rec.Code != 200 {
-			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-	})
-	t.Run("unlaned answer line fails closed", func(t *testing.T) {
-		rec, requester := run(t, "pa.dtr@2.2")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want the framed answer leg; body=%s", rec.Code, rec.Body.String())
-		}
-		hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if hdr.Status != http.StatusInternalServerError {
-			t.Fatalf("framed status = %d, want 500 — a 2.2 package must NOT be validated on the 2.0 lane; body=%s", hdr.Status, body)
-		}
-		if !strings.Contains(string(body), "2.2") {
-			t.Fatalf("failure must name the missing lane: %s", body)
-		}
-	})
-}
-
 // errTransport fails every request, so a forward that gets PAST the version filter
 // surfaces as a transport fault rather than reaching any network.
 type errTransport struct{}

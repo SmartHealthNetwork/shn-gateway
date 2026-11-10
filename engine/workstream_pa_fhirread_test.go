@@ -140,7 +140,7 @@ func TestQuestionnaireHasSubject(t *testing.T) {
 		t.Error("questionnaireHasSubject: demo lumbar questionnaire should return false (no subject)")
 	}
 
-	// MALFORMED: returns false (no valid subject; egress-$validate catches shape).
+	// MALFORMED: returns false (no subject read).
 	if questionnaireHasSubject([]byte("{")) {
 		t.Error("questionnaireHasSubject: malformed JSON should return false")
 	}

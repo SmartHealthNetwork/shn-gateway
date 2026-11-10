@@ -113,7 +113,7 @@ const (
 	// The payor Organization read.
 	fhirServerNoOrganization  = "no coverage to route by: fhirServer holds no Organization for the coverage's payor"
 	fhirServerNotOrganization = "no coverage to route by: fhirServer's answer is not the payor Organization"
-	fhirServerTwoPayors       = "no coverage to route by: fhirServer's coverages name more than one payor Organization by reference alone"
+	fhirServerTooManyPayors   = "no coverage to route by: fhirServer's coverages name more payor Organizations by reference alone than this gateway reads for one request (5)"
 )
 
 func prefixes(ps ...string) []netip.Prefix {

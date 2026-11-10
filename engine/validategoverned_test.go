@@ -438,10 +438,10 @@ func drivePayerEligibilityEgress(t *testing.T, marker string) (int, string, []Ob
 // (assembleTerminalPASBundle, LegResult.ResponseAssembled, and the separate
 // validate call that certified SHN's copy of a payer's decision), so the
 // migrated bypass site this helper and its "pas assembly" table row pinned no
-// longer exists. validatePASResult's one remaining arm is the ordinary
-// validateFHIRForContract wrapper, covered by TestPASResultCertification
-// (pasretention_test.go) and by TestPinnedFindingContext_InboundEgress /
-// _InboundUpdateEgress, which pin its production finding tag.
+// longer exists. Its one remaining arm, the egress check of a PAS answer the
+// payer's gateway built, went later: ownership admits only the participant's
+// relayed answer on the PAS legs (TestPayerAnswersAreAdmittedOnlyAsRelayed), so
+// no built answer reaches an egress check.
 
 func TestValidateGovernedAtObserveRecordsAndRelays(t *testing.T) {
 	const marker = "REJECTED-MARKER"

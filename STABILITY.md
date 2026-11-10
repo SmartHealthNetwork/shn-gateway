@@ -1846,6 +1846,9 @@ classify is written as `other`.
 | `backend.latencyMs` | core | core |
 | `backend.errorClass` | core | core |
 | `backend.calls` | core | core |
+| `backend.resends[].reason` | core | core |
+| `backend.resends[].challenge` | core | core |
+| `backend.redirects` | core | core |
 | `stages.unwrapMs` | core | core |
 | `stages.readsMs` | core | core |
 | `stages.forwardMs` | core | core |

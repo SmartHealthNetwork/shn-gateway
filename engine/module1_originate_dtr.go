@@ -7,12 +7,14 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -53,11 +55,11 @@ func searchsetMatches(bundle []byte, resourceType string) ([][]byte, error) {
 //   - the questionnaire canonical exactly as the payer stated it (a |version
 //     kept);
 //   - the payer's coverage-assertion-id as context, when it gave one;
-//   - referenced, the payer Organization each carried Coverage names by a
-//     reference outside itself, as the participant's system supplied it:
-//     the record the same Coverage search included for the reference, else
-//     payerOrg, which memberPayerOrganization read for the same reference
-//     on routing, the Coverage the gateway routes by (coveragePayorRecords),
+//   - referenced, the Organization each payor of each carried Coverage names
+//     by a reference outside itself, as the participant's system supplied
+//     it: the record the same Coverage search included for the reference,
+//     else payerOrg, which memberPayerOrganization read for payerRef, the
+//     payor routing chose (coveragePayorRecords),
 //     embedded byte for byte, so a payer that resolves the Coverage's payor
 //     from the request can. A reference left out (no record answers it, or
 //     several different Organizations do) is told to leftOut, with its
@@ -66,7 +68,7 @@ func searchsetMatches(bundle []byte, resourceType string) ([][]byte, error) {
 //
 // It returns the request's bytes and the request sealed as the gateway's own
 // message with every embed verified.
-func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, canonical, assertionID string, routing, payerOrg []byte, leftOut func(reason, resourceType string)) (body []byte, sealed relay.Payload, err error) {
+func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, canonical, assertionID, payerRef string, payerOrg []byte, leftOut func(reason, resourceType string)) (body []byte, sealed relay.Payload, err error) {
 	coverages, err := searchsetMatches(recs.coverage, "Coverage")
 	if err != nil {
 		// The searchset is this gateway's own assembly of the participant's
@@ -82,7 +84,7 @@ func originatedPackageRequest(line string, recs crdOriginRecords, order []byte, 
 	// What the build leaves out is told only once the request is built: a
 	// request the build refuses is not one that left a record out.
 	var left [][2]string
-	in.Referenced = coveragePayorRecords(recs.coverage, coverages, coveragePayorRef(routing), payerOrg, func(reason, resourceType string) {
+	in.Referenced = coveragePayorRecords(recs.coverage, coverages, payerRef, payerOrg, func(reason, resourceType string) {
 		left = append(left, [2]string{reason, resourceType})
 	})
 	pkg, err := shnsdk.BuildQuestionnairePackageParameters(line, in)
@@ -127,13 +129,38 @@ func sealPackageRequest(pkg shnsdk.QuestionnairePackageParameters, in shnsdk.Que
 	return sealed, nil
 }
 
-// carryUnchanged walks a questionnaire request the gateway built to the
-// payer's line (route) and returns the route to send it on: route itself when
-// the walk changes no byte of it. A walk that would change one is not applied:
-// the request is carried as built, at its build line (asSent), and the carry
-// is recorded (OriginateLeg); the participant's own setting
-// (RequireSharedLine) refuses it as routing (422) instead.
-func (g *Gateway) carryUnchanged(route legRoute, body []byte, correlationID, recipient string) (legRoute, int, string) {
+// carryUnchanged returns the route to send a questionnaire request the
+// gateway built at builtAt on, given the route selected for its leg:
+//
+//   - Built at the line it is sent at, the payer's: every caller today, since
+//     the request is built at the line selected for it (select-before-build).
+//     Nothing translates it, so it is sent as built, on a route naming that
+//     line with no chain, and no walk is run or recorded: no leg.transformed
+//     and no transform Provenance for a translation that never happened.
+//   - Built at the route's build line: walked to the payer's line. A walk that
+//     changes no byte is applied and recorded. One that would change a byte is
+//     not applied: the participant's own setting (RequireSharedLine) refuses
+//     it as routing (422); otherwise it is carried as built, at its build line
+//     (asSent), where its frame names the line its bytes were built at, and
+//     the carry is recorded (OriginateLeg).
+//   - Built at any other line: no route frames it at the line its bytes were
+//     built at, so it is refused as the gateway's own fault, at every level,
+//     before anything is sent.
+func (g *Gateway) carryUnchanged(ctx context.Context, route legRoute, body []byte, builtAt, correlationID, recipient string) (legRoute, int, string) {
+	if builtAt == shnsdk.LineOf(route.Token) {
+		return legRoute{Token: route.Token, BuildLine: builtAt, Pinned: route.Pinned}, 0, ""
+	}
+	if builtAt != route.BuildLine {
+		msg := fmt.Sprintf("the questionnaire-package request was built at line %s, neither the line it is sent at (%s) nor this gateway's build line (%s), so nothing was sent", builtAt, shnsdk.LineOf(route.Token), route.BuildLine)
+		g.observe(ObserverEvent{
+			Kind: "leg.failed", Direction: "originate",
+			LegType: "dtr-questionnaire-fetch", CorrelationID: correlationID,
+			Counterpart: recipient, Detail: msg,
+			Route: routeInfoFor(route),
+		})
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageVerify)
+		return legRoute{}, http.StatusInternalServerError, msg
+	}
 	adapted, _, record, err := g.egressWalk(route, body, ExchangeIdentity{CorrelationID: correlationID, LegType: "dtr-questionnaire-fetch", Counterpart: recipient})
 	if err != nil {
 		return legRoute{}, adaptFailureStatus(err), err.Error()

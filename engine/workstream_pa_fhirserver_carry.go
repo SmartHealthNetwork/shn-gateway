@@ -3,8 +3,11 @@
 package engine
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -66,8 +69,16 @@ func (g *Gateway) carryFHIRServerCoverage(prepared *crdIngressRequest) (int, str
 	if prepared.fhirServer == nil {
 		return http.StatusInternalServerError, "prepare cds request failed"
 	}
-	payor := prepared.fhirServer.payor
-	value, status, msg := fhirServerCoverageValue(c.answer, payor, prepared.fhirServer.read.base, c.fence)
+	payors := prepared.fhirServer.payors
+	// The request's other prefetch values resolve a payor reference for
+	// routing too (crdIngressRecipient): read alike, never carried again.
+	others := make(map[string][]byte, len(prepared.values))
+	for k, v := range prepared.values {
+		if k != "coverage" {
+			others[k] = v
+		}
+	}
+	value, status, msg := fhirServerCoverageValue(c.answer, payors, carriedRefs(prefetchValues(others)), prepared.fhirServer.read.base, c.fence)
 	if status != 0 {
 		return status, msg
 	}
@@ -112,15 +123,12 @@ func (g *Gateway) carryFHIRServerCoverage(prepared *crdIngressRequest) (int, str
 // the number of matches. What is written passes the fill fence before it is
 // carried: every record in it is the bound patient's own or names no patient
 // (a refusal at every level, as for any record SHN adds to a message).
-func fhirServerCoverageValue(answer, payor []byte, base string, fence patientFence) ([]byte, int, string) {
-	entries, total, ok := fhirServerCarriedEntries(answer, payor, base)
+func fhirServerCoverageValue(answer []byte, payors [][]byte, others []bundleRefEntry, base string, fence patientFence) ([]byte, int, string) {
+	entries, total, ok := fhirServerCarriedEntries(answer, payors, others, base)
 	if !ok {
 		return nil, http.StatusInternalServerError, "prepare cds request failed"
 	}
-	pages := [][]byte{answer}
-	if payor != nil {
-		pages = append(pages, payor)
-	}
+	pages := append([][]byte{answer}, payors...)
 	value, _, err := assembleSoRSearchset(pages, entries, total)
 	if err != nil {
 		return nil, http.StatusInternalServerError, "prepare cds request failed"
@@ -219,16 +227,17 @@ func fhirServerFencedValue(answer []byte, fence patientFence) ([]byte, bool) {
 // an answer that holds no Coverage or cannot be read as the read read it.
 //
 // The Organizations included are exactly the ones routing resolved: each
-// chosen Coverage is parsed for its payer by routing's own rule
-// (shnsdk.ParseCoveragePayer: payor[0], its inline identifier first, then a
-// contained or referenced Organization), with a resolver that answers a
-// reference as routing's does from these records (an Organization entry of
-// the answer, by fullUrl or Organization/<id>, entryAnswers; else the payor
-// Organization routing read, by its id) and records what it answered. So a
-// Coverage routed by its own identifier includes nothing, a second payor is
-// never included, and an Organization only a Coverage not chosen names never
-// is.
-func fhirServerCarriedEntries(answer, payor []byte, base string) (entries []assemblyEntry, total int, ok bool) {
+// chosen Coverage is read for its payers by routing's own rule
+// (shnsdk.CoveragePayerCandidates: every payor, in document order, its inline
+// identifier and then the contained or referenced Organization it names, a
+// self-pay payor passed over), with a resolver that answers a reference as
+// routing's does from these records (an Organization entry of the answer, by
+// fullUrl or Organization/<id>, entryAnswers; else the payor Organization
+// routing read, by its id) and records what it answered. So every payor's
+// Organization routing resolved is included, whichever payor names the payer
+// routing chose (the payer reads every payor too), and an Organization only a
+// Coverage not chosen names never is.
+func fhirServerCarriedEntries(answer []byte, payors [][]byte, others []bundleRefEntry, base string) (entries []assemblyEntry, total int, ok bool) {
 	doc, err := relay.Doc(relay.NewBody(answer, relay.OriginUpstreamResponse))
 	if err != nil || doc.Kind(doc.Root()) != relay.KindObject {
 		return nil, 0, false
@@ -258,10 +267,13 @@ func fhirServerCarriedEntries(answer, payor []byte, base string) (entries []asse
 	if len(covs) == 0 {
 		return nil, 0, false
 	}
-	_, payorID := entryHead(payor)
-	// readAt is the position the payor Organization routing read takes
-	// among the answer's entries: past them.
+	// readAt is the position the first payor Organization routing read takes
+	// among the answer's entries: past them, each further one after it.
 	readAt := len(all)
+	payorIDs := make([]string, len(payors))
+	for k, p := range payors {
+		_, payorIDs[k] = entryHead(p)
+	}
 	// Routing resolves a payor reference against what it routes by
 	// (routingCoverages): the chosen Coverages and every entry that is not a
 	// Coverage. A Coverage not chosen is never what a reference resolves to.
@@ -285,7 +297,17 @@ func fhirServerCarriedEntries(answer, payor []byte, base string) (entries []asse
 		}
 	}
 	for _, i := range choice {
-		_, _ = shnsdk.ParseCoveragePayer(covs[i], func(ref string) ([]byte, bool) {
+		typed := typedPayorRefs(covs[i])
+		_, _ = shnsdk.CoveragePayerCandidates(covs[i], func(ref string) ([]byte, bool) {
+			// A payor stating another type than Organization names no payer
+			// routing reads from its reference: nothing it references is
+			// carried for it.
+			if typed[ref] {
+				return nil, false
+			}
+			// Every Organization entry that answers ref is one routing
+			// resolved (resolveAmong reads them all), so each is carried.
+			var ats []int
 			for at, l := range all {
 				if l.typ == "Coverage" && !chosen[at] {
 					continue
@@ -294,14 +316,63 @@ func fhirServerCarriedEntries(answer, payor []byte, base string) (entries []asse
 					if l.typ != "Organization" {
 						return nil, false
 					}
-					record(at, ref, l.id)
-					return answer[l.span.Start:l.span.End], true
+					ats = append(ats, at)
 				}
 			}
-			if payor != nil {
-				if id, ok := payorOrganizationID(ref, base); ok && id == payorID {
-					record(readAt, ref, payorID)
-					return payor, true
+			// The request's other prefetch values answer ref as routing's
+			// local resources do: they count, and are not carried again.
+			var elsewhere [][]byte
+			for _, o := range others {
+				if entryAnswers(ref, o.fullURL, o.typ, o.id) {
+					if o.typ != "Organization" {
+						return nil, false
+					}
+					elsewhere = append(elsewhere, o.resource)
+				}
+			}
+			if len(ats) > 0 || len(elsewhere) > 0 {
+				// An entry repeated byte for byte is carried once, and only
+				// the first carried for ref may take ref as its fullUrl: a
+				// fullUrl is never carried twice.
+				var ids []shnsdk.PayerIdentifier
+				var kept [][]byte
+				for _, o := range elsewhere {
+					for _, p := range shnsdk.OrganizationIdentifiers(o) {
+						if !slices.Contains(ids, p) {
+							ids = append(ids, p)
+						}
+					}
+				}
+				for _, at := range ats {
+					l := all[at]
+					res := answer[l.span.Start:l.span.End]
+					if slices.ContainsFunc(kept, func(k []byte) bool { return bytes.Equal(k, res) }) {
+						continue
+					}
+					if len(kept) == 0 {
+						record(at, ref, l.id)
+					} else {
+						resolved[at] = true
+					}
+					kept = append(kept, res)
+					for _, p := range shnsdk.OrganizationIdentifiers(res) {
+						if !slices.Contains(ids, p) {
+							ids = append(ids, p)
+						}
+					}
+				}
+				if len(ats) == 1 && len(elsewhere) == 0 {
+					l := all[ats[0]]
+					return answer[l.span.Start:l.span.End], true
+				}
+				return routingOrganization(ids), true
+			}
+			if id, ok := payorOrganizationID(ref, base); ok {
+				for k, payorID := range payorIDs {
+					if id == payorID {
+						record(readAt+k, ref, payorID)
+						return payors[k], true
+					}
 				}
 			}
 			return nil, false
@@ -319,8 +390,10 @@ func fhirServerCarriedEntries(answer, payor []byte, base string) (entries []asse
 			entries = append(entries, include(at, l.span))
 		}
 	}
-	if resolved[readAt] {
-		entries = append(entries, include(readAt, EntrySpan{Page: 1, Start: 0, End: len(payor)}))
+	for k, p := range payors {
+		if resolved[readAt+k] {
+			entries = append(entries, include(readAt+k, EntrySpan{Page: 1 + k, Start: 0, End: len(p)}))
+		}
 	}
 	return entries, total, true
 }
@@ -340,4 +413,30 @@ func absolutePayorOnBase(ref, base, id string) bool {
 		return false
 	}
 	return sameFHIRBase(refBase, base)
+}
+
+// typedPayorRefs is the set of payor references of coverage that every payor
+// naming them states a type (Reference.type) other than Organization.
+func typedPayorRefs(coverage []byte) map[string]bool {
+	var probe struct {
+		Payor []struct {
+			Reference string          `json:"reference"`
+			Type      json.RawMessage `json:"type"`
+		} `json:"payor"`
+	}
+	if json.Unmarshal(coverage, &probe) != nil {
+		return nil
+	}
+	typed := map[string]bool{}
+	for _, p := range probe.Payor {
+		if p.Reference == "" {
+			continue
+		}
+		var stated string
+		t := json.Unmarshal(p.Type, &stated) == nil && stated != "" && stated != "Organization"
+		if v, seen := typed[p.Reference]; !seen || v {
+			typed[p.Reference] = t
+		}
+	}
+	return typed
 }

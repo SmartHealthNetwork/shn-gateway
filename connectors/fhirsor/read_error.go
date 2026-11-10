@@ -23,6 +23,11 @@ func safeReadError(err error) error {
 	if errors.Is(err, relay.ErrDuplicateKey) {
 		return engine.SoRRepeatedMember()
 	}
+	// A redirect from https to http, not followed: the read failed, and the
+	// error says why, so the record names it.
+	if errors.Is(err, smartauth.ErrCleartextRedirect) && !smartauth.IsTokenAcquisitionError(err) {
+		return engine.SoRCleartextRedirect()
+	}
 	kind := engine.SoRInvalidResponse
 	var status *fhirclient.HTTPError
 	var token *smartauth.TokenEndpointError

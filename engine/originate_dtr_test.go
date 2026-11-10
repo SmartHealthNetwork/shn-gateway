@@ -30,7 +30,7 @@ func TestOriginatedPackageRequest_CanonicalAndContextAsStated(t *testing.T) {
 	order := []byte(`{"resourceType":"ServiceRequest","id":"sr1","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"L8000"}]}}`)
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		t.Run(line, func(t *testing.T) {
-			body, sealed, err := originatedPackageRequest(line, recs, order, canonical, assertionID, nil, nil, nil)
+			body, sealed, err := originatedPackageRequest(line, recs, order, canonical, assertionID, "", nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -56,7 +56,7 @@ func TestOriginatedPackageRequest_CanonicalAndContextAsStated(t *testing.T) {
 		})
 	}
 	t.Run("no assertion id, no context", func(t *testing.T) {
-		body, _, err := originatedPackageRequest("2.2", recs, order, canonical, "", nil, nil, nil)
+		body, _, err := originatedPackageRequest("2.2", recs, order, canonical, "", "", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +101,7 @@ func TestOriginatedPackageRequest_CarriesThePayorTheCoverageNames(t *testing.T) 
 	// Two Coverages naming one payer carry it once (DTR 2.2 takes one
 	// Coverage).
 	for _, line := range []string{"2.0", "2.1"} {
-		body, _, err := originatedPackageRequest(line, searchset(match(byRef), match(byRefToo), include(org)), order, "http://x/q", "", nil, nil, nil)
+		body, _, err := originatedPackageRequest(line, searchset(match(byRef), match(byRefToo), include(org)), order, "http://x/q", "", "", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +125,7 @@ func TestOriginatedPackageRequest_CarriesThePayorTheCoverageNames(t *testing.T) 
 			"a payor that is not an Organization":              {searchset(match(selfPay), include(patient)), selfPay, patient, 0},
 		} {
 			t.Run(line+"/"+name, func(t *testing.T) {
-				body, sealed, err := originatedPackageRequest(line, row.recs, order, "http://x/q", "", []byte(row.routing), []byte(row.payerOrg), nil)
+				body, sealed, err := originatedPackageRequest(line, row.recs, order, "http://x/q", "", firstPayorRef(row.routing), []byte(row.payerOrg), nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -158,7 +158,7 @@ func TestOriginatedPackageRequest_LeftOutToldOnlyWhenBuilt(t *testing.T) {
 	order := []byte(`{"resourceType":"ServiceRequest","id":"sr1","status":"active","intent":"order","subject":{"reference":"Patient/MBR-1"},"code":{"coding":[{"system":"http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets","code":"L8000"}]}}`)
 	for line, built := range map[string]bool{"2.2": false, "2.1": true} {
 		var told []string
-		_, _, err := originatedPackageRequest(line, recs, order, "http://x/q", "", nil, nil, func(reason, typ string) {
+		_, _, err := originatedPackageRequest(line, recs, order, "http://x/q", "", "", nil, func(reason, typ string) {
 			told = append(told, reason+" "+typ)
 		})
 		if (err == nil) != built {
@@ -172,4 +172,13 @@ func TestOriginatedPackageRequest_LeftOutToldOnlyWhenBuilt(t *testing.T) {
 			t.Fatalf("%s: told %q, want %q", line, got, want)
 		}
 	}
+}
+
+// firstPayorRef is the reference of a Coverage's first payor that has one, or
+// "" for none.
+func firstPayorRef(coverage string) string {
+	if refs := coveragePayorRefs([]byte(coverage)); len(refs) > 0 {
+		return refs[0]
+	}
+	return ""
 }

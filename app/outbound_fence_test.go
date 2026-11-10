@@ -51,8 +51,10 @@ var outboundSites = map[string]outboundSite{
 
 	// Nil defaults for library callers: build() always passes a client.
 	"checks/checks.go NewRunner http.DefaultClient":                         {1, "nil default; build passes the template, and every target its tagged copy"},
+	"connectors/fhirsor/fhirsor.go NewFromURL http.DefaultClient":           {1, "nil default, under the redirect policy; build passes a tagged fhir client"},
 	"connectors/fhirsor/search.go searchClient http.DefaultClient":          {1, "nil default; build passes a tagged fhir client"},
 	"connectors/smartauth/tokensource.go fetch http.Client{}":               {1, "nil default; tagSmart sets HTTPClient"},
+	"connectors/smartauth/tokensource.go RoundTrip http.DefaultTransport":   {1, "net/http's own fallback for a token client with no transport; tagSmart sets the token client, whose tagged transport this wraps"},
 	"connectors/smartauth/transport.go NewHTTPClient http.DefaultTransport": {1, "nil default; tagSmart sets Transport"},
 	"connectors/smartauth/transport.go NewHTTPClient http.Client{}":         {1, "wraps the transport it is given"},
 	"diagnostics/http.go ObserveTransport http.DefaultTransport":            {1, "nil default; build passes tagged transports"},

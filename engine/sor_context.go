@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -68,6 +69,21 @@ func (g *Gateway) refuseUnreadableMember(w http.ResponseWriter, r *http.Request,
 	g.refuseInbound(w, r, leg, env, tok, answerTok, http.StatusForbidden, msg, nil)
 	exchangeOf(r.Context()).sorFailure(err)
 	return true
+}
+
+// sorPayorResolver is sorReferenceCallback for routing coverage: a payor that
+// carries an identifier of its own already names its payer, and one stating
+// another type than Organization names none it would read, so its reference is
+// never read (unreadPayorRefs), as on every routing path (payorRefs.named).
+func sorPayorResolver(ctx context.Context, sor SystemOfRecord, coverage []byte) (func(string) ([]byte, bool), *error) {
+	read, readErr := sorReferenceCallback(ctx, sor)
+	named := unreadPayorRefs(coverage)
+	return func(ref string) ([]byte, bool) {
+		if named[ref] {
+			return nil, false
+		}
+		return read(ref)
+	}, readErr
 }
 
 // Reference callbacks are scoped to one SDK invocation. Once a read fails,
@@ -199,20 +215,105 @@ func (g *Gateway) readMemberCoverage(ctx context.Context, member string, choose 
 	case 1:
 		return covs[0], true, false, 0, "", nil
 	}
-	var first shnsdk.PayerIdentifier
-	for i, c := range covs {
-		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
-		pid, parseErr := shnsdk.ParseCoveragePayer(c, resolve)
-		if *readErr != nil {
-			status, msg := SoRFailureResponse(*readErr)
-			return nil, false, false, status, msg, *readErr
+	// A payor known by its own identifier is never read (sorPayorResolver).
+	// A failed read of any other leaves its payor unknown; when the records
+	// then do not name one payer, the record that failed to load may have
+	// been the one naming it, so the answer is the system's failure, never a
+	// refusal (unknown is not empty).
+	var lists [][]shnsdk.PayerIdentifier
+	var failed error
+	for _, c := range covs {
+		resolve, readErr := sorPayorResolver(ctx, g.cfg.SoR, c)
+		cands, parseErr := shnsdk.CoveragePayerCandidates(c, resolve)
+		if *readErr != nil && failed == nil {
+			failed = *readErr
 		}
-		if parseErr != nil || (i > 0 && pid != first) {
-			return nil, false, true, http.StatusUnprocessableEntity, msgAmbiguousCoverage, nil
+		if parseErr != nil {
+			lists = nil
+			break
 		}
-		first = pid
+		lists = append(lists, cands...)
+	}
+	if lists == nil || !g.coveragesNameOnePayer(lists) {
+		if failed != nil {
+			status, msg := SoRFailureResponse(failed)
+			return nil, false, false, status, msg, failed
+		}
+		return nil, false, true, http.StatusUnprocessableEntity, msgAmbiguousCoverage, nil
 	}
 	return covs[0], true, false, 0, "", nil
+}
+
+// coveragesNameOnePayer reports whether a member's Coverages name one payer, never judged by
+// an identifier's position. A payer's gateway reading its own member's records knows who it is
+// (ownPayerIdentities): they name it when each carries one of its own identities on some payor,
+// in any position. Otherwise, as for any gateway, the payer directory must resolve their
+// identifiers to one holder; when it resolves none of them (routing then refuses the coverage,
+// naming them), every Coverage must name the same set of identifiers, in any order.
+func (g *Gateway) coveragesNameOnePayer(lists [][]shnsdk.PayerIdentifier) bool {
+	if own := g.ownPayerIdentities(); len(own) > 0 && !slices.ContainsFunc(lists, func(l []shnsdk.PayerIdentifier) bool {
+		return !slices.ContainsFunc(l, func(p shnsdk.PayerIdentifier) bool { return slices.Contains(own, p) })
+	}) {
+		return true
+	}
+	if g.cfg.PayerRouter != nil {
+		_, _, err := shnsdk.ChooseRegisteredPayer(lists, g.cfg.PayerRouter.Resolve)
+		if err == nil {
+			return true
+		}
+		if !errors.Is(err, shnsdk.ErrNoRegisteredPayer) {
+			return false
+		}
+	}
+	for _, l := range lists[1:] {
+		if !sameIdentifierSet(l, lists[0]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownPayerIdentities is every payer identity a payer's gateway's participant is known by: the
+// identities its holder publishes on the network feed and, with the payer identity mapping on,
+// its configured and backend identities (ownRecordIdentifier). nil for a gateway that is not a
+// payer's, or one that knows none of them.
+func (g *Gateway) ownPayerIdentities() []shnsdk.PayerIdentifier {
+	if g.cfg.Role != "payer" {
+		return nil
+	}
+	var own []shnsdk.PayerIdentifier
+	add := func(ids []shnsdk.PayerIdentifier) {
+		for _, p := range ids {
+			if p.System != "" && p.Value != "" && !slices.Contains(own, p) {
+				own = append(own, p)
+			}
+		}
+	}
+	if m, ok := g.cfg.Responder.(ownRecordIdentifier); ok {
+		add(m.ownRecordIdentities())
+	}
+	if g.cfg.HolderID != "" {
+		if e, ok := g.cfg.Reg.Lookup(g.cfg.HolderID); ok {
+			add(e.PayerIDs)
+		}
+	}
+	return own
+}
+
+// sameIdentifierSet reports whether a and b hold the same identifiers, whatever their order
+// and however often each is listed.
+func sameIdentifierSet(a, b []shnsdk.PayerIdentifier) bool {
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
+	}
+	for _, x := range b {
+		if !slices.Contains(a, x) {
+			return false
+		}
+	}
+	return true
 }
 
 // recipientForSoR resolves the payer holder from the member's own Coverage,
@@ -226,29 +327,47 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 		exchangeOf(ctx).refusedFor(RefusalRouting, reasonNoPayerRouter)
 		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, msgNoPayerRouter
 	}
-	resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
-	parsed, ok := shnsdk.ParsePayerIdentifier(coverage, resolve)
-	if *readErr != nil {
-		// The system failed to answer for the payer the Coverage names: a
-		// backend failure, recorded as one, never a refusal.
+	resolve, readErr := sorPayorResolver(ctx, g.cfg.SoR, coverage)
+	cands, parseErr := shnsdk.CoveragePayerCandidates(coverage, resolve)
+	var holder, msg string
+	var pid shnsdk.PayerIdentifier
+	var status int
+	var reason refusalReason
+	if parseErr != nil {
+		status, msg, reason = http.StatusUnprocessableEntity, noPayerIdentifierFor(parseErr), reasonNoPayerIdentifier
+	} else {
+		holder, pid, status, msg, reason = g.routeCandidates(cands)
+	}
+	// A payor known by its own identifier is never read (sorPayorResolver).
+	// A failed read of any other leaves its payor unknown; when routing then
+	// chooses no payer, the record that failed to load may have been the one
+	// naming it: the system failed to answer for the payer the Coverage
+	// names, a backend failure recorded as one, never a refusal (unknown is
+	// not empty). sorReferenceCallback reads nothing after a failure, so every
+	// later payor is unknown too.
+	if status != 0 && *readErr != nil {
 		exchangeOf(ctx).sorFailure(*readErr)
 		status, msg := SoRFailureResponse(*readErr)
 		return "", shnsdk.PayerIdentifier{}, status, msg
 	}
-	if !ok {
-		exchangeOf(ctx).refusedFor(RefusalRouting, reasonNoPayerIdentifier)
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, noPayerIdentifier
+	if status != 0 {
+		exchangeOf(ctx).refusedFor(RefusalRouting, reason)
+		return "", shnsdk.PayerIdentifier{}, status, msg
 	}
-	holder, ok := g.cfg.PayerRouter.Resolve(parsed)
-	if !ok {
-		exchangeOf(ctx).refusedFor(RefusalRouting, reasonUnregisteredPayer)
-		return "", shnsdk.PayerIdentifier{}, http.StatusUnprocessableEntity, unregisteredPayer(parsed)
-	}
-	return holder, parsed, 0, ""
+	return holder, pid, 0, ""
 }
 
-// memberPayerOrganization reads the payer's own Organization record — the one
-// the member's Coverage names as payor — from the participant's system.
+// memberPayerOrganization reads the payer's own Organization record from the
+// participant's system: the one the member's Coverage names as the payor the
+// network routes by. pid is the payer identifier routing chose
+// (recipientForSoR, routedPayerIdentifier). Every payor counts
+// (Coverage.payor carries no ordering meaning), so the record is the
+// Organization of the first payor, in document order, that names pid: its
+// inline identifier, or one of its Organization's. A self-pay payor (a Patient
+// or RelatedPerson, by structure: selfPayPayor) is passed over. So the payer a
+// message names is always the payer it goes to: routed payer and payload payer
+// cannot diverge. payorRef is that payor's own reference, which a message the
+// gateway builds names it by.
 //
 // It is the SAME read the inquiry leg already makes (inquiryRecords), moved to
 // the origination side because both legs have to name one payer organization.
@@ -259,24 +378,67 @@ func (g *Gateway) recipientForSoR(ctx context.Context, coverage []byte) (string,
 // live, and isolated to exactly that one id.
 //
 // A coverage that names an organization this system cannot supply is a refusal
-// that names the record. A coverage that names NO organization at all — one
-// whose payor is an inline identifier, which is a shape this network routes on
-// perfectly well — is not refused here: eligibility and coverage-check legs do
-// not carry a payer organization, and only the prior-authorization leg does, so
-// that absence surfaces where it matters, at the request builder, with its own
-// named reason (errNoPayerRecord). Nothing is minted either way.
+// that names the record. A payor that names pid by an inline identifier and
+// references no organization — a shape this network routes on perfectly well —
+// is not refused here: eligibility and coverage-check legs do not carry a payer
+// organization, and only the prior-authorization leg does, so that absence
+// surfaces where it matters, at the request builder, with its own named reason
+// (errNoPayerRecord). Nothing is minted either way.
 //
 // A read the system of record failed to answer returns its error too, beside
 // the status it is answered with: a backend failure, never a refusal, which
 // a caller that answers it later records as such (sorFailure).
-func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) ([]byte, int, string, error) {
-	payorRef := coveragePayorRef(coverage)
-	if payorRef == "" {
-		return nil, 0, "", nil
+func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte, pid shnsdk.PayerIdentifier) (org []byte, payorRef string, status int, msg string, err error) {
+	var probe struct {
+		Payor []struct {
+			Reference  string          `json:"reference"`
+			Type       json.RawMessage `json:"type"`
+			Identifier *struct {
+				System string `json:"system"`
+				Value  string `json:"value"`
+			} `json:"identifier"`
+		} `json:"payor"`
 	}
-	// A coverage may carry its payer organization INSIDE itself. That is still the
-	// participant's own record — read it where the record put it rather than asking
-	// the system for a reference that names nothing outside this resource.
+	if json.Unmarshal(coverage, &probe) != nil {
+		return nil, "", 0, "", nil
+	}
+	for _, p := range probe.Payor {
+		if selfPayPayor(coverage, p.Type, p.Reference) {
+			continue
+		}
+		inline := p.Identifier != nil && p.Identifier.System == pid.System && p.Identifier.Value == pid.Value
+		var stated string
+		typed := json.Unmarshal(p.Type, &stated) == nil && stated != "" && stated != "Organization"
+		if p.Reference == "" || typed {
+			// A payor naming pid by its identifier alone references no
+			// record, and one stating another type than Organization
+			// references none that is a payer's (unreadPayorRefs): a later
+			// payor whose Organization lists pid may.
+			continue
+		}
+		org, status, msg, err := g.payorOrganization(ctx, coverage, p.Reference)
+		if status != 0 {
+			// A payor that names another payer identifier of its own already
+			// names its payer, as routing read it (payorRefs.named): the
+			// Organization it references is never what this exchange routes
+			// on unless it lists pid, which an unreadable one cannot show.
+			if !inline && p.Identifier != nil && p.Identifier.System != "" && p.Identifier.Value != "" {
+				continue
+			}
+			return nil, "", status, msg, err
+		}
+		if inline || slices.Contains(shnsdk.OrganizationIdentifiers(org), pid) {
+			return org, p.Reference, 0, "", nil
+		}
+	}
+	return nil, "", 0, "", nil
+}
+
+// payorOrganization reads the Organization a payor reference names: a coverage
+// may carry its payer organization INSIDE itself, which is still the
+// participant's own record, read where the record put it; any other reference
+// is read from the system.
+func (g *Gateway) payorOrganization(ctx context.Context, coverage []byte, payorRef string) ([]byte, int, string, error) {
 	if strings.HasPrefix(payorRef, "#") {
 		org, ok := containedResource(coverage, strings.TrimPrefix(payorRef, "#"))
 		if !ok {
@@ -293,6 +455,64 @@ func (g *Gateway) memberPayerOrganization(ctx context.Context, coverage []byte) 
 		return nil, http.StatusUnprocessableEntity, "the system of record has no payer organization " + payorRef, nil
 	}
 	return org, 0, "", nil
+}
+
+// selfPayPayor reports, by structure, whether a payor of coverage is self-pay
+// (Coverage.payor's Patient and RelatedPerson targets), as shnsdk's
+// CoveragePayerCandidates reads it: its Reference.type when it states one,
+// else the type of the resource a contained reference names, else the type
+// its literal reference names.
+func selfPayPayor(coverage []byte, declared json.RawMessage, ref string) bool {
+	var t string
+	if json.Unmarshal(declared, &t) != nil || t == "" {
+		t = literalReferenceType(ref)
+		if id, ok := strings.CutPrefix(ref, "#"); ok {
+			if res, ok := containedResource(coverage, id); ok {
+				t = resourceTypeOf(res)
+			}
+		}
+	}
+	return t == "Patient" || t == "RelatedPerson"
+}
+
+// literalReferenceType is the resource type a literal reference names by FHIR's reference
+// grammar ([url/]Type/id[/_history/version]), or "" for a contained ("#id") or URN reference.
+func literalReferenceType(ref string) string {
+	if ref == "" || strings.HasPrefix(ref, "#") || strings.HasPrefix(ref, "urn:") {
+		return ""
+	}
+	if i := strings.Index(ref, "/_history/"); i >= 0 {
+		ref = ref[:i]
+	}
+	segs := strings.Split(ref, "/")
+	if len(segs) < 2 {
+		return ""
+	}
+	return segs[len(segs)-2]
+}
+
+// routedPayerIdentifier is the payer identifier routing chooses for a member's
+// Coverage (recipientForSoR's choice), without recording anything: for a
+// later leg of an exchange that was routed, to name the same payer. ok is
+// false when it chooses none; a read of the system that failed is then that
+// read's error (routing would answer it so), with its status and reason.
+func (g *Gateway) routedPayerIdentifier(ctx context.Context, coverage []byte) (pid shnsdk.PayerIdentifier, ok bool, status int, msg string, err error) {
+	if g.cfg.PayerRouter == nil {
+		return shnsdk.PayerIdentifier{}, false, 0, "", nil
+	}
+	resolve, readErr := sorPayorResolver(ctx, g.cfg.SoR, coverage)
+	cands, perr := shnsdk.CoveragePayerCandidates(coverage, resolve)
+	if perr == nil {
+		pid, _, perr = shnsdk.ChooseRegisteredPayer(cands, g.cfg.PayerRouter.Resolve)
+	}
+	if perr == nil {
+		return pid, true, 0, "", nil
+	}
+	if *readErr != nil {
+		status, msg := SoRFailureResponse(*readErr)
+		return shnsdk.PayerIdentifier{}, false, status, msg, *readErr
+	}
+	return shnsdk.PayerIdentifier{}, false, 0, "", nil
 }
 
 // containedResource lifts a resource a record contains, by its local id, and

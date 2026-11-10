@@ -126,6 +126,42 @@ Worth checking:
   to include the write a claim submission needs.
 - **Optional `*_CLIENT_KID`.** Set it only if your server pins a specific key id
   in the assertion header.
+- **A `401` gets one fresh token (from shn-gateway v1.9.0).** The gateway keeps the
+  token your authorization server issues until shortly before its `expires_in`. If your
+  server answers a request with `401` before then (it revoked the token, or it expires
+  tokens sooner than it says), the gateway drops that token, fetches a new one and sends
+  the same request once more, byte for byte the same apart from `Authorization`, as a
+  direct SMART client does. So your system may see a request twice when it answers `401`
+  to an expired token. Only once: a `401` to the fresh token too is your system's answer,
+  and is passed back as it is; if the fresh token cannot be obtained, your system's first
+  `401` is the answer. A `403`, or any other status, is never resent. A system that
+  answers `401` for a reason other than the token (a key it checks in front of the token,
+  a scope it never grants) therefore costs a token request and a second send for each
+  request: fix that `401` at its cause. Before v1.9.0 the gateway kept sending the cached
+  token until it aged out.
+- **A token request follows no redirect (from shn-gateway v1.9.0).** The token request to
+  your authorization server is never redirected, whatever the redirect's origin or code:
+  its body is your client's credential (the client secret, or the signed assertion), and
+  OAuth defines no redirect of it. Any `3xx` answer fails the token request as a token
+  endpoint that does not answer fails it, so the call that needed the token is not sent;
+  the failure names the answer's status and the origin its `Location` named, if any, never
+  its path or query.
+- **Redirects (from shn-gateway v1.9.0).** When your system answers a call with a
+  redirect, the gateway follows it as a direct client would, with two rules, whether or
+  not the call carries a token. A
+  redirect to another origin (another scheme, host or port) is followed without
+  `Authorization`, whatever set it, and without any header `PAYER_DAVINCI_BACKEND_HEADERS`
+  configures: the token was issued for your system, and those headers configured for it,
+  so neither is sent elsewhere. Neither is sent after the first hop to another origin, for
+  the rest of the redirect chain, even when it leads back to your system: another origin
+  chose that hop. A chain of redirects within your system's origin keeps them. A `401`
+  from another origin, or from your system to a hop back, is the answer, with no fresh
+  token fetched. A redirect from `https` to `http` is never followed, whatever its origin: a
+  `307` or `308` would send the request's body in cleartext. A read your system
+  redirects that way fails, as a read your system cannot answer does; a forwarded
+  operation (a PAS, DTR, CRD or CDex request) is refused on message integrity, and the
+  requester is told your system received it, since it answered. The access line's
+  `backend.redirects` names each redirect by its class.
 
 ## Provider-data origination
 

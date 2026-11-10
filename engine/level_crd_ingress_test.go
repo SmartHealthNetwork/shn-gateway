@@ -63,7 +63,17 @@ func levelFillRow(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, bo
 
 func levelIngressRowWith(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, body []byte, enrich bool) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
 	t.Helper()
+	return levelIngressRowRouted(t, s, level, body, enrich, nil)
+}
+
+// levelIngressRowRouted is levelIngressRowWith with the provider's payer
+// directory replaced by router, when not nil.
+func levelIngressRowRouted(t *testing.T, s *prefetchSoR, level ConformanceEnforcement, body []byte, enrich bool, router PayerRouter) (*inProcessExchange, *httptest.ResponseRecorder, []ConformanceFinding) {
+	t.Helper()
 	env := newInProcessExchange(t)
+	if router != nil {
+		env.originator.cfg.PayerRouter = router
+	}
 	env.originator.cfg.SoR = s.sor()
 	env.originator.cfg.ConformanceEnforcement = level
 	optInEnrichment(env.originator, enrich)

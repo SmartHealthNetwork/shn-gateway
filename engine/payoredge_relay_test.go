@@ -272,7 +272,7 @@ func assertRefused(t *testing.T, res LegResult, p *stubPartner, status int, cont
 // body on carrier.
 func requestOwnership(t *testing.T, n *nativeResponder, body []byte, carrier payorEdgeCarrier) (relay.Payload, LegResult) {
 	t.Helper()
-	p, lr, err := n.payorEdgeRequest(peerBody(body), carrier, "application/fhir+json", nil, nil)
+	p, lr, err := n.payorEdgeRequest(context.Background(), peerBody(body), carrier, "application/fhir+json", nil, nil)
 	if err != nil {
 		t.Fatalf("payorEdgeRequest: %v", err)
 	}

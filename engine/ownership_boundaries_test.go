@@ -146,6 +146,13 @@ var writerUsersThatSendNothing = map[string]string{
 	"net/http.NewResponseController":                       "sets a read deadline; its Flush and Hijack are checked as sends",
 }
 
+// clientUsersThatSendNothing are functions of other packages that take a
+// client and send nothing with it, each with why.
+var clientUsersThatSendNothing = map[string]string{
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth.ParticipantClient":     "returns a copy of the client with its redirect policy set; the copy's sends are checked where they are made",
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth.ParticipantClientWith": "returns a copy of the client with its redirect policy and the names of its configured headers set; the copy's sends are checked where they are made",
+}
+
 // unestablishedLegScopes are the only functions that name the refusal row a
 // transmit uses before a leg is known.
 var unestablishedLegScopes = []string{"Gateway.withScope", "refusalKey"}
@@ -386,7 +393,9 @@ func checkTransmitBoundaries(fset *token.FileSet, files []*ast.File, info *types
 					at := info.TypeOf(a)
 					switch {
 					case at != nil && isClient(at):
-						sink(call, "client handed to "+fn.Pkg().Name()+"."+fn.Name())
+						if _, ok := clientUsersThatSendNothing[qualifiedName(fn)]; !ok {
+							sink(call, "client handed to "+fn.Pkg().Name()+"."+fn.Name())
+						}
 					case at != nil && isWriter(at):
 						if _, ok := writerUsersThatSendNothing[qualifiedName(fn)]; !ok {
 							sink(call, "writer handed to "+fn.Pkg().Name()+"."+fn.Name())
@@ -539,6 +548,7 @@ func TestTransmitBoundaryCheckFires(t *testing.T) {
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
@@ -547,6 +557,8 @@ var (
 	_ = fmt.Sprint
 	_ = io.Copy
 	_ = strings.Contains
+	_ = smartauth.ParticipantClient
+	_ = smartauth.ParticipantClientWith
 	_ = relay.Transmit
 	_ http.ResponseWriter
 )
@@ -572,6 +584,10 @@ func probeWrapped(w probeWrapper) { _, _ = w.Write([]byte("x")) }`, nil,
 			"probeDo sends bytes outside"},
 		{"a client handed to another package", `func probeHand(c *http.Client) { _ = fmt.Sprint(c) }`, nil,
 			"probeHand sends bytes outside"},
+		{"a send on a client given the redirect policy", `func probePolicyDo(c *http.Client, r *http.Request) { _, _ = smartauth.ParticipantClient(c).Do(r) }`, nil,
+			"probePolicyDo sends bytes outside"},
+		{"a send on a client given the redirect policy with configured headers", `func probePolicyWithDo(c *http.Client, r *http.Request) { _, _ = smartauth.ParticipantClientWith(c, nil).Do(r) }`, nil,
+			"probePolicyWithDo sends bytes outside"},
 		{"a writer handed to another handler", `func probeServe(w http.ResponseWriter, r *http.Request) { http.NotFoundHandler().ServeHTTP(w, r) }`, nil,
 			"probeServe sends bytes outside"},
 		{"a flush through a response controller", `func probeFlush(w http.ResponseWriter) { _ = http.NewResponseController(w).Flush() }`, nil,

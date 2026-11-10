@@ -170,13 +170,13 @@ func TestAuthoredPASSubmit_SeededContainedPayerOrgIsNeverStranded(t *testing.T) 
 			coverage := seededProviderCoverage(t, member)
 			// The payer organization, read the way every originated leg reads it:
 			// out of the record that contains it, never minted.
-			insurer, status, msg, _ := (&Gateway{}).memberPayerOrganization(context.Background(), coverage)
-			if status != 0 {
-				t.Fatalf("memberPayerOrganization: %d %s", status, msg)
-			}
 			payer, parsed := shnsdk.ParsePayerIdentifier(coverage, nil)
 			if !parsed {
 				t.Fatalf("the seeded Coverage for %s names no payer identity", member)
+			}
+			insurer, _, status, msg, _ := (&Gateway{}).memberPayerOrganization(context.Background(), coverage, payer)
+			if status != 0 {
+				t.Fatalf("memberPayerOrganization: %d %s", status, msg)
 			}
 			order := []byte(`{"resourceType":"ServiceRequest","id":"sr-dom3","status":"active","intent":"order",` +
 				`"subject":{"reference":"Patient/` + member + `"},"performer":[{"reference":"` + OrderingProviderRef + `"}],` +

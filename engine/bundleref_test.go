@@ -112,6 +112,79 @@ func TestPASIngressPayorReference_ResolvesInTheBundle(t *testing.T) {
 	}
 }
 
+// Several Organization entries answering one payor reference name every
+// identifier they name, and the payer directory decides, as it does across
+// payors: no entry is picked over another, and none is judged by an
+// identifier's position. Identifiers no participant registers are passed
+// over, so the submission reaches the payer, once; two registered payers are
+// ambiguous, refused before the network. At every level.
+func TestPASIngressPayorReference_SeveralEntriesNameEveryIdentifier(t *testing.T) {
+	t.Parallel()
+	org := func(fullURL, id string, ids ...string) string {
+		var list []string
+		for _, v := range ids {
+			list = append(list, `{"system":"urn:oid:2.16.840.1.113883.6.300","value":"`+v+`"}`)
+		}
+		res := `{"resourceType":"Organization"`
+		if id != "" {
+			res += `,"id":"` + id + `"`
+		}
+		res += `,"identifier":[` + strings.Join(list, ",") + `]}`
+		if fullURL != "" {
+			return `{"fullUrl":"` + fullURL + `","resource":` + res + `}`
+		}
+		return `{"resource":` + res + `}`
+	}
+	for name, row := range map[string]struct {
+		body   string
+		refuse string // the refusal, or "" for a submission that reaches the payer
+	}{
+		// The Coverage's own base would name one of them; the rule does not
+		// read it, and picks neither.
+		"a relative reference two entries answer, one naming an unregistered identifier": {payorBundle(
+			payorCoverage(ehrCov, payorRef("Organization/payer-org")),
+			payorOrg(ehrOrg, "payer-org", "00001"),
+			payorOrg(otherOrg, "payer-org", "99999")), ""},
+		"two entries, one naming no identifier": {payorBundle(
+			payorCoverage("", payorRef("Organization/payer-org")),
+			payorOrg("", "payer-org", "00001"),
+			payorOrg("", "payer-org", "")), ""},
+		"two entries, the first naming no identifier": {payorBundle(
+			payorCoverage("", payorRef("Organization/payer-org")),
+			payorOrg("", "payer-org", ""),
+			payorOrg("", "payer-org", "00001")), ""},
+		"an absolute reference two entries answer, one naming an unregistered identifier": {payorBundle(
+			payorCoverage("", payorRef(urnOrg)),
+			payorOrg(urnOrg, "", "00001"),
+			payorOrg(urnOrg, "", "99999")), ""},
+		"two entries, each naming the payer beside an unregistered identifier": {payorBundle(
+			payorCoverage("", payorRef("Organization/payer-org")),
+			org("", "payer-org", "99998", "00001"),
+			org("", "payer-org", "00001", "99999")), ""},
+		"two entries naming two registered payers": {payorBundle(
+			payorCoverage("", payorRef("Organization/payer-org")),
+			org("", "payer-org", "99998", "00001"),
+			org("", "payer-org", "99998", "99999", "00002")), msgCoverageNamesTwoPayers},
+	} {
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				env := newInProcessExchange(t)
+				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.PayerRouter = twoRegisteredPayers(t)
+				rec := httptest.NewRecorder()
+				env.originator.handlePASIngress(rec, httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(row.body)))
+				if row.refuse != "" {
+					refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, row.refuse)
+					return
+				}
+				if n := env.routeHitCount(); n != 1 {
+					t.Fatalf("the submission crossed the network %d times, want once: %d %s", n, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
 // A Coverage.payor that names no payer identifier the Bundle can supply is
 // refused before the network at every level, and the refusal says which shape
 // failed without echoing what the request carried.
@@ -138,33 +211,11 @@ func TestPASIngressPayorReference_RefusalSaysWhy(t *testing.T) {
 			payorCoverage("", payorRef("Organization/payer-org")),
 			`{"resource":{"resourceType":"Organization","id":"payer-org","identifier":[{"value":"00001"}]}}`),
 			"the payor Organization in the Bundle carries no identifier with both a system and a value, such as a NAIC code or payer id"},
-		// The Coverage's own base would name one of them; the rule does not
-		// read it, so the two are ambiguous rather than one picked.
-		"a relative reference two entries answer": {payorBundle(
-			payorCoverage(ehrCov, payorRef("Organization/payer-org")),
-			payorOrg(ehrOrg, "payer-org", "00001"),
-			payorOrg(otherOrg, "payer-org", "99999")),
-			"Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"},
-		"two entries, one naming no payer": {payorBundle(
-			payorCoverage("", payorRef("Organization/payer-org")),
-			payorOrg("", "payer-org", "00001"),
-			payorOrg("", "payer-org", "")),
-			"Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"},
-		"two entries, the first naming no payer": {payorBundle(
-			payorCoverage("", payorRef("Organization/payer-org")),
-			payorOrg("", "payer-org", ""),
-			payorOrg("", "payer-org", "00001")),
-			"Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"},
 		"two entries, one not an Organization": {payorBundle(
 			payorCoverage("", payorRef(urnOrg)),
 			payorOrg(urnOrg, "", "00001"),
 			`{"fullUrl":"`+urnOrg+`","resource":{"resourceType":"Patient","id":"MBR-COVERED"}}`),
-			"Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"},
-		"an absolute reference two entries answer": {payorBundle(
-			payorCoverage("", payorRef(urnOrg)),
-			payorOrg(urnOrg, "", "00001"),
-			payorOrg(urnOrg, "", "99999")),
-			"Coverage.payor matches more than one entry of the Bundle, and they do not name one payer"},
+			"Coverage.payor matches more than one entry of the Bundle, and not every one is an Organization"},
 		"an Organization whose identifier is not a list": {payorBundle(
 			payorCoverage("", payorRef("Organization/payer-org")),
 			`{"resource":{"resourceType":"Organization","id":"payer-org","identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}}`),

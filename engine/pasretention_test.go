@@ -7,12 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 func TestNativePASRetainsApprovedBundle(t *testing.T) {
@@ -195,56 +198,45 @@ func fixturePASResponse(t *testing.T, decision []byte, bundle bool) []byte {
 }
 
 type pasResultResponder struct {
-	result       LegResult
-	err          error
-	beforeReturn func()
+	result LegResult
+	err    error
 }
 
 func (r pasResultResponder) Handle(context.Context, string, string, string, []byte) (LegResult, error) {
-	if r.beforeReturn != nil {
-		r.beforeReturn()
-	}
 	return r.result, r.err
 }
 
-// TestPASResultCertification: this gateway certifies what it PRODUCED and stands
-// down for what it RELAYED. A relayed payer answer never reaches the validator —
-// the case that used to fail an entire exchange because a payer's own extension
-// made SHN's validator refuse SHN's copy of the payer's decision.
-func TestPASResultCertification(t *testing.T) {
+// A payer's gateway answers the DTR and PAS legs only with its
+// participant's own answer, relayed as sent: ownership admits nothing else on
+// them, so an answer this gateway built is refused before any egress check
+// could read it, and those legs carry no such check. Were ownership ever to
+// admit a built answer on one of them, this row fails, and the leg needs its
+// built answer's egress check back first.
+func TestPayerAnswersAreAdmittedOnlyAsRelayed(t *testing.T) {
 	raw := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
-	for _, mode := range []string{"relayed", "produced", "produced invalid", "produced unavailable", "missing lane"} {
-		t.Run(mode, func(t *testing.T) {
-			validator := &pasAssemblyValidator{valid: true}
-			g := &Gateway{cfg: Config{HolderID: "payer", Clock: fixedClock, ValidatorsByContractLine: contractLanes(map[string]shnsdk.Validator{"2.0": validator})}}
-			result := LegResult{Response: testResponse(raw), ResponseSubjectForeign: true}
-			switch mode {
-			case "relayed":
-				result.Response = relayedResponse(raw)
-			case "produced invalid":
-				validator.valid = false
-			case "produced unavailable":
-				validator.err = fmt.Errorf("unavailable")
-			case "missing lane":
-				g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.1": validator})
+	for _, leg := range []string{"dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"} {
+		t.Run(leg, func(t *testing.T) {
+			// The rule itself: relayed, and nothing else (no edit, no builder).
+			rule := relay.LegOwnership()[answerKey(leg, relay.OutcomeAnswered)]
+			if !slices.Equal(rule.Allowed, []relay.Ownership{relay.OwnershipRelayed}) || len(rule.Edits) != 0 || len(rule.Builders) != 0 || len(rule.InputEdits) != 0 {
+				t.Fatalf("the answer rule is %+v, want relayed only", rule)
 			}
-			status, _ := g.validatePASResult(context.Background(), result, "pa.pas@2.0", "pas-claim")
-			switch mode {
-			case "relayed":
-				if status != 0 {
-					t.Fatalf("a relayed payer answer must not be certified by this gateway (status=%d)", status)
+			if _, err := relay.Transmit(relayedResponse(raw), relay.Check(answerKey(leg, relay.OutcomeAnswered))); err != nil {
+				t.Fatalf("the participant's relayed answer was refused: %v", err)
+			}
+			built := 0
+			for _, id := range relay.Builders() {
+				p, err := relay.Authored(id, raw, "application/fhir+json")
+				if err != nil {
+					continue // not a builder that authors a message
 				}
-				if validator.profile != "" {
-					t.Fatal("the validator was handed a payer's own bytes")
+				built++
+				if _, err := relay.Transmit(p, relay.Check(answerKey(leg, relay.OutcomeAnswered))); err == nil {
+					t.Errorf("an answer %s built was admitted on %s: the leg's built answer has no egress check", id, leg)
 				}
-			case "produced":
-				if status != 0 {
-					t.Fatalf("a valid produced answer was refused (status=%d)", status)
-				}
-			default:
-				if status == 0 {
-					t.Fatal("accepted an uncertified produced answer")
-				}
+			}
+			if built == 0 {
+				t.Fatal("no builder authored the answer: the row checks nothing")
 			}
 		})
 	}
@@ -252,13 +244,14 @@ func TestPASResultCertification(t *testing.T) {
 
 // TestPASInboundCommitOrdering pins the ordering both PAS inbound handlers keep:
 // the response leg is sealed BEFORE any payer state is committed, and every
-// pre-commit exit rolls back. It drives an answer the gateway PRODUCED (a test
-// payload), because that is the arm where certification can still refuse.
+// pre-commit exit rolls back. It drives a test-injected answer, which the
+// legs' ownership admits only in a test binary, so the produced response's
+// stamp can be read; none of its refusals is a conformance check's.
 func TestPASInboundCommitOrdering(t *testing.T) {
 	t.Parallel()
 	assembled := pasBundleWithResponse(t, []byte(assemblyRealPending), []byte(assemblyRealTerminal))
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
-		for _, mode := range []string{"valid", "validator reject", "validator unavailable", "cancelled", "seal failure", "store failure", "responder error", "bare operation"} {
+		for _, mode := range []string{"valid", "seal failure", "store failure", "responder error", "bare operation"} {
 			t.Run(leg+"/"+mode, func(t *testing.T) {
 				g, requester := newInboundTestGateway(t, true)
 				pci, _, _ := g.cfg.SoR.ResolvePatient("MBR-COVERED")
@@ -284,18 +277,10 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 					responder.err = fmt.Errorf("transport failed")
 				}
 				g.cfg.Responder = responder
-				validator := &pasAssemblyValidator{valid: mode != "validator reject"}
-				if mode == "validator unavailable" {
-					validator.err = fmt.Errorf("validator unavailable")
-				}
-				g.cfg.ValidatorsByContractLine = contractLanes(map[string]shnsdk.Validator{"2.0": validator})
 				g.cfg.Observer = func(e ObserverEvent) {
-					// A conformance finding is not a leg note. validateGoverned
-					// emits it AT the invalid verdict — necessarily before any
-					// Commit, since the refusal is what stops the commit — and
-					// that record is the whole point of the governed check.
-					// Counting it separately keeps the ordering rule below about
-					// leg notes, and findings is asserted on its own after.
+					// A conformance finding is not a leg note: counted
+					// separately, so the ordering rule below stays about leg
+					// notes, and asserted on its own after.
 					if e.Kind == ConformanceObservedEvent {
 						findings++
 						return
@@ -315,12 +300,6 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				tok := shnsdk.Token{Subject: pci, CorrelationID: env.Metadata.CorrelationID}
 				rec := httptest.NewRecorder()
 				r := newSignedInboundRequest(t, g, requester.ID)
-				if mode == "cancelled" {
-					ctx, cancel := context.WithCancel(r.Context())
-					responder.beforeReturn = cancel
-					g.cfg.Responder = responder
-					r = r.WithContext(ctx)
-				}
 				if leg == "pas-claim" {
 					g.handlePASNativeInbound(rec, r, env, tok, request, "pa.pas@2.0")
 				} else {
@@ -373,16 +352,9 @@ func TestPASInboundCommitOrdering(t *testing.T) {
 				if status/100 == 2 || commits != 0 || rollbacks != 1 || observed != 0 {
 					t.Fatalf("status=%d commits=%d releases=%d events=%d", status, commits, rollbacks, observed)
 				}
-				// Only an invalid VERDICT is a conformance finding: an outage
-				// ("validator unavailable") is identical at every enforcement
-				// level and records nothing, and every other refusal here never
-				// reaches a check at all.
-				wantFindings := 0
-				if mode == "validator reject" {
-					wantFindings = 1
-				}
-				if findings != wantFindings {
-					t.Fatalf("conformance findings = %d, want %d — the refusal must leave exactly its own record", findings, wantFindings)
+				// None of these refusals reaches a conformance check.
+				if findings != 0 {
+					t.Fatalf("conformance findings = %d, want none: no refusal here is a check's", findings)
 				}
 			})
 		}

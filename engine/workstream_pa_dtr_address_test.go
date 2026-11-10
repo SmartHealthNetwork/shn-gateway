@@ -492,7 +492,7 @@ func TestDTRAddress_ThePASForwardRestoresWithTheIdentityMapping(t *testing.T) {
 	bundle = append(append(append([]byte{}, bundle[:i]...), []byte(","+qr)...), bundle[i:]...)
 	ctx := withAddressIssuer(context.Background(), addressIssuer{key: key, payer: "payer", provider: "provider-1"})
 	in := peerBody(bundle)
-	p, lr, err := n.payorEdgeRequest(in, payorEdgeClaimBundle, "application/fhir+json", nil, n.adaptiveRestore(ctx, in))
+	p, lr, err := n.payorEdgeRequest(ctx, in, payorEdgeClaimBundle, "application/fhir+json", nil, n.adaptiveRestore(ctx, in))
 	if err != nil || lr.Status != 0 {
 		t.Fatalf("payorEdgeRequest: %v %+v", err, lr)
 	}

@@ -37,8 +37,10 @@ import (
 //	                  relayed non-2xx, omitted for an ordinary 2xx response)
 //	leg.failed        the origination leg errored for a reason OTHER than a relayed
 //	                  recipient response (Detail = error text). Route is present for
-//	                  TWO refusal variants sharing this seam: egressAdapt's
-//	                  transform-chain refusal and guardPendCarry's
+//	                  the refusals sharing this seam: egressAdapt's
+//	                  transform-chain refusal, sealTransformed's failed
+//	                  verification, carryUnchanged's refusal of a request no
+//	                  route frames at the line it was built at, and guardPendCarry's
 //	                  carry-integrity refusal on the pinned resume legs —
 //	                  each carries the routed line/chain via routeInfoFor, same
 //	                  rendering as leg.originated's Route; nil for roundTrip's

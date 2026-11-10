@@ -236,7 +236,7 @@ func shapePayor(t *testing.T, sor SystemOfRecord, member, shape string) payorSha
 	if !found {
 		t.Fatalf("the fixture holds no Coverage for %s", member)
 	}
-	ref := coveragePayorRef(cov)
+	ref := coveragePayorRefs(cov)[0]
 	var org []byte
 	if strings.HasPrefix(ref, "#") {
 		org, found = containedResource(cov, strings.TrimPrefix(ref, "#"))

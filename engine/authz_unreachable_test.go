@@ -176,11 +176,11 @@ func TestAuthzUnreachable_RetryCarriesAFreshAssertion(t *testing.T) {
 	}
 }
 
-// An answer from authz is never retried and keeps what it answers today: a
-// denial is the 403 it always was, an erroring or malformed answer the opaque
-// 502, recorded as this gateway's refusal on authority: no authority could be
-// obtained. A decision the Framework could not record is its refusal on the
-// audit rule, and is recorded so; the caller's answer stays the opaque 502.
+// An answer from authz is never retried: a denial is the 403 it always was, an
+// erroring or malformed answer a 502 naming its class, recorded as this
+// gateway's refusal on authority: no authority could be obtained. A decision
+// the Framework could not record is its refusal on the audit rule, and is
+// recorded so; the caller is told the decision could not be recorded.
 func TestAuthzAnswered_NotRetriedAnswersAsBefore(t *testing.T) {
 	for _, row := range []struct {
 		name    string
@@ -193,10 +193,10 @@ func TestAuthzAnswered_NotRetriedAnswersAsBefore(t *testing.T) {
 	}{
 		{"denial", answer(http.StatusForbidden, `{"error":"forbidden"}`), http.StatusForbidden, "authorization denied",
 			ExchangeRefused, RefusedByAuthorizationFramework, RefusalAuthority},
-		{"authz 500", answer(http.StatusInternalServerError, `{"error":"policy error"}`), http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
-		{"authz 502", answer(http.StatusBadGateway, `{"error":"decision audit failed","rule":"audit"}`), http.StatusBadGateway, "authorization failed",
+		{"authz 500", answer(http.StatusInternalServerError, `{"error":"policy error"}`), http.StatusBadGateway, wantAuthzFailed("500"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+		{"authz 502", answer(http.StatusBadGateway, `{"error":"decision audit failed","rule":"audit"}`), http.StatusBadGateway, wantAuthzNotRecorded,
 			ExchangeRefused, RefusedByAuthorizationFramework, RefusalAudit},
-		{"malformed 200", answer(http.StatusOK, `not json`), http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+		{"malformed 200", answer(http.StatusOK, `not json`), http.StatusBadGateway, wantAuthzNoToken, ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			env, rec, r := authzRow(t, row.fault, row.fault)
@@ -221,7 +221,8 @@ func TestAuthzAnswered_NotRetriedAnswersAsBefore(t *testing.T) {
 // 502 with no rule, an unknown one, a differently cased key or an unreadable
 // body, and a 500 that names one, are no stated rule: no authority could be
 // obtained, this gateway's refusal on authority, as for an authz that never
-// answered. Every caller's answer is unchanged.
+// answered. The caller is told the decision could not be recorded where the
+// rule is stated, the Framework's status otherwise, never the rule's name.
 func TestAuthzAuditRefusal_RecordedOnlyFromTheStatedRule(t *testing.T) {
 	t.Parallel()
 	for _, row := range []struct {
@@ -234,21 +235,21 @@ func TestAuthzAuditRefusal_RecordedOnlyFromTheStatedRule(t *testing.T) {
 		rule    string
 	}{
 		{"the audit rule stated", answer(http.StatusBadGateway, `{"error":"decision audit failed","rule":"audit"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByAuthorizationFramework, RefusalAudit},
+			http.StatusBadGateway, wantAuthzNotRecorded, ExchangeRefused, RefusedByAuthorizationFramework, RefusalAudit},
 		{"the same text, no rule", answer(http.StatusBadGateway, `{"error":"decision audit failed"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"a rule the gateway does not know", answer(http.StatusBadGateway, `{"error":"decision audit failed","rule":"ledger"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"a network rule the Framework does not state here", answer(http.StatusBadGateway, `{"error":"consent check failed","rule":"consent"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"a rule that is not a string", answer(http.StatusBadGateway, `{"error":"decision audit failed","rule":1}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"the rule under another key's case", answer(http.StatusBadGateway, `{"error":"decision audit failed","Rule":"audit"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"a body that is not JSON", answer(http.StatusBadGateway, `rule: audit`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("502"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"the rule on a 500", answer(http.StatusInternalServerError, `{"error":"decision audit failed","rule":"audit"}`),
-			http.StatusBadGateway, "authorization failed", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
+			http.StatusBadGateway, wantAuthzFailed("500"), ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"authz unreachable", transportFault(errors.New("tls: handshake failure"), false),
 			http.StatusServiceUnavailable, "could not be reached", ExchangeRefused, RefusedByProviderGateway, RefusalAuthority},
 		{"the rule on a proxy's 503", answer(http.StatusServiceUnavailable, `{"rule":"audit"}`),
@@ -482,7 +483,8 @@ func TestAuthzUnreachable_InvolvedTokenLeftOut(t *testing.T) {
 // request leg's token must also verify against the Framework's key, bound to
 // exactly that leg, before it is sealed in. Either way the leg is refused at
 // the requester on authority, a network rule, at every conformance level:
-// answered with the opaque 502, and it never reaches the Hub.
+// answered with a 502 that its answer carried no token the leg can use, and it
+// never reaches the Hub.
 func TestAuthzToken_RequiredAndVerifiedBeforeTheLegIsSent(t *testing.T) {
 	t.Parallel()
 	_, strangerKey := genED25519(t)
@@ -547,8 +549,11 @@ func TestAuthzToken_RequiredAndVerifiedBeforeTheLegIsSent(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			env, rec, r := run(t, row.fault)
-			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "authorization failed") {
-				t.Fatalf("answer %d %s, want 502 authorization failed", rec.Code, rec.Body.String())
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusBadGateway || body.Error != wantAuthzNoToken {
+				t.Fatalf("answer %d %s, want 502 %q", rec.Code, rec.Body.String(), wantAuthzNoToken)
 			}
 			if env.routeHitCount() != 0 {
 				t.Fatal("the leg was sent to the Hub")

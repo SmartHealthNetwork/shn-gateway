@@ -35,13 +35,13 @@ import (
 // in this file reach each text.
 func TestSentPayorRefusalTexts(t *testing.T) {
 	const prefix = "no payer identifier on member coverage: "
-	twoRefs := prefix + "the request's coverages name more than one payor Organization by reference alone"
+	tooMany := prefix + "the request's coverages name more payor Organizations by reference alone than this gateway reads for one request (5)"
 	pinned := [][2]string{
 		{noPayerSendPayor, prefix + "Coverage.payor is a reference to an Organization the gateway could not read; send the payor Organization with the coverage, or a payor identifier"},
 		{noPayerUnreadRef, prefix + "Coverage.payor is a reference to an Organization the gateway could not resolve; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"},
 		{noPayerIdentifierOnlyRef, prefix + "Coverage.payor is a reference to an Organization the gateway does not read; send a payor identifier with the coverage"},
-		{noPayerSentTwoRefs, twoRefs},
-		{sentPayorRefusal(fhirServerTwoPayors), twoRefs},
+		{noPayerSentTooManyRefs, tooMany},
+		{sentPayorRefusal(fhirServerTooManyPayors), tooMany},
 		{noPayerUnresolvedURN, prefix + "Coverage.payor is a urn reference no Bundle entry's fullUrl matches; send the payor Organization as a Bundle entry whose fullUrl is that reference, or a payor identifier"},
 	}
 	// The payor Organization read through the request's fhirServer: its
@@ -484,8 +484,10 @@ func TestCRDIngressSentBarePayorReadRefusals(t *testing.T) {
 			"no payer identifier on member coverage: fhirServer refused the fhirAuthorization token"},
 		"an error": {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(500, "", ""), 1, 412,
 			"no payer identifier on member coverage: fhirServer answered with an error"},
-		"two Organizations by reference alone": {bareRefSearchset("o1", "o2"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001")),
-			1, 422, noPayerSentTwoRefs},
+		// Every payor counts: each Organization is read, up to
+		// fhirServerPayorReadsMax; one more is refused.
+		"more Organizations by reference alone than the gateway reads": {bareRefSearchset("o1", "o2", "o3", "o4", "o5", "o6"), organizationByPath("00001"),
+			fhirServerPayorReadsMax, 422, noPayerSentTooManyRefs},
 		"an Organization with no payer identifier": {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(200, "application/json", `{"resourceType":"Organization","id":"o1","name":"Payer One"}`),
 			1, 422, noPayerOrganizationNoIdentifier},
 	} {
@@ -532,10 +534,10 @@ func TestExchangeRecord_SentBarePayorRefusals(t *testing.T) {
 		status   int
 		routing  bool
 	}{
-		"no such Organization":                 {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(404, "", ""), 412, true},
-		"two Organizations by reference alone": {bareRefSearchset("o1", "o2"), ehrAnswer(200, "application/json", payorOrganization("o1", "00001")), 422, true},
-		"nothing to read it through":           {sentBareCoverage(strangerMember, "Organization/o1"), nil, 422, true},
-		"another Organization answered":        {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(200, "application/json", payorOrganization("o2", "00001")), 502, false},
+		"no such Organization": {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(404, "", ""), 412, true},
+		"more Organizations by reference alone than the gateway reads": {bareRefSearchset("o1", "o2", "o3", "o4", "o5", "o6"), organizationByPath("00001"), 422, true},
+		"nothing to read it through":                                   {sentBareCoverage(strangerMember, "Organization/o1"), nil, 422, true},
+		"another Organization answered":                                {sentBareCoverage(strangerMember, "Organization/o1"), ehrAnswer(200, "application/json", payorOrganization("o2", "00001")), 502, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e, _ := recordingEHR(t, ehrAnswer(200, "application/json", payorOrganization("o1", "00001")))

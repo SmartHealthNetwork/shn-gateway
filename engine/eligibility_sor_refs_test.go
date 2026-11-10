@@ -307,6 +307,18 @@ func TestEligibilityIngress_SystemOfRecordReadFailureIsItsOwn(t *testing.T) {
 		"payor read fails": {body: eligibilitySoRRequest(t, map[string]any{"display": "the plan"}, nil, "Coverage/cov-1"),
 			held:   map[string]any{"Coverage/cov-1": eligibilitySoRCoverage("cov-1", byOrg)},
 			failed: "Organization/payer-org", status: unavailableStatus, msg: unavailableMsg},
+		// An insurer carrying an identifier of its own already names its
+		// payer: its reference is never read from the system of record, so
+		// a read that would fail is never made, and an identifier no
+		// participant registers is the routing refusal it always was.
+		"an unregistered insurer identifier: its Organization is never read": {body: eligibilitySoRRequest(t,
+			map[string]any{"reference": "Organization/payer-org", "identifier": map[string]any{"system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893"}}, nil),
+			failed: "Organization/payer-org", status: http.StatusUnprocessableEntity, msg: "no registered payer for identifier http://hl7.org/fhir/sid/us-npi|1234567893"},
+		// Every payor counts: a second payor's read failing is the system's.
+		"a second payor's read fails": {body: eligibilitySoRRequest(t, map[string]any{"display": "the plan"}, nil, "Coverage/cov-1"),
+			held: map[string]any{"Coverage/cov-1": withRef(eligibilitySoRCoverage("cov-1", map[string]any{"identifier": eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)}),
+				"payor", []any{map[string]any{"identifier": eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)}, byOrg})},
+			failed: "Organization/payer-org", status: unavailableStatus, msg: unavailableMsg},
 		"another resource answered": {body: eligibilitySoRRequest(t, byOrg, nil),
 			held:   map[string]any{"Organization/payer-org": map[string]any{"resourceType": "Patient", "id": "payer-org"}},
 			status: invalidStatus, msg: invalidMsg},
@@ -327,5 +339,65 @@ func TestEligibilityIngress_SystemOfRecordReadFailureIsItsOwn(t *testing.T) {
 				refusedBeforeTheNetwork(t, env, rec, row.status, row.msg)
 			})
 		}
+	}
+}
+
+// An insurer carrying an identifier of its own already names its payer: its
+// Organization is never read from the system of record, so a read that would
+// fail stops nothing. Registered, the request is carried and the payer's
+// answer relayed; unregistered, it is the routing refusal it always was. At
+// every level, with no read made.
+func TestEligibilityIngress_AFailedBestEffortReadDoesNotStopARoutedRequest(t *testing.T) {
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			sor := eligibilitySoRHolding(t, nil)
+			sor.readErrs = map[string]error{"Organization/payer-org": &SoRReadError{Kind: SoRUnavailable}}
+			env := eligibilitySoREnv(t, level, sor)
+			body := eligibilitySoRRequest(t, map[string]any{"reference": "Organization/payer-org",
+				"identifier": eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)}, nil)
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteEligibility)(rec, eligibilityIngressPost(body))
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s, %d legs sent; want the payer's answer, once", rec.Code, rec.Body, env.routeHitCount())
+			}
+			if read := sor.readsOf(); len(read) != 0 {
+				t.Fatalf("read %v, want no read", read)
+			}
+		})
+		t.Run("unregistered/"+level.String(), func(t *testing.T) {
+			sor := eligibilitySoRHolding(t, nil)
+			sor.readErrs = map[string]error{"Organization/payer-org": &SoRReadError{Kind: SoRUnavailable}}
+			env := eligibilitySoREnv(t, level, sor)
+			body := eligibilitySoRRequest(t, map[string]any{"reference": "Organization/payer-org",
+				"identifier": map[string]any{"system": "http://hl7.org/fhir/sid/us-npi", "value": "1234567893"}}, nil)
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteEligibility)(rec, eligibilityIngressPost(body))
+			refusedBeforeTheNetwork(t, env, rec, http.StatusUnprocessableEntity, "no registered payer for identifier http://hl7.org/fhir/sid/us-npi|1234567893")
+			if read := sor.readsOf(); len(read) != 0 {
+				t.Fatalf("read %v, want no read", read)
+			}
+		})
+	}
+}
+
+// A payor carrying an identifier of its own names its payer whatever the
+// Organization it references holds: one that cannot be read one way only (an
+// identifier value that is not a string) adds nothing, and the request routes
+// by the payor's own identifier, as on every other path, at every level.
+func TestEligibilityIngress_AnInlinePayorBesideAnUnreadableOrganizationRoutes(t *testing.T) {
+	coverage := eligibilityCoverage("cov", map[string]any{"reference": "#org",
+		"identifier": eligibilityPayorIdentifier(shnsdk.CMSPayerIdentity.Value)})
+	coverage["beneficiary"] = map[string]any{"reference": "Patient/" + prefetchMember}
+	org := map[string]any{"resourceType": "Organization", "id": "org", "identifier": []any{map[string]any{"system": "urn:x", "value": 5}}}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env := eligibilitySoREnv(t, level, eligibilitySoRHolding(t, nil))
+			body := eligibilitySoRRequest(t, map[string]any{"display": "the plan"}, []any{coverage, org}, "#cov")
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteEligibility)(rec, eligibilityIngressPost(body))
+			if env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s, %d legs sent; want routed once", rec.Code, rec.Body, env.routeHitCount())
+			}
+		})
 	}
 }

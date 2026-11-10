@@ -214,7 +214,7 @@ var validateFHIREntryPoints = []string{
 func TestValidateFHIRCallSiteFloor(t *testing.T) {
 	t.Parallel()
 	const (
-		wantTotal       = 36
+		wantTotal       = 35
 		wantDelegations = 1 // the wrappers' own internal delegation, in gateway.go (validateFHIRPayerIngress's candidate check calls the choke point directly, through the participant's module 3)
 	)
 	_, files := engineFiles(t, ".")

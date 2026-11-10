@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirclient"
@@ -28,7 +29,14 @@ func searchClient(hc *http.Client) *http.Client {
 		hc = http.DefaultClient
 	}
 	c := *hc
-	c.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirectRefused }
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// A downgrade is named as one (smartauth.ErrCleartextRedirect), so
+		// the read records it; every other redirect is refused as before.
+		if err := smartauth.RefuseCleartextRedirect(req, via); err != nil {
+			return err
+		}
+		return errRedirectRefused
+	}
 	return &c
 }
 
@@ -140,6 +148,8 @@ func (s *SoR) searchPage(parent, ctx context.Context, hc *http.Client, target st
 	resp, err := fhirclient.Do(hc, req)
 	if err != nil {
 		switch {
+		case errors.Is(err, smartauth.ErrCleartextRedirect) && !smartauth.IsTokenAcquisitionError(err):
+			return nil, engine.SearchCleartextRedirect()
 		case errors.Is(err, errRedirectRefused):
 			return nil, searchFailure(engine.SearchMalformed, "redirect refused")
 		case timedOut():

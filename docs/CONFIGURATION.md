@@ -122,6 +122,47 @@ claims that identity) **fails closed with 422**, and an ambiguous identity claim
 holder also fails closed (`AI-G12`). Set `PAYER_DIRECTORY` only to override this default with a
 static map.
 
+**Every payor counts, and the directory decides (from v1.9.0).** `Coverage.payor` carries no
+ordering meaning, so the gateway reads every payor of each Coverage and every identifier each
+names: its inline identifier, then each identifier of the Organization it references. It routes
+to the holder the directory registers for any of them, wherever it is listed (shn-sdk's
+`ChooseRegisteredPayer`), never by an identifier's position or system: an Organization that lists
+an NPI before its payer identifier, or a registered payor after an unregistered one, goes to that
+payer. Earlier releases read only the first identifier of the first payor. The gateway refuses
+`422` (routing), before any leg, at every conformance level, when:
+
+- the directory registers none of the identifiers: `no registered payer for identifier
+  <identifiers>: name the payer by an identifier the network registers for that payer, on the
+  Organization that Coverage.payor references (see the Participant Wire Protocol §1a,
+  Participant directory)`, naming up to five identifiers, then a count of the rest;
+- they name more than one registered payer, in one Coverage or across the Coverages, or one
+  Coverage names a registered payer and another names none: `ambiguous coverage for routing:
+  the coverage names more than one payer`;
+- a payor after the first carries no inline identifier and cannot be read as a payer
+  Organization with an identifier (its reference resolves to nothing, to an Organization with
+  no identifier, or to another kind of resource): `no payer identifier on member coverage:
+  payor[<i>] "<reference>" cannot be read as a payer Organization with an identifier, so the
+  coverage's payer is unknown`. The first payor keeps the refusals described with each request
+  below.
+
+A `Patient` or `RelatedPerson` payor (self-pay) names no payer and is passed over: its
+identifiers, even an inline one, are never routed on or named in a refusal. Its type is its
+reference's `type`, else the type of the resource the reference resolves to, else the type its
+literal reference names. R4 types `Coverage.payor` as `Organization | Patient | RelatedPerson`,
+so a payor stating any other type (a `Practitioner`, say) names a payer only by an identifier it
+carries itself, and its reference is never read; without one it is unknown. The
+coverage eligibility request names its own refusals (below).
+
+A payor that carries an identifier of its own already names its payer: its reference counts
+when what the request (or your record) itself carries resolves it, and is never read from your
+system of record or your EHR's `fhirServer` to route. (A request your gateway builds still reads
+the Organization of the payor routing chose, which it names.) A read of any other payor that your system of
+record fails leaves that payor unknown; when no payer is then found, the Organization that
+failed to load may have named it, so the answer is your system's failure (`502`, or `503` when
+it is unavailable), never a routing refusal. A request your gateway builds for you (origination) names the payer it routes to: the
+Claim's insurer is the Organization of the payor whose identifier routing chose, never a payor
+named only because it is first.
+
 **A request your gateway builds names your payer record.** When your gateway builds a
 prior-authorization request for you, the Claim names the payer's own Organization record, read
 from your system through the Coverage's `payor` reference, and a Coverage that names its payer by
@@ -155,6 +196,17 @@ answer as usual, whatever a later leg would have needed. From v1.4.0:
     `verify`).
 - **At the questionnaire leg:** a payer that declares no framed DTR operations (`422`, recorded
   as `routing`).
+- **At UC-05's data request** (from v1.9.0): the CDex data-request Task your gateway builds for
+  the facility is `$validate`d at your conformance level, before it is sent, against the
+  `cdex-task-data-request` profile its builder pins, on the lane that checks the facility's
+  answer. A defect is recorded at `observe` and the Task sent; it is refused `422 egress
+  validation failed: …` at `strict`, and at `structural` for a structural issue (a deeper one,
+  an invariant or a code outside its code list, is recorded and the Task sent). A validator your gateway cannot reach refuses
+  `500 validator unavailable` at `strict` and is recorded at `observe` and `structural`. It is
+  not checked at `none`. A validator lane that does not hold that profile (the supplied validator
+  image holds CDex 2.1.0) reads it as a structural issue. The PAS submission was already sent:
+  the payer's pend stands, and the answer says which legs were carried. Earlier releases sent the
+  Task unchecked.
 - **At UC-07's patient questionnaire exchange:** no patient health gateway registered (`422`,
   recorded as `routing`), and, on a lane whose patient answers a score, an answer that is no
   score (`400`).
@@ -215,12 +267,15 @@ payer holds whatever those legs asked of it: a submission refused at its amendme
 payer's pend in place, for a corrected `/complete` or an inquiry to continue.
 
 **A PAS Bundle's payor.** On `Claim/$submit` and `Claim/$inquire`, the gateway routes by the first
-Coverage's first `payor`: an identifier it carries routes first; otherwise its reference resolves
-among the Bundle's own entries, and the gateway never reads the payor from outside the Bundle. An
+Coverage's payors (every payor counts, as above): the identifier a payor carries, and the
+identifiers of the Organization its reference resolves to among the Bundle's own entries; the
+gateway never reads a payor from outside the Bundle. An
 absolute reference (a URL or a `urn:uuid`) names the entry whose `fullUrl` equals it; a relative
 `Organization/<id>` names the entry with that type and id, whatever its `fullUrl`; a `#<id>` names
-an Organization the Coverage contains. A reference several entries answer routes only when every
-one is an Organization naming the same payer identifier. When the payor names no payer identifier
+an Organization the Coverage contains. A reference several entries answer, when every one of them
+is an Organization, names every identifier they name, in document order, each once, and the
+payer directory decides among them as it does across payors (above): no entry is picked over
+another. Several entries that are not all Organizations are refused. When the payor names no payer identifier
 routing can read, the request is refused `422` `no payer identifier on member coverage`, followed,
 when the gateway can tell, by `: ` and the reason, which echoes nothing the request carried. (A
 `$submit` Bundle with no Coverage is refused earlier, `400 PAS bundle missing
@@ -230,7 +285,7 @@ Coverage.beneficiary`, so the first reason below is seen on `$inquire`.)
   - `the Coverage names no payor`
   - `Coverage.payor carries neither a reference nor an identifier with both a system and a value`
   - `Coverage.payor names a contained resource the Coverage does not contain`
-  - `Coverage.payor matches more than one entry of the Bundle, and they do not name one payer`
+  - `Coverage.payor matches more than one entry of the Bundle, and not every one is an Organization`
   - `Coverage.payor is an absolute reference that is no entry's fullUrl: the payor Organization must be an entry of the Bundle`
   - `Coverage.payor is a relative reference that matches no entry of the Bundle: the payor Organization must be an entry of the Bundle`
   - `Coverage.payor references a resource that is not an Organization`
@@ -406,7 +461,26 @@ There is nothing to configure:
   access), http-3xx, http-4xx, http-5xx, read, malformed, cancelled, or other
   (your system of record reported itself unavailable, a search of it failed,
   your connector cancelled a read itself, or a call to your system was
-  abandoned while the request it served was still live).
+  abandoned while the request it served was still live). From v1.9.0,
+  `resends` names each call sent a second time because your system answered `401`
+  to the token it carried (the same request, sent once more with a fresh token;
+  see [INTEGRATION.md](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)):
+  its `reason`, `credential-refreshed-after-401`, and its `challenge`, what the
+  `401`'s `WWW-Authenticate` said, recorded as seen and never used to decide:
+  `invalid_token` (a Bearer challenge naming that error), `other` or `none`. Each
+  resend is counted in `calls`.
+  From v1.9.0, `redirects` names each redirect your system answered a call with,
+  in order, by its class and never its URL: `same-origin` or `cross-origin` for a
+  redirect the gateway followed (a cross-origin one, and every later hop of its
+  chain, without the token or any `PAYER_DAVINCI_BACKEND_HEADERS` header), and
+  `https-to-http-refused` for a redirect from `https` to `http`, which the gateway
+  never follows, a redirect of a token request to your authorization server
+  included, and `token-redirect-refused` for any other redirect of a token request,
+  which the gateway never follows either, whatever its origin (see
+  [INTEGRATION.md](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)):
+  a read it ends fails with `http-3xx`, a forwarded operation it ends is refused
+  on message integrity, and a token request it ends fails the call that needed the
+  token as an unreachable token endpoint does.
 - `timeout` on a forwarded operation is your system not answering within
   this gateway's deadline for it (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by
   default, under the requester's 30 s leg budget). The deadline counts from
@@ -471,7 +545,8 @@ There is nothing to configure:
   gateway's own refusal) could not be authorized, the access line's
   `answerError` says why: `cancelled` (the request ended first: the requester
   had gone), `timeout` (the authorize call ran out of time), `auth` (the
-  Authorization Framework denied it), `unreachable` (it never answered) or
+  Authorization Framework denied it), `unreachable` (it never answered, or,
+  from v1.9.0, answered `429`: it is limiting this gateway) or
   `other`. The gateway also logs `gateway: <exchange> answer not authorized:
   <class> (correlation <leg id>)`. From v1.1.0, once your system has answered
   the forwarded operation, the gateway says so: the Hub is answered a raw `502`
@@ -487,9 +562,15 @@ There is nothing to configure:
   not sent and is recorded as this gateway's refusal on rule `authority`, and
   the access line's `authorizeError` says why, with the classes `answerError`
   uses. A denial, and the Framework's audit refusal, stay the Framework's. The
-  caller's answer is unchanged: `503` when the Framework could not be reached,
-  else `502 authorization failed`. A request that ended first has
-  `authorizeError` `cancelled` and is no refusal.
+  caller's answer is `503` when the Framework could not be reached. From v1.9.0
+  a Framework `429` is also a `503`, `the authorization service is limiting this
+  gateway, so this leg was not sent`, carrying the Framework's `Retry-After` only
+  when it sent exactly one well-formed value, and recorded as the Framework
+  unavailable; any other failure is a `502` whose `error` names the Framework's
+  status and the failure's class, never the Framework's own text
+  (PARTICIPANT_PROTOCOL.md §4.1). Before
+  v1.9.0 each of those was `502 authorization failed`. A request that ended first
+  has `authorizeError` `cancelled` and is no refusal.
 - `findings` counts the conformance findings the call's checks recorded; each
   finding keeps its own `gateway: conformance:` line. From v0.60.0, at `observe`
   the line carries `"deferred": true` instead of a count (`count` reads 0 and
@@ -614,7 +695,13 @@ There is nothing to configure:
   `E-12:request-carried-a-questionnaire`, `E-12:not-under-base`, `E-12:escaped-address`,
   `E-12:base-spelled-differently`, `E-12:unreadable-tag`, `E-12:unclean-remainder`,
   `E-12:unreadable-address`, `E-12:unreadable-answer` and `E-12:address-not-writable`, each
-  described there. Absent when empty. Evolving.
+  described there. From v1.9.0, on a PAS inquiry, a CDS Hooks request or a DTR
+  `$questionnaire-package` request a payer's gateway forwards to its own system with the
+  payer identity mapping on (see
+  [Payer backend identity mapping](#payer-backend-identity-mapping)): `E-03:no-coverage` (the
+  request carries no Coverage anywhere, so it names no payor to re-stamp, and it is carried as
+  sent).
+  Absent when empty. Evolving.
 - `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
   `Retry-After` of a participant's 2xx answer that was not carried, and, from v1.7.0, each
   `operationBase` or `operationAddressTags` a payer's gateway states on a DTR answer that was not
@@ -1429,14 +1516,14 @@ task-based data request) — and forwards them through to the Hub. A CDS Hooks r
 sent it, with `fhirServer` and `fhirAuthorization` removed; the payer never gets a callback
 into your systems. By default the gateway itself reads your EHR's FHIR server through
 `fhirServer` in two cases only, both to choose the payer: a request with no coverage to route
-by, for a member your system of record does not hold (a Coverage search, and at most one read
-of its payor Organization; from v0.61.0 the records the payer was chosen by are then carried
+by, for a member your system of record does not hold (a Coverage search, and a read of each
+payor Organization routing needs, at most five from v1.9.0, at most one before; from v0.61.0 the records the payer was chosen by are then carried
 as the request's `prefetch.coverage`, since the payer cannot read them once `fhirServer` is
 removed; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)),
 and a coverage your EHR sent that names its payor Organization by reference alone, which the
 request does not resolve, for any member: unless that `fhirServer` is your system of record's
-own FHIR base and your system resolves it (one read of that Organization, only to choose the
-payer and never carried; see [CDS Hooks prefetch](#cds-hooks-prefetch)). Set
+own FHIR base and your system resolves it (one read of each such Organization, at most five from
+v1.9.0, only to choose the payer and never carried; see [CDS Hooks prefetch](#cds-hooks-prefetch)). Set
 `CDS_FHIR_SERVER_READ=off` to turn both off; then nothing is read or carried. Apart from that
 carried coverage, nothing is added to a request your EHR sends by default: set
 `ENRICH_NATIVE_REQUESTS=true` to have the gateway add what a request leaves out from
@@ -1499,8 +1586,10 @@ in another case is refused as above (`… the Bundle's entries cannot be read on
   `REQUIRE_KNOWN_MEMBERS=true`, a request for a member your system does not hold is refused,
   naming which request of the batch.
 - **Routing.** Each request is routed by its `insurer`, the request's recipient: its
-  identifier, or an Organization the request carries; failing that, by the first payor of each
-  Coverage it carries and names in `insurance` (an identifier, or an Organization it carries).
+  identifier, or an Organization the request carries, by whichever of that Organization's
+  identifiers the directory registers; failing that, by every payor of each Coverage it carries
+  and names in `insurance` (an identifier, or an Organization it carries), as "Every payor
+  counts" above says.
   Every coverage it names must name a payer, and all of them the same one: a coverage naming
   none is not passed over for another. A reference is resolved among the resources the
   request carries: a `#id` among the referring resource's contained resources, and, in a
@@ -1543,8 +1632,15 @@ in another case is refused as above (`… the Bundle's entries cannot be read on
   coverages naming different payers, whether carried or read from your system, `422 the eligibility
   request names more than one payer: …`; a contained id it is routed by that more than one
   contained resource has, or a reference more than one Bundle entry answers (unless they are
-  Organizations naming one payer), `422 ambiguous reference for routing: …`; an unregistered
-  payer, `422 no registered payer for identifier …`.
+  all Organizations, whose identifiers then all count, the directory deciding), `422 ambiguous
+  reference for routing: …`; an insurer
+  Organization whose identifiers name different registered payers, `422 the eligibility request
+  names more than one payer: its insurer's identifiers name different payers, …`; a payor after
+  the first that names no payer the gateway can read, `422 no payer to route the eligibility
+  request by: …: insurance[i].coverage "<reference>", payor[<i>] "<reference>" cannot be read as
+  a payer Organization with an identifier, so the coverage's payer is unknown`; an unregistered
+  payer, `422 no registered payer for identifier …`, whose remedy, when the insurer named it,
+  points to the insurer Organization the request names.
 - **The payer's answer** is relayed exactly. One that repeats a member name is refused `502`
   at every level. One that is not a `CoverageEligibilityResponse` naming its patient, or a
   `Bundle` of them (each with the resources it references), is relayed
@@ -1664,8 +1760,8 @@ name no patient for this member)`), holds no Coverage
 errors](#system-of-record-search-errors)) or is unavailable (503). A Coverage that references its payor
 Organization is resolved among the request's own resources and the records the search
 included, then by one read from your system of record, with or without the opt-in below;
-records that answer the reference without naming one payer are refused (422), as for the CDS
-Hooks prefetch. By default the Coverage is only routed by: it is searched (every Coverage, no
+records that answer the reference name every identifier they name, and are refused (422) when
+not every one is an Organization, as for the CDS Hooks prefetch. By default the Coverage is only routed by: it is searched (every Coverage, no
 status filter) under your system's own id for the patient, and the request is sent as your
 EHR sent it. The payer then receives a request without a coverage, as it would from your EHR
 directly; a payer's gateway that runs `strict` refuses it (`400`), and its answer is relayed
@@ -2036,10 +2132,11 @@ For each key:
   Organization is resolved against every prefetch value the request carries (a resource, or
   the entries of a Bundle value), whatever its key: an absolute reference (a URL, or a
   `urn:uuid`) names the Bundle entry whose `fullUrl` equals it, and `Organization/<id>` the
-  resource with that type and id. Several that answer must each be an Organization naming
-  the same payer identifier; otherwise the request is refused, at every level, with `422 no
+  resource with that type and id. Several that answer, every one an Organization, name every
+  identifier they name, and the payer directory decides among them as it does across payors
+  ("Every payor counts", above); otherwise the request is refused, at every level, with `422 no
   payer identifier on member coverage: Coverage.payor matches more than one resource of the
-  request, and they do not name one payer` (for a coverage your system of record supplied,
+  request, and not every one is an Organization` (for a coverage your system of record supplied,
   `… of the request and the system of record's Coverage search …`: its search's records are
   among the values), and the payor is then never read from your system of record or
   `fhirServer`. An EHR that fulfils the coverage template exactly sends no Organization (the
@@ -2070,10 +2167,11 @@ For each key:
   fhirAuthorization token`, an answer that is not that Organization `502 no payer identifier
   on member coverage: fhirServer's answer is not the payor Organization`. A failed read of
   your system of record is its failure status (`503 system of record unavailable`, or `502`
-  for an answer it cannot read), and `fhirServer` is then not read. Coverages naming the same
-  Organization share the read; two different Organizations named by reference alone are
-  refused `422 no payer identifier on member coverage: the request's coverages name more than
-  one payor Organization by reference alone`. A reference to another server, a versioned one,
+  for an answer it cannot read), and `fhirServer` is then not read. Payors naming the same
+  Organization share the read; every payor counts, so each different Organization routing needs
+  is read, up to five for one request (from v1.9.0; before, a second was refused), and more are
+  refused `422 no payer identifier on member coverage: the request's coverages name more payor
+  Organizations by reference alone than this gateway reads for one request (5)`. A reference to another server, a versioned one,
   or one with a fragment, a leading slash or a dot segment is never read (nor, with
   `CDS_FHIR_SERVER_READ=off`, one absolute on `fhirServer` itself, except in your system of
   record at the same base as above). When nothing resolves the payor the request is refused
@@ -2218,12 +2316,15 @@ the Coverages it chose to route by (the active ones your system of record holds 
 member, else the others; each record exactly), the order as the payer returned it, the
 payer's `coverage-assertion-id` as `context` when the answer gives one, and **one**
 questionnaire: the first the payer's answer names, exactly as stated (a `|version` kept).
-When a Coverage it carries names its payer (its first `payor` reference, the one routing
-reads) by a reference to a record outside itself, the request also carries that payer
+When a Coverage it carries names its payer (any of its `payor` references; every payor counts)
+by a reference to a record outside itself, the request also carries that payer
 Organization as a `referenced` parameter, each record your system supplied once, exactly as
 your system of record holds it: the record your Coverage search included for a relative
 reference (`Organization/<id>`), else the record your system supplied, for the same reference,
-when the gateway read the payer of the Coverage it routes by. A payer
+when the gateway read the payer of the Coverage it routes by. From v1.9.0 every payor of each
+carried Coverage counts, so each payor's Organization is carried so, and the record read for the
+payer is the Organization of the payor routing chose, never one named only because it is
+first. A payer
 that resolves the Coverage's payor from the request can then do so. A Coverage that contains
 its payer Organization, or names its payer by identifier alone, adds nothing. A reference
 that no record your system supplied answers, or that several different Organizations answer,
@@ -2280,23 +2381,26 @@ never read `fhirServer`.
   Organization it references when the answer resolves it (an Organization entry or a contained
   one). Chosen Coverages naming two payers are refused as ambiguous (`422 ambiguous coverage
   for routing: …`).
-- **At most one more read, of the payor Organization.** When a Coverage names its payor only
-  by reference (`Organization/<id>`, or the same written absolute on the `fhirServer` base) and
-  nothing in the answer resolves it, the gateway reads `GET {fhirServer}/Organization/<id>`
-  once, with the same token and the same checks. Coverages naming the same Organization share
-  that read; two different Organizations named by reference alone are refused (below). A
-  reference to another server, or a versioned one, is never read, and such a Coverage is
-  refused as any coverage without a payer (`422 no payer identifier on member coverage`), as
-  is an Organization that carries no payer identifier. (The same single read resolves the
-  payor of a coverage your EHR sent; see [CDS Hooks prefetch](#cds-hooks-prefetch).) So your FHIR server must allow a
+- **A read of each payor Organization routing needs (from v1.9.0; before, at most one).** When
+  a payor names its Organization only by reference (`Organization/<id>`, or the same written
+  absolute on the `fhirServer` base), carries no identifier of its own (a payor that does
+  already names its payer, and its reference is never read), and nothing in the answer
+  resolves it, the gateway reads `GET {fhirServer}/Organization/<id>` once, with the same token
+  and the same checks. Every payor counts, so each such Organization is read; payors naming
+  the same Organization share that read. More than five for one request are refused (below).
+  A reference to another server, or a versioned one, is never read, and such a payor is
+  refused as any payor without a payer (`422 no payer identifier on member coverage`), as is
+  an Organization that carries no payer identifier. (The same reads resolve the payors of a
+  coverage your EHR sent; see [CDS Hooks prefetch](#cds-hooks-prefetch).) So your FHIR server must allow a
   Coverage search and an Organization read with the token.
 - **What routing used is carried (from v0.61.0).** Once the request is routed, the gateway
   adds `prefetch.coverage` (creating `prefetch` when the request has none): a `searchset` it
   writes, with a `match` entry for each Coverage the payer was chosen by (the active ones, else
   all of them, in your server's order) and an `include` entry for the payor Organization the
-  payer was chosen by for each of them (the first payor, as routing reads it; one with a payor
-  identifier of its own needs none), whether your server's search returned it or the gateway
-  read it. Each
+  payer was chosen by for each of them (from v1.9.0 the Organization of every payor routing
+  resolved, a payor with an identifier of its own included; before, the first payor's, and none
+  for a payor with an identifier of its own), whether your server's search returned it or the
+  gateway read it. Each
   resource is exactly the bytes your server returned; each entry's `fullUrl` is a `urn:uuid:`
   the gateway assigns, with one exception: an included Organization that a carried Coverage
   names by an absolute reference on the request's `fhirServer` base (compared with the scheme
@@ -2365,9 +2469,9 @@ request, and the exchange record names your gateway as the refusing party, rule 
 `502`s are your EHR's server answering wrongly, recorded as `other`. Each begins `no coverage to
 route by: `; on the read of the payor of a coverage your EHR sent (see
 [CDS Hooks prefetch](#cds-hooks-prefetch)), which carried a coverage, the same reason and status
-begin `no payer identifier on member coverage: ` instead (two Organizations by reference alone:
-`422 no payer identifier on member coverage: the request's coverages name more than one payor
-Organization by reference alone`):
+begin `no payer identifier on member coverage: ` instead (more than five Organizations by
+reference alone: `422 no payer identifier on member coverage: the request's coverages name more
+payor Organizations by reference alone than this gateway reads for one request (5)`):
 
 | Refusal | Status |
 |---|---|
@@ -2392,7 +2496,7 @@ Organization by reference alone`):
 | `fhirServer holds no Organization for the coverage's payor` (a `404` or `410` on the Organization read) | 412 |
 | `fhirServer returned another patient's coverage` (a Coverage whose patient reference names another patient: another `Patient` id, or the member identifier with another member's value) | 502 |
 | `fhirServer's answer is not the payor Organization` (not JSON, or not the Organization asked for) | 502 |
-| `fhirServer's coverages name more than one payor Organization by reference alone` | 422 |
+| `fhirServer's coverages name more payor Organizations by reference alone than this gateway reads for one request (5)` | 422 |
 
 ## Take a payer's request for documentation: the attachment-request Task (provider, optional)
 
@@ -2578,7 +2682,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_DTR_BASE_URL` | Base URL for the partner's DTR operations (`/Questionnaire/$questionnaire-package`, `/Questionnaire/$next-question`) when they are **not** co-located with the PAS base — e.g. a payer that serves DTR under `/dtr` and PAS under `/pas`. Empty ⇒ DTR uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
-| `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
+| `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v1.9.0, a member's several Coverages name this payer when each carries one of its own identities, those it publishes on the network feed and, with the payer identity mapping on, its configured and backend ones, on some payor, in any position, or, failing that, the payer directory resolves their identifiers to one holder, or, when it resolves none of them, they name the same identifiers in any order; otherwise the request is refused `422 ambiguous coverage for routing: the member's Coverage records do not name one payer`) (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
 
 **Where each operation goes.** For every PAS, DTR and CDex forward the gateway resolves the URL in this order: under the base your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then under the per-operation base if you set one, then under `PAYER_DAVINCI_BASE_URL`. HRex 1.2.0 defines each published value as the base an operation is invoked on, not the operation's URL, so the gateway always adds the operation's path to it: `davinci_pas_submission_endpoint#<line>` is the base for `/Claim/$submit` (submit and update) and `/Claim/$inquire`, `davinci_dtr_qpackage_endpoint#<line>` the base for `/Questionnaire/$questionnaire-package` (the gateway sends `/Questionnaire/$next-question` under the same base), and `davinci_cdex_attachsubmit_endpoint#2.1` the base for `/$submit-attachment`. The operation's path is added where the published base's path ends, before any query or fragment: the slashes that end the published path are dropped first, so none is doubled, and the rest of the URL the gateway builds is the published value as written, sent as any URL the gateway calls is. Nothing is read from how a published path ends: a value that already names an operation is still a base, so the operation's path is added to it and your system answers that URL; publish the base. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its bases win and the configured bases are only the fallback. The published CDex base is honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
 
@@ -2595,7 +2699,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
 | `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48); from shn-gateway v0.62.0 only with `REQUIRE_SHARED_LINE=true`, and by default such a leg is forwarded as sent and the carry recorded. Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
-| `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. From v1.9.0, a redirect your system answers with to another origin (another scheme, host or port) is followed without them, as it is without `Authorization`, and they are not sent after the first hop to another origin, for the rest of the redirect chain, even back at your system; a chain of redirects within your system's origin keeps them. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_TIMEOUT` | How long this gateway waits for your system on each operation it forwards, counted from the leg's arrival at this gateway, as a Go duration from `1s` to `28s` (from v0.59.0). Unset: `25s`, under the requester's 30 s leg budget by enough that a system slower than it is answered as its own timeout, this gateway's framed `504`, while the requester is still waiting, and recorded as your system's `timeout`. Any other value refuses the boot, as does setting it without `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | Whether each operation forwarded to your system carries `X-Correlation-Id` with the leg's id. Unset (or `on`, the default): it does. `off`: no `X-Correlation-Id` is sent, for a system that validates that header its own way; nothing else changes. Any other value refuses the boot, as does `off` without `PAYER_DAVINCI_BASE_URL`. `PAYER_DAVINCI_BACKEND_HEADERS` can never name `X-Correlation-Id`, whatever this is set to. |
 | `PAYER_DAVINCI_STRICT_EXTENSIONS` | **No longer read** (from shn-gateway v1.0.0). It reserved a per-peer strict-extensions overlay (FR-G52) that never had a routing effect. A gateway that sets it, to any value, logs `gateway: WARNING: PAYER_DAVINCI_STRICT_EXTENSIONS is set but no longer read` at boot and starts; remove it. A gateway SHN hosts for you no longer renders it. |
@@ -2678,12 +2782,17 @@ When both are set, every CDS Hooks (`order-select`, `order-sign` and `order-disp
 and PAS request this gateway forwards to your system has the payor identifier of **every**
 `Coverage` it carries re-stamped to
 `PAYER_DAVINCI_PAYOR_BACKEND` — but **only** when the inbound identifier is genuinely your
-own. The identifier is the `Coverage.payor` identifier itself, or the first identifier
-with a system and value on the payer `Organization` it references (contained in the
-Coverage, or another resource of the same Bundle or prefetch). Each Coverage is read by its
-first `payor`, the one the network routes on. A PAS Claim's `insurer` is resolved the same
-way and re-stamped too when it names your identity; an insurer that names you under
-another identifier (for example your NPI) is left as sent.
+own. Every payor of a Coverage counts (`Coverage.payor` carries no ordering meaning). A
+payor names you when its inline identifier is one of yours, or, failing that, when the payer
+`Organization` it references (contained in the Coverage, or another resource of the same
+Bundle or prefetch) lists one of yours, wherever it sits: the first such identifier. Only that
+identifier is re-stamped; every other identifier (an inline NPI beside your Organization's
+identifier, say), and every payor naming none of yours, is left as sent. A
+Coverage none of whose payors names one of yours is refused as another payer's (below), judged
+by its first payor. Before v1.9.0, each Coverage was read by its first `payor` alone, by its
+Organization's first identifier. A PAS Claim's `insurer` is resolved the same way and
+re-stamped too when it names your identity; an insurer that names you under another
+identifier (for example your NPI) is left as sent.
 
 **Which identities count as yours.** The pair above is all-or-nothing: setting
 `PAYER_DAVINCI_PAYOR_OWN` and `PAYER_DAVINCI_PAYOR_BACKEND` together turns the mapping on
@@ -2729,16 +2838,26 @@ A request is refused with a clear error, never silently forwarded, when:
   (the same 422, naming the reference). Which payer answers is decided on the Coverages, so
   below `strict` that insurer is left as sent (recorded as a finding at `observe`) and the
   Coverages are re-stamped as usual;
-- a PAS submission or amendment carries no `Coverage` at all (400 `PAS bundle missing
-  Coverage.beneficiary`), at every level: there is no payor to re-stamp. Without the
-  mapping, such a Bundle is refused only at `strict`;
+- a PAS submission or amendment carries no `Coverage` at all (400 `PAS bundle carries no
+  Coverage`), at every level: there is no payor to re-stamp. Without the
+  mapping, such a Bundle is refused only at `strict`. A PAS inquiry that carries no
+  `Coverage` anywhere is not refused: from v1.9.0 it is forwarded exactly as it arrived, as
+  it is without the mapping, and recorded as `E-03:no-coverage` (before v1.9.0, the 400
+  `inbound Coverage carries no resolvable payor identifier`). An inquiry that holds a Coverage
+  only where the mapping does not read one is still refused with that 400. The mapping reads a
+  Coverage only as the `resource` of one of the Bundle's own entries, spelled exactly
+  `"resourceType": "Coverage"`. Any other object in the inquiry whose `resourceType` member
+  names Coverage, whatever the case of the member's name and value, is one it does not read:
+  for example a contained one, one in a Bundle or `Parameters` nested in an entry, or an entry
+  that spells `resourceType` or `Coverage` in another case;
 - the identifier to re-stamp is covered by a signature inside the message (a
   `Bundle.signature`, a `Provenance` signature, or a `Signature` element) — 422
   `signed content cannot be edited (E-03, <signature>)`. The gateway never strips a
   signature and never forwards a stale one.
 
 A CDS Hooks request that carries no Coverage at all has nothing to map, and is forwarded to your
-system exactly as it arrived; your own system answers it. The network has already routed it
+system exactly as it arrived; your own system answers it. From v1.9.0 its exchange record names
+the edit not made, `E-03:no-coverage`. The network has already routed it
 to you. A CDS Hooks request carries no Coverage only when both hold: its `prefetch`, or
 `prefetch.coverage`, is absent or `null`, or `prefetch.coverage` is a Bundle whose `entry` is
 absent, `null`, or holds only entries whose `resource` is an `OperationOutcome` (a search
@@ -2756,7 +2875,9 @@ from v0.60.0 and before v0.61.0, the EHR's `fhirServer`) and carried nothing it 
 v0.61.0 a coverage the requester's gateway read through the EHR's `fhirServer` is carried as a
 `searchset` with `urn:uuid:` entries (an included Organization that a Coverage names by an
 absolute reference has that reference as its `fullUrl`), which your gateway maps like any other. A DTR request with no
-coverage parameter is forwarded as it arrived too. Your conformance level still applies:
+coverage parameter is forwarded as it arrived too (at `none` and `observe`, when it names its
+patient elsewhere); from v1.9.0 its record names `E-03:no-coverage` when no Coverage appears anywhere
+in it. Your conformance level still applies:
 an `order-select` or `order-sign` request whose coverage beneficiary cannot be read is the
 request's own shape, refused at `structural` and `strict` and carried below.
 
@@ -3121,7 +3242,7 @@ tradeoff.
 | Env var | Description |
 |---|---|
 | `PROVIDER_DTR_NATIVE` | `true` to forward DTR population to an SDC `$populate` engine instead of the managed populator. Default `false`. |
-| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. Required when `PROVIDER_DTR_NATIVE=true`, and on a provider for `ORIGINATION_PROFILE=demo` / `provider-data` (the operated engine those lanes require). A profile on any other role does not require it. |
+| `PROVIDER_DTR_POPULATE_URL` | The SDC `Questionnaire/$populate` endpoint. From shn-gateway v1.9.0 the request is sent as `application/fhir+json`, with `Accept: application/fhir+json, application/json` (before, `application/json` for both). Required when `PROVIDER_DTR_NATIVE=true`, and on a provider for `ORIGINATION_PROFILE=demo` / `provider-data` (the operated engine those lanes require). A profile on any other role does not require it. |
 | `PROVIDER_DTR_POPULATE_TOKEN_URL` | SMART Backend Services token endpoint the gateway authenticates to the `$populate` engine with. Sets the connector's **own** credential block — the engine may be your SoR under the same registration, or a separate server with its own; either way the connector mints its own bearer and never reuses the `FHIR_*` client's. Requires `PROVIDER_DTR_POPULATE_URL`. |
 | `PROVIDER_DTR_POPULATE_CLIENT_ID` | Client id the token endpoint knows the connector by. Required with `PROVIDER_DTR_POPULATE_TOKEN_URL`. |
 | `PROVIDER_DTR_POPULATE_CLIENT_KEY` | Path to the PEM private key for `private_key_jwt`. |
@@ -3170,15 +3291,19 @@ gateway no answer (the connection refused, reset or closed before any response, 
 within the gateway's HTTP client timeout, or a `503` or `504` from a proxy or load
 balancer in front of it; the Framework never answers those itself) is answered
 `503 {"error":"the authorization service could not be reached, so this leg was not sent to
-the payer"}` (an `OperationOutcome` with issue code `transient` on the FHIR operation
+the recipient"}` (`to the payer` before v1.5.0; an `OperationOutcome` with issue code `transient` on the FHIR operation
 routes), and the leg is recorded as this gateway's refusal on rule `authority`, with
 `authorizeError` saying why; before, it was `502 {"error":"authorization failed"}`. The leg is not sent to the Hub: a Da Vinci ingress
 call is one leg, so its caller can resend it. The gateway makes that call once more, with a fresh holder assertion, only when
 the first attempt failed with a refused, reset or closed connection before its request was
 written: after the write the Framework may already have decided and recorded its decision.
-A `403` denial is `403 {"error":"authorization denied"}`, and any other answer from the
-Framework, or one the gateway cannot read, stays `502 {"error":"authorization failed"}`;
-neither is retried.
+A `403` denial is `403 {"error":"authorization denied"}`. From v1.9.0 a `429` is
+`503 {"error":"the authorization service is limiting this gateway, so this leg was not
+sent"}`, with the Framework's `Retry-After` when it sent exactly one well-formed value, and
+any other answer from the Framework, or one the gateway cannot read, is a `502` whose
+`error` names the Framework's status and the failure's class (PARTICIPANT_PROTOCOL.md §4.1
+lists each); before v1.9.0 each was `502 {"error":"authorization failed"}`. None is
+retried.
 
 Two timeouts are named rather than left generic. One is a Hub leg that produces **no answer
 within the wait your gateway gives it**. The originating gateway posts each exchange to the
@@ -3351,7 +3476,7 @@ plans translations to it again at the first answer of any status. The gateway lo
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_SHARED_LINE` | `true` or `false`; unset means `false`. From shn-gateway v0.62.0. Set `true` and your gateway refuses, as `routing`, a pair that shares no declared IG line: a leg to a peer that no shared line, native reach or transform chain reaches (`422 no shared contract line …`); a leg forwarded to your own Da Vinci system (`PAYER_DAVINCI_CONTRACT_VERSIONS`) on the same terms; a request whose frame claims a line your gateway cannot build or validate at (`422 request declares contract version …`); from shn-gateway v0.63.0, whatever lines the pair shares, an amendment or inquiry your gateway builds about a pended prior authorization whose pinned line nothing reaches any more (your system's own is carried exactly as sent) (`422 … no bridge to the pinned line … remains available`; unset, it is built at a line you declare, one the payer also declares if there is one, and carried); a request whose walk to the payer's line would change it, from your own EHR (CDS Hooks or questionnaire-package) or built by your gateway (questionnaire-package, PAS inquiry) (`422 … cannot be carried to the payer's line unchanged`); and a 2xx answer stamped with another line than the leg routed (`502 … response contract version mismatch …`). Unset, each is carried and recorded. It never changes the line a pair that shares one routes at. Before v0.62.0 every one of these was refused. Any other value refuses to boot. |
+| `REQUIRE_SHARED_LINE` | `true` or `false`; unset means `false`. From shn-gateway v0.62.0. Set `true` and your gateway refuses, as `routing`, a pair that shares no declared IG line: a leg to a peer that no shared line, native reach or transform chain reaches (`422 no shared contract line …`); a leg forwarded to your own Da Vinci system (`PAYER_DAVINCI_CONTRACT_VERSIONS`) on the same terms; a request whose frame claims a line your gateway cannot build or validate at (`422 request declares contract version …`); from shn-gateway v0.63.0, whatever lines the pair shares, an amendment or inquiry your gateway builds about a pended prior authorization whose pinned line nothing reaches any more (your system's own is carried exactly as sent) (`422 … no bridge to the pinned line … remains available`; unset, it is built at a line you declare, one the payer also declares if there is one, and carried); a request whose walk to the payer's line would change it, from your own EHR (CDS Hooks or questionnaire-package) or built by your gateway (PAS inquiry) (`422 … cannot be carried to the payer's line unchanged`); and a 2xx answer stamped with another line than the leg routed (`502 … response contract version mismatch …`). Unset, each is carried and recorded. It never changes the line a pair that shares one routes at. Before v0.62.0 every one of these was refused. Any other value refuses to boot. |
 | `TRANSLATE_IG_LINES` | `true` or `false`; unset means `false`. From shn-gateway v0.63.0. Optional, and off unless you turn it on. Set `true` and your gateway translates between IG lines: a message it builds for a peer that shares no line with it is carried to the peer's line through the registered compatibility steps where a certified translation exists (a chain whose only outcome would be a refusal, such as one that needs PAS's gated 2.0 to 2.1 step, is never planned: the message is carried at its own line and recorded), and a payer's questionnaire package answer from another DTR line is carried into your gateway's line's parameter names (E-08). The boot log states `TRANSLATE_IG_LINES=true` when it is on. Unset, nothing is translated: such a message is built natively at a line the peer declares where it can be, else carried as sent and recorded, and the answer is carried exactly. Before v0.63.0 every gateway translated. Any other value refuses to boot. |
 | `SHN_CONTRACT_VERSIONS` | This gateway's own **declared** exchange-contract versions: comma-separated `<contract>@<line>` tokens, e.g. `pa.crd@2.2, pa.dtr@2.2, pa.pas@2.2`. Drives leg selection, the published `CapabilityStatement`s and `.well-known/davinci-configuration`, and the declaration peers route against. Must be a **subset of the native set** (`pa.crd@{2.0,2.1,2.2}`, `pa.dtr@{2.0,2.1,2.2}`, `pa.pas@{2.0,2.1,2.2}`) — a token outside it is a boot error, not a routing outcome. From shn-gateway v0.62.0 no gateway declares `pa.pdex@2.1`: a gateway serves no Patient Access API and builds no PDex resource, and a set still naming it refuses boot with an error saying to remove it (remove it before upgrading; earlier releases boot without it too). Unset ⇒ the build default, the canonical `2.0` line (`pa.crd@2.0`, `pa.dtr@2.0`, `pa.pas@2.0`; before v0.62.0 also `pa.pdex@2.1`). From shn-gateway v0.59.0, a payer that forwards to its own system (`PAYER_DAVINCI_BASE_URL`) and declares that system's versions (`PAYER_DAVINCI_CONTRACT_VERSIONS`) derives this set instead when it is unset: the system's `pa.crd`, `pa.dtr` and `pa.pas` lines (before v0.62.0, plus `pa.pdex@2.1`). The gateway logs `gateway: declaring <set>, derived from PAYER_DAVINCI_CONTRACT_VERSIONS` at boot; the registry entry peers select it against must declare the same set (see [Opting a line in](#opting-a-line-in), step 3). A derived line needs its validator lane exactly as a declared one does, and a system line this build cannot exchange refuses boot, naming it. Earlier releases declare the build default, which advertises lines the forward then refuses. From shn-gateway v0.59.0, any payer that forwards to its own system also refuses to boot when its declaration, set or derived, has no `pa.crd`, `pa.dtr` or `pa.pas` line: no provider could reach it for prior authorization. |
 | `FHIR_VALIDATE_URL_2_1` | Optional **2.1** `$validate` address override. Compose default: `http://shn-validator-2-1:8080/fhir`. |

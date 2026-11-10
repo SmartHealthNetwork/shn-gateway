@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -21,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -112,6 +114,13 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 		base, tag, ok := endpointcert.Unwrap(tgt.Client.Transport)
 		if w, known := want[tgt.ID]; !ok || !known || tag != w || base != nil {
 			t.Errorf("check target %s's client is tagged %v (%v) over %T, want %v over the runner's transport", tgt.ID, tag, ok, base, w)
+		}
+		// Every target's client is under the redirect policy: a hop from
+		// https to http is refused before it is sent.
+		https, _ := url.Parse("https://system.example/metadata")
+		plain, _ := url.Parse("http://system.example/metadata")
+		if tgt.Client.CheckRedirect == nil || !errors.Is(tgt.Client.CheckRedirect(&http.Request{URL: plain, Header: http.Header{}}, []*http.Request{{URL: https}}), smartauth.ErrCleartextRedirect) {
+			t.Errorf("check target %s's client follows a redirect from https to http", tgt.ID)
 		}
 	}
 }
