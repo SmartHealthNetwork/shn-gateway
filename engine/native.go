@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -513,6 +514,13 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 	resp, err := client.Do(req)
 	x.resent(refresh.Resends())
 	x.redirected(redirects.Hops())
+	// The system answered with a redirect within its origin that would change
+	// the request's method or drop its body: the hop was not sent, and its 3xx
+	// is the system's answer, carried below as any answer that is not a 2xx.
+	// This gateway's operator is told why (smartauth.RefuseMethodChangeRedirect).
+	if err == nil && resp != nil && slices.Contains(redirects.Hops(), smartauth.RedirectMethodChangeRefused) {
+		logMethodChangeRedirect(ctx, label, leg, resp.StatusCode)
+	}
 	// The system redirected the forward from https to http: the hop was not
 	// sent (smartauth.CheckRedirect). The system answered, with its 3xx, and
 	// the request was sent to it, so it is refused as delivered on message
@@ -638,6 +646,16 @@ func withResponderCorrelation(ctx context.Context, corrID string) context.Contex
 func logCrossOriginRedirect(ctx context.Context, label, leg string, cross *smartauth.CrossOriginRedirectError) {
 	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
 	log.Printf("gateway: upstream %s: your system answered %d, a redirect to another origin (%s), and a request that carries a body is not sent there: point the registered endpoint at the final address (leg %s, correlation %s)", label, cross.StatusCode, cross.Origin, leg, corr)
+}
+
+// logMethodChangeRedirect tells this gateway's operator that its participant's
+// system answered a request that carries a body with a redirect within its
+// origin that would have changed the request's method or dropped its body,
+// which was not followed: the system's 3xx was carried as its answer. It
+// names the status only, never the redirect's address.
+func logMethodChangeRedirect(ctx context.Context, label, leg string, status int) {
+	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
+	log.Printf("gateway: upstream %s: your system answered %d to a request that carries a body, a redirect that would change its method or drop its body; it is not followed, and your system's %d is the answer: answer with 307 or 308, or point the registered endpoint at the final address (leg %s, correlation %s)", label, status, status, leg, corr)
 }
 
 // logUpstreamAbandoned writes the payer gateway's own line when its call to

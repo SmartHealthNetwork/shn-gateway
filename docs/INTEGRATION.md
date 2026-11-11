@@ -160,7 +160,19 @@ Worth checking:
   answered; the reason names the redirect's origin, never its path or query, and your
   gateway logs it, so point your registered endpoint at the final address. A `$populate`
   request fails at its transport (`cross_origin_refused`). A redirect within your
-  system's own origin is followed as before.
+  system's own origin is followed as before when it keeps the request's method and
+  body (a `307` or `308`).
+- **A redirect that would change the request is not followed (from shn-gateway
+  v1.11.0).** When your system answers a request that carries a body (a forwarded
+  operation or a `$populate` request) with a `301`, `302` or `303` within its own
+  origin, following it would send your system a `GET` with no body, a request nobody
+  made, and the message would be lost. The gateway does not
+  follow it: your system's own `3xx` and its body are the answer, carried to the
+  requester as any answer that is not a `2xx` is, and your gateway logs the status for
+  you. Answer with a `307` or `308`, which keep the method and body, or point your
+  registered endpoint at the final address. A front end that answers a `POST` with a
+  redirect to a sign-in page shows the requester that `302`, never the page. A read (a
+  `GET` or `HEAD` with no body) follows a `301`, `302` or `303` as before.
 - **Redirects (from shn-gateway v1.9.0).** When your system answers a call with a
   redirect, the gateway follows it as a direct client would, with two rules, whether or
   not the call carries a token. A

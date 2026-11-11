@@ -96,6 +96,8 @@ func checkTag(id string) (endpointcert.Tag, bool) {
 	switch {
 	case id == "PAYER_DAVINCI_WELL_KNOWN":
 		return endpointcert.Of(endpointcert.PayerDavinci), true
+	case id == payerCDSCheckID:
+		return endpointcert.Of(endpointcert.CDS), true
 	case id == "AUDIT_ENDPOINT":
 		return endpointcert.Of(endpointcert.Audit), true
 	case strings.HasPrefix(id, "validator-lane-"):

@@ -85,6 +85,13 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 		}
 	}
 	targets := append(checkTargets(cfg), auditCheckTarget(u("audit")))
+	payer := cfg
+	payer.Role = "payer"
+	cds, ok := payerCDSCheckTarget(payer, shnsdk.NewRegistry(), "")
+	if !ok {
+		t.Fatal("a forwarding payer has no CDS service listing check")
+	}
+	targets = append(targets, cds)
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		targets = append(targets, checks.Target{ID: "validator-lane-" + line, Kind: checks.KindValidatorLane})
 	}
@@ -104,6 +111,7 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 		"SHN_DISCOVERY_URL": of(endpointcert.Discovery),
 		"AUTHZ_PUBKEY_URL":  of(endpointcert.AuthorizationKey), "HUB_TRANSPORT_KEY_URL": of(endpointcert.HubKey),
 		"AUDIT_ENDPOINT": of(endpointcert.Audit), "PAYER_DAVINCI_WELL_KNOWN": of(endpointcert.PayerDavinci),
+		payerCDSCheckID:      of(endpointcert.CDS),
 		"validator-lane-2.0": validatorLane("2.0"), "validator-lane-2.1": validatorLane("2.1"), "validator-lane-2.2": validatorLane("2.2"),
 	}
 	rec := endpointcert.New()

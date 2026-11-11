@@ -134,10 +134,11 @@ func TestBodyRedirect_ASameOriginRedirectIsFollowed(t *testing.T) {
 	}
 }
 
-// The rule is decided by the request the chain began with: a 303 within the
-// origin turns the request into a GET, and a later hop to another origin is
-// still refused, since the request the participant sent carried a body.
-func TestBodyRedirect_DecidedByTheOriginalRequest(t *testing.T) {
+// A 303 within the origin that would turn the request into a GET is not
+// followed (RefuseMethodChangeRedirect), so no chain that began with a body
+// can go on as a GET toward another origin: the other origin receives
+// nothing, and the system's 303 is the answer.
+func TestBodyRedirect_A303WithinTheOriginNeverLetsTheChainLeaveIt(t *testing.T) {
 	other, otherHits := countingServer(t, okAnswer)
 	var home *httptest.Server
 	home = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,14 +152,28 @@ func TestBodyRedirect_DecidedByTheOriginalRequest(t *testing.T) {
 	t.Cleanup(home.Close)
 	ctx, obs := WithRedirectObservation(context.Background())
 	resp, err := postBody(ctx, ParticipantClient(&http.Client{}), home.URL+"/submit")
-	if resp != nil {
-		resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !errors.Is(err, ErrCrossOriginBodyRedirect) || otherHits.Load() != 0 {
-		t.Fatalf("err %v, other origin hits %d; want a refused cross-origin redirect and none", err, otherHits.Load())
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || otherHits.Load() != 0 {
+		t.Fatalf("answer %d, other origin hits %d; want the system's 303 and none", resp.StatusCode, otherHits.Load())
 	}
-	if want := []string{RedirectSameOrigin, RedirectCrossOriginRefused}; !slices.Equal(obs.Hops(), want) {
+	if want := []string{RedirectMethodChangeRefused}; !slices.Equal(obs.Hops(), want) {
 		t.Fatalf("hops %q, want %q", obs.Hops(), want)
+	}
+}
+
+// Defense in depth: no participant client lets a chain that began with a body
+// go on as a GET any more (RefuseMethodChangeRedirect), but the cross-origin
+// rule is still decided by the request the chain began with, via[0], never
+// the hop, should any caller reach it with such a chain.
+func TestRefuseCrossOriginBodyRedirect_ReadsTheChainsFirstRequest(t *testing.T) {
+	first, _ := http.NewRequest(http.MethodPost, "https://payer.example/submit", strings.NewReader("{}"))
+	rewritten, _ := http.NewRequest(http.MethodGet, "https://payer.example/result", nil)
+	hop, _ := http.NewRequest(http.MethodGet, "https://elsewhere.example/x", nil)
+	if err := RefuseCrossOriginBodyRedirect(hop, []*http.Request{first, rewritten}); !errors.Is(err, ErrCrossOriginBodyRedirect) {
+		t.Fatalf("err %v, want the chain refused by its first request's body", err)
 	}
 }
 

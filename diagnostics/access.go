@@ -199,8 +199,11 @@ type AccessBackend struct {
 	// hop of its chain, without the bearer or configured headers),
 	// "https-to-http-refused" for a downgrade that was not sent,
 	// "token-redirect-refused" for any other redirect of a token request,
-	// which is never followed, and "cross-origin-refused" for a redirect to
-	// another origin of a request that carries a body, never followed.
+	// which is never followed, "cross-origin-refused" for a redirect to
+	// another origin of a request that carries a body, never followed, and
+	// "method-change-refused" for a redirect within the origin that would
+	// change the request's method or drop its body, never followed (the
+	// system's 3xx is its answer).
 	Redirects []string `json:"redirects,omitempty"`
 }
 

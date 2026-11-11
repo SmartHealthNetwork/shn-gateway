@@ -3,6 +3,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/checks"
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -104,6 +107,91 @@ func checkPayerCDSAuth(role string, cfg config, rawMode, rawISS, rawJKU string) 
 	return a, nil
 }
 
+// cdsCredential is what a payer's gateway's CDS calls carry: the one
+// selector both the CRD calls (payerCDSHTTPClient) and their connectivity
+// check (payerCDSCheckTarget) read, so the check is made as CRD calls are.
+type cdsCredential int
+
+const (
+	cdsCredentialNone cdsCredential = iota
+	cdsCredentialAccessToken
+	cdsCredentialClientJWT
+)
+
+// payerCDSCredentialOf is what CDS calls carry under a: the CDS client JWT in
+// client-jwt mode; otherwise what the payer's other operations carry, the
+// access token from PAYER_DAVINCI_TOKEN_URL, or nothing when it is unset.
+func payerCDSCredentialOf(cfg config, a payerCDSAuth) cdsCredential {
+	switch {
+	case a.mode == cdsAuthClientJWT:
+		return cdsCredentialClientJWT
+	case cfg.PayerDavinciTokenURL != "":
+		return cdsCredentialAccessToken
+	}
+	return cdsCredentialNone
+}
+
+// payerCDSCheckID is the connectivity check of the payer's CDS service
+// listing (payerCDSCheckTarget).
+const payerCDSCheckID = "PAYER_DAVINCI_CDS_SERVICES"
+
+// payerCDSCheckTarget is the connectivity check of a forwarding payer's CDS
+// service: the listing read CRD makes (GET {CDS base}/cds-services, on
+// PAYER_DAVINCI_CDS_BASE_URL or else PAYER_DAVINCI_BASE_URL), carrying what
+// CRD calls carry (payerCDSCredentialOf), through a client of its own outside
+// diagnostic capture, as every check's is: a check is not an exchange. It
+// calls no hook. ok is false for a gateway that forwards to no payer.
+func payerCDSCheckTarget(cfg config, reg shnsdk.Registry, holderID string) (checks.Target, bool) {
+	if !payerNative(cfg) {
+		return checks.Target{}, false
+	}
+	base := cfg.PayerDavinciCDSBaseURL
+	if base == "" {
+		base = cfg.PayerDavinciBaseURL
+	}
+	t := checks.Target{ID: payerCDSCheckID, Kind: checks.KindCDSServices, URL: base, Headers: cfg.PayerDavinciBackendHeaders}
+	switch payerCDSCredentialOf(cfg, cfg.PayerCDSAuth) {
+	case cdsCredentialClientJWT:
+		t.Credential = "the CDS client JWT"
+		hc, _, err := payerCDSClient(cfg, cfg.PayerCDSAuth, payerTransport(cfg.certs), reg, holderID, io.Discard)
+		if err != nil {
+			// build() has already refused to serve on such a key.
+			t.AuthClient = &http.Client{Transport: probeCredentialTransport{err: err}}
+			break
+		}
+		hc.Transport = cdsTagged{cdsCheckCredential{hc.Transport}}
+		t.AuthClient = hc
+	case cdsCredentialAccessToken:
+		t.Credential = "the access token"
+		hc := probeAuthClient(payerDavinciSmartConfig(cfg))
+		hc.Transport = cdsTagged{hc.Transport}
+		t.AuthClient = hc
+	}
+	return t, true
+}
+
+// cdsTagged marks each request as a call to the payer's CDS service, so the
+// payer's tagged transport beneath records it as CRD's own calls are (a token
+// the request needs is fetched by its own client, under its own kind).
+type cdsTagged struct{ base http.RoundTripper }
+
+func (t cdsTagged) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req.WithContext(endpointcert.WithTag(req.Context(), endpointcert.Of(endpointcert.CDS))))
+}
+
+// cdsCheckCredential maps a CDS client JWT that could not be minted (no
+// issuer known yet) onto the checks package's credential error, as
+// probeCredentialTransport maps a token that could not be obtained.
+type cdsCheckCredential struct{ base http.RoundTripper }
+
+func (t cdsCheckCredential) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil && errors.Is(err, smartauth.ErrCDSClientIssuerUnknown) {
+		return nil, &checks.CredentialUnavailable{Hint: "the CDS client JWT has no issuer yet"}
+	}
+	return resp, err
+}
+
 // payerCDSClient is the client the payer's gateway calls its payer's CDS
 // service with in client-jwt mode, and the key whose public JWK Set it serves;
 // both nil in access-token mode, where CDS calls go through the payer's other
@@ -112,10 +200,10 @@ func checkPayerCDSAuth(role string, cfg config, rawMode, rawISS, rawJKU string) 
 // the setting, else the payer ingress's base, else this gateway's own base as
 // the network feed registers it (reg, under holderID).
 func payerCDSClient(cfg config, a payerCDSAuth, base http.RoundTripper, reg shnsdk.Registry, holderID string, stdout io.Writer) (*http.Client, *smartauth.CDSClientKey, error) {
-	if a.mode != cdsAuthClientJWT {
+	if c := payerCDSCredentialOf(cfg, a); c != cdsCredentialClientJWT {
 		switch {
 		case !payerNative(cfg):
-		case cfg.PayerDavinciTokenURL == "":
+		case c == cdsCredentialNone:
 			fmt.Fprintf(stdout, "gateway: CDS calls to the payer carry no credential, as its other operations do (PAYER_DAVINCI_TOKEN_URL unset): %s\n", a.why)
 		default:
 			fmt.Fprintf(stdout, "gateway: CDS calls to the payer carry the payer client's access token: %s\n", a.why)

@@ -441,13 +441,13 @@ func TestRecipientForSoR_AFailedReadIsTheSystemsWhenNoPayerIsFound(t *testing.T)
 	}
 }
 
-// TestPayorCandidates_SeveralEntriesSDKTwin records a known difference from the
-// published SDK twin. The gateway reads a payor reference several Organization
-// entries of a Bundle answer as the union of their identifiers (resolveAmong),
-// and the payer directory decides; shn-sdk v1.10.0's CoveragePayerCandidates
-// given the whole Bundle takes the first entry. Nothing published promises the
-// first entry. When the SDK reads the union too, this row fails: make it an
-// equality row in the change that moves the gateway's pin to that release.
+// TestPayorCandidates_SeveralEntriesSDKTwin holds the gateway to the reading of a
+// payor reference several Organization entries of a Bundle answer that its SDK
+// twin shares from shn-sdk v1.11.0 (shnsdk.CoveragePayerCandidates given the whole
+// Bundle; the SDK's own rows hold it): the union of their identifiers, for the
+// payer directory to decide among. The gateway's tests also run against its
+// pinned SDK (GOWORK=off), where the twin still reads the first entry, so this row
+// asserts the twin's answer too only once the gateway pins v1.11.0.
 func TestPayorCandidates_SeveralEntriesSDKTwin(t *testing.T) {
 	const (
 		npi = `{"system":"http://hl7.org/fhir/sid/us-npi","value":"1234567893"}`
@@ -461,25 +461,16 @@ func TestPayorCandidates_SeveralEntriesSDKTwin(t *testing.T) {
 	id := func(system, value string) shnsdk.PayerIdentifier {
 		return shnsdk.PayerIdentifier{System: system, Value: value}
 	}
-	var (
-		nID   = id("http://hl7.org/fhir/sid/us-npi", "1234567893")
-		eID   = id("http://terminology.hl7.org/NamingSystem/USEIN", "7239994834")
-		c1    = id("urn:oid:2.16.840.1.113883.6.300", "00001")
-		c2    = id("urn:oid:2.16.840.1.113883.6.300", "00002")
-		sdk   = [][]shnsdk.PayerIdentifier{{nID, c1}}
-		ours  = [][]shnsdk.PayerIdentifier{{nID, c1, eID, c2}}
-		equal = func(a, b [][]shnsdk.PayerIdentifier) bool {
-			return len(a) == len(b) && (len(a) == 0 || slices.Equal(a[0], b[0]))
-		}
-	)
-	got, err := shnsdk.CoveragePayerCandidates(bundle, nil)
-	if err != nil || !equal(got, sdk) {
-		t.Fatalf("the SDK twin: %v %v, want its first entry %v; if it now reads the union, make this an equality row", got, err, sdk)
+	union := []shnsdk.PayerIdentifier{
+		id("http://hl7.org/fhir/sid/us-npi", "1234567893"),
+		id("urn:oid:2.16.840.1.113883.6.300", "00001"),
+		id("http://terminology.hl7.org/NamingSystem/USEIN", "7239994834"),
+		id("urn:oid:2.16.840.1.113883.6.300", "00002"),
 	}
 	refs := readBundleRefs(bundle)
-	got, err = shnsdk.CoveragePayerCandidates(refs.firstCoverage(), refs.resolver())
-	if err != nil || !equal(got, ours) {
-		t.Fatalf("the gateway: %v %v, want the union %v", got, err, ours)
+	ours, err := shnsdk.CoveragePayerCandidates(refs.firstCoverage(), refs.resolver())
+	if err != nil || len(ours) != 1 || !slices.Equal(ours[0], union) {
+		t.Fatalf("the gateway: %v %v, want the union %v", ours, err, union)
 	}
 }
 

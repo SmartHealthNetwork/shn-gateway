@@ -2887,7 +2887,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 
 	// The telemetry targets are local (KindLocal): they read cached state and
 	// dial nothing, so they carry no client of their own.
-	checksRunner := checks.NewRunner(append(tagCheckTargets(cfg.certs, append(append(checkTargets(cfg), auditCheckTarget(endpoints.Audit)), lanes.checkTargets()...), template), telemetryCheckTargets(tel, tel.Endpoint())...), template, clock)
+	targets := append(append(checkTargets(cfg), auditCheckTarget(endpoints.Audit)), lanes.checkTargets()...)
+	// The payer's CDS service listing, read as CRD reads it (payercdsauth.go):
+	// last, so a CDS service that does not answer cannot spend the run's
+	// deadline before the platform's checks.
+	if t, ok := payerCDSCheckTarget(cfg, reg, bundle.Identity.HolderID); ok {
+		targets = append(targets, t)
+	}
+	checksRunner := checks.NewRunner(append(tagCheckTargets(cfg.certs, targets, template), telemetryCheckTargets(tel, tel.Endpoint())...), template, clock)
 	// Endpoint evidence: feed each completed checks cycle's PAYER_DAVINCI_WELL_KNOWN
 	// (davinci-config probe) evidence into the native responder — the REAL
 	// app-wiring hook (checks.Runner.OnResults, checks.go) from a live

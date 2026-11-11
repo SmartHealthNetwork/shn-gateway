@@ -38,10 +38,17 @@ const (
 	// (ErrCrossOriginBodyRedirect): such a request follows a redirect only
 	// within its own origin.
 	RedirectCrossOriginRefused = "cross-origin-refused"
+	// RedirectMethodChangeRefused: the system answered a request with a
+	// redirect within its own origin that would change the request's method
+	// or drop its body (a 301, 302 or 303 of a POST, which net/http turns into
+	// a GET with no body), and the hop was not sent: the client returns the
+	// system's own 3xx as its answer (RefuseMethodChangeRedirect). A 307 or
+	// 308, which keeps the method and body, is followed.
+	RedirectMethodChangeRefused = "method-change-refused"
 )
 
 // RedirectValues is the closed list a hop's class draws from.
-var RedirectValues = []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused}
+var RedirectValues = []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused, RedirectMethodChangeRefused}
 
 // ErrCleartextRedirect is a redirect from https to http, refused before the hop
 // is sent, whatever its origin: a 307 or 308 replays the request body, which
@@ -85,8 +92,12 @@ func WithRedirectObservation(ctx context.Context) (context.Context, *RedirectObs
 // CheckRedirect is the one redirect policy for every client that reaches a
 // participant's system, whether or not it carries a bearer: net/http's
 // ten-hop limit, a hop from https to http refused before it is sent
-// (RefuseCleartextRedirect), and each hop it lets through recorded with its
-// origin class. NewHTTPClient's clients use it; set it on any other.
+// (RefuseCleartextRedirect), a hop to another origin of a request that
+// carries a body refused (RefuseCrossOriginBodyRedirect), a hop that would
+// change the request's method or drop its body not followed, the system's
+// 3xx returned as its answer (RefuseMethodChangeRedirect), and each hop it
+// lets through recorded with its origin class. NewHTTPClient's clients use
+// it; set it on any other.
 func CheckRedirect(req *http.Request, via []*http.Request) error {
 	return checkRedirectDropping(req, via, nil)
 }
@@ -102,6 +113,9 @@ func checkRedirectDropping(req *http.Request, via []*http.Request, configured []
 		return err
 	}
 	if err := RefuseCrossOriginBodyRedirect(req, via); err != nil {
+		return err
+	}
+	if err := RefuseMethodChangeRedirect(req, via); err != nil {
 		return err
 	}
 	cross := dropCrossOriginCredentials(req, via, configured)
@@ -264,6 +278,49 @@ func RefuseCrossOriginBodyRedirect(req *http.Request, via []*http.Request) error
 	return &CrossOriginRedirectError{StatusCode: status, Origin: strings.ToLower(req.URL.Scheme) + "://" + req.URL.Host}
 }
 
+// RefuseMethodChangeRedirect is http.ErrUseLastResponse, recorded on the
+// request's RedirectObservation as RedirectMethodChangeRefused, when req, a
+// redirect hop, would not be the request before it: another method, or no
+// body where that request had one. net/http rewrites the hop before the
+// policy sees it: a 301, 302 or 303 of any method but GET and HEAD becomes a
+// GET with no body, while a 307 or 308 keeps the method and replays the
+// body. Such a hop would send the participant's system a request nobody made
+// and lose the message, so it is not sent: the client returns the system's
+// own 3xx, its answer, unread, and the caller carries it as it carries any
+// answer that is not a 2xx. nil otherwise: a GET or HEAD that a 301, 302 or
+// 303 redirects stays what it was, and a 307 or 308 keeps the request.
+func RefuseMethodChangeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	prev := via[len(via)-1]
+	if methodOf(req) == methodOf(prev) && (!hasBody(prev) || hasBody(req)) {
+		return nil
+	}
+	if o := redirectObservationFrom(req.Context()); o != nil {
+		o.hop(RedirectMethodChangeRefused)
+	}
+	return http.ErrUseLastResponse
+}
+
+// hasBody reports whether r carries a body, whatever its method: a request
+// sent with one, or a redirect hop net/http gave the original's body again (a
+// 307 or 308 does before the policy sees it). An empty one has none (a nil
+// body, http.NoBody, or a zero-length reader, which http.NewRequest turns into
+// http.NoBody), so a hop that drops it loses nothing and an empty POST's 307
+// keeps the request.
+func hasBody(r *http.Request) bool {
+	return r.ContentLength > 0 || (r.Body != nil && r.Body != http.NoBody)
+}
+
+// methodOf is r's method, GET when it names none, as net/http reads it.
+func methodOf(r *http.Request) string {
+	if r.Method == "" {
+		return http.MethodGet
+	}
+	return r.Method
+}
+
 // carriedBody reports whether r, the first request of a redirect chain, is one
 // that carries a body: any method but GET and HEAD (an empty POST included),
 // or any request that carried one.
@@ -315,9 +372,13 @@ func port(u *url.URL) string {
 // reaches a participant's own system, whether or not it carries a bearer. A
 // client with no redirect policy of its own gets CheckRedirect, which also
 // records each hop followed by its origin class; a client with its own policy
-// keeps it after the downgrade is refused, so a stricter one (refusing every
-// redirect) stays as strict. The caller's client is not changed; its
-// transport is shared. A nil c stays nil.
+// keeps it after the network's own rules have run (RefuseCleartextRedirect,
+// RefuseCrossOriginBodyRedirect and RefuseMethodChangeRedirect), so a stricter
+// one (refusing every redirect) stays as strict for every other hop. A hop
+// those rules stop never reaches it: a method change of a request with a body
+// returns the system's 3xx as the answer, whatever the client's own policy
+// would have returned. The caller's client is not changed; its transport is
+// shared. A nil c stays nil.
 func ParticipantClient(c *http.Client) *http.Client {
 	return ParticipantClientWith(c, nil)
 }
@@ -355,6 +416,9 @@ func ParticipantClientWith(c *http.Client, configured http.Header) *http.Client 
 			return err
 		}
 		if err := RefuseCrossOriginBodyRedirect(req, via); err != nil {
+			return err
+		}
+		if err := RefuseMethodChangeRedirect(req, via); err != nil {
 			return err
 		}
 		dropCrossOriginCredentials(req, via, names)

@@ -4,6 +4,56 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A payer's connectivity checks read its CDS service listing as CRD does (v1.11.0)
+
+- **Added (payer, `/internal/checks`):** `PAYER_DAVINCI_CDS_SERVICES`, the read of your CDS
+  service listing that CRD itself makes: `GET {PAYER_DAVINCI_CDS_BASE_URL, or
+  PAYER_DAVINCI_BASE_URL when it is unset}/cds-services`, with
+  `PAYER_DAVINCI_BACKEND_HEADERS`, the credential your CRD calls carry (the CDS client JWT,
+  the access token, or none) and the same redirect rules, after the other checks that dial out. It passes
+  on the listings CRD can use, a 2xx JSON object whose `services` is an array of entries
+  each with an `id` and a `hook`, member names read exactly as written (case-sensitively), and its `detail` names the credential and the number of
+  services. It fails `credential-rejected` on a `401` or `403` (or a credential that could
+  not be obtained), `http-status` on any other failing status, `unreachable` when your
+  system does not answer, and `invalid-cds-services` on a 2xx that is not a listing. It
+  calls no hook and sends no patient data: a CDS service that answers its listing without
+  authentication and refuses a hook call passes it.
+- **Added (`/internal/checks`):** the failure code `invalid-cds-services`.
+
+## A payer's CDS service listing is read by its exact member names (v1.11.0)
+
+- **Changed (payer role, CDS Hooks):** a payer's gateway reads the CDS Hooks service
+  listing its payer's system serves at `/cds-services` by its exact member names,
+  case-sensitively, as JSON specifies: the document's `services`, and each entry's `id` and
+  `hook`. An entry that names its id or hook only in another case (`ID`, `HOOK`) names
+  none, so the listing cannot be read, as one with an entry naming no id or hook cannot:
+  the gateway warns at start, and refuses CRD requests (`502`) until its payer's
+  system serves a listing it can read.
+
+## Go 1.26.11 (v1.11.0)
+
+- **Changed (every role):** the gateway image is built with Go 1.26.11, and so are the
+  validator image's healthcheck stage and the evaluation seeder.
+
+## A redirect that would change the request is not followed (v1.11.0)
+
+- **Changed (every role, every request with a body to your own system):** when your system
+  answers a forwarded operation (a PAS, CRD, DTR, eligibility or CDex request) or a
+  `$populate` request with a `301`, `302` or `303` within its own origin, the gateway does
+  not follow it, at every conformance level: following it would send your system a `GET`
+  with no body, a request nobody made. Your system's own `3xx` and its body are the
+  answer: a forwarded operation's requester gets them as your system's answer, as it gets
+  any answer that is not a `2xx`, and this gateway refuses nothing. A `$populate` request
+  fails at `http_status` (`non_2xx`) with that status. Your gateway logs the status, never
+  the redirect's address: answer with a `307` or `308`, which keep the method and body and
+  are followed, or point your registered endpoint at the final address. A front end that
+  answers a `POST` with a redirect to a sign-in page shows the requester that `302`, never
+  the page. A read (a `GET` or `HEAD` with no body) follows a `301`, `302` or `303`, and a
+  redirect to another origin of a request that carries a body is refused.
+- **Added (exchange record):** the access line's `backend.redirects` names such a redirect
+  `method-change-refused`; `backend` records your system's `3xx` status with
+  `backend.errorClass` `http-3xx`.
+
 ## A payer's CDS calls carry a CDS Hooks client JWT (v1.10.0)
 
 - **Changed (payer, CRD):** when your payer client has a signing key

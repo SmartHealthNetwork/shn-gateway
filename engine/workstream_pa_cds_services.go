@@ -24,10 +24,13 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/cdslisting"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 )
 
-// CDSService is one entry of a CDS service listing.
+// CDSService is one entry of a CDS service listing, as
+// readCDSServiceListing reads it. Its tags write one; a listing is never
+// read through them.
 type CDSService struct {
 	ID   string `json:"id"`
 	Hook string `json:"hook"`
@@ -119,7 +122,7 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 		return nil, fmt.Errorf("engine: GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPartnerBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, cdslisting.MaxBody))
 	if err != nil {
 		x.read(resp.StatusCode, x.since(x.clock, started), callEndedClass(ctx, bodyReadClass(err)))
 		return nil, fmt.Errorf("engine: read %s: %w", url, err)
@@ -128,24 +131,27 @@ func DiscoverCDSServices(ctx context.Context, client *http.Client, base string, 
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("engine: GET %s returned %s", url, resp.Status)
 	}
-	var listing struct {
-		Services *[]CDSService `json:"services"`
-	}
-	if err := json.Unmarshal(body, &listing); err != nil {
+	services, err := readCDSServiceListing(body)
+	if err != nil {
 		x.malformed()
-		return nil, fmt.Errorf("engine: parse %s: %w", url, err)
+		return nil, fmt.Errorf("engine: %s: %w", url, err)
 	}
-	if listing.Services == nil {
-		x.malformed()
-		return nil, fmt.Errorf("engine: %s lists no services array", url)
+	return services, nil
+}
+
+// readCDSServiceListing reads a discovery document's services by the
+// gateway's one rule for a listing (cdslisting.Read), which the payer's
+// connectivity check reads by too.
+func readCDSServiceListing(body []byte) ([]CDSService, error) {
+	read, err := cdslisting.Read(body)
+	if err != nil {
+		return nil, err
 	}
-	for i, s := range *listing.Services {
-		if s.ID == "" || s.Hook == "" {
-			x.malformed()
-			return nil, fmt.Errorf("engine: %s: service %d has no id or no hook", url, i)
-		}
+	services := make([]CDSService, len(read))
+	for i, s := range read {
+		services[i] = CDSService(s)
 	}
-	return *listing.Services, nil
+	return services, nil
 }
 
 // PrimeCDSServices stores a listing read elsewhere (at boot) so the first

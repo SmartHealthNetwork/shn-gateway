@@ -2395,6 +2395,7 @@ each of its `results`, with the values of `results[].failure.code` one row each.
 | `results[].failure.code=version-drift` | core | core |
 | `results[].failure.code=lane-unqualified` | core | core |
 | `results[].failure.code=invalid-davinci-configuration` | PA workstream | PA workstream |
+| `results[].failure.code=invalid-cds-services` | PA workstream | PA workstream |
 | `results[].failure.code=endpoint-unknown` | core | core |
 | `results[].failure.code=invalid-telemetry-configuration` | monitoring | core |
 | `results[].failure.hint` | core | core |

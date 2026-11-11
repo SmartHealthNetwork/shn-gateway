@@ -222,11 +222,14 @@ func TestNativePopulateFailureConcurrent(t *testing.T) {
 }
 
 func TestNativePopulateFailureRedirectAndStatusBounds(t *testing.T) {
+	// A 307 keeps the request, so the client's own policy decides the hop
+	// (a 301, 302 or 303 that would change the method is answered before it
+	// runs: TestNativePopulate_AMethodChangingRedirectIsNotFollowed).
 	t.Run("redirect refusal retains observed response", func(t *testing.T) {
 		var calls atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls.Add(1)
-			http.Redirect(w, r, "/CANARY-REDIRECT", 302)
+			http.Redirect(w, r, "/CANARY-REDIRECT", http.StatusTemporaryRedirect)
 		}))
 		defer srv.Close()
 		client := srv.Client()
@@ -236,7 +239,7 @@ func TestNativePopulateFailureRedirectAndStatusBounds(t *testing.T) {
 		if _, _, err := pop.Populate(context.Background(), []byte(failurePackage), failureContext); err != errPopulateUpstream {
 			t.Fatal(err)
 		}
-		if calls.Load() != 1 || len(notes) != 1 || notes[0] != (PopulateFailure{Stage: "transport", Reason: "other", Status: 302}) {
+		if calls.Load() != 1 || len(notes) != 1 || notes[0] != (PopulateFailure{Stage: "transport", Reason: "other", Status: http.StatusTemporaryRedirect}) {
 			t.Fatalf("calls=%d notes=%#v", calls.Load(), notes)
 		}
 	})

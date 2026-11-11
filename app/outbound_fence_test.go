@@ -29,6 +29,7 @@ var outboundSites = map[string]outboundSite{
 	"engine/workstream_pa_enrich.go var:cdexTaskDeadline shnsdk.NewClient": {1, "reads the requester's leg budget for the Task forward's deadline; no client is kept"},
 	"app/app.go probeAuthClient smartauth.NewHTTPClient":                   {1, "built from a SMART config tagSmart tagged"},
 	"app/app.go probeAuthClient http.Client{}":                             {1, "a credential that does not load: every request fails before dialing"},
+	"app/payercdsauth.go payerCDSCheckTarget http.Client{}":                {1, "a CDS client key that does not load: every request fails before dialing"},
 	"app/app.go selectValidator shnsdk.NewOperationValidator":              {1, "tagged validator-<canonical line> by build right after (TagValidatorClient)"},
 	"app/app.go fhirHTTPClient smartauth.NewHTTPClient":                    {1, "fhirSmartConfig tags it fhir / fhir-token"},
 	"app/app.go payerDavinciHTTPClient smartauth.NewHTTPClient":            {1, "payerDavinciSmartConfig tags it with the payer Router / payer-token"},

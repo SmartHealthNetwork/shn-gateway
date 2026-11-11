@@ -320,7 +320,7 @@ func TestRefuseCleartextRedirect(t *testing.T) {
 
 // Every value the observation records is in the closed list.
 func TestRedirectValues_Closed(t *testing.T) {
-	want := []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused}
+	want := []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused, RedirectMethodChangeRefused}
 	if !slices.Equal(RedirectValues, want) {
 		t.Fatalf("RedirectValues %q, want %q", RedirectValues, want)
 	}

@@ -161,8 +161,11 @@ type ExchangeRecord struct {
 	// token request, never followed, which fails it as a token failure, and
 	// cross-origin-refused for a redirect to another origin of a request that
 	// carries a body, never followed (the forward is refused on routing, as
-	// delivered; $populate fails at its transport). Nil when no answer asked
-	// for one.
+	// delivered; $populate fails at its transport), and method-change-refused
+	// for a redirect within the origin that would change the request's method
+	// or drop its body, never followed (the system's 3xx is its answer,
+	// carried; $populate fails at http_status). Nil when no answer asked for
+	// one.
 	BackendRedirects []string
 	// Stages is the time an inbound leg spent in each stage of its answer
 	// (LegStages); nil on an ingress call.

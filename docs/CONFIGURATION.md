@@ -533,7 +533,14 @@ There is nothing to configure:
   forwarded operation it ends is refused `502` on routing, attested delivered, its
   reason naming the redirect's origin (never its path or query), and your gateway
   logs it for you to point your registered endpoint at the final address; a
-  `$populate` request it ends fails at its transport (`cross_origin_refused`).
+  `$populate` request it ends fails at its transport (`cross_origin_refused`). From
+  v1.11.0, `method-change-refused` names a redirect within your system's origin that
+  would change the request's method or drop its body (a `301`, `302` or `303` of a
+  request that carries a body), which the gateway does not follow: your system's `3xx`
+  is the answer, `backend` records its status with `http-3xx`, a forwarded operation's
+  requester gets that `3xx` and its body as your system's answer, a `$populate`
+  request fails at `http_status` (`non_2xx`) with that status, and your gateway logs the
+  status for you. A `307` or `308` keeps the request and is followed.
 - `timeout` on a forwarded operation is your system not answering within
   this gateway's deadline for it (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by
   default, under the requester's 30 s leg budget). The deadline counts from
@@ -1118,6 +1125,21 @@ A result that carries `"advisory": true` reports on the gateway's monitoring
 some monitoring is off or not delivered, never that the gateway is not ready to
 carry exchanges. Every other result omits the field.
 
+From v1.11.0 a payer that forwards to its own system (`PAYER_DAVINCI_BASE_URL`) also gets
+`PAYER_DAVINCI_CDS_SERVICES`: the read of your CDS service listing that CRD itself makes,
+`GET {PAYER_DAVINCI_CDS_BASE_URL, or PAYER_DAVINCI_BASE_URL when it is unset}/cds-services`,
+with `PAYER_DAVINCI_BACKEND_HEADERS` and the credential your CRD calls carry (the CDS client
+JWT, the access token, or none: see [CDS Hooks client authentication](#cds-hooks-client-authentication-payer_davinci_cds_auth)),
+under the same redirect rules, after the other checks that dial out. It passes on the listings CRD can
+use, a 2xx JSON object whose `services` is an array of entries each with an `id` and a
+`hook`, member names read exactly as written (case-sensitively), and its `detail` names the credential and the number of services. It fails
+`credential-rejected` when your CDS service answers `401` or `403` (or when the credential
+could not be obtained, its `hint` saying why when that is safe to say, such as a CDS client
+JWT with no issuer yet), `http-status` on any other failing status, `unreachable` when your
+system does not answer, and `invalid-cds-services` on a 2xx that is not a listing. It calls
+no hook and sends no patient data, so it proves the listing only: a CDS service that answers
+its listing without authentication and refuses a hook call passes this check.
+
 A result that ran no probe carries `"noProbe": true` and has no latency (`latencyMs`
 is 0): the two monitoring checks and each `validator-lane-<line>` (read from the
 gateway's own state), an endpoint the network's discovery does not name
@@ -1132,7 +1154,9 @@ CapabilityStatement), `credential-rejected` (the credential check failed), `not-
 network condition), `version-drift` (for a contract both you and the endpoint name, it
 publishes none of the versions you declared for it), `invalid-davinci-configuration` (the
 endpoint published a `.well-known/davinci-configuration` that could not be parsed;
-publishing none is not a failure), `endpoint-unknown` (the network's discovery names no
+publishing none is not a failure), `invalid-cds-services` (from v1.11.0: a 2xx answer to
+the CDS service listing read that is not a listing CRD can use, a JSON object whose
+`services` is an array of entries each with an `id` and a `hook`, by those exact names), `endpoint-unknown` (the network's discovery names no
 endpoint for the check, so nothing was probed), `lane-unqualified` (a default validator lane has not
 qualified yet, below), or `invalid-telemetry-configuration` (a monitoring setting is not
 valid: one that tunes export falls back to its default and export continues, while one

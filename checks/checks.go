@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/cdslisting"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 )
 
@@ -266,6 +267,11 @@ const (
 	// where metrics go or how they authenticate turns OTLP export off. The
 	// gateway serves as before. Hint names the settings, never their values.
 	FailInvalidTelemetryConfiguration = "invalid-telemetry-configuration"
+	// FailInvalidCDSServices: a 2xx answer to a CDS service listing read that
+	// is not a listing CRD can use (cdslisting.Read: a JSON object whose
+	// services is an array of entries each naming an id and a hook, by those
+	// exact names). Hint says which.
+	FailInvalidCDSServices = "invalid-cds-services"
 )
 
 // Kind selects how a Target is probed.
@@ -289,6 +295,12 @@ const (
 	// monitoring configuration and its newest metrics export: it dials
 	// nothing, and a POST re-reads it rather than contacting anything.
 	KindLocal Kind = "local"
+
+	// KindCDSServices reads a CDS service listing, GET <base>/cds-services,
+	// through Target.AuthClient (the credential CRD calls carry) or, with
+	// none, the plain client: the CDS Hooks discovery call. It proves the
+	// listing only: it calls no hook.
+	KindCDSServices Kind = "cds-services"
 )
 
 // Target is one probe the runner executes. TokenFetch is set only for
@@ -330,11 +342,25 @@ type Target struct {
 	Local func() (ok bool, detail string, failure *Failure)
 	// Advisory marks the target's results advisory (Result.Advisory).
 	Advisory bool
+	// Credential names, for a KindCDSServices detail, the credential its
+	// AuthClient carries ("the CDS client JWT", "the access token"); "" is
+	// none. Display only: it never carries a credential itself.
+	Credential string
 }
 
 // ErrCredential is an AuthClient's report that it could not obtain its
 // credential for a reason other than a token endpoint status.
 var ErrCredential = errors.New("checks: credential unavailable")
+
+// CredentialUnavailable is ErrCredential with a redaction-safe hint saying
+// why (never a credential or an error's text): errors.Is(err, ErrCredential)
+// holds for it.
+type CredentialUnavailable struct{ Hint string }
+
+func (e *CredentialUnavailable) Error() string { return "checks: credential unavailable: " + e.Hint }
+
+// Is makes a CredentialUnavailable an ErrCredential.
+func (e *CredentialUnavailable) Is(target error) bool { return target == ErrCredential }
 
 // withHeaders adds t.Headers to a probe request.
 func (t Target) withHeaders(req *http.Request) {
@@ -571,6 +597,8 @@ func (r *Runner) probe(ctx context.Context, t Target) Result {
 		res.OK, res.Detail, res.Failure = r.probeReachable(pctx, t)
 	case KindDavinciConfig:
 		res.OK, res.Detail, res.Failure, res.Capability = r.probeDavinciConfig(pctx, t)
+	case KindCDSServices:
+		res.OK, res.Detail, res.Failure = r.probeCDSServices(pctx, t)
 	case KindUndiscovered:
 		res.NoProbe = true
 		res.OK, res.Detail = false, "discovery names no endpoint"
@@ -875,6 +903,75 @@ func (r *Runner) probeToken(ctx context.Context, fetch func(context.Context) err
 			&Failure{Code: FailCredentialRejected, Hint: fmt.Sprintf("HTTP %d", se.Code)}
 	}
 	return false, "credential check failed", &Failure{Code: FailCredentialRejected}
+}
+
+// cdsListingProof is what a CDS service listing read proves, said on a
+// passing result: the listing only.
+const cdsListingProof = "this proves the listing only: a CDS service may answer its listing without authentication and still refuse a hook call"
+
+// probeCDSServices reads the CDS service listing at t.URL + "/cds-services",
+// the URL CRD's own listing read calls (engine.DiscoverCDSServices), through
+// t.AuthClient when set, else the plain client. Green on a 2xx listing CRD
+// can use (cdslisting.Read); a 401 or 403 is the service refusing the
+// credential; any other failing status, a transport failure, a credential
+// that could not be obtained, and a 2xx that is not a listing each have
+// their own code. No hook is called and no patient data is sent.
+func (r *Runner) probeCDSServices(ctx context.Context, t Target) (bool, string, *Failure) {
+	redacted := targetOf(t.URL)
+	with := "with no credential"
+	if t.Credential != "" {
+		with = "with " + t.Credential
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL+"/cds-services", nil)
+	if err != nil {
+		return false, fmt.Sprintf("GET %s/cds-services: %v", redacted, redactErr(err)),
+			&Failure{Code: FailInternal, Hint: redactErr(err).Error()}
+	}
+	req.Header.Set("Accept", "application/json") // as CRD's own listing read asks
+	t.withHeaders(req)
+	client := t.AuthClient
+	if client == nil {
+		client = r.plain(t)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		var se *StatusError
+		if errors.As(err, &se) {
+			return false, fmt.Sprintf("credential check failed (HTTP %d)", se.Code),
+				&Failure{Code: FailCredentialRejected, Hint: fmt.Sprintf("HTTP %d", se.Code)}
+		}
+		if errors.Is(err, ErrCredential) {
+			var cu *CredentialUnavailable
+			if errors.As(err, &cu) && cu.Hint != "" {
+				return false, "credential check failed: " + cu.Hint, &Failure{Code: FailCredentialRejected, Hint: cu.Hint}
+			}
+			return false, "credential check failed", &Failure{Code: FailCredentialRejected}
+		}
+		return false, fmt.Sprintf("GET %s/cds-services: %v", redacted, redactErr(err)), transportFailure(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+		hint := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return false, fmt.Sprintf("the CDS service refused its listing read %s (HTTP %d)", with, resp.StatusCode),
+				&Failure{Code: FailCredentialRejected, Hint: hint}
+		}
+		return false, hint, &Failure{Code: FailHTTPStatus, Hint: hint}
+	}
+	// The body is read as CRD's own listing read reads it (cdslisting.Read,
+	// which engine.DiscoverCDSServices reads by): a listing CRD cannot use
+	// never passes.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, cdslisting.MaxBody))
+	if err != nil {
+		return false, fmt.Sprintf("GET %s/cds-services: read: %v", redacted, redactErr(err)), transportFailure(err)
+	}
+	services, err := cdslisting.Read(body)
+	if err != nil {
+		return false, "the answer is not a CDS service listing: " + err.Error(),
+			&Failure{Code: FailInvalidCDSServices, Hint: err.Error()}
+	}
+	return true, fmt.Sprintf("CDS service listing read (%d services) %s; %s", len(services), with, cdsListingProof), nil
 }
 
 // probeReachable GETs target; ok when the response status is below 500 (a
