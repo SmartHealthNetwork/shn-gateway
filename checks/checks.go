@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 )
 
 // Result is one probe outcome (extends the kit's
@@ -532,6 +534,19 @@ func redactErr(err error) error {
 	return err
 }
 
+// transportFailure is the failure of a probe whose request got no usable
+// answer: a redirect a network service or sidecar answered, which its
+// client does not follow (serviceclient), is a failing status, never an
+// outage, its hint naming the status and the class redirect-refused; any
+// other, a participant client's refused https-to-http hop included, is
+// unreachable as before.
+func transportFailure(err error) *Failure {
+	if serviceclient.IsRedirectRefused(err) {
+		return &Failure{Code: FailHTTPStatus, Hint: fmt.Sprintf("HTTP %d, %s", serviceclient.RedirectStatus(err), serviceclient.RedirectRefused)}
+	}
+	return &Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}
+}
+
 // probe dispatches on t.Kind, bounding the probe to min(probeTimeout, time
 // left on ctx) and stamping CheckedAt/LatencyMS from the runner's clock.
 func (r *Runner) probe(ctx context.Context, t Target) Result {
@@ -680,7 +695,7 @@ func (r *Runner) readMetadata(ctx context.Context, t Target, client *http.Client
 			return false, "credential check failed", &Failure{Code: FailCredentialRejected}, nil
 		}
 		return false, fmt.Sprintf("GET %s/metadata: %v", redacted, redactErr(err)),
-			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}, nil
+			transportFailure(err), nil
 	}
 	defer resp.Body.Close()
 
@@ -777,7 +792,7 @@ func (r *Runner) probeDavinciConfig(ctx context.Context, t Target) (bool, string
 	resp, err := r.plain(t).Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s/.well-known/davinci-configuration: %v", redacted, redactErr(err)),
-			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}, nil
+			transportFailure(err), nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
@@ -877,7 +892,7 @@ func (r *Runner) probeReachable(ctx context.Context, t Target) (bool, string, *F
 	resp, err := r.plain(t).Do(req)
 	if err != nil {
 		return false, fmt.Sprintf("GET %s: %v", redacted, redactErr(err)),
-			&Failure{Code: FailUnreachable, Hint: redactErr(err).Error()}
+			transportFailure(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))

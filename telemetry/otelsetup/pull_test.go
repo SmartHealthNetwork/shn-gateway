@@ -11,11 +11,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -287,6 +289,50 @@ func TestPullHandler_BadTokenGets401_MON_R7_R42(t *testing.T) {
 	}
 	if !bearerMatches("Bearer "+pullSecret, sha256.Sum256([]byte(pullSecret))) || bearerMatches("Bearer", sha256.Sum256([]byte(""))) {
 		t.Fatal("bearerMatches")
+	}
+}
+
+// Every answer the pull listener writes carries X-Content-Type-Options:
+// nosniff, with a token and without one: the scrape, its 401, and the 404 and
+// 405 of a path or method it does not serve. The scrape keeps the Content-Type
+// the exporter gave it.
+func TestPullHandler_EveryAnswerCarriesNosniff(t *testing.T) {
+	metrics := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = io.WriteString(w, "served")
+	})
+	for _, token := range []string{pullSecret, ""} {
+		h := pullHandler(metrics, token)
+		for _, c := range []struct {
+			name, method, path, auth string
+			status                   int
+		}{
+			{"no token", "GET", "/metrics", "", 401},
+			{"the token", "GET", "/metrics", "Bearer " + pullSecret, 200},
+			{"other path", "GET", "/", "Bearer " + pullSecret, 404},
+			{"POST", "POST", "/metrics", "Bearer " + pullSecret, 405},
+		} {
+			if token == "" && c.status == 401 {
+				continue // no token configured: nothing is refused for its lack
+			}
+			t.Run(fmt.Sprintf("token set %t/%s", token != "", c.name), func(t *testing.T) {
+				r := httptest.NewRequest(c.method, c.path, nil)
+				if c.auth != "" {
+					r.Header.Set("Authorization", c.auth)
+				}
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, r)
+				if w.Code != c.status {
+					t.Fatalf("control: status %d, want %d", w.Code, c.status)
+				}
+				if got := w.Result().Header.Values("X-Content-Type-Options"); !slices.Equal(got, []string{"nosniff"}) {
+					t.Fatalf("X-Content-Type-Options %q, want exactly nosniff", got)
+				}
+				if c.status == 200 && w.Header().Get("Content-Type") != "text/plain; version=0.0.4; charset=utf-8" {
+					t.Fatalf("the scrape's Content-Type %q, want the exporter's", w.Header().Get("Content-Type"))
+				}
+			})
+		}
 	}
 }
 

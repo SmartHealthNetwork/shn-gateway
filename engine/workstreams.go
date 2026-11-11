@@ -194,6 +194,14 @@ func legSpecFor(transactionType string) (legSpec, bool) {
 	return legSpec{}, false
 }
 
+// answersFHIR reports whether the leg txType names, in either form, answers
+// this gateway's own refusal as an OperationOutcome (its answer envelope is
+// FHIR). A name no leg has answers {"error"}, as it always did.
+func answersFHIR(txType string) bool {
+	spec, ok := legSpecFor(txType)
+	return ok && spec.AnswerEnvelope == legtaxonomy.AnswerEnvelopeFHIR
+}
+
 // canonicalLeg is the leg a stated transaction-type name names, in either
 // form: the flat name (wire protocol 1.1.0, "pas-claim") or the prefixed one
 // (2.0.0, "pa.pas-claim"). A name no leg has is returned as stated, unknown,
@@ -797,6 +805,11 @@ type legSpec struct {
 	// leg its role takes unconditionally. The adapter sets it, to the setting
 	// the root leg taxonomy names (legtaxonomy.TakenWhenSet).
 	TakenWhenSet string
+	// AnswerEnvelope is the envelope of this gateway's own refusal on the leg,
+	// the taxonomy's (legtaxonomy.AnswerEnvelopeFHIR or AnswerEnvelopeJSON):
+	// an OperationOutcome on a leg its client reaches through a FHIR
+	// operation, {"error": …} otherwise (respondLegError).
+	AnswerEnvelope string
 }
 
 // legDetail is what a workstream adapter adds to one routable leg of its
@@ -842,12 +855,16 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 		if want := t.Workstream + "." + l.TransactionType; l.StagedName != want {
 			return nil, fmt.Errorf("workstream %q: leg %q: its prefixed name is %q, not %q", t.Workstream, l.TransactionType, l.StagedName, want)
 		}
+		if l.AnswerEnvelope != legtaxonomy.AnswerEnvelopeFHIR && l.AnswerEnvelope != legtaxonomy.AnswerEnvelopeJSON {
+			return nil, fmt.Errorf("workstream %q: leg %q: answer envelope %q is neither %q nor %q", t.Workstream, l.TransactionType, l.AnswerEnvelope, legtaxonomy.AnswerEnvelopeFHIR, legtaxonomy.AnswerEnvelopeJSON)
+		}
 		catalog[l.TransactionType] = legSpec{
 			ReqFrame: l.Request.Frame, RespFrame: l.Response.Frame,
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
 			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet,
+			AnswerEnvelope: l.AnswerEnvelope,
 		}
 	}
 	for _, tx := range slices.Sorted(maps.Keys(detail)) {

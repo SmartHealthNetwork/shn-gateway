@@ -246,6 +246,10 @@ var emfLines = map[*Instrument]func(*EMF, Measurement){
 		e.em.EmitLatency("ValidatorLatency", ms(m), map[string]string{"Service": e.service,
 			"line": closedDim(IGLines, m.Attributes[0]), "lane": closedDim(LaneKinds, m.Attributes[1])})
 	},
+	ListenerCuts: func(e *EMF, m Measurement) {
+		e.em.EmitCount("ListenerCut", m.Value, map[string]string{"Service": e.service,
+			"bound": closedDim(ListenerBounds, m.Attributes[0]), "listener": closedDim(Listeners, m.Attributes[1])})
+	},
 	ConformanceChecksDropped: func(e *EMF, m Measurement) {
 		e.em.EmitCount("ObserveCheckDropped", m.Value, map[string]string{"Service": e.service})
 	},

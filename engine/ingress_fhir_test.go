@@ -157,6 +157,29 @@ func TestFHIRIngressPreservesFramedUpstreamFailure(t *testing.T) {
 	}
 }
 
+// TestFHIRIngressRelaysEitherCounterpartRefusalAsSent is the mixed roll at
+// the requester: a counterpart gateway before the release that writes its
+// own refusal on a FHIR leg as an OperationOutcome answers {"error"}
+// (application/json), and one from that release answers the OperationOutcome;
+// this gateway relays either to its FHIR client byte for byte with its own
+// media type, never re-enveloping a counterpart's answer.
+func TestFHIRIngressRelaysEitherCounterpartRefusalAsSent(t *testing.T) {
+	for name, row := range map[string]struct{ body, ct string }{
+		"an earlier counterpart's {error}": {`{"error":"not an address this payer issued, or its base or key changed; fetch the package again"}` + "\n", "application/json"},
+		"a counterpart's OperationOutcome": {`{"issue":[{"code":"not-supported","diagnostics":"not an address this payer issued, or its base or key changed; fetch the package again","severity":"error"}],"resourceType":"OperationOutcome"}`, "application/fhir+json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			if !(&Gateway{}).relayOriginationError(&fhirOperationWriter{w}, &RelayError{Status: http.StatusUnprocessableEntity, Body: []byte(row.body), ContentType: row.ct, leg: "dtr-questionnaire-fetch"}) {
+				t.Fatal("framed refusal not handled")
+			}
+			if w.Code != http.StatusUnprocessableEntity || w.Body.String() != row.body || w.Header().Get("Content-Type") != row.ct {
+				t.Fatalf("the counterpart's refusal changed: %d %q %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+			}
+		})
+	}
+}
+
 func TestNonFHIRIngressKeepsJSONErrors(t *testing.T) {
 	for _, handler := range []func(http.ResponseWriter, *http.Request){(&Gateway{}).handleCRDIngress, (&Gateway{}).handleCDSDiscovery} {
 		w := httptest.NewRecorder()
@@ -260,5 +283,35 @@ func TestFHIRIngressHubLegTimeoutIsTimeoutOutcome(t *testing.T) {
 	const want = `"diagnostics":"no answer on the hub leg within 50ms (hub leg timeout)"`
 	if !strings.Contains(w.Body.String(), want) {
 		t.Fatalf("body=%s want to contain %s", w.Body.String(), want)
+	}
+}
+
+// TestRefusalOutcome_IssueCodesAreAClosedSetOfIssueType is the tripwire on
+// the codes this gateway's own refusal OperationOutcome states (refusalOutcome,
+// both ends): each is a code of FHIR R4's IssueType value set
+// (http://hl7.org/fhir/ValueSet/issue-type, a required binding on
+// OperationOutcome.issue.code), the refusal's from its status and every echoed
+// validator issue's "invalid". $validate certifies the structure in the
+// validate gate; this pins the codes, which an invented one could pass.
+func TestRefusalOutcome_IssueCodesAreAClosedSetOfIssueType(t *testing.T) {
+	want := map[int]string{
+		http.StatusBadRequest: "invalid", http.StatusUnauthorized: "login", http.StatusForbidden: "forbidden",
+		http.StatusUnprocessableEntity: "not-supported", http.StatusServiceUnavailable: "transient", http.StatusGatewayTimeout: "timeout",
+	}
+	issueType := map[string]bool{"invalid": true, "login": true, "forbidden": true, "not-supported": true, "transient": true, "timeout": true, "processing": true}
+	for status := 400; status <= 599; status++ {
+		o := refusalOutcome(status, "m", []string{"echoed"})
+		issues := o["issue"].([]map[string]string)
+		code, ok := want[status]
+		if !ok {
+			code = "processing"
+		}
+		if o["resourceType"] != "OperationOutcome" || len(issues) != 2 || issues[0]["code"] != code || issues[0]["severity"] != "error" || issues[0]["diagnostics"] != "m" ||
+			issues[1]["code"] != "invalid" || issues[1]["severity"] != "error" || issues[1]["diagnostics"] != "echoed" {
+			t.Fatalf("%d: %+v, want code %q then the echoed issue as invalid", status, o, code)
+		}
+		if !issueType[issues[0]["code"]] {
+			t.Fatalf("%d: code %q is outside the pinned IssueType codes", status, issues[0]["code"])
+		}
 	}
 }

@@ -132,7 +132,7 @@ func TestEligibility_RecordsUnknownMemberIsThePayersAnswer(t *testing.T) {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
 			ans := p.sendAs(t, "coverage-eligibility", "", eligibilityRequest(t, "MBR-NOT-HELD"), shnsdk.ResolvePCI("MBR-NOT-HELD", "", ""))
-			if ans.status != http.StatusBadRequest || strings.TrimSpace(string(ans.body)) != `{"error":"unknown member"}` {
+			if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusBadRequest || msg != "unknown member" {
 				t.Fatalf("answer %d %s, want the payer's 400 unknown member", ans.status, ans.body)
 			}
 			if rec := got.only(t); rec.Rule != ExchangeOther {

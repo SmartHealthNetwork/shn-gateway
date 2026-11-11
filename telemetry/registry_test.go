@@ -167,7 +167,7 @@ var allowedKeys = map[string]bool{
 	KeyReason: true, KeyPoolState: true, KeyIGLine: true, KeyLane: true, KeyWireProtocol: true, KeyLevel: true,
 	KeyEndpointKind: true, KeyCertRole: true, KeyDependency: true,
 	KeyRefusalRule: true, KeyRefusalBy: true, KeyRefusalStage: true, KeyStage: true, KeyFindingKind: true,
-	KeyAction: true, KeyTolerated: true,
+	KeyAction: true, KeyTolerated: true, KeyListener: true, KeyBound: true,
 }
 
 // semconvKeys are http.server.request.duration's attribute keys, the
@@ -212,7 +212,7 @@ func TestCatalogue_ClosedAndFreeOfIdentifiers_MON_R19_R20(t *testing.T) {
 			t.Errorf("%s: bound %d", inst.Name, inst.SeriesBound())
 		}
 	}
-	if len(seen) != 34 {
+	if len(seen) != 35 {
 		t.Errorf("%d instruments; the catalogue's count is part of MONITORING.md's and STABILITY's", len(seen))
 	}
 }

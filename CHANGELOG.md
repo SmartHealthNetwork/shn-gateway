@@ -4,6 +4,262 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A payer's CDS calls carry a CDS Hooks client JWT (v1.10.0)
+
+- **Changed (payer, CRD):** when your payer client has a signing key
+  (`PAYER_DAVINCI_CLIENT_KEY` and `PAYER_DAVINCI_CLIENT_ALG`), each call your gateway makes
+  to your CDS service (the service listing read and each CRD hook) carries
+  `Authorization: Bearer <JWT>`, a JWT your gateway signs with that key, as CDS Hooks 2.0
+  ("Trusting CDS Clients") and Da Vinci CRD define, in place of the SMART access token it
+  carried before. `aud` is the exact URL called, `iss` is your gateway's own base URL
+  (`PAYER_DAVINCI_INGRESS_BASE_URL`, else its base as registered on the network) unless
+  `PAYER_DAVINCI_CDS_JWT_ISS` names another, `exp` is five minutes after `iat`, and every
+  request, a redirect hop included, gets a new `jti`. DTR, PAS and eligibility carry what
+  they did. A key and algorithm set without `PAYER_DAVINCI_TOKEN_URL` now sign your CDS
+  calls too, and an algorithm other than `ES384` or `RS384` with a key refuses the boot.
+  Until your gateway knows an issuer a CDS call is not sent, and the requester is answered
+  `502`. See CONFIGURATION.md "CDS Hooks client authentication".
+- **Added (payer):** your gateway serves your payer client key's public JWK Set, with no
+  credential, at `GET /cds-client/jwks.json` (public members only), and each JWT's `jku`
+  names it when your gateway's base is `https`. Register the issuer and that URL with your
+  CDS service before you upgrade.
+- **Added (payer):** `PAYER_DAVINCI_CDS_AUTH=access-token` keeps your CDS calls on the
+  access token, for a CDS service built for it; `PAYER_DAVINCI_CDS_JWT_JKU` sets the `jku`
+  or, with `off`, leaves it out. Your boot log names which credential your CDS calls carry,
+  and why.
+
+## Network-service, OTLP and sidecar clients follow no redirect (v1.10.0)
+
+- **Changed (every role):** the gateway's clients for the network's own services
+  (discovery and its two trust-anchor keys, the Hub, the Authorization Framework, consent,
+  the registrar and the audit endpoint), its OTLP metrics export, and its validator and
+  certification sidecars follow no redirect, and neither do the `/internal/checks` probes
+  of those endpoints. A `3xx` answer is that call's failure, as when the endpoint does not
+  answer usably; what is recorded names its status and the `Location`'s origin at most,
+  never its path or query, and a hop from `https` to `http` is never made. A boot whose
+  discovery, trust-anchor key or registrar feed redirects fails as when it does not answer
+  usably; a leg fails as when the Hub or the Authorization Framework cannot be reached; a
+  consent check fails as when the service cannot be reached; a capability declaration is
+  not stored and is retried; an audit record stays queued and is retried; an OTLP export
+  fails; a check fails; and a `$validate` or certification call finds its validator
+  unavailable. A client or validator an embedding program passes to `engine.Config`
+  (`Client`, `AuthzClient`, `ConsentClient`, `Validator` and the validator lane maps)
+  follows the same rule. The clients that reach a participant's own system keep their own
+  redirect rule.
+- **Additive (access line, checks, metrics and logs): the class `redirect-refused`** tells
+  such a failure apart from an outage. It is a new value of the access line's
+  `authorizeError` and `answerError` (`recording.AnswerErrorClasses`,
+  `recording.RedirectRefused`) for the Authorization Framework, and a new reason of
+  `AuditAppendRetried`; a failed OTLP export's `telemetry-export` check, and a failed
+  `/internal/checks` probe of one of these endpoints, is `http-status` with a `hint` naming
+  the status and `redirect-refused`; and the boot error, the Hub leg, the consent check and
+  the capability declaration name it with the status (`gateway: hub leg … failed:
+  redirect-refused (HTTP <status>)`, `gateway: consent check failed: redirect-refused (HTTP
+  <status>)`, `gateway: capability declaration not stored (redirect-refused) …`). A reader
+  of a closed list should expect the new value.
+- **Before you upgrade:** make sure `SHN_DISCOVERY_URL`, every network-service URL
+  (`HUB_URL`, `AUTHZ_URL`, `CONSENT_URL`, `REGISTRAR_URL`, `AUTHZ_PUBKEY_URL`,
+  `HUB_TRANSPORT_KEY_URL`), the OTLP endpoint, and every validator and certification URL
+  (`FHIR_VALIDATE_URL*`, `FHIR_CERTIFY_URL_*`) names its final address, the one that
+  answers itself. A URL that relies on a redirect, such as an `http://` URL for a host that
+  only redirects to `https`, or a path that redirects, fails: these clients follow no redirect.
+  Plain `http` to a local sidecar or an in-network service name that answers directly, such
+  as `http://validator:8080`, is unaffected.
+
+## A gateway names the Hub's refusal of a token whose patient does not fit its leg (v1.10.0)
+
+- **Changed (every role, the exchange record):** the network's Hub refuses `403` a request
+  whose token names no patient on a leg whose request names one, or a patient on a leg whose
+  request names none, with the reason `authz token's patient does not fit the leg`. A gateway
+  records that refusal as the Hub's, on the `authority` rule, as it records the Hub's other
+  token refusals. An earlier release records it with no rule. The Authorization Framework
+  mints no such token, so a gateway that asks it for its tokens never meets the refusal.
+
+## Connection bounds on the main and observer listeners (v1.10.0)
+
+The main listener and the observer hold a connection only while its client
+makes progress. These bounds are fixed, with no settings:
+
+- Request headers, and over TLS the handshake, must complete within 10 s. Over
+  HTTP/2, a stream whose headers never complete is ended at the idle bound.
+- Request headers may total up to 64 KiB. Past that, the answer is `431`.
+- An idle kept-alive connection closes after 120 s, above a load balancer's usual
+  60 s idle timeout.
+- On the main listener, a request body is cut after 30 s with no byte, or once
+  10 min have passed in all. A documentation attachment submission keeps its own
+  30 s arrival rule.
+- On the main listener, an answer is cut when the client does not take the next
+  8 KiB of it within 30 s. Over HTTP/2, a connection that takes no frame (at
+  most about 8 KiB) within 30 s is closed (Go's `WriteByteTimeout`, which Go
+  leaves unset). The header-size and idle bounds above apply to HTTP/2 too. A
+  long wait before the answer is never cut.
+
+Each cut is counted in the new `shn.gateway.listener.cuts` counter (EMF
+`ListenerCut`), by bound and listener. Each cut also writes one line,
+`gateway: listener: cut a connection at its <bound> bound (listener=<listener>)`.
+The line names no request data. A cut is not an exchange refusal. See
+DEPLOYMENT.md, "Connection bounds", and MONITORING.md, "Connection cuts".
+
+If your load balancer's idle timeout is 120 s or more, lower it below 120 s.
+
+## The payer's ingress takes a set of SMART Task scopes (v1.10.0)
+
+- **Changed (every role, the ingress token endpoint):** `POST /oauth/token` takes a `scope`
+  that is a set, separated by single spaces, as SMART Backend Services asks for it. Every scope
+  in it must be registered for the client, or the request is refused `400 invalid_scope`, as a
+  single unregistered scope is. Duplicates count once, and the bearer and the answer's `scope`
+  state the set granted, in the order asked. A request for one registered scope is granted
+  exactly that scope, as before. A registered client's own signed bearer is taken with the set
+  it states only when every scope in it is registered.
+- **Changed (payer, the attachment-request Task routes):** `POST {base}/Task`, `POST /Task` and
+  `GET /cdex/providers` take a bearer whose set holds a scope that permits creating a Task:
+  `system/Task.write`, `system/Task.*`, or a SMART v2 `system/Task` scope with `c` (such as
+  `system/Task.c` or `system/Task.cr`). Earlier releases took only a bearer granted exactly
+  `system/Task.write`, so one token asked for `system/Task.write system/Task.read`, or a v2
+  scope, was refused. A bearer whose scopes permit no create, such as one granted only
+  `system/Task.read`, is refused `403 insufficient_scope`, recorded as `authority`, at every
+  conformance level; the answer's `error` now names the scopes that permit the route. A
+  granular scope (a v2 scope with a query, such as `system/Task.c?status=requested`) permits
+  nothing on these routes: the gateway cannot enforce its query. The SMART configuration still
+  advertises `system/Task.write` alone.
+- **Changed (payer, `INGRESS_CLIENTS_FILE`):** a payer's ingress client registers any SMART
+  `system/Task` scope, v1 (`read`, `write`, `*`) or v2 (some of `c r u d s`, in that order,
+  with or without a query), and at least one, with no query, that permits a route of the
+  payer's ingress. Every route creates a Task, so that is `system/Task.write`,
+  `system/Task.*`, or a v2 scope with `c`: a client registered only to read
+  (`system/Task.read`, say) refuses the gateway's start, as one without `system/Task.write`
+  did before. A `system/Task`
+  scope SMART does not spell (such as `system/Task.rc`, or `system/task.read`) refuses the
+  gateway's start, naming the scope, and so does a client whose `scopes` hold no
+  `system/Task` scope that permits a route (only a granular one, say, or only
+  `system/Task.read` or `system/Task.uds`). Scopes for other resources are kept beside one, as before, and permit
+  nothing on these routes. A client that lists no scopes is registered for
+  `system/Task.write`, as before.
+- **Additive (Go API):** `engine.CheckPayerIngressScopes`, the start-up rule for a payer's ingress
+  client's scopes.
+
+## A relayed answer keeps the media type its system stated (v1.10.0)
+
+- **Before you upgrade (provider):** your gateway now writes a CRD, DTR or PAS answer to
+  your EHR with the media type the payer's system stated, a change to a full item that
+  `STABILITY.md` records as an exception. An EHR that dispatches on the media type must
+  accept the payer's stated type before you upgrade, including the payer's own
+  parameters (for example `;charset=UTF-8`): on a DTR or PAS answer, a type other than
+  `application/fhir+json` (for example `application/json`); on a CDS Hooks answer,
+  `application/fhir+json` from a payer whose gateway advertises the `v1opsub` request
+  frame. The answer's bytes are unchanged.
+- **Changed (provider and payer, every conformance level):** a peer's success answer is
+  written to your system with the media type the answering system stated, whatever it
+  is, as a direct client would see it: a PAS answer to a claim, an amendment or an
+  inquiry, a DTR `$questionnaire-package` or `$next-question` answer, a CDex
+  `$submit-attachment` answer, a CDex data request's answer, a coverage eligibility
+  answer and a federated query answer. Earlier releases wrote a PAS or DTR answer
+  `application/fhir+json` whatever the payer stated, and wrote the others
+  `application/fhir+json` unless the answer stated `application/json` or
+  `application/fhir+json`. The body is carried as before; a pend's documentation return
+  address, an adaptive questionnaire's address and a DTR answer's line names are edited
+  as before, and the answer keeps the stated type. An answer that states no media type,
+  or one no header can carry (it does not parse as a media type, is over 256 bytes or
+  holds a control character), is written `application/fhir+json`.
+- **Changed (provider, CDS Hooks):** a payer's CDS Hooks answer stated
+  `application/fhir+json` is written as stated when the payer's gateway advertises the
+  `v1opsub` request frame (shn-gateway v1.8.0 and later); from any other payer it is
+  written `application/json`, as before, since a payer gateway before v0.57.0 stated
+  `application/fhir+json` for every answer. Any other stated type is written as stated,
+  as before; one no header can carry is written `application/json`.
+
+## Every answer carries `X-Content-Type-Options: nosniff` (v1.10.0)
+
+- **Added (every role, every conformance level):** every answer the gateway writes carries
+  `X-Content-Type-Options: nosniff`, whatever its status: its ingress and Hub routes,
+  its refusals, `/internal/checks`, `/internal/stats` and `/health`, the observer
+  stream's listener and the metrics pull listener's `/metrics`, so a browser that fetched
+  an answer would read it as the media type it states and never as another. The header
+  is the gateway's own, added beside the answer: it changes nothing else in it, and an
+  answer your peer's system sent is relayed with the same bytes and `Content-Type` as
+  before. An answer the HTTP server writes itself before the gateway reads the request
+  does not carry it: a fixed error, plain text or empty, such as `400` (a request it
+  cannot parse, or plain HTTP sent to a TLS listener), `417`, `431` (a header block over
+  its limit), `501` or `505`, which carries nothing of any exchange. A program that embeds the
+  engine gets the header on every answer of `(*engine.Gateway).Handler()`, and one that
+  serves `app.Handler` on every answer it writes.
+
+## A request that carries a body follows no redirect to another origin (v1.10.0)
+
+- **Changed (every role, every request with a body to your own system):** a forwarded
+  operation (a PAS, CRD, DTR, eligibility or CDex request) and a `$populate` request go
+  only to your registered endpoint. When your system answers one with a redirect to
+  another origin (another scheme, host or port), whatever its code, the gateway does not
+  send it there, at every conformance level: the request and its body go only to the
+  endpoint you registered. The rule is
+  decided by the request you sent, so a redirect within your origin that turns it into a
+  `GET` does not let a later hop leave it. A forwarded operation is refused `502` on
+  routing, attested delivered (`X-SHN-Delivered: yes`): your system received the request
+  and answered, so the requester checks the request's outcome before resending it. The
+  reason is `the recipient's system redirected this request to another origin (<origin>),
+  where this gateway does not send it; the recipient's operator must point its
+  registered endpoint at the final address`, naming the redirect's origin only, never its
+  path or query, and your gateway logs the same cause for you. A `$populate` request
+  fails at its transport, reason `cross_origin_refused`, with the redirect's status. A
+  redirect within your system's own origin is followed as before, a redirect from
+  `https` to `http` is refused as before, and a request with no body (a read of your
+  system) still follows a redirect to another origin, without your token or configured
+  headers.
+- **Added (exchange record):** the access line's `backend.redirects` names such a
+  refused redirect `cross-origin-refused`; the forward's `backend` records your system's
+  `3xx` status with `backend.errorClass` `http-3xx`.
+
+## A payer's eligibility answer names the payer by its network identity, wherever its record lists it (v1.10.0)
+
+- **Changed (payer):** the coverage eligibility answer a payer's gateway builds from its system
+  of record (`PAYER_ELIGIBILITY_URL` unset) names its insurer by an identity the network knows
+  this payer by, read from every payor of the member's Coverage, in any position: the first
+  identity the holder publishes on the network feed, in document order. Earlier releases named
+  the first identifier of `payor[0]`: an Organization listing an NPI before the payer identifier
+  named the NPI.
+- **Changed (payer):** a payor this payer's records cannot read as a payer (a clinic
+  Organization the system of record does not hold, a self-pay payor) no longer hides this
+  payer's identity on another payor of the Coverage.
+- **Changed (payer):** a member with no Coverage is answered with the payer's own
+  `Organization/payer` named the same way: its identifier that the holder publishes, before its
+  first one.
+- **Unchanged (payer):** when the Coverage, or the Organization, lists none of this payer's
+  published identities, or the holder publishes none, the insurer is
+  read as before: the first identifier of `payor[0]`, or of the Organization (when that names
+  none, the request is refused as before).
+- **Changed (payer):** a payor whose reference the system of record failed to read no longer
+  decides the answer when another payor can be read: the answer names the first published
+  identity the payors that could be read give, else is read as before. The payors are read in
+  order until one names a published identity; a later payor is not read. An answer is never worse than reading
+  `payor[0]` alone: when `payor[0]`'s own read fails and no other payor names this payer, the
+  answer is the system's failure, as before.
+- **Added (access line):** `readsFailed` (evolving) names the error class of each read of the
+  system of record that failed while the answer was still built from what could be read, one
+  per failed read, in read order; absent when none did. It never holds a URL, an identifier or
+  text, and `backend` keeps its meaning. It is written today on the coverage eligibility answer
+  a payer's gateway builds from its records, once the answer is built: an exchange refused
+  before its answer is built records none. Each payor reference is read at most once.
+- **Unchanged (payer):** answers the payer's own system sends (PAS, CRD, DTR, and eligibility
+  through `PAYER_ELIGIBILITY_URL`) are carried as sent.
+
+## A gateway's own refusal on a FHIR leg is an OperationOutcome (v1.10.0)
+
+- **Changed (every role, every leg a client reaches through a FHIR operation):** when this
+  gateway refuses a leg itself, with no answer from its participant's system to carry, the
+  body its requester relays is now in the leg's answer envelope, a field of each leg in the
+  network's leg taxonomy. On coverage eligibility, DTR (`$questionnaire-package` and `$next-question`),
+  PAS (`$submit`, its update, and `$inquire`), CDex (`$submit-attachment` and the attachment
+  request Task) and the federated query, it is an `OperationOutcome`
+  (`application/fhir+json`): its first issue is the refusal, with severity `error`, a code
+  from its status and the message as its `diagnostics`, followed by one `invalid` issue for
+  each validator issue it echoes. On the CDS Hooks legs and patient-authored DTR it stays
+  `{"error": …}` (`application/json`). The requesting gateway relays the answer as it
+  arrives, so your FHIR client reads a counterpart gateway's refusal in the same shape as
+  your own gateway's. Statuses, messages, refusal rules and the exchange record are
+  unchanged, and a participant's own answer is carried as it was sent on every leg.
+- **During a roll:** a counterpart on an earlier release still sends `{"error": …}` on every
+  leg, relayed as it arrives, so read an `OperationOutcome` first and then `error`.
+
 ## A token request follows no redirect (v1.9.0)
 
 - **Changed (every role, SMART Backend Services to your own system):** the gateway's token

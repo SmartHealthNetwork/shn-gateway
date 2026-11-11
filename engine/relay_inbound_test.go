@@ -302,15 +302,11 @@ func TestRespondLegErrorLegacyRequesterNeverGetsParticipantBytes(t *testing.T) {
 			if strings.Contains(rec.Body.String(), marker) {
 				t.Fatalf("the participant's bytes reached the Hub unsealed: %s", rec.Body.String())
 			}
-			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-				t.Fatalf("Content-Type = %q, want application/json (the gateway's refusal)", ct)
-			}
-			var got map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("legacy body not valid JSON: %v (%s)", err, rec.Body.String())
-			}
-			if want := "pas-claim: recipient answered 422; its answer is carried only in a message frame"; len(got) != 1 || got["error"] != want {
-				t.Fatalf("legacy body = %v, want exactly {\"error\": %q}", got, want)
+			// The gateway's refusal, in the leg's answer envelope (an
+			// OperationOutcome on pas-claim).
+			msg, echoed := gatewayRefusal(t, "pas-claim", rec.Header().Get("Content-Type"), rec.Body.Bytes())
+			if want := "pas-claim: recipient answered 422; its answer is carried only in a message frame"; msg != want || len(echoed) != 0 {
+				t.Fatalf("legacy body = %s, want exactly the refusal %q", rec.Body.Bytes(), want)
 			}
 		})
 	}
@@ -350,15 +346,12 @@ func TestRespondLegErrorNeverEmptyMessage_Framed(t *testing.T) {
 	if hdr.Status != 422 {
 		t.Fatalf("framed status = %d, want 422", hdr.Status)
 	}
-	var synth map[string]string
-	if err := json.Unmarshal(body, &synth); err != nil {
-		t.Fatalf("synthesized body not valid JSON: %v (%s)", err, body)
-	}
-	if synth["error"] == "" {
+	synth, _ := gatewayRefusal(t, "pas-claim", hdr.Headers["Content-Type"], body)
+	if synth == "" {
 		t.Fatalf("synthesized body error is EMPTY -- the exact smoke-caught defect; body=%s", body)
 	}
-	if !strings.Contains(synth["error"], "pas-claim") || !strings.Contains(synth["error"], "422") {
-		t.Fatalf("synthesized body error = %q, want it to name the leg (pas-claim) and status (422)", synth["error"])
+	if !strings.Contains(synth, "pas-claim") || !strings.Contains(synth, "422") {
+		t.Fatalf("synthesized body error = %q, want it to name the leg (pas-claim) and status (422)", synth)
 	}
 }
 
@@ -374,15 +367,12 @@ func TestRespondLegErrorNeverEmptyMessage_Legacy(t *testing.T) {
 	if rec.Code != 422 {
 		t.Fatalf("legacy requester: to-Hub status = %d, want 422 (bare non-2xx)", rec.Code)
 	}
-	var got map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("legacy body not valid JSON: %v (%s)", err, rec.Body.String())
-	}
-	if got["error"] == "" {
+	got, _ := gatewayRefusal(t, "pas-claim", rec.Header().Get("Content-Type"), rec.Body.Bytes())
+	if got == "" {
 		t.Fatalf("legacy body error is EMPTY -- the exact smoke-caught defect; body=%s", rec.Body.String())
 	}
-	if !strings.Contains(got["error"], "pas-claim") || !strings.Contains(got["error"], "422") {
-		t.Fatalf("legacy body error = %q, want it to name the leg (pas-claim) and status (422)", got["error"])
+	if !strings.Contains(got, "pas-claim") || !strings.Contains(got, "422") {
+		t.Fatalf("legacy body error = %q, want it to name the leg (pas-claim) and status (422)", got)
 	}
 }
 

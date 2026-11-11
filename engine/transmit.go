@@ -229,6 +229,15 @@ func (g *Gateway) responderFailed(w http.ResponseWriter, r *http.Request, leg in
 		attestAnswerRefused(w, RefusalIntegrity, fmt.Sprintf(errCleartextRedirectFor, responderParty(leg.tx)))
 		return
 	}
+	// The system redirected a request that carries a body to another origin,
+	// and the hop was not sent (smartauth.ErrCrossOriginBodyRedirect): refused
+	// on routing, the request's addressing, as delivered (the system answered,
+	// with its 3xx, and may have acted). The reason names the origin only.
+	if uf := (*upstreamFailure)(nil); errors.As(err, &uf) && uf.crossOriginRedirect != "" {
+		exchangeOf(r.Context()).refused(RefusalRouting)
+		attestAnswerRefused(w, RefusalRouting, fmt.Sprintf(errCrossOriginRedirectFor, uf.crossOriginRedirect))
+		return
+	}
 	status, msg := g.responderFailure(r.Context(), leg.tx, err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
 	// The answer is this gateway's, but the record says whose failure it was:
@@ -336,6 +345,12 @@ type upstreamFailure struct {
 	// integrity, as delivered (responderFailed). Set only where the system's
 	// own answer was the redirect, never for a token endpoint's.
 	cleartextRedirect bool
+	// crossOriginRedirect is the origin (scheme, host and port) the system's
+	// redirect named, when the system answered a request that carried a body
+	// with a redirect to another origin and the hop was not sent: refused on
+	// routing, as delivered (responderFailed). Empty otherwise. Never the
+	// redirect's path or query.
+	crossOriginRedirect string
 }
 
 func (e *upstreamFailure) Error() string { return e.err.Error() }
@@ -363,6 +378,14 @@ const (
 // the hop is not sent, whatever its origin, since a 307 or 308 replays the
 // body. It names the recipient's role (responderParty).
 const errCleartextRedirectFor = "the %[1]s's system redirected this request from https to http, where it would travel in cleartext: it was not sent there"
+
+// errCrossOriginRedirectFor is the reason a forward is refused when the
+// recipient's system answered it, a request that carries a body, with a
+// redirect to another origin (smartauth.ErrCrossOriginBodyRedirect), naming
+// that origin: such a request goes only to the recipient's registered
+// endpoint, and its operator is the one who can point it at the final
+// address.
+const errCrossOriginRedirectFor = "the recipient's system redirected this request to another origin (%s), where this gateway does not send it; the recipient's operator must point its registered endpoint at the final address"
 
 // The answers above for the payer's system, every provider's leg's.
 var (

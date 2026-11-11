@@ -101,6 +101,14 @@ func wantClosed(t *testing.T, rec ExchangeRecord) {
 	if b := rec.Backend; b != nil && b.ErrorClass != "" && !slices.Contains(BackendErrorClasses, b.ErrorClass) {
 		t.Errorf("Backend.ErrorClass %q not in its closed list", b.ErrorClass)
 	}
+	if rec.ReadsFailed != nil && len(rec.ReadsFailed) == 0 {
+		t.Error("ReadsFailed is empty, not absent")
+	}
+	for _, c := range rec.ReadsFailed {
+		if !slices.Contains(BackendErrorClasses, c) {
+			t.Errorf("ReadsFailed names %q, not in BackendErrorClasses", c)
+		}
+	}
 	for _, k := range rec.Findings.Kinds {
 		switch CheckKind(k) {
 		case KindFHIRIngress, KindFHIREgress, KindFHIRBridged, KindCDSEnvelope, KindNetwork, KindContent:
@@ -289,6 +297,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"replay", hubAnswers{status: 409, reason: "replay detected", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
 		{"large envelope budget", hubAnswers{status: 503, reason: "large envelope budget exhausted", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"authority", hubAnswers{status: 403, reason: "authz token verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
+		{"authority, the token's patient", hubAnswers{status: 403, reason: "authz token's patient does not fit the leg", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"authentication", hubAnswers{status: 401, reason: "assertion verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthentication},
 		{"routing", hubAnswers{status: 502, reason: "unknown recipient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"unknown leg", hubAnswers{status: 400, reason: "unknown transaction type", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},

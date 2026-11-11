@@ -15,8 +15,9 @@ import (
 
 // The payer gateway's Da Vinci ingress for the payer's CDex attachment
 // request (D127): the payer's own system, authenticated as a registered client
-// with a bearer granted TaskWriteScope, creates a CDex 2.1.0 Task Attachment
-// Request at a provider's base on its gateway
+// with a bearer granted a scope that permits creating a Task (taskCreate:
+// TaskWriteScope, system/Task.* or a v2 scope with c), creates a CDex 2.1.0
+// Task Attachment Request at a provider's base on its gateway
 // (POST <ingress base>/cdex/provider/{provider}/Task), and the network carries
 // it to that provider as sent. The network refuses one only on its own
 // primitives:
@@ -98,7 +99,7 @@ func (g *Gateway) handleCDexRequestByOwner(w http.ResponseWriter, r *http.Reques
 func (g *Gateway) admitCDexRequest(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
 	w, _ = g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
-	return w, !g.ingressScopeRefused(w, r, TaskWriteScope)
+	return w, !g.ingressScopeRefused(w, r, taskCreate)
 }
 
 // serveCDexRequest serves the payer's Task, routed to the provider recipientOf
@@ -207,11 +208,8 @@ func (g *Gateway) serveCDexRequest(w http.ResponseWriter, r *http.Request, recip
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, "answered"))
-	// The provider's own media type, as on the other carried legs.
-	ct := carriedFHIRMediaType(answerType)
-	if ct == "" {
-		ct = mediaFHIRJSON
-	}
+	// The provider's own media type, whatever it is, as on the other carried legs.
+	ct := writableAnswerMediaType(answerType)
 	g.writeRelayedAnswer(w, stated, ct,
 		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
@@ -292,7 +290,7 @@ func (g *Gateway) cdexProviders() ([]cdexProvider, error) {
 // handleCDexProviders is GET /cdex/providers: the providers a payer's system
 // can create an attachment-request Task for, each with its base.
 func (g *Gateway) handleCDexProviders(w http.ResponseWriter, r *http.Request) {
-	if g.ingressScopeRefused(w, r, TaskWriteScope) {
+	if g.ingressScopeRefused(w, r, taskCreate) {
 		return
 	}
 	providers, err := g.cdexProviders()

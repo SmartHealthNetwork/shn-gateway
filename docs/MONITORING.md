@@ -135,6 +135,23 @@ From v1.1.0 an outage of the Authorization Framework is `refused` on `authority`
 here, with `authorizeError` set, not `unreachable`: no authority could be
 obtained. Alert on `LegError` for it, whose leg outcome is still `unreachable`.
 
+From shn-gateway v1.10.0, a redirect answered by a network service (discovery and its
+trust-anchor keys, the Hub,
+the Authorization Framework, consent, the registrar, the audit endpoint), the OTLP
+collector or a validator or certification sidecar is never followed: the call fails as
+when that endpoint cannot be reached, and the class `redirect-refused` tells it apart from
+an outage. It should never happen; when it does, a URL names an address that redirects
+instead of its final one. It appears in the boot error (discovery, a trust-anchor key, the
+registrar's feed), as the access line's `authorizeError` or `answerError` (the
+Authorization Framework), in the log lines `gateway: hub leg … failed: redirect-refused
+(HTTP <status>)`, `gateway: consent check failed: redirect-refused (HTTP <status>)` and
+`gateway: capability declaration not stored (redirect-refused) …`, as the
+`AuditAppendRetried` reason `redirect-refused`, and as an `http-status` hint naming the
+status and `redirect-refused` on `telemetry-export` (below) and on the `/internal/checks`
+probe of any of those endpoints. The clients that reach a participant's own system keep
+their own redirect rule (CONFIGURATION.md, the access line's `redirects`). See
+CONFIGURATION.md, "Network services and sidecars follow no redirect".
+
 A patient an exchange's involved list left out has no record of it under that
 patient. From v1.1.0 the access line's `involvedOmitted` counts them by reason, on
 any gateway. With metrics on, `InvolvedOmitted` is the same count. Alert on either.
@@ -358,7 +375,7 @@ memory (Linux).
 | `shn.gateway.store.pool.connections` | `shn_gateway_store_pool_connections` | `StorePool` (`stat` `TotalConns`, `AcquiredConns`, `IdleConns`) | gauge | `{connection}` | `shn.pool.state` | Shared-state pool connections, by state. |
 | `shn.gateway.store.pool.empty_acquires` | `shn_gateway_store_pool_empty_acquires_total` | `StorePool` (`stat` `EmptyAcquireCount`) | counter | `{acquire}` | none | Shared-state pool acquires that waited for a connection. |
 | `shn.gateway.audit.appends` | `shn_gateway_audit_appends_total` | `AuditAppendSent` | counter | `{record}` | none | Audit records the Audit Plane accepted. No producer in v1.0.0. |
-| `shn.gateway.audit.retries` | `shn_gateway_audit_retries_total` | `AuditAppendRetried` | counter | `{record}` | `shn.reason` | Audit record sends retried, by reason. No producer in v1.0.0. |
+| `shn.gateway.audit.retries` | `shn_gateway_audit_retries_total` | `AuditAppendRetried` | counter | `{record}` | `shn.reason` | Audit record sends retried, by reason (`unknown-sender`, `unavailable`, `unreachable`, `store`, `redirect-refused`: the audit endpoint answered a redirect, which is not followed). No producer in v1.0.0. |
 | `shn.gateway.audit.drops` | `shn_gateway_audit_drops_total` | `AuditAppendDroppedBy`, `AuditAppendDropped` | counter | `{record}` | `shn.reason` | Audit records that left the outbox without the Audit Plane's acceptance, by reason. No producer in v1.0.0. |
 | `shn.gateway.audit.queue.depth` | `shn_gateway_audit_queue_depth` | `AuditQueueDepth` | gauge | `{record}` | none | Audit records queued in the outbox. No producer in v1.0.0. |
 | `shn.gateway.audit.endpoint.unknown` | `shn_gateway_audit_endpoint_unknown` | `AuditEndpointUnknown` | gauge | `{record}` | none | Audit records queued while discovery names no audit endpoint. No producer in v1.0.0. |
@@ -381,6 +398,7 @@ memory (Linux).
 | `shn.gateway.conformance.findings` | `shn_gateway_conformance_findings_total` | `ConformanceFinding` | counter | `{finding}` | `shn.exchange`, `shn.conformance.level`, `shn.finding.kind`, `shn.finding.action`, `shn.finding.tolerated` | Conformance findings recorded, by level, kind, the decision recorded and whether the peer was tolerated. |
 | `shn.gateway.validator.duration` | `shn_gateway_validator_duration_seconds` | `ValidatorLatency` | histogram | `s` | `shn.ig_line`, `shn.lane` | Duration of a $validate call, by IG line and lane. |
 | `shn.gateway.conformance.checks.dropped` | `shn_gateway_conformance_checks_dropped_total` | `ObserveCheckDropped` | counter | `{check}` | none | Observe checks dropped because the observe queue was full or closed. |
+| `shn.gateway.listener.cuts` | `shn_gateway_listener_cuts_total` | `ListenerCut` | counter | `{cut}` | `shn.listener.bound`, `shn.listener` | Connections (HTTP/1.1) or streams (HTTP/2) a listener cut at one of its connection bounds, by bound and listener. |
 | `http.server.request.duration` | `http_server_request_duration_seconds` | none | histogram | `s` | `http.request.method`, `http.response.status_code`, `http.route`, `url.scheme`, `network.protocol.version`, `error.type` | Duration of HTTP server requests. |
 | `go.memory.used` | `go_memory_used_bytes` | none | updowncounter | `By` | `go.memory.type` | Memory used by the Go runtime, by type. |
 | `go.memory.limit` | `go_memory_limit_bytes` | none | updowncounter | `By` | none | The Go runtime's memory limit, where one is set. |
@@ -397,6 +415,60 @@ memory (Linux).
 The five audit-outbox instruments (`shn.gateway.audit.*`) have no producer in v1.0.0:
 nothing appends to the outbox yet, so they stay silent, and their silence means not
 measured, not no drops ([CONFIGURATION.md](CONFIGURATION.md#the-audit-outbox)).
+
+### Connection cuts
+
+`shn.gateway.listener.cuts` (EMF `ListenerCut`, dimensions `bound` and `listener`)
+counts each cut a listener made at one of its connection bounds
+([DEPLOYMENT.md](DEPLOYMENT.md#connection-bounds)). Over HTTP/1.1 a cut ends the
+connection; over HTTP/2 it ends one stream, and the connection's other streams go
+on. `shn.listener` is `main` or
+`observer`; `shn.listener.bound` is:
+
+- `header`: the request headers, or the TLS handshake, did not complete within 10 s;
+- `body-stall`: a request body sent no byte for 30 s;
+- `body-ceiling`: a request body was still arriving after 10 min;
+- `write-stall`: the client did not take the next 8 KiB of the answer within 30 s
+  (one stream over HTTP/2), or, over HTTP/2, the connection took no frame (at most
+  about 8 KiB) within 30 s: that cut ends the connection and every stream on it,
+  and counts once;
+- `attachment-arrival`: a documentation attachment submission did not arrive
+  within its own 30 s bound.
+
+Only `header` occurs on the observer. Each cut also writes one line:
+
+```
+gateway: listener: cut a connection at its <bound> bound (listener=<listener>)
+```
+
+The line names the bound and the listener only: never the request's path, its
+headers or the client's address. It is written whether or not metrics are exported.
+A TLS handshake cut at the header bound also produces Go's own line,
+`http: TLS handshake error from <address>: … i/o timeout`, which does name the
+client's address, as Go writes it for every failed handshake.
+
+Some closes are not counted:
+
+- an idle kept-alive connection closed after 120 s, which is the normal end of a
+  connection;
+- over HTTP/2, a stream whose headers never complete, which Go's HTTP/2 server ends
+  with the idle bound itself;
+- over HTTP/2, a connection whose client never sends the HTTP/2 preface, which Go's
+  HTTP/2 server closes on its own timer;
+- over HTTP/2, a stream reset because the client stopped granting it flow-control
+  window for the last part of an answer, sent after the gateway's handling of the
+  call ended (a connection that stops taking bytes altogether is counted).
+
+Over HTTP/2, the deadline for an answer's final flush can reach Go's HTTP/2 server
+after the stream has ended. Go then resets the already closed stream (`RST_STREAM`)
+once that deadline passes, 30 s later, or 60 s when the request's body was left
+unread. Clients ignore the reset, and nothing is cut or counted.
+
+A cut is not an exchange refusal, and no exchange records one. A rising count means
+clients that are slow or have stalled (a congested link, a client that crashed
+mid-request), or a deliberate attempt to hold connections open. A steady trickle of
+`header` cuts on a gateway that faces the internet directly is ordinary background
+scanning.
 
 Each EMF metric's stability class is in [STABILITY.md](../STABILITY.md#metrics). The
 OpenTelemetry export, its instrument names and their attributes are in the evolving
@@ -487,7 +559,9 @@ small fraction: a payer's gateway answers legs from the network, a
 provider's gateway calls for its own system, and most refusal combinations
 never occur. The gateway's other metrics (`LegOutcome`, `StoreError`, the
 store pool, audit, validator lane, certificate, ingress key, registrar feed
-and token metrics) add combinations of their own.
+and token metrics, and `ListenerCut`, which reaches at most six: the five
+bounds on the main listener and `header` on the observer) add combinations
+of their own.
 
 Every dimension value apart from `Service` and `Env`, which are your own, comes from a
 closed list, so the combinations a gateway can reach are bounded. `ExchangeRefused` and
@@ -535,6 +609,10 @@ Give the container a 45 s stop timeout: see
   `hint` carries the status. With `unreachable`, the export failed to connect, in TLS
   (a client certificate refused in the handshake included) or in time, or a gRPC
   endpoint answered `Unavailable`, `DeadlineExceeded` or `Canceled`.
+- **`telemetry-export` fails with `http-status` and a `hint` naming `redirect-refused`.**
+  The OTLP endpoint answered a redirect (the `hint` carries its status), which the
+  exporter does not follow. Set the endpoint to its final address, the one that answers
+  itself.
 - **A plain `http://` endpoint on another host.** It is allowed, and logged at boot:
   metrics then cross the network unencrypted.
 - **The pull listener serves nothing.** Off loopback it needs TLS and a scrape credential,

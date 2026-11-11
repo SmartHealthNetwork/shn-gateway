@@ -39,16 +39,67 @@ func TestLoadConfig_PayerIngress(t *testing.T) {
 		"no clients": {map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test"}, "INGRESS_CLIENTS_FILE"},
 		"an empty client list": {map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test",
 			"INGRESS_CLIENTS_FILE": writeClientsFile(t, "[]")}, "INGRESS_CLIENTS_FILE"},
-		// Every payer route takes only the Task scope: a client that can
-		// never be granted it is a registration error.
-		"a client without the Task scope": {map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test",
-			"INGRESS_CLIENTS_FILE": davinciOnly}, "lists no system/Task.write"},
+		// Every payer route takes a system/Task scope: a client that can
+		// never be granted one is a registration error.
+		"a client without a Task scope": {map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test",
+			"INGRESS_CLIENTS_FILE": davinciOnly}, "lists no system/Task scope"},
 		"a bad client": {map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test",
 			"INGRESS_CLIENTS_FILE": writeClientsFile(t, `[{"client_id":"x","alg":"HS256","public_key_pem":"irrelevant"}]`)}, "ingress clients"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := load(row.env); err == nil || !strings.Contains(err.Error(), row.want) {
 				t.Fatalf("want a boot refusal naming %q, got %v", row.want, err)
+			}
+		})
+	}
+	// A client registers any SMART system/Task scope, v1 or v2, granular
+	// included, and at least one that permits a route with no query: every
+	// route creates a Task, so one registered only to read is refused; scopes
+	// for another resource beside one are kept as before. A Task scope that is not one
+	// of SMART's spellings refuses the start, naming the scope, and so does a
+	// client whose Task scopes permit no route.
+	scoped := func(scopes string) string {
+		return strings.Replace(testValidClientsJSON(t), `"scopes":["system/Davinci.write"]`, `"scopes":`+scopes, 1)
+	}
+	for name, scopes := range map[string]string{
+		"v1 write and read":                 `["system/Task.write","system/Task.read"]`,
+		"v1 star":                           `["system/Task.*"]`,
+		"v2 c":                              `["system/Task.c"]`,
+		"v2 cr and rs":                      `["system/Task.cr","system/Task.rs"]`,
+		"a granular create beside a create": `["system/Task.write","system/Task.c?status=requested"]`,
+		"the Task scope among others":       `["system/Davinci.write","system/Task.write"]`,
+	} {
+		t.Run("boots with "+name, func(t *testing.T) {
+			if !strings.Contains(scoped(scopes), `"scopes":`+scopes) {
+				t.Fatal("fixture: scopes not replaced")
+			}
+			cfg, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test", "INGRESS_CLIENTS_FILE": writeClientsFile(t, scoped(scopes))})
+			if err != nil || len(cfg.IngressClients) != 1 {
+				t.Fatalf("%s: %v", scopes, err)
+			}
+		})
+	}
+	for name, scopes := range map[string]string{
+		"a granular create alone":     `["system/Task.c?status=requested"]`,
+		"update, delete and search":   `["system/Task.uds"]`,
+		"v1 read alone":               `["system/Task.read"]`,
+		"v2 read and search":          `["system/Task.rs"]`,
+		"another resource and update": `["system/Davinci.write","system/Task.u"]`,
+	} {
+		t.Run("refused with "+name, func(t *testing.T) {
+			_, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test", "INGRESS_CLIENTS_FILE": writeClientsFile(t, scoped(scopes))})
+			if err == nil || !strings.Contains(err.Error(), "lists no system/Task scope that permits a route") {
+				t.Fatalf("%s: want a boot refusal, got %v", scopes, err)
+			}
+		})
+	}
+	for _, bad := range []string{"system/task.read", "system/Task.rc", "system/Task.cc", "system/Task.x", "system/Task.", "system/Task", "system/Task.read?status=requested"} {
+		t.Run("refused "+bad, func(t *testing.T) {
+			for _, scopes := range []string{`["` + bad + `"]`, `["system/Task.write","` + bad + `"]`} {
+				_, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test", "INGRESS_CLIENTS_FILE": writeClientsFile(t, scoped(scopes))})
+				if err == nil || !strings.Contains(err.Error(), `"`+bad+`" is not a SMART system/Task scope`) {
+					t.Fatalf("%s: want a boot refusal naming the scope, got %v", scopes, err)
+				}
 			}
 		})
 	}

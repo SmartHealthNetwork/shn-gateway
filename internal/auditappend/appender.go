@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/backoff"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -71,14 +72,17 @@ const (
 	RetryUnknownSender = "unknown-sender" // 401: the Plane does not hold this holder yet
 	RetryUnavailable   = "unavailable"    // 408, 429, 5xx, or an answer the client does not know
 	RetryUnreachable   = "unreachable"    // no answer
-	RetryStore         = "store"          // the outbox could not be read
+	// RetryRedirectRefused: the audit endpoint answered a redirect, which is
+	// not followed (serviceclient): an endpoint that did not answer usably.
+	RetryRedirectRefused = serviceclient.RedirectRefused
+	RetryStore           = "store" // the outbox could not be read
 )
 
 // DropReasons and RetryReasons are the closed lists of Metrics.Dropped and
 // Metrics.Retried reasons.
 var (
 	DropReasons  = []string{DropOverflow, DropInvalid, DropStore, DropRefused, DropConflict, DropStopped}
-	RetryReasons = []string{RetryUnknownSender, RetryUnavailable, RetryUnreachable, RetryStore}
+	RetryReasons = []string{RetryUnknownSender, RetryUnavailable, RetryUnreachable, RetryStore, RetryRedirectRefused}
 )
 
 // Metrics is how the appender reports; the app maps it to its emitter.
@@ -139,9 +143,9 @@ func New(cfg Config) (*Appender, error) {
 	case cfg.Metrics == nil:
 		return nil, errors.New("auditappend: no metrics")
 	}
-	if cfg.Client == nil {
-		cfg.Client = http.DefaultClient
-	}
+	// The audit endpoint is a network service: its client, the one passed in
+	// or the default, follows no redirect (serviceclient).
+	cfg.Client = serviceclient.ServiceClient(cfg.Client)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -383,6 +387,9 @@ func (a *Appender) send(ctx context.Context, body []byte) (verdict, string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.cfg.Client.Do(req)
+	if serviceclient.IsRedirectRefused(err) {
+		return verdictRetry, RetryRedirectRefused
+	}
 	if err != nil {
 		return verdictRetry, RetryUnreachable
 	}

@@ -314,7 +314,8 @@ func (g *Gateway) forwardNextQuestionRound(w http.ResponseWriter, r *http.Reques
 		Payload: request, Carried: true, Operation: shnsdk.FrameOperationNextQuestion, Subpath: sub.String(),
 		MediaType: carriedFHIRMediaType(r.Header.Get("Content-Type"))}
 	var stated statedAnswer
-	answerJSON, err := g.OriginateLeg(withStatedAnswerSink(r.Context(), &stated), r, addr.payer, legType, pci, child, "", content)
+	var answerType string
+	answerJSON, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, addr.payer, legType, pci, child, "", content)
 	leg := Leg{Type: legType, Physics: legPhysics(legType), Content: content, Subjects: subjectsOf(pci)}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
@@ -337,10 +338,12 @@ func (g *Gateway) forwardNextQuestionRound(w http.ResponseWriter, r *http.Reques
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
 		return
 	}
-	relayed := relay.Exact(relay.NewBody(answerJSON, relay.OriginPeerFrame), "application/fhir+json")
+	// The round's answer keeps the media type the payer's system stated.
+	ct := writableAnswerMediaType(answerType)
+	relayed := relay.Exact(relay.NewBody(answerJSON, relay.OriginPeerFrame), ct)
 	rekeyed := g.rekeyAnswer(r.Context(), relayed, rekeyContext{payer: addr.payer, line: addr.line, stated: stated, nextQuestion: true, round: &sub})
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	g.writeRelayedAnswer(w, stated, "application/fhir+json", rekeyed, dtrAnswerKey)
+	g.writeRelayedAnswer(w, stated, ct, rekeyed, dtrAnswerKey)
 	// The round's answer is in the line its route was sealed at: no answer is
 	// bridged here, so evidence judges it at that line.
 	exchangeOf(r.Context()).answerLine(route.Token)

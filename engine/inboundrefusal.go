@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -99,7 +100,8 @@ func (g *Gateway) refuseInboundRequest(w http.ResponseWriter, r *http.Request, e
 // requester that does not decode frames, respondLegError writes the bare
 // status). detail, when set, is the refusal's own JSON object (a 422 that
 // echoes its issues) and must carry "error"; otherwise the body is
-// {"error": msg}.
+// {"error": msg}. On a leg whose answer envelope is FHIR either is written as
+// an OperationOutcome (refusalOutcome).
 func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, status int, msg string, detail map[string]any) {
 	if msg == errOwnershipFault {
 		// The transmit check refused this gateway's own answer: a message it
@@ -108,10 +110,25 @@ func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inbo
 	}
 	result := LegResult{Status: status, Message: msg}
 	if detail != nil {
-		body, err := json.Marshal(detail)
+		var value any = detail
+		contentType := "application/json"
+		var err error
+		if answersFHIR(leg.tx) {
+			// On a FHIR leg the detail is the refusal and the issues it
+			// echoes, written as one OperationOutcome; a member it cannot
+			// write there is refused rather than dropped.
+			var echoed []string
+			if echoed, err = refusalDetailIssues(detail, msg); err == nil {
+				value, contentType = refusalOutcome(status, msg, echoed), "application/fhir+json"
+			}
+		}
+		var body []byte
+		if err == nil {
+			body, err = json.Marshal(value)
+		}
 		if err == nil {
 			var p relay.Payload
-			if p, err = relay.Authored(relay.BuilderGatewayRefusal, body, "application/json"); err == nil {
+			if p, err = relay.Authored(relay.BuilderGatewayRefusal, body, contentType); err == nil {
 				result.Response = p
 			}
 		}
@@ -123,4 +140,30 @@ func (g *Gateway) refuseInbound(w http.ResponseWriter, r *http.Request, leg inbo
 	// A consent-gated leg's refusal is anchored to the consent reference the
 	// leg carried (empty on every other leg, and before one was carried at all).
 	g.respondLegError(w, r, leg.frame, leg.op, leg.tx, env.Metadata.CorrelationID, result, tok.Subject, env.Metadata.Sender, env.Metadata.ConsentRef, answerTok)
+}
+
+// refusalDetailIssues is the validator issues a refusal's detail object
+// echoes, for its OperationOutcome on a FHIR leg. The object may carry only
+// its "error", which must be the refusal's message, and its "issues" (a list
+// of texts): any other member, or another message, has no place in the
+// OperationOutcome, and is refused rather than dropped.
+func refusalDetailIssues(detail map[string]any, msg string) ([]string, error) {
+	var issues []string
+	for k, v := range detail {
+		switch k {
+		case "error":
+			if v != msg {
+				return nil, fmt.Errorf("refusal detail: error %v is not the refusal's message", v)
+			}
+		case "issues":
+			list, ok := v.([]string)
+			if !ok {
+				return nil, fmt.Errorf("refusal detail: issues is %T, not a list of texts", v)
+			}
+			issues = list
+		default:
+			return nil, fmt.Errorf("refusal detail: member %q has no place in an OperationOutcome", k)
+		}
+	}
+	return issues, nil
 }

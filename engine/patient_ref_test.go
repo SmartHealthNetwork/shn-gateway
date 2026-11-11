@@ -273,7 +273,7 @@ func TestEligibility_OtherReferencesAreReadAsBefore(t *testing.T) {
 					}
 					return
 				}
-				if ans.status != http.StatusBadRequest || strings.TrimSpace(string(ans.body)) != `{"error":"unknown member"}` {
+				if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusBadRequest || msg != "unknown member" {
 					t.Fatalf("answer %d %s, want the payer's 400 unknown member, as before", ans.status, ans.body)
 				}
 			})
@@ -688,7 +688,7 @@ func TestEligibility_ContainedMemberOfAnyShapeIsRead(t *testing.T) {
 		t.Run("records/"+level.String(), func(t *testing.T) {
 			p := eligibilityPayer(t, level, false)
 			ans := p.sendAs(t, "coverage-eligibility", "", body(t), p.pci)
-			if ans.status != http.StatusBadRequest || strings.TrimSpace(string(ans.body)) != `{"error":"unknown member"}` {
+			if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusBadRequest || msg != "unknown member" {
 				t.Fatalf("answer %d %s, want the payer's 400 unknown member", ans.status, ans.body)
 			}
 		})

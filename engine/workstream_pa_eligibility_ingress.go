@@ -181,10 +181,8 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, "answered"))
-	ct := carriedFHIRMediaType(answerType)
-	if ct == "" {
-		ct = mediaFHIRJSON
-	}
+	// The answering system's own media type, whatever it is.
+	ct := writableAnswerMediaType(answerType)
 	g.writeRelayedAnswer(w, stated, ct, relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }

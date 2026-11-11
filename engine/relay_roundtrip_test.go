@@ -220,11 +220,19 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 			}
 		}
 	default:
-		body := responseBytes(lr)
+		body, ct := responseBytes(lr), "application/fhir+json"
 		if len(body) == 0 {
-			body, _ = json.Marshal(map[string]string{"error": lr.Message})
+			// The payer gateway's own refusal, in the body and media type its
+			// respondLegError writes for the leg (refusalOutcome on a FHIR
+			// leg), so a test on this side reads what a real one sends.
+			var value any = map[string]string{"error": lr.Message}
+			ct = "application/json"
+			if answersFHIR(env.Metadata.TransactionType) {
+				value, ct = refusalOutcome(lr.Status, lr.Message, nil), "application/fhir+json"
+			}
+			body, _ = json.Marshal(value)
 		}
-		respPayload, err = shnsdk.EncodeHTTPFrame(lr.Status, "application/fhir+json", body)
+		respPayload, err = shnsdk.EncodeHTTPFrame(lr.Status, ct, body)
 		if err != nil {
 			return errResp("stub: EncodeHTTPFrame: " + err.Error()), nil
 		}

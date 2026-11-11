@@ -387,13 +387,13 @@ func scopedBearer(t *testing.T, g *Gateway, priv *ecdsa.PrivateKey, clientID, sc
 	return tr.AccessToken
 }
 
-// The payer's Task routes take only a bearer granted system/Task.write: one
-// granted none, or the provider ingress's scope, is refused 403
+// The payer's Task routes take a bearer granted a scope that permits creating
+// a Task: one granted none, or the provider ingress's scope, is refused 403
 // insufficient_scope, recorded as the payer gateway's authority refusal,
 // before the Task is read and before the exchange is the leg's, at a
 // provider's base and at the plain Task endpoint alike. No bearer is 401. The
-// SMART configuration advertises the one scope.
-func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
+// SMART configuration advertises system/Task.write alone: no route reads yet.
+func TestCDexRequestIngress_TakesAScopeThatPermitsCreate(t *testing.T) {
 	priv, pub := newTestClientKey(t)
 	g := payerGatewayWithAuth(t, "payer-system", pub)
 	var got exchangeRecords
@@ -467,8 +467,151 @@ func TestCDexRequestIngress_TakesOnlyTheTaskWriteScope(t *testing.T) {
 	})
 }
 
+// cdexCreateScopeRows are the scope sets a bearer is granted in the rows of
+// TestCDexRequestIngress_ScopeSetAtEveryLevel, and whether each permits the
+// create routes: some scope in the set that permits create (v1 write or *, v2
+// with c), never a granular one, whose query the gateway cannot enforce.
+var cdexCreateScopeRows = []struct {
+	name, scope string
+	admitted    bool
+}{
+	{"both v1 scopes in one token", "system/Task.write system/Task.read", true},
+	{"both v1 scopes, read first", "system/Task.read system/Task.write", true},
+	{"v1 write alone", TaskWriteScope, true},
+	{"v1 read alone", "system/Task.read", false},
+	{"v2 cr", "system/Task.cr", true},
+	{"v2 c", "system/Task.c", true},
+	{"v2 r", "system/Task.r", false},
+	{"v1 star", "system/Task.*", true},
+	{"another resource", "system/Patient.read", false},
+	{"a granular create", "system/Task.c?status=requested", false},
+	{"a granular create with read", "system/Task.c?status=requested system/Task.r", false},
+	{"none", "", false},
+	{"the provider ingress's scope", ingressScope, false},
+}
+
+// cdexCreateScopesRegistered registers payer-system for every scope the
+// rows above ask for.
+func cdexCreateScopesRegistered(pub []byte) func(*Config) {
+	return func(c *Config) {
+		var scopes []string
+		for _, row := range cdexCreateScopeRows {
+			for _, s := range strings.Split(row.scope, " ") {
+				if s != "" && !slices.Contains(scopes, s) {
+					scopes = append(scopes, s)
+				}
+			}
+		}
+		c.IngressClients = map[string]IngressClientRegistration{"payer-system": {Alg: "ES384", PublicKeyPEM: pub, Scopes: scopes}}
+	}
+}
+
+// The ingress grants a scope set and each create route takes a bearer whose
+// set holds a scope that permits create, whatever the conformance level: a
+// set that permits none is refused 403 insufficient_scope, recorded as the
+// payer gateway's authority refusal before the Task is read, at a provider's
+// base, at the plain Task endpoint and on the listing alike. An admitted
+// Task is read and routed: a base naming no registered provider refuses it
+// as routing, after the scope check.
+func TestCDexRequestIngress_ScopeSetAtEveryLevel(t *testing.T) {
+	priv, pub := newTestClientKey(t)
+	for _, level := range allLevels {
+		for _, row := range cdexCreateScopeRows {
+			t.Run(level.String()+"/"+row.name, func(t *testing.T) {
+				var got exchangeRecords
+				g := payerGatewayWithAuth(t, "payer-system", pub, cdexCreateScopesRegistered(pub), func(c *Config) {
+					c.ConformanceEnforcement = level
+					c.ExchangeObserved = got.observe
+				})
+				bearer := scopedBearer(t, g, priv, "payer-system", row.scope)
+				if row.admitted {
+					rec := payerPost(g, http.MethodPost, providerBasePath("nobody"), bearer, cdexRequestTask(t))
+					if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "names no registered provider") {
+						t.Fatalf("answer %d %s, want the routing refusal past the scope", rec.Code, rec.Body)
+					}
+					xr := got.only(t)
+					wantRefusal(t, xr, http.StatusUnprocessableEntity, RefusedByPayerGateway, RefusalRouting)
+					wantReasonInAnswer(t, xr, rec.Body.String())
+					if listed := payerPost(g, http.MethodGet, CDexProvidersPath, bearer, nil); listed.Code != http.StatusOK {
+						t.Fatalf("listing %d %s, want 200", listed.Code, listed.Body)
+					}
+					return
+				}
+				for _, path := range []string{providerBasePath("provider-1"), "/Task", CDexProvidersPath} {
+					method, body := http.MethodPost, cdexRequestTask(t)
+					if path == CDexProvidersPath {
+						method, body = http.MethodGet, nil
+					}
+					rec := payerPost(g, method, path, bearer, body)
+					if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "insufficient_scope") ||
+						rec.Header().Get("WWW-Authenticate") != `Bearer error="insufficient_scope", scope="system/Task.write"` {
+						t.Fatalf("%s: answer %d %s (%q), want 403 insufficient_scope", path, rec.Code, rec.Body, rec.Header().Get("WWW-Authenticate"))
+					}
+					if path == CDexProvidersPath {
+						continue // the listing is no exchange: it keeps no record
+					}
+					xr := got.only(t)
+					wantRefusal(t, xr, http.StatusForbidden, RefusedByPayerGateway, RefusalAuthority)
+					if xr.Exchange != ExchangeOther {
+						t.Fatalf("%s: recorded as %s, want %s: the scope is checked before the leg is known", path, xr.Exchange, ExchangeOther)
+					}
+					wantReasonInAnswer(t, xr, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// The token endpoint grants the set the client asks for, in the order asked,
+// duplicates collapsed, and its answer and the bearer state it; a client
+// asking for exactly system/Task.write is granted exactly that, as before. A
+// set holding one scope the client is not registered for is refused
+// invalid_scope, as a single one is.
+func TestCDexRequestIngress_TokenGrantsTheScopeSet(t *testing.T) {
+	priv, pub := newTestClientKey(t)
+	g := payerGatewayWithAuth(t, "payer-system", pub, func(c *Config) {
+		c.IngressClients = map[string]IngressClientRegistration{"payer-system": {Alg: "ES384", PublicKeyPEM: pub,
+			Scopes: []string{TaskWriteScope, "system/Task.read"}}}
+	})
+	token := func(scope string) *httptest.ResponseRecorder {
+		now := ingressFixedClock()()
+		claims := validClaims("payer-system", g.ingressAuth.tokenURL(), now)
+		cdexRequestJTI++
+		claims["jti"] = fmt.Sprintf("jti-%d", cdexRequestJTI)
+		return postTokenScope(t, g.Handler(), mintAssertion(t, priv, jwt.SigningMethodES384, claims), scope)
+	}
+	for requested, want := range map[string]string{
+		TaskWriteScope:                                        TaskWriteScope,
+		"system/Task.write system/Task.read":                  "system/Task.write system/Task.read",
+		"system/Task.read system/Task.write":                  "system/Task.read system/Task.write",
+		"system/Task.write system/Task.write":                 TaskWriteScope,
+		"system/Task.read system/Task.write system/Task.read": "system/Task.read system/Task.write",
+	} {
+		rec := token(requested)
+		var tr struct {
+			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &tr) != nil || tr.Scope != want {
+			t.Fatalf("%q: %d %s, want scope %q", requested, rec.Code, rec.Body, want)
+		}
+		req := httptest.NewRequest(http.MethodGet, testIngressBaseURL+CDexProvidersPath, nil)
+		req.Header.Set("Authorization", "Bearer "+tr.AccessToken)
+		if _, scope, ok, _ := g.ingressAuth.verifyBearerScope(req); !ok || scope != want {
+			t.Fatalf("%q: the bearer carries %q (%v), want %q", requested, scope, ok, want)
+		}
+	}
+	for _, requested := range []string{"system/Task.write system/Task.cr", "system/Task.write system/Patient.read", "system/Task.write  system/Task.read", " system/Task.write"} {
+		if rec := token(requested); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"invalid_scope"`) {
+			t.Fatalf("%q: %d %s, want 400 invalid_scope", requested, rec.Code, rec.Body)
+		}
+	}
+}
+
 // A registered client cannot grant itself the scope with a direct bearer its
 // registration does not allow; one that its registration allows is taken.
+// The direct bearer's scope sets are in
+// TestCDexRequestIngress_ScopeAtEveryLevelAndEveryCredential.
 func TestCDexRequestIngress_DirectBearerScope(t *testing.T) {
 	priv, pub := newTestClientKey(t)
 	g := payerGatewayWithAuth(t, "payer-system", pub)
@@ -889,7 +1032,11 @@ func TestCDexRequestIngress_ScopeAtEveryLevelAndEveryCredential(t *testing.T) {
 		"a direct bearer stating the scope":     {func(*Gateway) string { return direct(TaskWriteScope) }, http.StatusUnprocessableEntity, RefusalRouting},
 		"a direct bearer stating none":          {func(*Gateway) string { return direct("") }, http.StatusForbidden, RefusalAuthority},
 		"a direct bearer stating another scope": {func(*Gateway) string { return direct(ingressScope) }, http.StatusForbidden, RefusalAuthority},
-		"a forged bearer":                       {func(*Gateway) string { return "a.b.c" }, http.StatusUnauthorized, RefusalAuthentication},
+		// A set it is registered for, holding the create scope, is taken;
+		// one holding a scope it is not registered for is kept as none.
+		"a direct bearer stating a registered set":    {func(*Gateway) string { return direct(ingressScope + " " + TaskWriteScope) }, http.StatusUnprocessableEntity, RefusalRouting},
+		"a direct bearer stating an unregistered set": {func(*Gateway) string { return direct(TaskWriteScope + " system/Task.read") }, http.StatusForbidden, RefusalAuthority},
+		"a forged bearer": {func(*Gateway) string { return "a.b.c" }, http.StatusUnauthorized, RefusalAuthentication},
 		"a tampered bearer": {func(g *Gateway) string {
 			// The signature's first character, moved to the next one of the
 			// base64url alphabet: an ES384 signature fills its text exactly,

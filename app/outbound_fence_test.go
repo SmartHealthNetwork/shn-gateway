@@ -50,19 +50,19 @@ var outboundSites = map[string]outboundSite{
 	"internal/endpointcert/endpointcert.go Client var http.Client":                 {1, "the copy Client returns, its transport Wrapped"},
 
 	// Nil defaults for library callers: build() always passes a client.
-	"checks/checks.go NewRunner http.DefaultClient":                         {1, "nil default; build passes the template, and every target its tagged copy"},
-	"connectors/fhirsor/fhirsor.go NewFromURL http.DefaultClient":           {1, "nil default, under the redirect policy; build passes a tagged fhir client"},
-	"connectors/fhirsor/search.go searchClient http.DefaultClient":          {1, "nil default; build passes a tagged fhir client"},
-	"connectors/smartauth/tokensource.go fetch http.Client{}":               {1, "nil default; tagSmart sets HTTPClient"},
-	"connectors/smartauth/tokensource.go RoundTrip http.DefaultTransport":   {1, "net/http's own fallback for a token client with no transport; tagSmart sets the token client, whose tagged transport this wraps"},
-	"connectors/smartauth/transport.go NewHTTPClient http.DefaultTransport": {1, "nil default; tagSmart sets Transport"},
-	"connectors/smartauth/transport.go NewHTTPClient http.Client{}":         {1, "wraps the transport it is given"},
-	"diagnostics/http.go ObserveTransport http.DefaultTransport":            {1, "nil default; build passes tagged transports"},
-	"diagnostics/publisher.go RunPublisher http.Client{}":                   {1, "nil default; build passes the tagged diagnostic client"},
-	"engine/gateway.go New http.DefaultClient":                              {1, "nil default; build passes the hub client"},
-	"engine/gateway.go authorizeOnce http.DefaultClient":                    {1, "nil default; build passes the authorization client"},
-	"internal/auditappend/appender.go New http.DefaultClient":               {1, "nil default; build passes the audit client"},
-	"internal/fhirclient/client.go New http.DefaultClient":                  {1, "nil default; its callers pass a tagged client"},
+	"checks/checks.go NewRunner http.DefaultClient":                                  {1, "nil default; build passes the template, and every target its tagged copy"},
+	"connectors/fhirsor/fhirsor.go NewFromURL http.DefaultClient":                    {1, "nil default, under the redirect policy; build passes a tagged fhir client"},
+	"connectors/fhirsor/search.go searchClient http.DefaultClient":                   {1, "nil default; build passes a tagged fhir client"},
+	"connectors/smartauth/tokensource.go fetch http.Client{}":                        {1, "nil default; tagSmart sets HTTPClient"},
+	"connectors/smartauth/tokensource.go RoundTrip http.DefaultTransport":            {1, "net/http's own fallback for a token client with no transport; tagSmart sets the token client, whose tagged transport this wraps"},
+	"connectors/smartauth/transport.go NewHTTPClient http.DefaultTransport":          {1, "nil default; tagSmart sets Transport"},
+	"connectors/smartauth/transport.go NewHTTPClient http.Client{}":                  {1, "wraps the transport it is given"},
+	"connectors/smartauth/clientjwt.go NewClientJWTHTTPClient http.DefaultTransport": {1, "nil default; the payer's gateway gives it the payer's tagged transport (payercdsauth.go)"},
+	"connectors/smartauth/clientjwt.go NewClientJWTHTTPClient http.Client{}":         {1, "wraps the transport it is given"},
+	"diagnostics/http.go ObserveTransport http.DefaultTransport":                     {1, "nil default; build passes tagged transports"},
+	"diagnostics/publisher.go RunPublisher http.Client{}":                            {1, "nil default; build passes the tagged diagnostic client"},
+	"engine/gateway.go New http.DefaultClient":                                       {1, "nil default; build passes the hub client"},
+	"internal/fhirclient/client.go New http.DefaultClient":                           {1, "nil default; its callers pass a tagged client"},
 
 	// Clients the engine builds itself.
 	"engine/fhirserver_read.go client http.Transport{}":                             {1, "the read's own guarded transport, unchanged; Wrapped crd-fhir-server through CertRecorder"},
@@ -85,6 +85,14 @@ var outboundSites = map[string]outboundSite{
 	// call's peer TLS state (peerCertificate), which builds no client.
 	"telemetry/otelsetup/setup.go build http.Client{}":         {1, "the OTLP HTTP exporter's client: its transport Wrapped otlp in the same expression"},
 	"telemetry/otelsetup/setup.go build http.DefaultTransport": {1, "the OTLP HTTP exporter's own clone, Wrapped otlp where the client is built"},
+
+	// The network-service redirect policy: a copy of the client it is given,
+	// whose tag (endpointcert) stays outermost.
+	"internal/serviceclient/serviceclient.go ServiceClient var http.Client": {1, "the copy ServiceClient returns, the given client's tagged transport under the policy"},
+	"internal/serviceclient/serviceclient.go next http.DefaultTransport":    {1, "a nil transport's meaning, read at each request, as the client did"},
+
+	// The redirect rows' fixture (imported only by tests, never by a build).
+	"internal/serviceclient/redirecttest/redirecttest.go Serve http.Client{}": {2, "the plain client an embedding program might pass, for the rows that prove the policy applies to it; never built by a gateway"},
 
 	// The recorder.
 	"internal/endpointcert/endpointcert.go transport http.DefaultTransport": {1, "a wrapper of a nil transport reads http.DefaultTransport at each request, as the client did"},

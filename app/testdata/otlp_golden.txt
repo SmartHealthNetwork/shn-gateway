@@ -26,6 +26,7 @@ scope github.com/SmartHealthNetwork/shn-gateway/telemetry v1.0.0-golden
   shn.gateway.audit.queue.depth unit="{record}" gauge
     {} 7
   shn.gateway.audit.retries unit="{record}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.reason=redirect-refused} 1
     {shn.reason=store} 1
     {shn.reason=unavailable} 1
     {shn.reason=unknown-sender} 1

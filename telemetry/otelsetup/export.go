@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -53,9 +54,13 @@ type ExportState struct {
 type attempt struct {
 	sent      bool
 	transport bool // the request never got an answer: connect, TLS or timeout
-	httpCode  int
-	grpcCode  codes.Code
-	isGRPC    bool
+	// redirect: the collector answered a redirect, which is not followed
+	// (serviceclient); httpCode is its status, which the policy names for
+	// every redirect, a hop from https to http included.
+	redirect bool
+	httpCode int
+	grpcCode codes.Code
+	isGRPC   bool
 }
 
 // probe records each request's attempt for the export in progress. Exports
@@ -91,6 +96,10 @@ type roundTripper struct {
 
 func (t roundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := t.next.RoundTrip(r)
+	if serviceclient.IsRedirectRefused(err) {
+		t.probe.set(attempt{sent: true, redirect: true, httpCode: serviceclient.RedirectStatus(err)})
+		return resp, err
+	}
 	if err != nil {
 		t.probe.set(attempt{sent: true, transport: true})
 		return resp, err
@@ -198,6 +207,14 @@ func classify(err error, a attempt) verdict {
 		return verdict{outcome: "dropped"}
 	case a.transport:
 		return verdict{outcome: "failed", code: CodeUnreachable}
+	case a.redirect:
+		// The collector answered, with a redirect the exporter does not
+		// follow: a failing status, never a network outage.
+		hint := "HTTP redirect, " + serviceclient.RedirectRefused
+		if a.httpCode != 0 {
+			hint = fmt.Sprintf("HTTP %d, %s", a.httpCode, serviceclient.RedirectRefused)
+		}
+		return verdict{outcome: "failed", code: CodeHTTPStatus, hint: hint}
 	case a.isGRPC:
 		switch a.grpcCode {
 		case codes.Unauthenticated, codes.PermissionDenied:

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -71,6 +73,19 @@ func validatorLane(line string) endpointcert.Tag {
 }
 func certifyLane(line string) endpointcert.Tag { return endpointcert.Lane(endpointcert.Certify, line) }
 
+// noRedirectKinds are the endpoint kinds of the network's own services and
+// the gateway's sidecars: every client of one follows no redirect
+// (serviceclient), its /internal/checks probe included. Every other kind is a
+// participant's system, under smartauth's participant policy.
+var noRedirectKinds = []endpointcert.Kind{
+	endpointcert.Hub, endpointcert.HubKey, endpointcert.Authorization, endpointcert.AuthorizationKey,
+	endpointcert.Consent, endpointcert.Registrar, endpointcert.Audit, endpointcert.Discovery,
+	endpointcert.OTLP, endpointcert.Validator, endpointcert.Certify,
+}
+
+// followsNoRedirect reports whether k is one of noRedirectKinds.
+func followsNoRedirect(k endpointcert.Kind) bool { return slices.Contains(noRedirectKinds, k) }
+
 // checkTag is the endpoint kind a /internal/checks target's probes reach:
 // its setting's, or for a target that is not a setting, the endpoint it
 // stands for. ok is false for an ID this table does not know.
@@ -94,6 +109,12 @@ func checkTag(id string) (endpointcert.Tag, bool) {
 func tagCheckTargets(rec *endpointcert.Recorder, targets []checks.Target, client *http.Client) []checks.Target {
 	for i := range targets {
 		if tag, ok := checkTag(targets[i].ID); ok {
+			if followsNoRedirect(tag.Kind()) {
+				// A network service or a sidecar is probed under the policy
+				// its calls follow: no redirect at all (serviceclient).
+				targets[i].Client = serviceclient.ServiceClient(rec.Client(tag, client))
+				continue
+			}
 			// Under the redirect policy every client that reaches a
 			// participant's system has: never https to http, and no
 			// Authorization to another origin, nor any header the target

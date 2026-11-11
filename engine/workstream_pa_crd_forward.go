@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -24,6 +25,29 @@ func WithCDSBaseURL(cdsBaseURL string) NativeOption {
 			n.paNative().cdsBaseURL = cdsBaseURL
 		}
 	}
+}
+
+// WithCDSClient sends the CDS calls to the partner's CDS service (the service
+// listing and each CRD hook) with c: one that authenticates them with a CDS
+// Hooks client JWT (smartauth.NewClientJWTHTTPClient). DTR, PAS and every
+// other operation keep the responder's own client. nil leaves the CDS calls
+// on it too.
+func WithCDSClient(c *http.Client) NativeOption {
+	return func(n *nativeResponder) { n.paNative().cdsClient = c }
+}
+
+// cdsHTTPClient is the client the CDS calls go with: the CDS client when one
+// is set, with the backend headers' redirect rule the responder's own client
+// has (WithBackendHeaders), else the responder's own client.
+func (n *nativeResponder) cdsHTTPClient() *http.Client {
+	c := n.paNative().cdsClient
+	if c == nil {
+		return n.client
+	}
+	if len(n.backendHeaders) > 0 {
+		return smartauth.ParticipantClientWith(c, n.backendHeaders)
+	}
+	return c
 }
 
 // WithCRDDispatchService names the partner's CDS service for the crd-order-dispatch
@@ -48,7 +72,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if err != nil || refused.Status != 0 {
 		return refused, err
 	}
-	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), n.paNative().cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
+	up, bad, err := n.postVia(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), n.cdsHTTPClient(), n.paNative().cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
 	}

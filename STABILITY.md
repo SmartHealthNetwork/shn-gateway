@@ -115,7 +115,79 @@ evolving.
   only. With it, E-10, E-11, E-12 and E-13 are the only edits the gateway makes
   to signed content, each only at its own address. No exception lets a minor
   release add another edit to a full item or to signed content, or make any
-  of these four anywhere else.
+  of these four anywhere else. (v1.10.0 records a fourth exception of its own,
+  which makes no edit; see the next entry.)
+- **A fourth recorded exception, v1.10.0:** CRD, DTR and PAS pass-through are
+  full, and v1.10.0, a minor release, changes one thing in them: the media type
+  the provider's gateway writes to its EHR on a CRD, DTR or PAS answer it
+  relays.
+  - **What changes:** the provider's gateway writes a questionnaire package, a
+    `$next-question` answer, and a PAS answer to a claim, an amendment or an
+    inquiry with the media type the payer's system stated, whatever it is,
+    where earlier releases wrote `application/fhir+json`. A CDS Hooks answer
+    stated `application/fhir+json` is written as stated when the payer's
+    gateway advertises the `v1opsub` request frame, as a payer's gateway does
+    from v1.8.0, and `application/json` from any other payer, as before. An
+    answer that states no type is written as before: `application/fhir+json`,
+    or `application/json` for a CDS Hooks answer. One no header can carry (it
+    does not parse as a media type, is over 256 bytes or holds a control
+    character) is written the same way; earlier releases wrote such a CDS
+    Hooks type as stated when it parsed and was not
+    `application/fhir+json`. The answer's body, status and other
+    headers are carried as before.
+  - **Signed content:** n/a. This exception changes no byte of the answer, so
+    a signature in it verifies as it did before.
+  - **Why it was granted:** when it was granted, production carried no live
+    traffic, only tests, and the change follows the participant's own type, as
+    a direct integration would.
+  - **Upgrade note:** an EHR that dispatches on the media type must accept the
+    payer's stated type before its provider's gateway upgrades to v1.10.0,
+    including the payer's own parameters (for example `;charset=UTF-8`): on a
+    DTR or PAS answer, a type other than `application/fhir+json` (for example
+    `application/json`); on a CDS Hooks answer, `application/fhir+json` from a
+    payer whose gateway advertises `v1opsub`.
+
+  The exception is this media type only, on these answers only, among them a
+  DTR answer module 2 carries into the provider's DTR line (E-08): no other
+  full item changes, and it lets no minor release change another. (v1.10.0
+  records a fifth exception of its own, which makes no edit; see the next
+  entry.)
+- **A fifth recorded exception, v1.10.0:** CRD pass-through is full, and so
+  are the payer client's settings (`PAYER_DAVINCI_TOKEN_URL` and
+  `PAYER_DAVINCI_CLIENT_*`), with which earlier releases authenticated every
+  call a payer's gateway made to the payer's own system, the CDS service
+  listing and each CRD hook included: with the SMART Backend Services access
+  token, or with no credential when no token endpoint was set. v1.10.0, a
+  minor release, changes how those CDS calls authenticate.
+  - **What changes:** on a payer's gateway whose payer client has a signing
+    key (`PAYER_DAVINCI_CLIENT_KEY` and `PAYER_DAVINCI_CLIENT_ALG`), the CDS
+    service listing read and each CRD hook call carry a CDS Hooks client JWT
+    signed with that key, in place of the access token (or of no credential),
+    and the gateway serves the key's public JWK Set at
+    `GET /cds-client/jwks.json`. A payer client with no signing key, and DTR,
+    PAS and eligibility on every payer, authenticate as before. Only the
+    `Authorization` header the gateway sets on those calls changes; no byte of
+    a request's or an answer's body does.
+  - **Signed content:** n/a. This exception changes no byte of a CDS request's
+    or answer's body, so a signature in one verifies as it did before.
+  - **Why it was granted:** CDS Hooks 2.0, which Da Vinci CRD adopts, defines
+    a JWT the client signs as the one way a CDS client authenticates, and a
+    payer whose CDS service requires it answered the access token `401`. When
+    it was granted, the one hosted payer with a signing key was a payer whose
+    CDS service requires the client JWT, and production carried no live
+    traffic, only tests.
+  - **Upgrade note:** a payer whose payer client has a signing key and whose
+    CDS service takes only the access token sets
+    `PAYER_DAVINCI_CDS_AUTH=access-token` before its gateway upgrades to
+    v1.10.0 (an earlier gateway ignores the setting, and SHN Cloud accepts
+    that value on an earlier release); one whose CDS service verifies the
+    client JWT registers the
+    issuer and the JWK Set URL with it (CONFIGURATION.md, "CDS Hooks client
+    authentication").
+
+  The exception is this credential only, on these calls only, on a payer
+  client with a signing key: no other full item changes, and it lets no minor
+  release change another.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -191,8 +263,9 @@ The classes are:
 - `monitoring`: the gateway's monitoring surface: the OpenTelemetry export
   settings, the checks that report on them, the OpenTelemetry instruments and
   their attributes, the metrics and access line fields added with them, the
-  `/internal/stats` endpoint and `shn gateway stats`, the `shn` CLI's command
-  that reads it. Owned by `core`, evolving at v1.0.
+  access line's `readsFailed` (from v1.10.0), whose scope grows as reads adopt
+  it, the `/internal/stats` endpoint and `shn gateway stats`, the `shn` CLI's
+  command that reads it. Owned by `core`, evolving at v1.0.
 - `test tooling`: for test deployments; outside the promise. A released
   gateway reads some of it only to refuse to start with it.
 - `unsupported`: not acted on (the gateway or the CLI reads it only to warn or
@@ -384,6 +457,9 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PAYER_DIRECTORY` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_BASE_URL` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_CDS_BASE_URL` | PA workstream | PA workstream |
+| `PAYER_DAVINCI_CDS_AUTH` | PA workstream | PA workstream |
+| `PAYER_DAVINCI_CDS_JWT_ISS` | PA workstream | PA workstream |
+| `PAYER_DAVINCI_CDS_JWT_JKU` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_DTR_BASE_URL` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_PAS_BASE_URL` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_TOKEN_URL` | PA workstream | PA workstream |
@@ -441,7 +517,8 @@ export (the gateway's table of these settings is `noEffectSettings` in
   a member a system of record does not hold, and files its records under that binding.
   It answers coverage eligibility only through `PAYER_ELIGIBILITY_URL`; without it an
   eligibility request is answered `501` "coverage eligibility is not offered by this
-  payer", in the `{"error": …}` shape of every refusal the payer's gateway makes itself.
+  payer", in the shape every refusal the payer's gateway makes itself on that leg takes
+  (from v1.10.0 an `OperationOutcome`, before `{"error": …}`).
   `REQUIRE_KNOWN_MEMBERS=true` without a system of record refuses to boot. Patient Access
   returns no explanations of benefit on such a gateway: they are filed under its binding
   of each member, never under the identifier a patient-access token names, as for any
@@ -896,6 +973,7 @@ The main listener, on `HOST` and `PORT`:
 | `POST /cdex/provider/{provider}/Task` | PA workstream, evolving | PA workstream |
 | `POST /Task (payer)` | PA workstream, evolving | PA workstream |
 | `GET /cdex/providers` | PA workstream, evolving | PA workstream |
+| `GET /cds-client/jwks.json` | PA workstream | PA workstream |
 | `GET /metadata` | core | core |
 | `POST /oauth/token` | core | core |
 | `GET /.well-known/smart-configuration` | core | core |
@@ -1183,6 +1261,30 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   frame carries.
 - No configuration or Go API changes.
 
+**Behavior change in v1.10.0.**
+
+- A requesting gateway writes the media type a success frame states to its own
+  participant's system, whatever it is, as a direct client would see it:
+  - on the provider's DTR and PAS ingress (a questionnaire package, a
+    `$next-question` answer, a PAS answer to a claim, an amendment or an
+    inquiry), where earlier releases wrote `application/fhir+json` whatever the
+    frame carried. This changes a full item: v1.10.0's fourth recorded
+    exception (Versioning policy, above);
+  - on the CDex `$submit-attachment` and data request routes, coverage
+    eligibility and the federated query, where earlier releases wrote
+    `application/fhir+json` unless the frame stated `application/json` or
+    `application/fhir+json`.
+
+  A frame that states none, or a type no header can carry, is written
+  `application/fhir+json`.
+- The provider's CRD ingress writes a CDS Hooks answer stated
+  `application/fhir+json` as stated when the payer's gateway advertises the
+  `v1opsub` request frame, as a payer's gateway does from v1.8.0, and
+  `application/json`, as before, from any other payer, whose gateway may
+  predate v0.57.0. A stated type no header can carry is written
+  `application/json`. This is part of the same exception.
+- No configuration or Go API changes.
+
 ### An empty application error body
 
 **Behavior change in v0.57.0.**
@@ -1197,7 +1299,8 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   one that states no media type is still read as `application/fhir+json`.
 - The gateway's own refusals (no answer from its system to relay) keep their
   `{"error": …}` body, which names the leg and status when there is no reason
-  to give.
+  to give. (From v1.10.0 that body takes the leg's answer envelope: see
+  "Behavior change in v1.10.0" below.)
 - A requester that negotiated no frame still sees the Hub's failed forward. The
   bare answer the Hub discards is the gateway's own refusal,
   `{"error":"<leg>: recipient answered <status>; its answer is carried only in
@@ -1209,6 +1312,27 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   gateway's own body in place of a participant's application error. Its
   exported constant `relay.BuilderInterimEmptyErrorSubstitution` remains,
   deprecated, so code naming it still compiles; `relay.Authored` refuses it.
+
+**Behavior change in v1.10.0.**
+
+- The gateway's own refusal of a leg, with no answer from its system to carry,
+  is written in the leg's answer envelope, a field of each leg in the network's
+  leg taxonomy, which the participant protocol's §4.3 names: on coverage
+  eligibility, DTR,
+  PAS, CDex and the federated query, an `OperationOutcome`
+  (`application/fhir+json`) whose first issue is the refusal (severity `error`,
+  a code from its status, the message as its `diagnostics`), then one `invalid`
+  issue for each validator issue it echoes; on the CDS Hooks legs and
+  patient-authored DTR, `{"error": …}` (`application/json`) as before. A
+  requester's gateway relays either as it arrived, so a client of a FHIR
+  operation route reads a counterpart gateway's refusal as it reads its own
+  gateway's. The bare answer to a requester that negotiated no frame takes the
+  same envelope.
+- Statuses, messages, refusal rules and the exchange record are unchanged, and
+  a participant's own answer is carried as it was sent on every leg.
+- While a counterpart runs an earlier release, a client of a FHIR operation
+  route can receive either body: read an `OperationOutcome` first, then `error`.
+- No configuration changes.
 
 ### Amendments a provider's gateway builds, after a payer's 409
 
@@ -1874,6 +1998,7 @@ classify is written as `other`.
 | `answerEdits` | core | core |
 | `editsNotMade` | core | core |
 | `answerHeadersNotCarried` | core | core |
+| `readsFailed` | monitoring | core |
 | `hubDelivered` | core | core |
 
 | Item | Class | Owner |
@@ -2102,6 +2227,7 @@ tier: a minor release may remove or rename it with its leg.
 | `ConformanceFinding` | monitoring | core |
 | `ValidatorLatency` | monitoring | core |
 | `ObserveCheckDropped` | monitoring | core |
+| `ListenerCut` | monitoring | core |
 
 ## OpenTelemetry instruments
 
@@ -2172,6 +2298,7 @@ the EMF `exchange` dimension.
 | `shn.gateway.conformance.findings` | monitoring | core |
 | `shn.gateway.validator.duration` | monitoring | core |
 | `shn.gateway.conformance.checks.dropped` | monitoring | core |
+| `shn.gateway.listener.cuts` | monitoring | core |
 | `http.server.request.duration` | monitoring | core |
 | `go.config.gogc` | monitoring | core |
 | `go.goroutine.count` | monitoring | core |
@@ -2208,6 +2335,8 @@ the EMF `exchange` dimension.
 | `shn.finding.kind` | monitoring | core |
 | `shn.finding.action` | monitoring | core |
 | `shn.finding.tolerated` | monitoring | core |
+| `shn.listener` | monitoring | core |
+| `shn.listener.bound` | monitoring | core |
 | `http.request.method` | monitoring | core |
 | `http.response.status_code` | monitoring | core |
 | `http.route` | monitoring | core |

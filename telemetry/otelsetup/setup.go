@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
@@ -210,8 +211,9 @@ func (t *Telemetry) build(id Identity, opts Options) error {
 			// The client carries the per-request timeout and records each
 			// request's answer for the export's classification.
 			// The collector's certificate is recorded from each answer, over
-			// the exporter's own transport (MON-R25).
-			otlpmetrichttp.WithHTTPClient(&http.Client{Timeout: o.Timeout, Transport: roundTripper{next: opts.Certs.Wrap(endpointcert.Of(endpointcert.OTLP), transport), probe: pr}}),
+			// the exporter's own transport (MON-R25), which follows no
+			// redirect (serviceclient).
+			otlpmetrichttp.WithHTTPClient(&http.Client{Timeout: o.Timeout, Transport: roundTripper{next: opts.Certs.Wrap(endpointcert.Of(endpointcert.OTLP), serviceclient.Transport(transport)), probe: pr}}),
 		)
 	}
 	if err == nil && exporterRefusal != nil {

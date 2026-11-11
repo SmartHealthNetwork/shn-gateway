@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -36,8 +37,10 @@ func TestMONR25TagValidatorClientTagsBothValidatorShapes(t *testing.T) {
 	if routing.Client.Timeout != 30*time.Second {
 		t.Fatalf("routing client timeout = %v", routing.Client.Timeout)
 	}
-	if got, tag, ok := endpointcert.Unwrap(routing.Client.Transport); !ok || got != base || tag != endpointcert.Lane(endpointcert.Validator, "2.1") {
-		t.Fatalf("routing transport = %v, %v, %v; want its own transport, tagged", got, tag, ok)
+	// Its own transport, under the network-service redirect policy, tagged.
+	got, tag, ok := endpointcert.Unwrap(routing.Client.Transport)
+	if inner, policed := serviceclient.Base(got); !ok || !policed || inner != base || tag != endpointcert.Lane(endpointcert.Validator, "2.1") {
+		t.Fatalf("routing transport = %v, %v, %v; want its own transport under the redirect policy, tagged", got, tag, ok)
 	}
 	if _, err := routing.Validate(t.Context(), []byte(`{"resourceType":"Bundle"}`), ""); err != nil {
 		t.Fatalf("validate through the wrapped transport: %v", err)
@@ -54,7 +57,7 @@ func TestMONR25TagValidatorClientTagsBothValidatorShapes(t *testing.T) {
 	if !ok {
 		t.Fatal("the certification wrapper was dropped")
 	}
-	got, tag, ok := endpointcert.Unwrap(ct.inner)
+	got, tag, ok = endpointcert.Unwrap(ct.inner)
 	if !ok || got != http.RoundTripper(inner) || tag != endpointcert.Lane(endpointcert.Certify, "2.2") {
 		t.Fatalf("certification inner = %v, %v, %v; want its own bounded transport, tagged", got, tag, ok)
 	}
@@ -72,8 +75,16 @@ func TestMONR25TagValidatorClientTagsBothValidatorShapes(t *testing.T) {
 	TagValidatorClient(fixture, rec, endpointcert.Lane(endpointcert.Validator, "2.0"))
 	if got, _, ok := endpointcert.Unwrap(fixture.Client.Transport); !ok {
 		t.Fatal("a fixture transport was not wrapped")
-	} else if _, same := got.(certRoundTrip); !same {
+	} else if inner, policed := serviceclient.Base(got); !policed {
+		t.Fatal("a fixture transport is not under the redirect policy")
+	} else if _, same := inner.(certRoundTrip); !same {
 		t.Fatal("a fixture transport was replaced")
+	}
+	// With no recorder, the client is still put under the redirect policy.
+	untagged := shnsdk.NewOperationValidator(srv.URL)
+	TagValidatorClient(untagged, nil, endpointcert.Lane(endpointcert.Validator, "2.0"))
+	if _, policed := serviceclient.Base(untagged.Client.Transport); !policed {
+		t.Fatal("a validator with no recorder is not under the redirect policy")
 	}
 	TagValidatorClient(nil, rec, endpointcert.Lane(endpointcert.Validator, "2.0")) // must not panic
 }

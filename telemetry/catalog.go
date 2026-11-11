@@ -72,6 +72,18 @@ var (
 	Stages = []string{StageUnwrap, StageReads, StageForward, StageValidate, StageSeal, StageLedger, StageWrite, StageRest, StageNetwork, StageSelf}
 	// Booleans are a flag attribute's values.
 	Booleans = []string{"true", "false"}
+	// Listeners are the gateway's HTTP listeners: main, the listener every
+	// exchange arrives on, and observer, the loopback event stream.
+	Listeners = []string{"main", "observer"}
+	// ListenerBounds are the connection bounds a listener cuts a connection
+	// at: header, its request headers (or TLS handshake) not complete in
+	// time; body-stall, a request body that sent no byte in time;
+	// body-ceiling, a request body still arriving at its overall ceiling;
+	// write-stall, a client that did not take the answer's next piece in time
+	// (over HTTP/2, also a connection that took no frame in time); and
+	// attachment-arrival, a documentation attachment submission that did
+	// not arrive within its own bound. Only header occurs on the observer.
+	ListenerBounds = []string{"header", "body-stall", "body-ceiling", "write-stall", "attachment-arrival"}
 	// RefusalStages are a refusal's shn.refusal.stage values: none for a
 	// refusal on any rule but fidelity, else the stage the fidelity refusal
 	// was made at (recording.RefusalStages: build, verify, other).
@@ -126,6 +138,8 @@ const (
 	KeyFindingKind  = "shn.finding.kind"
 	KeyAction       = "shn.finding.action"
 	KeyTolerated    = "shn.finding.tolerated"
+	KeyListener     = "shn.listener"
+	KeyBound        = "shn.listener.bound"
 )
 
 func attr(key string, values []string) Attribute { return Attribute{Key: key, Values: values} }
@@ -290,6 +304,18 @@ var (
 		}
 		return out
 	}()
+	listenerValues = func() (out []string) {
+		for _, v := range Listeners {
+			out = append(out, v)
+		}
+		return out
+	}()
+	boundValues = func() (out []string) {
+		for _, v := range ListenerBounds {
+			out = append(out, v)
+		}
+		return out
+	}()
 	toleratedValues = func() (out []string) {
 		for _, v := range Booleans {
 			out = append(out, v)
@@ -424,6 +450,14 @@ var (
 		Description: "Observe checks dropped because the observe queue was full or closed."}
 )
 
+// ListenerCuts counts the cuts a listener made at one of its own connection
+// bounds (DEPLOYMENT.md, "Connection bounds"): over HTTP/1.1 a cut ends a
+// connection, over HTTP/2 a stream. A cut is the listener's resource bound,
+// never an exchange refusal: nothing about it is recorded as one.
+var ListenerCuts = &Instrument{Name: "shn.gateway.listener.cuts", Kind: Counter, Unit: "{cut}",
+	Description: "Connections (HTTP/1.1) or streams (HTTP/2) a listener cut at one of its connection bounds, by bound and listener.",
+	Attributes:  []Attribute{attr(KeyBound, boundValues), attr(KeyListener, listenerValues)}}
+
 // catalog is every instrument, in catalogue order. A new instrument is added
 // here and, unless it is OpenTelemetry only, to the EMF sink's lines.
 var catalog = []*Instrument{
@@ -435,6 +469,7 @@ var catalog = []*Instrument{
 	Refusals, ExchangeStageDuration, ActiveRequests, ExchangeRequestSize, ExchangeResponseSize,
 	ConformanceFindings, ValidatorDuration, ConformanceChecksDropped,
 	HTTPServerRequestDuration,
+	ListenerCuts,
 }
 
 // Instruments returns the catalogue, in order. The Instruments are shared:

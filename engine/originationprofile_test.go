@@ -273,8 +273,10 @@ var otherRoleRoutes = map[string][]string{
 	// A payer's own Da Vinci ingress takes its system's attachment-request
 	// Tasks at each provider's base and at its plain Task endpoint, and lists
 	// the bases, behind its own token endpoint.
+	// The payer's gateway serves the public JWK Set of its CDS Hooks client
+	// key, with or without the ingress.
 	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
-		"POST /oauth/token", "GET /.well-known/smart-configuration"},
+		"POST /oauth/token", "GET /.well-known/smart-configuration", "GET /cds-client/jwks.json"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},
 }
@@ -288,7 +290,8 @@ var otherRoleRoutes = map[string][]string{
 //     outside (*Gateway).routes, and inside it the ServeMux is passed to
 //     HandleFunc once and to nothing else, so no helper mounts a route on it;
 //     Handler is exactly handlerBody, the routes mux served under the
-//     operation count, so it answers no path of its own;
+//     operation count, its answers marked nosniff, so it answers no path of
+//     its own;
 //   - routes mounts exactly coreRoutes, workstreamRoutes (every compiled-in
 //     workstream adapter's routes: the PA adapter's are paRoutes, the
 //     Federated Query Services adapter's fqsRoutes) and moduleRoutes (every
@@ -771,7 +774,7 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.CDSClientJWKS": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 
@@ -1429,15 +1432,16 @@ func adapterRoutesIs(fset *token.FileSet, fn *ast.FuncDecl) error {
 }
 
 // handlerBody is (*Gateway).Handler's whole body: it takes the routes mux and
-// serves every request through it, counting the operation. Anything else it
-// did would answer a path no declaration classifies.
+// serves every request through it, counting the operation. Its one wrapper,
+// nosniff.Handler, sets a header and answers nothing. Anything else it did
+// would answer a path no declaration classifies.
 const handlerBody = `{
 	mux := g.routes()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return nosniff.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		done := g.operations.begin()
 		defer done()
 		mux.ServeHTTP(w, r)
-	})
+	}))
 }`
 
 // moduleStatesAfterOptionsFaults: New builds every module's state once, after

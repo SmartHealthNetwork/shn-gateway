@@ -156,7 +156,10 @@ type payerAnswer struct {
 	status int
 	body   []byte
 	framed bool
-	corr   string
+	// contentType is the answer's media type: the frame's, or the bare
+	// answer's.
+	contentType string
+	corr        string
 	// header is the payer gateway's HTTP answer's header (the Hub's view).
 	header http.Header
 	// name is the transaction type the answer's envelope names.
@@ -251,7 +254,7 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	// leg's queued checks, so a test reads every finding the leg produced.
 	p.g.drainObserveChecks()
 	if rec.Code != http.StatusOK {
-		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr, header: rec.Result().Header}
+		return payerAnswer{status: rec.Code, body: rec.Body.Bytes(), corr: corr, header: rec.Result().Header, contentType: rec.Header().Get("Content-Type")}
 	}
 	hdr, answer, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, p.requester, rec.Body.Bytes()))
 	if err != nil {
@@ -261,7 +264,7 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	if err != nil {
 		t.Fatalf("decode response leg: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header, name: answerEnv.Metadata.TransactionType}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header, name: answerEnv.Metadata.TransactionType, contentType: hdr.Headers["Content-Type"]}
 }
 
 // content returns the content-rule findings recorded, as rule/decision.

@@ -208,7 +208,7 @@ func (n *nativeResponder) cdsServices(ctx context.Context) ([]CDSService, error)
 // requests may be waiting for it (it is bounded by cdsServiceListingTimeout).
 func (n *nativeResponder) readCDSServices(ctx context.Context, reading chan struct{}) ([]CDSService, error) {
 	c := &n.paNative().cds
-	services, err := DiscoverCDSServices(endpointcert.WithTag(context.WithoutCancel(ctx), endpointcert.Of(endpointcert.CDS)), n.client, n.paNative().cdsBaseURL, n.backendHeaders)
+	services, err := DiscoverCDSServices(endpointcert.WithTag(context.WithoutCancel(ctx), endpointcert.Of(endpointcert.CDS)), n.cdsHTTPClient(), n.paNative().cdsBaseURL, n.backendHeaders)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer close(reading)

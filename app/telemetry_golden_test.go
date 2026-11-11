@@ -76,7 +76,7 @@ func driveTelemetryFixture(reg *telemetry.Registry) {
 	emitStorePool(reg, storePoolStat{TotalConns: 7, AcquiredConns: 3, IdleConns: 4, EmptyAcquireCount: 11})
 	am := auditMetrics{reg: reg}
 	am.Sent()
-	for _, r := range []string{"unknown-sender", "unavailable", "unreachable", "store"} {
+	for _, r := range []string{"unknown-sender", "unavailable", "unreachable", "store", "redirect-refused"} {
 		am.Retried(r)
 	}
 	for i, r := range []string{"overflow", "invalid", "store", "refused", "conflict", "stopped"} {
@@ -281,11 +281,11 @@ func TestEMFMetricCombinations_MON_R47(t *testing.T) {
 		}
 		combos[key] = true
 	}
-	// 68 of the 18 existing metrics, 18 of the operational additions' lines,
+	// 69 of the 18 existing metrics, 18 of the operational additions' lines,
 	// and 24 of the exchange additions' (ActiveRequests writes only when
 	// sampled).
-	if len(combos) != 110 {
-		t.Errorf("the fixture writes %d distinct metric-and-dimension combinations, pinned 110", len(combos))
+	if len(combos) != 111 {
+		t.Errorf("the fixture writes %d distinct metric-and-dimension combinations, pinned 111", len(combos))
 	}
 	// The most the exchange record's, conformance and in-flight metrics can
 	// write for one gateway, at today's lists in a release build: the

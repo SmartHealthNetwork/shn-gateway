@@ -342,6 +342,11 @@ func TestClassify_MON_R13(t *testing.T) {
 		{err, attempt{sent: true, isGRPC: true, grpcCode: codes.Unavailable}, "failed", CodeUnreachable, "gRPC Unavailable"},
 		{err, attempt{sent: true, isGRPC: true, grpcCode: codes.DeadlineExceeded}, "failed", CodeUnreachable, "gRPC DeadlineExceeded"},
 		{context.DeadlineExceeded, attempt{}, "failed", CodeUnreachable, ""},
+		// A redirect is not followed: an answer with a failing status, never
+		// a network outage, its hint naming the class.
+		{err, attempt{sent: true, redirect: true, httpCode: 307}, "failed", CodeHTTPStatus, "HTTP 307, redirect-refused"},
+		{err, attempt{sent: true, redirect: true, httpCode: 300}, "failed", CodeHTTPStatus, "HTTP 300, redirect-refused"},
+		{err, attempt{sent: true, redirect: true}, "failed", CodeHTTPStatus, "HTTP redirect, redirect-refused"},
 		{err, attempt{}, "failed", CodeInternal, ""},
 	} {
 		v := classify(c.err, c.a)

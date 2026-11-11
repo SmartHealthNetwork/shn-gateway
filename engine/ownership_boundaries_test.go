@@ -83,7 +83,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.postEnvelope": {kind: excluded, callers: []string{"Gateway.roundTripInner"},
 		reason: "posts the sealed envelope roundTripInner built from its checked request"},
 	// Requests to the participant's own system.
-	"nativeResponder.post": {kind: transmits, body: sendsRequest},
+	"nativeResponder.postVia": {kind: transmits, body: sendsRequest},
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true, body: sendsAnswer},
 	"writeLeg": {kind: excluded,
@@ -130,6 +130,8 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "this gateway's own CDS Services discovery document"},
 	"Gateway.handleDavinciConfiguration": {kind: excluded,
 		reason: "this gateway's own Da Vinci configuration document"},
+	"Gateway.handleCDSClientJWKS": {kind: excluded,
+		reason: "the public JWK Set of this gateway's own CDS client key"},
 	"oauthErr": {kind: excluded,
 		reason: "an error from the ingress authorization server"},
 	"ingressAuthServer.handleToken": {kind: excluded,
@@ -151,6 +153,7 @@ var writerUsersThatSendNothing = map[string]string{
 var clientUsersThatSendNothing = map[string]string{
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth.ParticipantClient":     "returns a copy of the client with its redirect policy set; the copy's sends are checked where they are made",
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth.ParticipantClientWith": "returns a copy of the client with its redirect policy and the names of its configured headers set; the copy's sends are checked where they are made",
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient.ServiceClient":       "returns a copy of the client under the network-service redirect policy; the copy's sends are checked where they are made",
 }
 
 // unestablishedLegScopes are the only functions that name the refusal row a

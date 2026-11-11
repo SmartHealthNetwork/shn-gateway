@@ -755,6 +755,10 @@ func TestAnswerAuthorization_AttestedOnceTheSystemAnswered(t *testing.T) {
 		{"the Framework's audit refusal", tokenAnswer(http.StatusBadGateway, `{"error":"decision audit failed","rule":"audit"}`), "answer authorization not recorded", RefusalAudit, RefusedByAuthorizationFramework, ExchangeOther},
 		{"the Framework erroring", tokenAnswer(http.StatusInternalServerError, `{"error":"boom"}`), "answer authorization unavailable", RefusalAuthority, RefusedByPayerGateway, ExchangeOther},
 		{"the Framework unreachable", tokenFault(tokenConnRefused(), false), "answer authorization unavailable", RefusalAuthority, RefusedByPayerGateway, "unreachable"},
+		// A redirect is not followed (serviceclient): unavailable as when the
+		// Framework cannot be reached, its class redirect-refused.
+		{"the Framework redirecting", tokenAnswer(http.StatusTemporaryRedirect, ``), "answer authorization unavailable", RefusalAuthority, RefusedByPayerGateway, redirectRefused},
+		{"the Framework redirecting with no Location", tokenAnswer(http.StatusMultipleChoices, ``), "answer authorization unavailable", RefusalAuthority, RefusedByPayerGateway, redirectRefused},
 	} {
 		for _, level := range allLevels {
 			t.Run(row.name+"/"+level.String(), func(t *testing.T) {

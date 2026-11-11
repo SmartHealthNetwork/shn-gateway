@@ -32,6 +32,13 @@ const (
 	PayloadRequired        = "required"
 )
 
+// Answer envelope values: the body of a gateway's own refusal on a leg
+// (the root module's legtaxonomy.AnswerEnvelopeFHIR and AnswerEnvelopeJSON).
+const (
+	AnswerEnvelopeFHIR = "fhir"
+	AnswerEnvelopeJSON = "json"
+)
+
 // Taxonomy is one workstream's file.
 type Taxonomy struct {
 	Workstream      string `json:"workstream"`
@@ -59,7 +66,22 @@ type Leg struct {
 	// recipients began declaring the legs they take; empty on every leg
 	// before (the root module's legtaxonomy.Leg.Since).
 	Since string `json:"since,omitempty"`
+	// AnswerEnvelope is the envelope of a gateway's own refusal on the leg
+	// (the root module's legtaxonomy.Leg.AnswerEnvelope).
+	AnswerEnvelope string `json:"answerEnvelope,omitempty"`
+	// Subject is SubjectFromAnswer on a leg whose request names no patient
+	// and whose patient is bound from its answer, and empty on every other
+	// leg (the root module's legtaxonomy.Leg.Subject).
+	Subject string `json:"subject,omitempty"`
 }
+
+// SubjectFromAnswer marks a leg whose request names no patient: its patient
+// is bound from the answer that discloses it.
+const SubjectFromAnswer = "from-answer"
+
+// FromAnswer reports whether the leg's patient is bound from its answer
+// rather than named by its request.
+func (l Leg) FromAnswer() bool { return l.Subject == SubjectFromAnswer }
 
 // Side is one side of a leg.
 type Side struct {
@@ -113,8 +135,9 @@ func init() {
 
 // Parse decodes a taxonomy file strictly (unknown fields and trailing data
 // refused) and checks what the engine derives from it: each routable leg has
-// a transaction type, a response side, both sides' frame and operation, and a
-// scope, and no transaction type or operation appears twice.
+// a transaction type, a response side, both sides' frame and operation, a
+// scope and an answer envelope, and no transaction type or operation appears
+// twice.
 func Parse(b []byte) (Taxonomy, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -151,6 +174,12 @@ func Parse(b []byte) (Taxonomy, error) {
 		}
 		if l.Routable() && l.Scope == "" {
 			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: empty scope", l.TransactionType))
+		}
+		if l.Subject != "" && (l.Subject != SubjectFromAnswer || l.Physics != PhysicsRequestResponse) {
+			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: subject %q: only %q is defined, and only on a request-response leg", l.TransactionType, l.Subject, SubjectFromAnswer))
+		}
+		if l.Routable() && l.AnswerEnvelope != AnswerEnvelopeFHIR && l.AnswerEnvelope != AnswerEnvelopeJSON {
+			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: answerEnvelope %q is neither %q nor %q", l.TransactionType, l.AnswerEnvelope, AnswerEnvelopeFHIR, AnswerEnvelopeJSON))
 		}
 	}
 	if len(t.Legs) == 0 {

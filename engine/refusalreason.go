@@ -26,7 +26,7 @@ type refusalReason string
 // Authentication and scope at an ingress.
 const (
 	reasonIngressAuthentication refusalReason = msgIngressAuthentication
-	reasonScopeTaskWrite        refusalReason = "insufficient_scope: this route takes a bearer granted " + TaskWriteScope
+	reasonScopeTaskCreate       refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits creating a Task, such as " + TaskWriteScope + ", system/Task.c or system/Task.*, with no query"
 	reasonScenarioCaller        refusalReason = errUnauthorizedCaller
 )
 
@@ -52,7 +52,7 @@ const (
 // coreRefusalReasons are the core's registered reasons.
 func coreRefusalReasons() []refusalReason {
 	return []refusalReason{
-		reasonIngressAuthentication, reasonScopeTaskWrite, reasonScenarioCaller,
+		reasonIngressAuthentication, reasonScopeTaskCreate, reasonScenarioCaller,
 		reasonUnsupportedCoding, reasonPatientUnidentifiable, reasonRequestTooLarge, reasonEnvelopeTooLarge,
 		reasonNoPayerRouter, reasonNoPayerIdentifier, reasonCoverageNamesTwoPayers, reasonUnregisteredPayer,
 		reasonNoCoverageOnFile, reasonMemberCoverageTwoPayers, reasonNoSharedLine,
@@ -72,11 +72,12 @@ func closedReason(reason refusalReason) string {
 	return ExchangeOther
 }
 
-// scopeReason is the reason of the 403 a route that takes scope refuses a
-// bearer granted another scope with; "" for a scope no route takes.
-func scopeReason(scope string) refusalReason {
-	if scope == TaskWriteScope {
-		return reasonScopeTaskWrite
+// scopeReason is the reason of the 403 a route that takes a scope permitting
+// need on Task refuses a bearer whose scopes permit no such thing with; "" for
+// a permission no route takes.
+func scopeReason(need taskPermission) refusalReason {
+	if need == taskCreate {
+		return reasonScopeTaskCreate
 	}
 	return ""
 }

@@ -42,6 +42,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
@@ -156,9 +157,12 @@ type ExchangeRecord struct {
 	// configured headers), https-to-http-refused for a downgrade that was not
 	// sent, which ends its call (a read fails with BackendHTTP3xx; the
 	// forward is refused on message integrity; a token request fails as a
-	// token failure), and token-redirect-refused for any other redirect of a
-	// token request, never followed, which fails it as a token failure. Nil
-	// when no answer asked for one.
+	// token failure), token-redirect-refused for any other redirect of a
+	// token request, never followed, which fails it as a token failure, and
+	// cross-origin-refused for a redirect to another origin of a request that
+	// carries a body, never followed (the forward is refused on routing, as
+	// delivered; $populate fails at its transport). Nil when no answer asked
+	// for one.
 	BackendRedirects []string
 	// Stages is the time an inbound leg spent in each stage of its answer
 	// (LegStages); nil on an ingress call.
@@ -266,6 +270,14 @@ type ExchangeRecord struct {
 	// unless it is refused for its own size.
 	// Content-free; not a metric dimension. Evolving.
 	AnswerHeadersNotCarried []string
+	// ReadsFailed is the error class (BackendErrorClasses) of each read of the
+	// participant's system of record that failed while the answer was still
+	// built from what could be read, one per failed read, in read order: what
+	// that read would have given is unknown, and recorded so. Nil when no such
+	// read failed, never empty. Backend keeps its meaning (the call the answer
+	// came from, or the last read). Content-free: never a URL, an identifier
+	// or text. Not a metric dimension. Evolving.
+	ReadsFailed []string
 	// HubDelivered is the Hub's own word on whether the recipient's gateway
 	// received an ingress call's leg, read from the HubDeliveredHeader of the
 	// Hub's error answer to the leg: "no", "yes" or "unknown". Empty when the
@@ -379,6 +391,11 @@ const (
 	ExchangeUpstreamError = vocab.ExchangeUpstreamError
 )
 
+// redirectRefused is recording.RedirectRefused: an answer error class
+// (AnswerErrorClasses) for an authorize call answered with a redirect, which
+// is not followed.
+const redirectRefused = vocab.RedirectRefused
+
 // Refusing parties.
 //
 // Deprecated: use package recording's names, which these are; a later minor release removes them.
@@ -457,8 +474,9 @@ var (
 	// AnswerErrorClasses say why an inbound leg's answer, or a request leg (its
 	// AuthorizeError), could not be authorized: the request ended before it
 	// (cancelled: the requester was gone), the authorize call ran out of time
-	// (timeout), the Authorization Framework denied it (auth) or never answered
-	// it (unreachable), or another failure (other).
+	// (timeout), the Authorization Framework denied it (auth), never answered
+	// it (unreachable) or answered it with a redirect, which is not followed
+	// (redirect-refused), or another failure (other).
 	//
 	// Deprecated: use recording.AnswerErrorClasses, which this is; a later minor release removes it.
 	AnswerErrorClasses = vocab.AnswerErrorClasses
@@ -1117,6 +1135,10 @@ func answerErrorClass(ctx context.Context, err error) string {
 		return BackendTimeout
 	case errors.Is(err, errAuthorizationDenied):
 		return BackendAuth
+	case serviceclient.IsRedirectRefused(err):
+		// The Framework answered a redirect, not followed: the call fails
+		// as when the Framework cannot be reached, told apart by its class.
+		return redirectRefused
 	case errors.Is(err, errAuthzUnreachable):
 		return ExchangeUnreachable
 	}
@@ -1228,6 +1250,20 @@ func repeatsAMember(ctx context.Context, body []byte) bool {
 	return true
 }
 
+// readsFailed records, in read order, the class (BackendErrorClasses) of each
+// failed read of the participant's system of record the answer was built
+// without (ExchangeRecord.ReadsFailed). Nothing is recorded for none.
+func (x *exchangeRecorder) readsFailed(classes []string) {
+	if len(classes) == 0 {
+		return
+	}
+	x.with(func() {
+		for _, c := range classes {
+			x.rec.ReadsFailed = append(x.rec.ReadsFailed, closed(BackendErrorClasses, c))
+		}
+	})
+}
+
 // sorFailure settles an answering-side refusal caused by err, a failed read
 // of the participant's own system of record (the read itself is noted where
 // it ran, recordingSoR): that system not answering usably, an upstream
@@ -1247,6 +1283,13 @@ func (x *exchangeRecorder) sorFailure(err error) {
 		return
 	}
 	x.decided(ExchangeUpstreamError, "", "")
+}
+
+// sorReadClass is the class (BackendErrorClasses) a failed read of the
+// participant's system of record is recorded with: the read's own class
+// (sorClass), or how the request it served ended (readEndedClass).
+func sorReadClass(ctx context.Context, err error) string {
+	return closed(BackendErrorClasses, readEndedClass(ctx, sorClass(err)))
 }
 
 // readRepeatsAMember reports a failed read of the participant's own system of
@@ -1346,6 +1389,10 @@ func backendClass(status int, err error) string {
 		return BackendCancelled
 	case smartauth.IsTokenAcquisitionError(err):
 		return BackendAuth
+	case errors.Is(err, smartauth.ErrCDSClientIssuerUnknown):
+		// The CDS client JWT could not be minted: this gateway's own
+		// credential, unsent, as a bearer that could not be obtained is.
+		return BackendAuth
 	case errors.As(err, &cert), errors.As(err, &hostname), errors.As(err, &unknownAuth), errors.As(err, &record):
 		return BackendTLS
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
@@ -1360,16 +1407,17 @@ func backendClass(status int, err error) string {
 // reason it answers, with the network rule each is. Only these name a rule:
 // any other answer from the Hub is "other".
 var hubRules = map[string]string{
-	"missing X-Holder-Assertion header":   RefusalAuthentication,
-	"invalid X-Holder-Assertion encoding": RefusalAuthentication,
-	"invalid X-Holder-Assertion JSON":     RefusalAuthentication,
-	"unknown sender":                      RefusalAuthentication,
-	"assertion holder id mismatch":        RefusalAuthentication,
-	"assertion verification failed":       RefusalAuthentication,
-	"invalid authz token":                 RefusalAuthority,
-	"authz token verification failed":     RefusalAuthority,
-	"response leg authorization failed":   RefusalAuthority,
-	"replay detected":                     RefusalReplay,
+	"missing X-Holder-Assertion header":          RefusalAuthentication,
+	"invalid X-Holder-Assertion encoding":        RefusalAuthentication,
+	"invalid X-Holder-Assertion JSON":            RefusalAuthentication,
+	"unknown sender":                             RefusalAuthentication,
+	"assertion holder id mismatch":               RefusalAuthentication,
+	"assertion verification failed":              RefusalAuthentication,
+	"invalid authz token":                        RefusalAuthority,
+	"authz token verification failed":            RefusalAuthority,
+	"authz token's patient does not fit the leg": RefusalAuthority,
+	"response leg authorization failed":          RefusalAuthority,
+	"replay detected":                            RefusalReplay,
 	// Routing, and transient: the network cannot carry this body right now.
 	"large envelope budget exhausted":        RefusalRouting,
 	"stale or future timestamp":              RefusalReplay,

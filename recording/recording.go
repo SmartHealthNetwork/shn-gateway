@@ -26,6 +26,12 @@ const (
 	ExchangeUpstreamError = "upstream-error"
 )
 
+// RedirectRefused is an answer error class (AnswerErrorClasses), never an
+// outcome: the Authorization Framework answered the authorize call with a
+// redirect, which is not followed. The call fails as when the Framework
+// cannot be reached.
+const RedirectRefused = "redirect-refused"
+
 // Refusing parties.
 const (
 	RefusedByProviderGateway        = "provider-gateway"
@@ -93,7 +99,8 @@ var (
 	// AnswerErrorClasses say why an inbound leg's answer could not be
 	// authorized: the request ended before it (cancelled: the requester was
 	// gone), the authorize call ran out of time (timeout), the Authorization
-	// Framework denied it (auth) or never answered it (unreachable), or
-	// another failure (other).
-	AnswerErrorClasses = []string{BackendCancelled, BackendTimeout, BackendAuth, ExchangeUnreachable, ExchangeOther}
+	// Framework denied it (auth), never answered it (unreachable) or answered
+	// it with a redirect, which is not followed (redirect-refused), or another
+	// failure (other).
+	AnswerErrorClasses = []string{BackendCancelled, BackendTimeout, BackendAuth, ExchangeUnreachable, RedirectRefused, ExchangeOther}
 )

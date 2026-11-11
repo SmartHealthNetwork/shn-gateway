@@ -18,7 +18,8 @@
       "consent": null,
       "observe": false,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "crd-order-select",
@@ -31,7 +32,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "json"
     },
     {
       "transactionType": "crd-order-dispatch",
@@ -44,7 +46,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "json"
     },
     {
       "transactionType": "dtr-questionnaire-fetch",
@@ -57,7 +60,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": ["questionnaire-package", "next-question"],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "pas-claim",
@@ -70,7 +74,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "pas-claim-update",
@@ -83,7 +88,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "pas-claim-inquire",
@@ -96,7 +102,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "patient-dtr",
@@ -109,7 +116,8 @@
       "consent": null,
       "observe": false,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "json"
     },
     {
       "transactionType": "cdex-attachment-submit",
@@ -123,7 +131,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "since": "1.1.0"
+      "since": "1.1.0",
+      "answerEnvelope": "fhir"
     },
     {
       "transactionType": "cdex-attachment-request",
@@ -137,7 +146,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "since": "1.5.0"
+      "since": "1.5.0",
+      "answerEnvelope": "fhir"
     }
   ]
 }

@@ -360,12 +360,53 @@ From shn-gateway v1.1.0. A CDex documentation attachment submission (`$submit-at
 
 ## Networking
 
+From shn-gateway v1.10.0, every answer the gateway writes, on the main listener, the observer stream's listener and the metrics pull listener, carries `X-Content-Type-Options: nosniff`, whatever its status, so a browser that fetched one would read it as the media type it states and never as another. The header is the gateway's own and is added beside an answer: it changes nothing else in it, and an answer your peer's system sent is relayed with the same bytes and `Content-Type` as before. An answer the HTTP server writes itself before the gateway reads the request does not carry it: a fixed error, plain text or empty, such as `400` (a request it cannot parse, or plain HTTP sent to a TLS listener), `417`, `431` (a header block over its limit), `501` or `505`, which carries nothing of any exchange.
+
 | Env var | Description |
 |---|---|
 | `PORT` | Listening port. Default `8080`. |
 | `HOST` | Bind address. Default `0.0.0.0`. |
 | `TLS_CERT_FILE` | PEM certificate for in-container TLS on the main listener. Must be set together with `TLS_KEY_FILE`; setting one alone is a startup error. Unset (default) = plain HTTP, with TLS terminated upstream at your load balancer. Conventionally paired with `PORT=8443`. TLS 1.2 floor; read once at startup, so restart to rotate. See [DEPLOYMENT.md](DEPLOYMENT.md). |
 | `TLS_KEY_FILE` | PEM private key matching `TLS_CERT_FILE`. Must be readable by uid `65532` (the container's unprivileged user). |
+
+### Network services and sidecars follow no redirect
+
+From shn-gateway v1.10.0, the gateway's clients for the network's own services (discovery
+and the two trust-anchor keys, the Hub, the Authorization Framework, consent, the registrar and the audit
+endpoint), its OTLP metrics export, and its validator and certification sidecars follow no
+redirect, and neither do the `/internal/checks` probes of those endpoints. A `3xx` answer
+is that call's failure, as when the endpoint does not answer usably; what is recorded
+names its status and the `Location`'s origin at most, never its path or query, and a hop
+from `https` to `http` is never made. Each caller fails as it does when the endpoint
+cannot be reached, and names the class `redirect-refused` where its record has a class:
+
+| Call | How it fails | Where `redirect-refused` appears |
+|---|---|---|
+| Discovery and the trust-anchor keys, at boot | the boot fails, as when discovery or a key does not answer usably | the boot error, with the status and the `Location`'s origin |
+| Hub route | the leg is `unreachable`, answered as when the Hub cannot be reached | the log line `gateway: hub leg <leg> to "<recipient>" failed: redirect-refused (HTTP <status>)` |
+| Authorization Framework | as when it cannot be reached: a request leg is answered `503` and refused on `authority`; an answer is the raw `502 answer authorization unavailable` | the access line's `authorizeError` (a request leg) or `answerError` (an answer) |
+| Consent check | `502 consent check failed`, as when it cannot be reached | the log line `gateway: consent check failed: redirect-refused (HTTP <status>)` |
+| Registrar capability declaration | not stored, and retried | the log line `gateway: capability declaration not stored (redirect-refused) …` |
+| Registrar holder feed (boot convergence, the poller, the refresh on an unknown holder) | the boot convergence fails; afterwards the feed is not read and stays as it was, as when the registrar cannot be reached | the boot error, or the poller's error, naming `redirect-refused` with the status |
+| Audit `/append` | the record stays queued and is retried | `AuditAppendRetried`, reason `redirect-refused` |
+| OTLP export | the export fails | `telemetry-export`: `http-status`, its `hint` naming the status and `redirect-refused` |
+| `/internal/checks` probe of any of these endpoints or sidecars | the check fails | `http-status`, its `hint` naming the status and `redirect-refused` |
+| `$validate` and certification | the validator is unavailable for that call | no class: the call's record says `validator unavailable` |
+
+The same holds for a client or validator an embedding program passes to `engine.Config`
+(`Client`, `AuthzClient`, `ConsentClient`, `Validator` and the validator lane maps).
+
+The validator lane health read (a lane's `/metadata`) treats a redirect as the lane
+answering, and follows none either. The clients that reach a participant's own system keep
+their own redirect rule (the access line's `redirects`, below).
+
+So each of these URLs (`SHN_DISCOVERY_URL`, `HUB_URL`, `AUTHZ_URL`, `CONSENT_URL`,
+`REGISTRAR_URL`, `AUTHZ_PUBKEY_URL`, `HUB_TRANSPORT_KEY_URL`, the OTLP endpoint,
+`FHIR_VALIDATE_URL*` and `FHIR_CERTIFY_URL_*`, and the endpoints discovery names) must name
+its final address, the one that answers itself. A URL that relies on a redirect, such as
+an `http://` URL for a host that only redirects to `https`, or a path that redirects,
+fails instead of being followed. Plain `http` to a local sidecar or an in-network service
+name that answers directly, such as `http://validator:8080`, is unaffected.
 
 ## Observer stream (optional — local tooling)
 
@@ -461,7 +502,13 @@ There is nothing to configure:
   access), http-3xx, http-4xx, http-5xx, read, malformed, cancelled, or other
   (your system of record reported itself unavailable, a search of it failed,
   your connector cancelled a read itself, or a call to your system was
-  abandoned while the request it served was still live). From v1.9.0,
+  abandoned while the request it served was still live). From v1.10.0,
+  `readsFailed` (evolving) names the error class of each read of your system of
+  record that failed while the answer was still built from what could be read, one
+  per failed read, in read order: today, on a payer's coverage eligibility answer
+  built from your records, a read of a payor's reference that failed (see
+  [The eligibility answer's insurer](#the-eligibility-answers-insurer)). It is absent when no such read failed, never a URL, an
+  identifier or text, and `backend` keeps its meaning above. From v1.9.0,
   `resends` names each call sent a second time because your system answered `401`
   to the token it carried (the same request, sent once more with a fresh token;
   see [INTEGRATION.md](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)):
@@ -480,7 +527,13 @@ There is nothing to configure:
   [INTEGRATION.md](INTEGRATION.md#authenticating-to-your-backend-smart-backend-services)):
   a read it ends fails with `http-3xx`, a forwarded operation it ends is refused
   on message integrity, and a token request it ends fails the call that needed the
-  token as an unreachable token endpoint does.
+  token as an unreachable token endpoint does. From v1.10.0, `cross-origin-refused`
+  names a redirect to another origin of a request that carries a body (a forwarded
+  operation, or `$populate`), which the gateway never follows, whatever its code: a
+  forwarded operation it ends is refused `502` on routing, attested delivered, its
+  reason naming the redirect's origin (never its path or query), and your gateway
+  logs it for you to point your registered endpoint at the final address; a
+  `$populate` request it ends fails at its transport (`cross_origin_refused`).
 - `timeout` on a forwarded operation is your system not answering within
   this gateway's deadline for it (`PAYER_DAVINCI_BACKEND_TIMEOUT`, 25 s by
   default, under the requester's 30 s leg budget). The deadline counts from
@@ -546,9 +599,11 @@ There is nothing to configure:
   `answerError` says why: `cancelled` (the request ended first: the requester
   had gone), `timeout` (the authorize call ran out of time), `auth` (the
   Authorization Framework denied it), `unreachable` (it never answered, or,
-  from v1.9.0, answered `429`: it is limiting this gateway) or
-  `other`. The gateway also logs `gateway: <exchange> answer not authorized:
-  <class> (correlation <leg id>)`. From v1.1.0, once your system has answered
+  from v1.9.0, answered `429`: it is limiting this gateway), from v1.10.0
+  `redirect-refused` (it answered with a redirect, which the gateway does not
+  follow) or `other`.
+  The gateway also logs `gateway: <exchange> answer not authorized: <class>
+  (correlation <leg id>)`. From v1.1.0, once your system has answered
   the forwarded operation, the gateway says so: the Hub is answered a raw `502`
   naming the reason and its rule (`authority`, or `audit` for the Framework's
   audit refusal), marked `X-SHN-Delivered: yes`, and the requester learns its
@@ -566,8 +621,10 @@ There is nothing to configure:
   a Framework `429` is also a `503`, `the authorization service is limiting this
   gateway, so this leg was not sent`, carrying the Framework's `Retry-After` only
   when it sent exactly one well-formed value, and recorded as the Framework
-  unavailable; any other failure is a `502` whose `error` names the Framework's
-  status and the failure's class, never the Framework's own text
+  unavailable; from v1.10.0 a redirect (any `3xx`), which is never followed, is a `503` too,
+  answered as when the Framework could not be reached, with `authorizeError`
+  `redirect-refused`; any other failure is a `502` whose `error` names the
+  Framework's status and the failure's class, never the Framework's own text
   (PARTICIPANT_PROTOCOL.md §4.1). Before
   v1.9.0 each of those was `502 authorization failed`. A request that ended first
   has `authorizeError` `cancelled` and is no refusal.
@@ -858,6 +915,11 @@ from a fixed list:
   DTR answer check SHN's own line edit relies on, which runs at every level
   where a validator lane serves the line. A lane that is not configured, or
   has not qualified, makes no call and records none.
+- `ListenerCut` (`bound`, `listener`), from v1.10.0, for each cut a listener made at one of
+  its connection bounds (a connection over HTTP/1.1, a stream over HTTP/2);
+  it is not a line of any call
+  ([DEPLOYMENT.md](DEPLOYMENT.md#connection-bounds),
+  [MONITORING.md](MONITORING.md#connection-cuts)).
 
 They add lines to a call's EMF output: for a leg from the network, up to 10
 more when answered (its stages, `rest` and its two sizes) and 12 when
@@ -1238,8 +1300,10 @@ place. There is no setting for it.
   dropped while the exchange goes on as before.
 
 With `METRICS_SERVICE` set the outbox reports `AuditAppendSent`, `AuditAppendRetried`
-(`reason`), `AuditAppendDroppedBy` (`reason`: `overflow`, `invalid`, `store`, `refused`,
-`conflict`, `stopped`), the gauge `AuditQueueDepth` each minute, and, while discovery
+(`reason`: `unknown-sender`, `unavailable`, `unreachable`, `store`, and from v1.10.0
+`redirect-refused`),
+`AuditAppendDroppedBy` (`reason`: `overflow`, `invalid`, `store`, `refused`, `conflict`,
+`stopped`), the gauge `AuditQueueDepth` each minute, and, while discovery
 names no audit endpoint, the gauge `AuditEndpointUnknown` with the queue's depth.
 `AuditAppendDropped` (`Service` only, for a single-metric alarm) counts every record that
 left the outbox without the Audit Plane's acceptance, whatever the reason.
@@ -1896,8 +1960,17 @@ attachment-request Task (below). HTTP-level signatures
 (signed header fields, a detached JWS) are not carried: each gateway terminates HTTP, and the
 network carries only the message's media type, contract line and operation name with it. A
 participant that needs an end-to-end signature signs inside the payload. The answer's body
-reaches your EHR exactly, apart from a pend's `payer-url`; its media type is the gateway's own (`application/json` for CDS
-Hooks, `application/fhir+json` for DTR and PAS).
+reaches your EHR exactly, apart from a pend's `payer-url`. From v0.57.0 a CDS Hooks answer is written with the
+media type the payer's system stated (see [CDS Hooks answers](#cds-hooks-answers)). From shn-gateway v1.10.0 a DTR
+or PAS answer, a CDex answer, a coverage eligibility answer and a federated query answer are written to your system
+with the media type the answering system stated, whatever it is, as a direct client would see it; one that states
+none, or one no header can carry (it does not parse as a media type, is over 256 bytes or holds a control
+character), is written `application/fhir+json`. Earlier releases wrote a DTR or PAS answer `application/fhir+json`,
+and the others `application/fhir+json` unless the answer stated `application/json` or `application/fhir+json`.
+Before your gateway upgrades to v1.10.0, make sure your EHR, if it dispatches on the media type, accepts the payer's
+stated type, including the payer's own parameters (for example `;charset=UTF-8`): on a DTR or PAS answer, a type
+other than `application/fhir+json` (for example `application/json`); on a CDS Hooks answer, `application/fhir+json`
+from a payer whose gateway advertises the `v1opsub` request frame (`STABILITY.md` records this as an exception).
 
 Inbound requests authenticate via **SMART Backend Services**: the gateway hosts its
 own `POST /oauth/token` and `GET /.well-known/smart-configuration`, verifies a
@@ -2682,7 +2755,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_DTR_BASE_URL` | Base URL for the partner's DTR operations (`/Questionnaire/$questionnaire-package`, `/Questionnaire/$next-question`) when they are **not** co-located with the PAS base — e.g. a payer that serves DTR under `/dtr` and PAS under `/pas`. Empty ⇒ DTR uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
-| `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v1.9.0, a member's several Coverages name this payer when each carries one of its own identities, those it publishes on the network feed and, with the payer identity mapping on, its configured and backend ones, on some payor, in any position, or, failing that, the payer directory resolves their identifiers to one holder, or, when it resolves none of them, they name the same identifiers in any order; otherwise the request is refused `422 ambiguous coverage for routing: the member's Coverage records do not name one payer`) (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
+| `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v1.9.0, a member's several Coverages name this payer when each carries one of its own identities, those it publishes on the network feed and, with the payer identity mapping on, its configured and backend ones, on some payor, in any position, or, failing that, the payer directory resolves their identifiers to one holder, or, when it resolves none of them, they name the same identifiers in any order; otherwise the request is refused `422 ambiguous coverage for routing: the member's Coverage records do not name one payer`) (from shn-gateway v1.10.0 the answer names its insurer by an identity your holder publishes on the network feed, wherever your record lists it: see [The eligibility answer's insurer](#the-eligibility-answers-insurer)) (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
 
 **Where each operation goes.** For every PAS, DTR and CDex forward the gateway resolves the URL in this order: under the base your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then under the per-operation base if you set one, then under `PAYER_DAVINCI_BASE_URL`. HRex 1.2.0 defines each published value as the base an operation is invoked on, not the operation's URL, so the gateway always adds the operation's path to it: `davinci_pas_submission_endpoint#<line>` is the base for `/Claim/$submit` (submit and update) and `/Claim/$inquire`, `davinci_dtr_qpackage_endpoint#<line>` the base for `/Questionnaire/$questionnaire-package` (the gateway sends `/Questionnaire/$next-question` under the same base), and `davinci_cdex_attachsubmit_endpoint#2.1` the base for `/$submit-attachment`. The operation's path is added where the published base's path ends, before any query or fragment: the slashes that end the published path are dropped first, so none is doubled, and the rest of the URL the gateway builds is the published value as written, sent as any URL the gateway calls is. Nothing is read from how a published path ends: a value that already names an operation is still a base, so the operation's path is added to it and your system answers that URL; publish the base. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its bases win and the configured bases are only the fallback. The published CDex base is honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
 
@@ -2690,16 +2763,19 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 |---|---|
 | `PAYER_DAVINCI_TOKEN_URL` | SMART Backend Services token endpoint for the partner. Required if the partner requires authentication. |
 | `PAYER_DAVINCI_CLIENT_ID` | SMART client id for the partner. Required when `PAYER_DAVINCI_TOKEN_URL` is set. |
-| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). The client assertion signed with it carries no `x5c` certificate chain, only a `kid` when `PAYER_DAVINCI_CLIENT_KID` is set, so a token endpoint that requires the chain in the assertion, as the UDAP Security IG has it, refuses it. |
+| `PAYER_DAVINCI_CLIENT_KEY` | Path to the SMART client's private-key PEM file (the value is a path, not the key text — mount the file into the container). Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). The client assertion signed with it carries no `x5c` certificate chain, only a `kid` when `PAYER_DAVINCI_CLIENT_KID` is set, so a token endpoint that requires the chain in the assertion, as the UDAP Security IG has it, refuses it. From shn-gateway v1.10.0 the same key, with `PAYER_DAVINCI_CLIENT_ALG`, also signs the CDS client JWT your CDS calls carry (see [CDS Hooks client authentication](#cds-hooks-client-authentication-payer_davinci_cds_auth)). |
 | `PAYER_DAVINCI_CLIENT_ALG` | `ES384` or `RS384`. Required for `private_key_jwt` mode (i.e. when `PAYER_DAVINCI_CLIENT_SECRET` is unset). |
 | `PAYER_DAVINCI_SCOPE` | Requested scope the gateway asks your token endpoint for. Default `system/*.read` (covers the read-only legs). Must be a scope your authorization server grants this client; it must cover `/Claim/$submit` and `/Claim/$inquire` as well as the read-only legs, since every leg forwards. |
 | `PAYER_DAVINCI_CLIENT_KID` | Key id for the client assertion JWK, if the partner requires it. |
 | `PAYER_DAVINCI_CLIENT_SECRET` | OAuth2 client secret for the `client_secret_post` `client_credentials` grant — for authorization servers that cannot issue asymmetric credentials. The value is the secret **itself, not a path** (unlike `PAYER_DAVINCI_CLIENT_KEY`). Mutually exclusive with `PAYER_DAVINCI_CLIENT_KEY`/`_ALG`/`_KID`; prefer `private_key_jwt` when your server supports it. |
+| `PAYER_DAVINCI_CDS_AUTH` | How the gateway authenticates its calls to your CDS service: `client-jwt` or `access-token` (from shn-gateway v1.10.0). Unset: `client-jwt` when the payer client has a signing key (`PAYER_DAVINCI_CLIENT_KEY` and `PAYER_DAVINCI_CLIENT_ALG`; a key set to an empty value is no key), and `access-token` otherwise (the access token from `PAYER_DAVINCI_TOKEN_URL`, or no credential when that is unset, as your other operations carry). See [CDS Hooks client authentication](#cds-hooks-client-authentication-payer_davinci_cds_auth). `client-jwt` without a signing key, or any other value, refuses the boot. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_CDS_JWT_ISS` | The `iss` of the CDS client JWT, an absolute URI, when your CDS service registers another issuer (from shn-gateway v1.10.0). Unset: `PAYER_DAVINCI_INGRESS_BASE_URL`, else this gateway's own base URL as it is registered on the network. Set with `PAYER_DAVINCI_CDS_AUTH` resolving to `access-token`, or not an absolute URI, it refuses the boot. |
+| `PAYER_DAVINCI_CDS_JWT_JKU` | The `jku` header of the CDS client JWT (from shn-gateway v1.10.0). Unset: this gateway's own JWK Set URL (`<base>/cds-client/jwks.json` under the issuer's default base) when that base is `https`, and no `jku` when it is not. `off`: no `jku`, for a service that holds your key set itself. An `https` URL: that URL. Anything else, or set with the access token, refuses the boot. |
 | `PAYER_DAVINCI_PAS_NATIVE` | **No longer a switch.** PAS submit/update always forward to the payer's `/Claim/$submit` along with every other leg; there is no in-process PAS fallback to select. Setting it to any value changes nothing. From shn-gateway v1.0.0, a gateway that sets it, to any value, logs `gateway: WARNING: PAYER_DAVINCI_PAS_NATIVE is set but no longer read` at boot, and one that leaves it unset logs nothing about it; remove it. Releases v0.60.0 through v0.63.x log `gateway: PAYER_DAVINCI_PAS_NATIVE is set but is no longer a switch` when it is set, and releases v0.39.0 through v0.59.x a similar notice whenever it is not `true`, unset included. |
 | `PAYER_DAVINCI_CRD_SERVICE_ID` | Optional: names your CDS service for `order-select` and `order-sign` requests. Empty (the default) ⇒ each request goes to the one service your CDS service listing offers for the request's hook (see [CDS service selection](#cds-service-selection)). The named service must be in your listing and answer the request's hook; any other request is refused. |
 | `PAYER_DAVINCI_DISPATCH_SERVICE_ID` | Optional: names your CDS service for `order-dispatch` requests, with the same rules. Empty ⇒ the service your listing offers for `order-dispatch`. |
 | `PAYER_DAVINCI_CONTRACT_VERSIONS` | Declared Da Vinci contract versions for the partner payer, comma-separated `<contract>@<line>` tokens (e.g. `pa.pas@2.0, pa.crd@2.0`). Two things read this: the connectivity checks verify the partner's published capability against it (`version-drift` on disagreement, FR-G46), and native-forward routing refuses (before forwarding) any leg whose contract shares no line with it (FR-G48); from shn-gateway v0.62.0 only with `REQUIRE_SHARED_LINE=true`, and by default such a leg is forwarded as sent and the carry recorded. Requires `PAYER_DAVINCI_BASE_URL`. Unset ⇒ native-forward legs are unfiltered (today's default) and the checks skip the drift comparison. From shn-gateway v0.59.0 it is also this gateway's own declaration when `SHN_CONTRACT_VERSIONS` is unset (see [Exchange contract lines](#exchange-contract-lines-shn_contract_versions)); a value that names no `pa.crd`, `pa.dtr` or `pa.pas` line, or a `pa.crd`, `pa.dtr` or `pa.pas` line this build cannot exchange, then refuses boot. Editing it then changes the declaration, so the grow-only rule below applies to it too. |
-| `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. From v1.9.0, a redirect your system answers with to another origin (another scheme, host or port) is followed without them, as it is without `Authorization`, and they are not sent after the first hop to another origin, for the rest of the redirect chain, even back at your system; a chain of redirects within your system's origin keeps them. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_BACKEND_HEADERS` | Fixed request headers for a partner system that routes on one (a tenant or plan key its API gateway reads before any payload), as comma-separated `Name: value` pairs, e.g. `X-Route-Key: plan-7`. Sent on every request to the partner's bases — the CDS service listing read, each CRD post, the DTR and PAS operations (`$submit` and `$inquire`) and the connectivity probes — and **never** to `PAYER_DAVINCI_TOKEN_URL`. From v1.9.0, a redirect your system answers with to another origin (another scheme, host or port) is followed without them, as it is without `Authorization`, and they are not sent after the first hop to another origin, for the rest of the redirect chain, even back at your system; a chain of redirects within your system's origin keeps them. From v1.10.0, a request that carries a body (each CRD post, the DTR and PAS operations) follows no redirect to another origin at all, so only a bodiless read is followed there, without them. The message bytes are untouched: this is addressing for your own system, not a change to what the request asserts. Refused at boot: a pair that is not `name: value`, an empty name or value, a name or value that is not a valid HTTP field, a repeated name, and the names this gateway sets itself (`Authorization`, `Content-Type`, `Accept`, `Host`, `Content-Length`, `X-Correlation-Id`) or hop-by-hop names (`Connection`, `Transfer-Encoding`, `Upgrade`, …). A value cannot contain a comma. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_TIMEOUT` | How long this gateway waits for your system on each operation it forwards, counted from the leg's arrival at this gateway, as a Go duration from `1s` to `28s` (from v0.59.0). Unset: `25s`, under the requester's 30 s leg budget by enough that a system slower than it is answered as its own timeout, this gateway's framed `504`, while the requester is still waiting, and recorded as your system's `timeout`. Any other value refuses the boot, as does setting it without `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | Whether each operation forwarded to your system carries `X-Correlation-Id` with the leg's id. Unset (or `on`, the default): it does. `off`: no `X-Correlation-Id` is sent, for a system that validates that header its own way; nothing else changes. Any other value refuses the boot, as does `off` without `PAYER_DAVINCI_BASE_URL`. `PAYER_DAVINCI_BACKEND_HEADERS` can never name `X-Correlation-Id`, whatever this is set to. |
 | `PAYER_DAVINCI_STRICT_EXTENSIONS` | **No longer read** (from shn-gateway v1.0.0). It reserved a per-peer strict-extensions overlay (FR-G52) that never had a routing effect. A gateway that sets it, to any value, logs `gateway: WARNING: PAYER_DAVINCI_STRICT_EXTENSIONS is set but no longer read` at boot and starts; remove it. A gateway SHN hosts for you no longer renders it. |
@@ -2735,6 +2811,53 @@ your system when:
 - the request names no hook, or a hook its leg does not carry (`order-select` and
   `order-sign` travel on one leg, `order-dispatch` on another) — 400.
 
+### CDS Hooks client authentication (`PAYER_DAVINCI_CDS_AUTH`)
+
+CDS Hooks 2.0 ("Trusting CDS Clients"), which Da Vinci CRD adopts, defines one way a client
+authenticates to a CDS service: every call carries `Authorization: Bearer <JWT>`, a JWT the
+client signs with its own private key, whose public key it publishes as a JWK Set. From
+shn-gateway v1.10.0 your gateway does this whenever your payer client has a signing key
+(`PAYER_DAVINCI_CLIENT_KEY` and `PAYER_DAVINCI_CLIENT_ALG`, `ES384` or `RS384`; another
+algorithm with a key refuses the boot): the CDS service listing read and each CRD hook call
+carry a fresh JWT, and nothing else changes. DTR, PAS and eligibility carry what they did:
+the SMART Backend Services access token from `PAYER_DAVINCI_TOKEN_URL`, or no credential when
+that is unset. A key and algorithm without a token endpoint sign the CDS calls alone.
+
+Each JWT carries:
+
+- header: `alg` and `kid` of your payer client key (`kid` is `PAYER_DAVINCI_CLIENT_KID`, or
+  the key's RFC 7638 thumbprint when that is unset), `typ` `JWT`, and `jku` (below);
+- `iss`: `PAYER_DAVINCI_CDS_JWT_ISS`; unset, `PAYER_DAVINCI_INGRESS_BASE_URL`; unset too,
+  this gateway's own base URL as it is registered on the network. Until the gateway knows
+  an issuer, a CDS call is not sent (the requester is answered `502`, and the access line
+  records `backend.errorClass` `auth`), and never sent with another credential instead;
+- `aud`: the exact URL called, `{CDS base}/cds-services` for the listing and
+  `{CDS base}/cds-services/{id}` for a hook, where the CDS base is
+  `PAYER_DAVINCI_CDS_BASE_URL`, or `PAYER_DAVINCI_BASE_URL` when that is unset (without any
+  user information the base carries, which is never part of the URL sent);
+- `iat`: now; `exp`: five minutes later;
+- `jti`: a random value, new on every request, a redirect hop included.
+
+A listing read your CDS service redirects to another origin is followed without the JWT; a
+hook call it redirects to another origin is refused, as any request with a body is. A `401`
+from your CDS service is
+its answer and is relayed; the call is not sent again. The JWT and the key never appear in a
+log, and a diagnostic capture of a CDS call records it as the gateway made it, before the JWT
+is added: it shows no `Authorization`.
+
+**Your public key.** The gateway serves the public JWK Set of your payer client key, with no
+credential, at `GET /cds-client/jwks.json` on its own base (public members only; a set
+holding a private member is never served). Unless `PAYER_DAVINCI_CDS_JWT_JKU` says otherwise,
+each JWT's `jku` names that URL when the base is `https`; over `http` (a local stack) no
+`jku` is sent, and the boot log says so. Register the issuer and the JWK Set URL (or the
+key set itself) with your CDS service. A gateway SHN hosts for you shows both on its tenant
+page.
+
+**Keeping the access token.** A CDS service built to take your SMART access token instead
+can keep it: set `PAYER_DAVINCI_CDS_AUTH=access-token`. With no signing key (a client secret,
+or no credentials), CDS calls carry what your other operations carry, as before, and the
+gateway serves no JWK Set. The boot log names which one your CDS calls carry, and why.
+
 ### CDS Hooks answers
 
 Your CDS Hooks answer is relayed to the provider exactly as your system sent it once it meets the CDS Hooks 2.0 response rules and, at a CRD line, the CRD card
@@ -2745,8 +2868,12 @@ is refused with 502 `payer CRD response is not a valid CDS Hooks response: <rule
 rather than repaired, and the provider's gateway applies the same rules; below `strict` it is
 relayed exactly as your system sent it (recorded as a finding at `observe`). An answer that
 repeats a member name is refused at every level. Your gateway carries the answer with the
-media type your system sent (`application/json` when it sent none); the provider's gateway
-returns it to the EHR as `application/json`, the CDS Hooks media type. Coverage information belongs in a system
+media type your system sent (`application/json` when it sent none), and, from v0.57.0, the
+provider's gateway returns it to the EHR with that media type. One stated `application/fhir+json` (as every payer
+gateway before v0.57.0 states it), none, or one that does not parse as a media type is written
+`application/json`, the CDS Hooks media type. From shn-gateway v1.10.0 the provider's gateway writes your system's
+`application/fhir+json` as stated when your gateway advertises the `v1opsub` request frame (from v1.8.0), and one
+no header can carry as `application/json`. Coverage information belongs in a system
 action that updates the order; each FHIR resource your answer embeds is also validated at the
 routed CRD line, but only to record the outcome (the `crd.embedded.validated` observation,
 at every level but `none`; from v0.61.0 it carries `ms`, the time the `$validate` call took; from v1.2.0 its
@@ -2762,6 +2889,26 @@ mixed credential block is a hard startup error (a likely misconfig). Setting
 `PAYER_DAVINCI_BASE_URL` alone (no token URL) is valid and forwards to the
 partner **unauthenticated** — the gateway logs a warning on startup to make this
 mode visible.
+
+### The eligibility answer's insurer
+
+From v1.10.0, the coverage eligibility answer your gateway builds from your system of record
+(`PAYER_ELIGIBILITY_URL` unset) names its insurer by an identity your holder publishes on the
+network feed, read from every payor of the member's Coverage (or, for a member with no Coverage,
+from your `Organization/payer`), in any position: the first such identity in document order.
+When the record lists none of them, or your holder publishes none, the insurer is read as
+before: the first identifier of `payor[0]`, or, for a member with no Coverage, of
+`Organization/payer` (when that names none, the request is refused as before). Earlier releases always named that identifier, so an Organization listing an NPI before
+your payer identifier named the NPI. The payors are read in order until one names an identity
+you publish; a later payor is not read. A payor your records cannot read as a payer (a clinic
+Organization your system does not hold) no longer hides your identity on another payor. Nor does
+one whose reference your system of record failed to read (each reference is read at most once):
+the answer is built from the payors that could be read, and, once the answer is built, the
+exchange record's `readsFailed` names each failed read. When no payor that could be read names one of your identities, the
+insurer is read as before, so an answer is never worse than reading `payor[0]` alone: when
+`payor[0]`'s own read fails, the answer is your system's failure, as before. Answers your own
+system sends (PAS, CRD, DTR, and eligibility through `PAYER_ELIGIBILITY_URL`) are carried as your
+system sent them.
 
 ### Payer backend identity mapping
 
@@ -3138,14 +3285,45 @@ to that provider's gateway. It is in the evolving tier (see `STABILITY.md`).
 |---|---|
 | `PAYER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the payer gateway (any non-empty value turns it on, `0` and `false` included). A gateway of any other role refuses to start with it set. |
 | `PAYER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL: the SMART audience the gateway pins, the token endpoint it advertises, and the base of each provider's base below. **Required** when the ingress is enabled. It must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
-| `INGRESS_CLIENTS_FILE` | Your system's registered clients, as for the provider's ingress ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)). **Required** (≥1 client) when the ingress is enabled. A client that lists no `scopes` is registered for `system/Task.write`; one whose `scopes` leave it out refuses the gateway's start, since every route of this ingress would refuse it. |
+| `INGRESS_CLIENTS_FILE` | Your system's registered clients, as for the provider's ingress ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)). **Required** (≥1 client) when the ingress is enabled. A client that lists no `scopes` is registered for `system/Task.write`. One whose `scopes` hold a `system/Task` scope SMART does not spell (below), or no `system/Task` scope that permits a route (every route creates a Task: `system/Task.write`, `system/Task.*`, or a v2 scope with `c`, with no query), refuses the gateway's start. Before v1.10.0, a client's `scopes` had to include `system/Task.write`. |
 
 **Authenticating.** Your system gets a bearer from the gateway's own token endpoint
 (`POST /oauth/token`, SMART Backend Services, `private_key_jwt`), asking for the scope
-`system/Task.write`. `/.well-known/smart-configuration` advertises that scope. Each Task route
-takes only a bearer granted exactly `system/Task.write`. A bearer granted another scope, or none,
-is refused `403` with `WWW-Authenticate: Bearer error="insufficient_scope"`, recorded as
+`system/Task.write`. `/.well-known/smart-configuration` advertises that scope. A bearer granted
+a scope that does not permit the route, or none, is refused `403` with
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="system/Task.write"`, recorded as
 `authority`. A missing or invalid bearer is `401`.
+
+From shn-gateway v1.10.0, the ingress reads scopes as SMART App Launch defines them:
+- **A client registers** `system/Task` scopes in either SMART form:
+  - v1: `system/Task.read`, `system/Task.write`, or `system/Task.*` (both).
+  - v2: `system/Task.` followed by one or more of the letters `c`, `r`, `u`, `d`, `s`, each at
+    most once and in that order, such as `system/Task.c`, `system/Task.cr` or
+    `system/Task.cruds`. Any other letters, a repeated letter or another order (such as
+    `system/Task.rc`) is not a scope. A v2 scope may carry a query (a granular scope, such as
+    `system/Task.c?status=requested`).
+
+  A client registers at least one, with no query, that permits creating a Task, since every
+  route of this ingress creates one: `system/Task.write`, `system/Task.*`, or a v2 scope with
+  `c`. A client registered only to read (`system/Task.read`) refuses the gateway's start.
+  Other `system/Task` scopes, and scopes for another resource or context, may be listed
+  beside one, and permit nothing on these routes.
+- **A token carries a set.** Ask for several registered scopes in one token, separated by
+  single spaces (`scope=system/Task.write system/Task.read`). Every scope asked for must be
+  registered for the client, or the request is refused `400 invalid_scope`. Duplicates count once.
+  The token and the answer's `scope` state the set granted, in the order asked. A client that
+  asks for exactly `system/Task.write` is granted exactly that, as before. A registered
+  client's own signed bearer (the direct-bearer form) is taken with the set it states only when
+  every scope in it is registered; otherwise it carries none.
+- **Each route takes a bearer whose set holds a scope that permits it.** The Task routes and
+  `GET /cdex/providers` take a scope that permits creating a Task: `system/Task.write`,
+  `system/Task.*`, or a v2 scope with `c`. A bearer granted only `system/Task.read` or
+  `system/Task.r` is refused `403`. A granular scope permits nothing here, even one with `c`:
+  the gateway cannot enforce its query, so admitting the route on it would grant more than the
+  scope does.
+
+Before v1.10.0, the token endpoint granted one registered scope exactly as written, and each
+route took only a bearer granted exactly `system/Task.write`.
 
 **Where to create the Task.** Each registered provider that takes the request has a base on this
 gateway, `{PAYER_DAVINCI_INGRESS_BASE_URL}/cdex/provider/{provider}`. Your system creates the Task
@@ -3342,8 +3520,9 @@ reads `504 {"error":"hub leg timed out"}` with no number, because no budget of t
 gateway's was what ended it. The leg's outcome stays `unreachable` (the leg did not
 complete), so the operators' `LegError` count is unchanged. A Hub that cannot be reached
 — including a connection or TLS handshake that gives up before the Hub is reached — is the
-generic `502 {"error":"hub routing failed"}`: the gateway will not call something a leg
-timeout unless its own leg deadline, or the caller's, ended the wait. A connection that
+generic `502 {"error":"hub routing failed"}`, and so is a Hub that answers with a redirect
+(any `3xx`, with or without a `Location`), which is never followed: the gateway will not
+call something a leg timeout unless its own leg deadline, or the caller's, ended the wait. A connection that
 fails after the request was sent to the Hub, or a Hub `200` that cannot be read as an
 envelope, may have reached the recipient: the `502` says so (below). A Hub that answers with a refusal is reported with
 `{"error":"hub refused the exchange: <reason>"}`: a `409` (a replayed envelope) keeps
@@ -3362,7 +3541,10 @@ not hold when it requires known members (`400 unknown member`), a request it can
 patient-authored DTR request whose patient cannot be matched to the token's (`403`), a consent it cannot confirm, an ingress validation
 failure at enforcement `strict` (`422 ingress validation failed`, issues echoed) — is its
 answer about the request, and a frame-capable requester receives it with that status and
-body. So is any `4xx` it writes about **its own participant's answer** after that system
+body. From v1.10.0 that body takes the leg's answer envelope: on coverage eligibility, DTR,
+PAS, CDex and the federated query an `OperationOutcome` whose first issue's `diagnostics` is
+the message (the echoed issues follow it, each `invalid`), on CDS Hooks and patient-authored
+DTR the `{"error": …}` shown here; the texts are the same. So is any `4xx` it writes about **its own participant's answer** after that system
 answered: an answer that repeats a member name (`403`, at every level), and at enforcement
 `strict` a PAS response whose patient linkage is inconsistent or that names another
 patient (`403`; from v0.61.0 the parent a dependent's Coverage entry names as a contained

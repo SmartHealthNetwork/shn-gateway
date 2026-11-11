@@ -936,7 +936,8 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	}
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
 	var stated statedAnswer
-	answer, err := g.OriginateLeg(withStatedAnswerSink(observationContext, &stated), r, recipient, leg, pci, child, "", content)
+	var answerType string
+	answer, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(observationContext, &answerType), &stated), r, recipient, leg, pci, child, "", content)
 	responseObservation = append([]byte(nil), answer...)
 	var relayed *RelayError
 	if errors.As(err, &relayed) {
@@ -998,16 +999,18 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		outcome = "answered"
 		g.localWriteSkipped(leg, child, unread)
 	}
-	// The payer's answer as it arrived, apart from a pend's documentation
-	// return address, re-keyed to the network (E-10).
-	carried, err := g.pendReturnRekey(r.Context(), answer, "application/fhir+json", recipient)
+	// The payer's answer as it arrived, with the media type the payer's system
+	// stated, apart from a pend's documentation return address, re-keyed to
+	// the network (E-10).
+	ct := writableAnswerMediaType(answerType)
+	carried, err := g.pendReturnRekey(r.Context(), answer, ct, recipient)
 	if err != nil {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		refusePendRekey(w, r, err)
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	g.writeRelayedAnswer(w, stated, "application/fhir+json", carried,
+	g.writeRelayedAnswer(w, stated, ct, carried,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 

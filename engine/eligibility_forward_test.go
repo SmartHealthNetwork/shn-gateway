@@ -313,7 +313,7 @@ func TestEligibility_DeclaredAnswerValidatorOutageFollowsTheLevel(t *testing.T) 
 			p.partner.respByPath[eligibilityPath] = answer
 			got := p.send(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember))
 			if level == EnforcementStrict {
-				if !got.framed || got.status != http.StatusInternalServerError || string(got.body) != `{"error":"validator unavailable"}` {
+				if msg, echoed := gatewayRefusal(t, "coverage-eligibility", got.contentType, got.body); len(echoed) != 0 || !got.framed || got.status != http.StatusInternalServerError || msg != "validator unavailable" {
 					t.Fatalf("strict: answer %d (framed %v) %s, want framed 500 validator unavailable", got.status, got.framed, got.body)
 				}
 				return

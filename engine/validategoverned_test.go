@@ -164,6 +164,29 @@ func TestGovResultRefusalWithoutIssuesLeavesMsgUnchanged(t *testing.T) {
 // every migrated site below sees, pinned here once rather than re-typed at each case.
 func fakeValidatorIssue(marker string) string { return "fake: contains " + marker }
 
+// wantOutcomeBody is wantJSONErrorBody for a refusal the payer's gateway
+// writes on a leg whose answer envelope is FHIR (coverage eligibility): an
+// OperationOutcome whose first issue is the refusal and whose next issues are
+// the echoed ones, in order.
+func wantOutcomeBody(wantError string, wantIssues []string) func(t *testing.T, body string) {
+	return func(t *testing.T, body string) {
+		t.Helper()
+		msg, echoed := gatewayRefusal(t, "coverage-eligibility", "application/fhir+json", []byte(body))
+		if msg != wantError {
+			t.Errorf("refusal = %q, want %q", msg, wantError)
+		}
+		if wantIssues == nil {
+			wantIssues = []string{}
+		}
+		if echoed == nil {
+			echoed = []string{}
+		}
+		if !slices.Equal(echoed, wantIssues) {
+			t.Errorf("echoed issues = %v, want %v", echoed, wantIssues)
+		}
+	}
+}
+
 // wantJSONErrorBody asserts a migrated HTTP site's response body decodes to EXACTLY
 // {"error": wantError} plus, when wantIssues is non-nil, an "issues" array equal to it.
 // Two of the five sites (the eligibility response-ingress 502 and the payer egress 500)
@@ -229,12 +252,12 @@ func TestMigratedBypassSitesKeepTheirStatusAndEmit(t *testing.T) {
 		{
 			name: "payer eligibility ingress", wantStatus: http.StatusUnprocessableEntity,
 			wantLegType: "coverage-eligibility", drive: drivePayerEligibilityIngress,
-			assertBody: wantJSONErrorBody("ingress validation failed", []string{issue}),
+			assertBody: wantOutcomeBody("ingress validation failed", []string{issue}),
 		},
 		{
 			name: "payer eligibility egress", wantStatus: http.StatusInternalServerError,
 			wantLegType: "coverage-eligibility", drive: drivePayerEligibilityEgress,
-			assertBody: wantJSONErrorBody("egress validation failed", nil),
+			assertBody: wantOutcomeBody("egress validation failed", nil),
 		},
 		// The fifth row, "pas assembly", is gone: the inquiry-leg change deleted the
 		// terminal-response assembly and with it that migrated site's

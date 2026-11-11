@@ -35,6 +35,7 @@ func TestPACatalog_MatchesTheLegTaxonomy(t *testing.T) {
 			want[l.TransactionType] = legSpec{
 				ReqFrame: l.Request.Frame, RespFrame: l.Response.Frame,
 				Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
+				AnswerEnvelope: l.AnswerEnvelope,
 			}
 		}
 		if len(want) < c.min {
@@ -48,6 +49,9 @@ func TestPACatalog_MatchesTheLegTaxonomy(t *testing.T) {
 			}
 			if got.ReqFrame != w.ReqFrame || got.RespFrame != w.RespFrame || got.Op != w.Op || got.RespOp != w.RespOp || got.Scope != w.Scope {
 				t.Errorf("%s: catalog %q = %+v, taxonomy frames/operations/scope %+v", c.name, tx, got, w)
+			}
+			if got.AnswerEnvelope != w.AnswerEnvelope || got.AnswerEnvelope == "" {
+				t.Errorf("%s: catalog %q answer envelope %q, taxonomy %q", c.name, tx, got.AnswerEnvelope, w.AnswerEnvelope)
 			}
 			if got.Physics.Kind != KindRequestResponse {
 				t.Errorf("%s: catalog %q physics %v, the taxonomy says request-response", c.name, tx, got.Physics.Kind)
@@ -119,6 +123,26 @@ func TestCatalogFromTaxonomy_RefusesDrift(t *testing.T) {
 				d["pas-claim"] = legDetail{Physics: LegPhysics{Kind: KindRequestResponse}, Contract: "pa.pas"}
 			},
 			`leg "pas-claim": the adapter row's physics`,
+		},
+		"a taxonomy leg with no answer envelope": {
+			func(tx *legtaxonomy.Taxonomy, _ map[string]legDetail) {
+				for i := range tx.Legs {
+					if tx.Legs[i].TransactionType == "pas-claim" {
+						tx.Legs[i].AnswerEnvelope = ""
+					}
+				}
+			},
+			`leg "pas-claim": answer envelope "" is neither "fhir" nor "json"`,
+		},
+		"a taxonomy leg with an answer envelope outside the closed set": {
+			func(tx *legtaxonomy.Taxonomy, _ map[string]legDetail) {
+				for i := range tx.Legs {
+					if tx.Legs[i].TransactionType == "crd-order-select" {
+						tx.Legs[i].AnswerEnvelope = "xml"
+					}
+				}
+			},
+			`leg "crd-order-select": answer envelope "xml" is neither "fhir" nor "json"`,
 		},
 		"an adapter row whose physics kind is not the taxonomy's": {
 			func(_ *legtaxonomy.Taxonomy, d map[string]legDetail) {

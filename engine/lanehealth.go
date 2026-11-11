@@ -223,7 +223,11 @@ func (l *explicitLane) logState(event string) {
 
 // ownConnectionClient is the client a lane's metadata check uses: it dials a
 // connection of its own for each request, never one a lane's $validate calls
-// hold, keeps none, and follows no redirect. When the lane client's
+// hold, keeps none, and follows no redirect. It stays outside the
+// network-service redirect policy (serviceclient): a 3xx answer here counts
+// as the lane answering (laneAnswers takes any answer), and is never
+// followed (ErrUseLastResponse); the lane's $validate and certification
+// calls themselves refuse a redirect. When the lane client's
 // transport records its endpoint kind (endpointcert), the check's records
 // under the same kind (MON-R25); the check's transport is as it was.
 func ownConnectionClient(inner *shnsdk.OperationValidator) *http.Client {

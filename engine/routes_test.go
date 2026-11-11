@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 )
 
 // The routes each role mounts, under each condition that gates one, are
@@ -55,18 +57,22 @@ var (
 	// cdexTaskRoutePatterns are mounted on a provider that sets its own Task
 	// endpoint: it takes the payer's attachment request.
 	cdexTaskRoutePatterns = []string{"POST /substrate/inbound"}
+	// cdsClientJWKSRoutePatterns are mounted on a payer whose CDS calls carry
+	// a CDS Hooks client JWT: the public JWK Set of its key, with or without
+	// the ingress.
+	cdsClientJWKSRoutePatterns = []string{"GET " + smartauth.CDSClientJWKSPath}
 )
 
 // routeConditions is one combination of the configuration that gates a route.
 // module1 is a declared origination profile: without one, module 1 mounts no
 // /scenario route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL, module1, cdexTask bool
+	ingress, ingressAuth, baseURL, module1, cdexTask, cdsClientJWKS bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask, "cdsClientJWKS": c.cdsClientJWKS} {
 		if set {
 			on = append(on, name)
 		}
@@ -78,11 +84,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the five conditions.
+// everyRouteCondition is every combination of the six conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 32 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0})
+	for bits := range 64 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0, bits&32 != 0})
 	}
 	return out
 }
@@ -112,6 +118,9 @@ func wantRoutes(role string, c routeConditions) []string {
 		}
 	case "payer":
 		want = append(want, "POST /substrate/inbound")
+		if c.cdsClientJWKS {
+			want = append(want, cdsClientJWKSRoutePatterns...)
+		}
 		if c.ingress {
 			want = append(want, payerIngressRoutePatterns...)
 			if c.ingressAuth {
@@ -153,6 +162,9 @@ func routeGateway(role string, c routeConditions) *Gateway {
 	}
 	if c.cdexTask {
 		g.cfg.ProviderCDexTaskURL = "https://provider.example/fhir/Task"
+	}
+	if c.cdsClientJWKS {
+		g.cfg.CDSClientJWKS = []byte(`{"keys":[]}`)
 	}
 	return withModuleOne(g)
 }

@@ -4,11 +4,13 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -117,81 +119,59 @@ func configuredRedirectExchange(t *testing.T, level ConformanceEnforcement, clie
 	return records.only(t), ans
 }
 
-// A payer's system that redirects the forward to another origin: the hop is
-// followed, and the other origin receives none of the headers the payer
-// configured for its own system, nor Authorization, at every level. The
-// payer's own system received them all; the hop is recorded as cross-origin,
-// and the other origin's answer is the answer. A configured header is the
-// payer's credential or routing for its own origin: carrying it to another
-// would hand SHN's carry of it to a party it was never configured for
-// (message integrity, and the authentication of the gateway's own carry).
-func TestNativeForward_ACrossOriginRedirectCarriesNoConfiguredHeaderAtEveryLevel(t *testing.T) {
+// A payer's system that redirects the forward, a request that carries a body,
+// to another origin: the hop is not sent, whatever the redirect's code, at
+// every level. The other origin receives nothing at all, the payer's own
+// system received the request with its configured headers and bearer, and
+// the forward is refused 502 on routing, attested delivered (the system
+// answered, with its 3xx, and may have acted), its reason naming the origin
+// only so the recipient's operator can point its registered endpoint at the
+// final address. The record names the system's 3xx, http-3xx and the refused
+// hop.
+func TestNativeForward_ACrossOriginRedirectIsRefusedAsRoutingAtEveryLevel(t *testing.T) {
 	answer := decidedAnswer(t)
 	for _, level := range allLevels {
-		t.Run(fmt.Sprint(level), func(t *testing.T) {
-			other := newRecordingOrigin(t, func(_ *http.Request, w http.ResponseWriter) {
-				w.Header().Set("Content-Type", "application/fhir+json")
-				_, _ = w.Write(answer)
-			})
-			system := newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
-				http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
-			})
-			rec, ans := configuredRedirectExchange(t, level, smartClientFor(t, system.Server), system.URL)
-			if ans.status != http.StatusOK {
-				t.Fatalf("answer %d %s, want the other origin's answer", ans.status, ans.body)
-			}
-			sent, away := system.requests(), other.requests()
-			if len(sent) != 1 || len(away) != 1 {
-				t.Fatalf("requests: system %d, other origin %d; want one each", len(sent), len(away))
-			}
-			requirePartnerHeaders(t, "the payer's own system", sent[0])
-			requireBearer(t, "the payer's own system", sent[0])
-			requireNoPartnerHeader(t, "the other origin", away[0])
-			if want := []string{smartauth.RedirectCrossOrigin}; !slices.Equal(rec.BackendRedirects, want) {
-				t.Fatalf("redirects %q, want %q", rec.BackendRedirects, want)
-			}
-		})
-	}
-}
-
-// A forward the payer's system redirects to another origin that redirects it
-// back (A to B to A) arrives back at the payer's system with no configured
-// header and no Authorization, at every level: once the chain has left the
-// origin, another origin chose where it goes, so nothing configured for the
-// origin is sent for the rest of the chain. The payer's system answers that
-// request as it chooses; here it answers, and its answer is the answer.
-func TestNativeForward_AChainBackToTheOriginCarriesNoConfiguredHeaderAtEveryLevel(t *testing.T) {
-	answer := decidedAnswer(t)
-	for _, level := range allLevels {
-		t.Run(fmt.Sprint(level), func(t *testing.T) {
-			var system *recordingOrigin
-			other := newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
-				http.Redirect(w, r, system.URL+r.URL.Path+"?back=1", http.StatusTemporaryRedirect)
-			})
-			system = newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
-				if r.URL.Query().Get("back") == "" {
-					http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
-					return
+		for _, code := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect, http.StatusFound} {
+			t.Run(fmt.Sprintf("%v/%d", level, code), func(t *testing.T) {
+				other := newRecordingOrigin(t, func(_ *http.Request, w http.ResponseWriter) {
+					w.Header().Set("Content-Type", "application/fhir+json")
+					_, _ = w.Write(answer)
+				})
+				system := newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
+					http.Redirect(w, r, other.URL+r.URL.Path+"?patient=x", code)
+				})
+				rec, ans := configuredRedirectExchange(t, level, smartClientFor(t, system.Server), system.URL)
+				sent, away := system.requests(), other.requests()
+				if len(sent) != 1 || len(away) != 0 {
+					t.Fatalf("requests: system %d, other origin %d; want 1 and none", len(sent), len(away))
 				}
-				w.Header().Set("Content-Type", "application/fhir+json")
-				_, _ = w.Write(answer)
+				requirePartnerHeaders(t, "the payer's own system", sent[0])
+				requireBearer(t, "the payer's own system", sent[0])
+				if ans.status != http.StatusBadGateway || ans.header.Get(HubDeliveredHeader) != "yes" {
+					t.Fatalf("answer %d (delivered %q) %s, want 502 attested delivered", ans.status, ans.header.Get(HubDeliveredHeader), ans.body)
+				}
+				var got map[string]string
+				if err := json.Unmarshal(ans.body, &got); err != nil {
+					t.Fatalf("answer %s: %v", ans.body, err)
+				}
+				want := map[string]string{"error": fmt.Sprintf(errCrossOriginRedirectFor, other.URL), "rule": RefusalRouting}
+				if got["error"] != want["error"] || got["rule"] != want["rule"] || len(got) != 2 {
+					t.Fatalf("answer %q, want %q", got, want)
+				}
+				if strings.Contains(string(ans.body), "patient=") {
+					t.Fatalf("answer %s carries the redirect's query", ans.body)
+				}
+				if rec.Outcome != ExchangeRefused || rec.Rule != RefusalRouting {
+					t.Fatalf("record outcome %q rule %q, want refused on routing", rec.Outcome, rec.Rule)
+				}
+				if rec.Backend == nil || rec.Backend.Status != code || rec.Backend.ErrorClass != BackendHTTP3xx {
+					t.Fatalf("backend %+v, want the system's %d, %s", rec.Backend, code, BackendHTTP3xx)
+				}
+				if want := []string{smartauth.RedirectCrossOriginRefused}; !slices.Equal(rec.BackendRedirects, want) {
+					t.Fatalf("redirects %q, want %q", rec.BackendRedirects, want)
+				}
 			})
-			rec, ans := configuredRedirectExchange(t, level, smartClientFor(t, system.Server), system.URL)
-			if ans.status != http.StatusOK {
-				t.Fatalf("answer %d %s, want the payer's system's answer", ans.status, ans.body)
-			}
-			got, away := system.requests(), other.requests()
-			if len(got) != 2 || len(away) != 1 {
-				t.Fatalf("requests: system %d, other origin %d; want 2 and 1", len(got), len(away))
-			}
-			requirePartnerHeaders(t, "the payer's system, first", got[0])
-			requireBearer(t, "the payer's system, first", got[0])
-			requireNoPartnerHeader(t, "the other origin", away[0])
-			requireNoPartnerHeader(t, "the payer's system, on the hop back", got[1])
-			if want := []string{smartauth.RedirectCrossOrigin, smartauth.RedirectSameOrigin}; !slices.Equal(rec.BackendRedirects, want) {
-				t.Fatalf("redirects %q, want %q", rec.BackendRedirects, want)
-			}
-		})
+		}
 	}
 }
 

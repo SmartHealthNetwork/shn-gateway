@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/nosniff"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -164,17 +165,17 @@ func pullHandler(metrics http.Handler, token string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", metrics)
 	if token == "" {
-		return mux
+		return nosniff.Handler(mux)
 	}
 	want := sha256.Sum256([]byte(token))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return nosniff.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !bearerMatches(r.Header.Get("Authorization"), want) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		mux.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // bearerMatches reports whether header carries the bearer token whose

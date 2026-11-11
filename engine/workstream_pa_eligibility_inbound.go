@@ -130,10 +130,10 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// NEVER through the injected Adjudicator/Responder occupant (which is consulted
 	// only for the PA legs: OrderSelect/Questionnaire/PriorAuth). One Coverage read
 	// feeds both facts, the payer twin of FR-G40's "one payer fact, read once":
-	// CoverageInforce is the verdict, OpenCoverage's payor (parsed the SAME way the
-	// origination-side machinery does, gateway.go's recipientForWith /
-	// shnsdk.ParsePayerIdentifier) is the insurer identity — replacing the
-	// hardcoded Organization/payer literal BuildEligibilityResponse used to stamp.
+	// CoverageInforce is the verdict, and the Coverage's payors name the insurer
+	// identity (coverageAnswerInsurer: this payer's own identity wherever the
+	// Coverage lists it) — replacing the hardcoded Organization/payer literal
+	// BuildEligibilityResponse used to stamp.
 	inforce, reason, readErr := ReadSystemOfRecord(g.cfg.SoR).CoverageInforceContext(r.Context(), member)
 	if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
 		return
@@ -144,16 +144,21 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var insurer shnsdk.PayerIdentifier
+	// readsFailed are the reads of the system of record that failed while the
+	// insurer was still found, recorded once the answer is built.
+	var readsFailed []string
 	switch {
 	case hasCoverage:
 		// The member HAS a Coverage record: its own payor is the insurer. An
 		// unresolvable payor on an EXISTING Coverage fails closed (R4:
 		// CoverageEligibilityResponse.insurer is 1..1) — a hollow or
 		// stale-literal response is never built.
+		// The insurer is the identity the network knows this payer by, as
+		// the Coverage lists it in any position (coverageAnswerInsurer).
 		var ok bool
-		resolve, readErr := sorReferenceCallback(ctx, g.cfg.SoR)
-		insurer, ok = shnsdk.ParsePayerIdentifier(coverageJSON, resolve)
-		if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, *readErr) {
+		var readErr error
+		insurer, ok, readsFailed, readErr = g.coverageAnswerInsurer(ctx, coverageJSON)
+		if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
 			return
 		}
 		if !ok {
@@ -181,7 +186,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var ok bool
-		insurer, ok = shnsdk.ParseOrganizationIdentifier(orgJSON)
+		insurer, ok = g.organizationAnswerInsurer(orgJSON)
 		if !ok {
 			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusUnprocessableEntity, "payer's own well-known Organization has no identifier", nil)
 			return
@@ -238,6 +243,7 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	exchangeOf(ctx).readsFailed(readsFailed)
 	g.respondLeg(w, r, "payer-coverage", "eligibility-response", "coverage-eligibility", env.Metadata.CorrelationID, result.Response, result.stated(), tok.Subject, env.Metadata.Sender, "", answerTok)
 }
 

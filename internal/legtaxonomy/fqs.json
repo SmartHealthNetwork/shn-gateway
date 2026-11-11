@@ -13,7 +13,8 @@
       "consent": {"purpose": "TREAT", "custodianFrom": "request"},
       "observe": false,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     }
   ]
 }

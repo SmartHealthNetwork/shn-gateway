@@ -26,6 +26,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		RequestEdits: r.RequestEdits, AnswerOwnership: r.AnswerOwnership, AnswerBuilder: r.AnswerBuilder, AnswerEdits: r.AnswerEdits,
 		EditsNotMade:            r.EditsNotMade,
 		AnswerHeadersNotCarried: r.AnswerHeadersNotCarried,
+		ReadsFailed:             r.ReadsFailed,
 	}
 	if r.Outcome == engine.ExchangeRefused {
 		line.Refusal = &diagnostics.AccessRefusal{By: r.RefusedBy, Rule: r.Rule, Stage: r.RefusalStage, Reason: r.RefusalReason}

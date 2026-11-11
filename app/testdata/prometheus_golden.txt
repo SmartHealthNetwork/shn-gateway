@@ -79,6 +79,7 @@ shn_gateway_audit_endpoint_unknown 5
 shn_gateway_audit_queue_depth 7
 # HELP shn_gateway_audit_retries_total Audit record sends retried, by reason.
 # TYPE shn_gateway_audit_retries_total counter
+shn_gateway_audit_retries_total{shn_reason="redirect-refused"} 1
 shn_gateway_audit_retries_total{shn_reason="store"} 1
 shn_gateway_audit_retries_total{shn_reason="unavailable"} 1
 shn_gateway_audit_retries_total{shn_reason="unknown-sender"} 1

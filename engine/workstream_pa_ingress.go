@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"mime"
 	"net/http"
 	"slices"
 	"strconv"
@@ -346,7 +345,7 @@ func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.recordLeg(ex.ID, leg.Project(child, outcome))
-	ct := cdsAnswerMediaType(answerType)
+	ct := cdsAnswerMediaType(answerType, g.framesItsSystemsAnswerType(recipient))
 	g.writeRelayedAnswer(w, stated, ct, relay.Exact(relay.NewBody(respJSON, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: legType, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
@@ -467,7 +466,8 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		Payload: prepared.request, Carried: true, OnBehalf: builder != "", Operation: shnsdk.FrameOperationQuestionnairePackage,
 		MediaType: carriedFHIRMediaType(r.Header.Get("Content-Type"))}
 	var stated statedAnswer
-	pkgJSON, err := g.OriginateLeg(withStatedAnswerSink(r.Context(), &stated), r, recipient, legType, prepared.pci, child, "", content)
+	var answerType string
+	pkgJSON, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated), r, recipient, legType, prepared.pci, child, "", content)
 	leg := Leg{Type: legType, Physics: legPhysics(legType), Content: content, Subjects: subjectsOf(prepared.pci)}
 	if err != nil {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
@@ -492,7 +492,9 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// The answer reaches the EHR as it arrived, or, from a payer on another
 	// DTR line and with module 2 on, under this gateway's line's parameter
 	// names (E-08).
-	answer, wrote, status, msg := g.adaptAnswer(r.Context(), dtrAnswerKey, pkgJSON, "application/fhir+json", route.Token,
+	// It keeps the media type the payer's system stated.
+	ct := writableAnswerMediaType(answerType)
+	answer, wrote, status, msg := g.adaptAnswer(r.Context(), dtrAnswerKey, pkgJSON, ct, route.Token,
 		ExchangeIdentity{CorrelationID: child, LegType: legType, Counterpart: recipient})
 	if status != 0 {
 		g.recordLeg(ex.ID, leg.Project(child, "error"))
@@ -503,7 +505,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	// gateway, so the client's next-question rounds stay on the network (E-12).
 	rekeyed := g.rekeyPackageAnswer(r.Context(), answer, recipient, route.Token, stated, body)
 	g.recordLeg(ex.ID, leg.Project(child, "ok"))
-	g.writeRelayedAnswer(w, stated, "application/fhir+json", rekeyed, dtrAnswerKey)
+	g.writeRelayedAnswer(w, stated, ct, rekeyed, dtrAnswerKey)
 	// The line the answer is written in, as adaptAnswer wrote it: the routed
 	// one, or this gateway's own when E-08 carried it across, so evidence judges
 	// the answer at its own line.
@@ -645,7 +647,8 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var stated statedAnswer
-	crJSON, err := g.OriginateLeg(withStatedAnswerSink(observationContext, &stated), r, recipient, leg, pci, child, "",
+	var answerType string
+	crJSON, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(observationContext, &answerType), &stated), r, recipient, leg, pci, child, "",
 		Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""})
 	responseObservation = append([]byte(nil), crJSON...)
 	var relayed *RelayError
@@ -726,16 +729,18 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	} else if res, perr := shnsdk.ParseClaimResponse(crJSON); perr == nil && res.Outcome != "" {
 		outcome = res.Outcome // approved | denied
 	}
-	// Near-relay: the payer's Bundle as it arrived, apart from a pend's
-	// documentation return address, re-keyed to the network (E-10).
-	answer, err := g.pendReturnRekey(r.Context(), crJSON, "application/fhir+json", recipient)
+	// Near-relay: the payer's Bundle as it arrived, with the media type the
+	// payer's system stated, apart from a pend's documentation return address,
+	// re-keyed to the network (E-10).
+	ct := writableAnswerMediaType(answerType)
+	answer, err := g.pendReturnRekey(r.Context(), crJSON, ct, recipient)
 	if err != nil {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		refusePendRekey(w, r, err)
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, outcome))
-	g.writeRelayedAnswer(w, stated, "application/fhir+json", answer,
+	g.writeRelayedAnswer(w, stated, ct, answer,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
@@ -792,18 +797,31 @@ func (g *Gateway) localWriteSkipped(leg, correlationID, rule string) {
 }
 
 // cdsAnswerMediaType is the media type a CDS Hooks answer is written to the
-// EHR with: the one the payer's system stated. A payer gateway before
-// v0.57.0 framed every success as application/fhir+json whatever the payer
-// sent, and a CDS Hooks answer is never a FHIR resource, so that stamp, or
-// none, is read as unstated and written as application/json, as before. A
-// stated type that does not parse as a media type is not written as a header
-// either; it is written as application/json the same way.
-func cdsAnswerMediaType(stated string) string {
-	if stated == "" {
+// EHR with: the one the payer's system stated, whatever it is, when
+// writableMediaType accepts it. None, or one no header can carry, is written
+// application/json, the CDS Hooks answer's own type.
+//
+// A payer gateway before v0.57.0 framed every success as
+// application/fhir+json whatever its system sent, and a CDS Hooks answer is
+// never a FHIR resource, so from a payer whose gateway may be that old
+// (systemStated false: framesItsSystemsAnswerType) that stamp is read as
+// unstated and written application/json. From any other payer it is the
+// type its system stated, and is written as stated.
+func cdsAnswerMediaType(stated string, systemStated bool) string {
+	ct, mt := writableMediaType(stated)
+	if ct == "" || (mt == mediaFHIRJSON && !systemStated) {
 		return mediaJSON
 	}
-	if mt, _, err := mime.ParseMediaType(stated); err != nil || mt == mediaFHIRJSON {
-		return mediaJSON
-	}
-	return stated
+	return ct
+}
+
+// framesItsSystemsAnswerType reports whether recipient's gateway is known to
+// state its own system's media type on every success frame, which a payer
+// gateway does from v0.57.0. The registry records no gateway release, so it
+// is read from a capability only a later release has: a holder that
+// advertises the v1opsub request frame runs shn-gateway v1.8.0 or later. One
+// that does not, or that the registry does not hold, may predate v0.57.0.
+func (g *Gateway) framesItsSystemsAnswerType(recipient string) bool {
+	entry, ok := g.cfg.Reg.Lookup(recipient)
+	return ok && shnsdk.SupportsRequestFrameV1OpSub(entry.RequestFrames)
 }

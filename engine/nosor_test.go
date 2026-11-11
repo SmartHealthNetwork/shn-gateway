@@ -542,10 +542,10 @@ func TestNoSystemOfRecord_EligibilityNotOffered(t *testing.T) {
 			p := eligibilityPayer(t, level, false)
 			p.g.cfg.SoR = NoSystemOfRecord()
 			got := p.sendAs(t, "coverage-eligibility", "", eligibilityRequest(t, strangerMember), nosorTokenSubject)
-			// The payer gateway's own refusal, in the shape every inbound
-			// refusal takes ({"error": …}), exactly.
-			want := `{"error":"coverage eligibility is not offered by this payer"}`
-			if !got.framed || got.status != http.StatusNotImplemented || strings.TrimSpace(string(got.body)) != want {
+			// The payer gateway's own refusal, in the leg's answer envelope
+			// (an OperationOutcome on eligibility), exactly.
+			const want = "coverage eligibility is not offered by this payer"
+			if msg, echoed := gatewayRefusal(t, "coverage-eligibility", got.contentType, got.body); !got.framed || got.status != http.StatusNotImplemented || msg != want || len(echoed) != 0 {
 				t.Fatalf("answer %d (framed %v) %s, want a framed 501 %s", got.status, got.framed, got.body, want)
 			}
 			if p.partner.lastPath != "" {

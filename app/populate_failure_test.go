@@ -331,6 +331,7 @@ func TestPopulateFailureEvidenceSchemaAndConcurrentOutput(t *testing.T) {
 		}
 	}
 	notes = append(notes, engine.PopulateFailure{Stage: "transport", Reason: "https_to_http_refused", Status: 307})
+	notes = append(notes, engine.PopulateFailure{Stage: "transport", Reason: "cross_origin_refused", Status: 308})
 	notes = append(notes, engine.PopulateFailure{Stage: "http_status", Reason: "non_2xx", Status: 100}, engine.PopulateFailure{Stage: "http_status", Reason: "non_2xx", Status: 599}, engine.PopulateFailure{Stage: "qr_extract", Reason: "invalid_json", Status: 200}, engine.PopulateFailure{Stage: "qr_extract", Reason: "wrong_resource_type", Status: 200})
 	var wg sync.WaitGroup
 	for _, n := range notes {

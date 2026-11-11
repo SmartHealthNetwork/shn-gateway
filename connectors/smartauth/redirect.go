@@ -33,10 +33,15 @@ const (
 	// was not sent (ErrTokenRedirect): a token request follows no redirect,
 	// since its body is the client's credential.
 	RedirectTokenRefused = "token-redirect-refused"
+	// RedirectCrossOriginRefused: the system answered a request that carried
+	// a body with a redirect to another origin, and it was not sent
+	// (ErrCrossOriginBodyRedirect): such a request follows a redirect only
+	// within its own origin.
+	RedirectCrossOriginRefused = "cross-origin-refused"
 )
 
 // RedirectValues is the closed list a hop's class draws from.
-var RedirectValues = []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused}
+var RedirectValues = []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused}
 
 // ErrCleartextRedirect is a redirect from https to http, refused before the hop
 // is sent, whatever its origin: a 307 or 308 replays the request body, which
@@ -94,6 +99,9 @@ func checkRedirectDropping(req *http.Request, via []*http.Request, configured []
 		return errors.New("stopped after 10 redirects")
 	}
 	if err := RefuseCleartextRedirect(req, via); err != nil {
+		return err
+	}
+	if err := RefuseCrossOriginBodyRedirect(req, via); err != nil {
 		return err
 	}
 	cross := dropCrossOriginCredentials(req, via, configured)
@@ -211,6 +219,61 @@ func (e *TokenRedirectError) Error() string {
 // Is reports ErrTokenRedirect.
 func (e *TokenRedirectError) Is(target error) bool { return target == ErrTokenRedirect }
 
+// ErrCrossOriginBodyRedirect is a redirect to another origin than the chain's
+// first, of a request that carried a body, refused before the hop is sent:
+// such a request goes only to the participant's registered endpoint, and a
+// 307 or 308 would replay its body (a patient's data) wherever the redirect
+// names, while a 301, 302 or 303 would answer it with a request it never
+// made. A redirect within the origin is followed. A GET or HEAD with no body
+// follows a redirect to another origin as before, without its credentials.
+var ErrCrossOriginBodyRedirect = errors.New("smartauth: a request that carries a body follows no redirect to another origin")
+
+// CrossOriginRedirectError is ErrCrossOriginBodyRedirect for one answer: its
+// status and the origin (scheme, host and port) its Location named, never
+// the path or query, so the system's operator can point its registered
+// endpoint at the final address.
+type CrossOriginRedirectError struct {
+	StatusCode int
+	Origin     string
+}
+
+func (e *CrossOriginRedirectError) Error() string {
+	return fmt.Sprintf("smartauth: the system answered %d, a redirect to another origin (%s); a request that carries a body follows no redirect to another origin", e.StatusCode, e.Origin)
+}
+
+// Is reports ErrCrossOriginBodyRedirect.
+func (e *CrossOriginRedirectError) Is(target error) bool { return target == ErrCrossOriginBodyRedirect }
+
+// RefuseCrossOriginBodyRedirect is a CrossOriginRedirectError, recorded on the
+// request's RedirectObservation as RedirectCrossOriginRefused, when the
+// chain's first request carried a body and req is a hop to another origin
+// than that request's; nil otherwise. It decides by the request the chain
+// began with, its method and body, never the hop's: a 303 that turned it
+// into a GET does not let a later hop leave the origin.
+func RefuseCrossOriginBodyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 || !carriedBody(via[0]) || sameOrigin(req.URL, via[0].URL) {
+		return nil
+	}
+	if o := redirectObservationFrom(req.Context()); o != nil {
+		o.hop(RedirectCrossOriginRefused)
+	}
+	status := 0
+	if req.Response != nil {
+		status = req.Response.StatusCode
+	}
+	return &CrossOriginRedirectError{StatusCode: status, Origin: strings.ToLower(req.URL.Scheme) + "://" + req.URL.Host}
+}
+
+// carriedBody reports whether r, the first request of a redirect chain, is one
+// that carries a body: any method but GET and HEAD (an empty POST included),
+// or any request that carried one.
+func carriedBody(r *http.Request) bool {
+	if r.Method != "" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return true
+	}
+	return r.GetBody != nil || r.ContentLength > 0 || (r.Body != nil && r.Body != http.NoBody)
+}
+
 func redirectObservationFrom(ctx context.Context) *RedirectObservation {
 	o, _ := ctx.Value(redirectObservationKey{}).(*RedirectObservation)
 	return o
@@ -289,6 +352,9 @@ func ParticipantClientWith(c *http.Client, configured http.Header) *http.Client 
 	}
 	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if err := RefuseCleartextRedirect(req, via); err != nil {
+			return err
+		}
+		if err := RefuseCrossOriginBodyRedirect(req, via); err != nil {
 			return err
 		}
 		dropCrossOriginCredentials(req, via, names)

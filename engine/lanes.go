@@ -86,7 +86,11 @@ func (d *DiscoveredLane) passedWith() (lanePass, bool) {
 // its manager keeps retrying until an attempt passes.
 func (d *DiscoveredLane) retrying() bool { return d.keeping.Load() > 0 }
 
+// NewDiscoveredLane is the lane at base for line, validating through
+// validator, which is put under the network-service redirect policy
+// (serviceValidator): a lane follows no redirect.
 func NewDiscoveredLane(line, base string, validator shnsdk.Validator) *DiscoveredLane {
+	serviceValidator(validator)
 	return &DiscoveredLane{line: line, base: base, validator: validator}
 }
 

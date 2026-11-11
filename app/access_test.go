@@ -97,6 +97,18 @@ func TestAccessLineFor(t *testing.T) {
 	if wantNotMade := strings.TrimSuffix(want, "}") + `,"answerEdits":["E-10"],"editsNotMade":["E-10:no-structural-payer-url"],"answerHeadersNotCarried":["ETag:value-not-carriable"]}`; string(b) != wantNotMade {
 		t.Fatalf("access line with an edit not made\n got %s\nwant %s", b, wantNotMade)
 	}
+	// The failed reads of the system of record an answer was built without
+	// follow, as classes in read order; a line with none holds no
+	// readsFailed key (the golden above).
+	unread := refusedRecord()
+	unread.ReadsFailed = []string{engine.ExchangeOther, engine.BackendTimeout}
+	b, err = json.Marshal(accessLineFor(unread))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantUnread := strings.TrimSuffix(want, "}") + `,"readsFailed":["other","timeout"]}`; string(b) != wantUnread {
+		t.Fatalf("access line with failed reads\n got %s\nwant %s", b, wantUnread)
+	}
 	// A refusal the gateway made before the request reached the Hub carries its
 	// fixed reason beside the rule.
 	reasoned := refusedRecord()

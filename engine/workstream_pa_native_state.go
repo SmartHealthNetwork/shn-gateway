@@ -2,6 +2,8 @@
 
 package engine
 
+import "net/http"
+
 // paNativeState is the PA workstream's own forward state on one native
 // responder (workstream.newNativeState): where its operations go, which CDS
 // service answers a CRD leg, and the pend ledger its PAS legs keep.
@@ -38,6 +40,11 @@ type paNativeState struct {
 	crdDispatchServiceID string
 	// cds caches the partner's CDS service listing.
 	cds cdsServiceListing
+	// cdsClient sends the CDS calls (the service listing and each CRD hook)
+	// when they authenticate other than the responder's other operations: a
+	// CDS Hooks client JWT (WithCDSClient). nil: they go with the
+	// responder's own client, as DTR and PAS do.
+	cdsClient *http.Client
 	// store is the gateway-owned Store the PAS legs keep the pend ledger in
 	// (WithPASStore); nil ⇒ the PAS legs keep none.
 	store Store

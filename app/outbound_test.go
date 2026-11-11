@@ -36,6 +36,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -112,11 +113,24 @@ func TestMONR25EveryCheckTargetHasAnEndpointKind(t *testing.T) {
 			continue
 		}
 		base, tag, ok := endpointcert.Unwrap(tgt.Client.Transport)
+		// A network service's or sidecar's probe follows no redirect at
+		// all: the policy sits directly beneath the tag.
+		if followsNoRedirect(tag.Kind()) {
+			inner, policed := serviceclient.Base(base)
+			if !policed {
+				t.Errorf("check target %s's client is not under the network-service redirect policy", tgt.ID)
+			}
+			base = inner
+		}
 		if w, known := want[tgt.ID]; !ok || !known || tag != w || base != nil {
 			t.Errorf("check target %s's client is tagged %v (%v) over %T, want %v over the runner's transport", tgt.ID, tag, ok, base, w)
 		}
-		// Every target's client is under the redirect policy: a hop from
-		// https to http is refused before it is sent.
+		if followsNoRedirect(tag.Kind()) {
+			continue
+		}
+		// Every participant target's client is under the participant
+		// redirect policy: a hop from https to http is refused before it is
+		// sent.
 		https, _ := url.Parse("https://system.example/metadata")
 		plain, _ := url.Parse("http://system.example/metadata")
 		if tgt.Client.CheckRedirect == nil || !errors.Is(tgt.Client.CheckRedirect(&http.Request{URL: plain, Header: http.Header{}}, []*http.Request{{URL: https}}), smartauth.ErrCleartextRedirect) {
@@ -216,6 +230,15 @@ func TestMONR25BuildTagsEachConsumerOverItsOwnTransport(t *testing.T) {
 		base, tag, ok := endpointcert.Unwrap(c.client.Transport)
 		if !ok || tag != c.want {
 			t.Errorf("%s: tagged %v (%v), want %v", c.name, tag, ok, c.want)
+		}
+		// A network service's client follows no redirect: the policy sits
+		// directly beneath the tag, over the transport it used before.
+		if c.name != "diagnostic publisher" {
+			inner, policed := serviceclient.Base(base)
+			if !policed {
+				t.Errorf("%s: transport %T is not under the network-service redirect policy", c.name, base)
+			}
+			base = inner
 		}
 		if base != nil {
 			t.Errorf("%s: transport %T, want the transport it used before: http.DefaultTransport (nil)", c.name, base)
@@ -461,8 +484,10 @@ func TestMONR25RoutingValidatorsCarryTheirLine(t *testing.T) {
 		if !ok {
 			t.Fatalf("line %s: %T", line, lanes[line])
 		}
-		if base, tag, ok := endpointcert.Unwrap(v.Client.Transport); !ok || tag != validatorLane(line) || base != nil {
-			t.Fatalf("line %s validator tagged %v (%v) over %T", line, tag, ok, base)
+		base, tag, ok := endpointcert.Unwrap(v.Client.Transport)
+		inner, policed := serviceclient.Base(base)
+		if !ok || tag != validatorLane(line) || !policed || inner != nil {
+			t.Fatalf("line %s validator tagged %v (%v) over %T (under the redirect policy %v)", line, tag, ok, base, policed)
 		}
 	}
 }

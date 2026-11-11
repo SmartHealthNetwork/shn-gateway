@@ -18,6 +18,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/contentcoding"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -312,6 +313,12 @@ func (g *Gateway) consentBackstop(ctx context.Context, pci, requester string) (s
 	}
 	hdr := map[string]string{"X-Holder-Assertion": assertionHdr}
 	if err := shnsdk.PostRaw(ctx, g.consentClient(), g.cfg.ConsentURL+"/check", raw, &out, hdr); err != nil {
+		if serviceclient.IsRedirectRefused(err) {
+			// The consent service answered a redirect, not followed: the
+			// check failed as when it cannot be reached, its class told
+			// apart in the log, by its status alone, never the Location.
+			log.Printf("gateway: consent check failed: %s (HTTP %d)", serviceclient.RedirectRefused, serviceclient.RedirectStatus(err))
+		}
 		return "", http.StatusBadGateway, "consent check failed"
 	}
 	if !out.Permit {
@@ -370,12 +377,13 @@ func (g *Gateway) verifyHubAssertion(r *http.Request) (ok bool, unavailable bool
 }
 
 // consentClient is the consent check's client: ConsentClient, else Client,
-// read at each call like authzClient.
+// under the network-service redirect policy (serviceclient), read at each
+// call like authzClient.
 func (g *Gateway) consentClient() *http.Client {
 	if g.cfg.ConsentClient != nil {
-		return g.cfg.ConsentClient
+		return serviceclient.ServiceClient(g.cfg.ConsentClient)
 	}
-	return g.cfg.Client
+	return serviceclient.ServiceClient(g.cfg.Client)
 }
 
 // recipientRoleRefusal is the inbound refusal of a leg whose row names other

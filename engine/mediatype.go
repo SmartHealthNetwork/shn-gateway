@@ -30,15 +30,42 @@ const (
 // carriedFHIRMediaType returns ct, exactly as the participant sent it, if it
 // is a well-formed FHIR JSON media type this gateway may carry, else "".
 func carriedFHIRMediaType(ct string) string {
-	ct = strings.TrimSpace(ct)
-	if ct == "" || len(ct) > 256 || strings.IndexFunc(ct, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) >= 0 {
-		return ""
-	}
-	mt, _, err := mime.ParseMediaType(ct)
-	if err != nil || (mt != mediaFHIRJSON && mt != mediaJSON) {
+	ct, mt := writableMediaType(ct)
+	if mt != mediaFHIRJSON && mt != mediaJSON {
 		return ""
 	}
 	return ct
+}
+
+// writableMediaType returns ct, exactly as the participant stated it (trimmed),
+// and its media type, when it is a well-formed media type an HTTP header can
+// carry: it parses, it is at most 256 bytes, and it holds no control
+// character. Otherwise both are "".
+func writableMediaType(ct string) (string, string) {
+	ct = strings.TrimSpace(ct)
+	if ct == "" || len(ct) > 256 || strings.IndexFunc(ct, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) >= 0 {
+		return "", ""
+	}
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return "", ""
+	}
+	return ct, mt
+}
+
+// writableAnswerMediaType is the Content-Type a peer's relayed success answer
+// is written to this gateway's own participant with: the media type the
+// answering system stated, exactly as its frame carried it, whatever the type
+// (a direct client would see it), when it is one writableMediaType accepts.
+// An answer that states none, or one no header can carry, is written
+// application/fhir+json: an answer a gateway built itself, or an earlier
+// payer gateway's frame, states that type, and the protocol reads a type
+// that is not stated as it.
+func writableAnswerMediaType(stated string) string {
+	if ct, _ := writableMediaType(stated); ct != "" {
+		return ct
+	}
+	return mediaFHIRJSON
 }
 
 // acceptFor is the Accept a direct client of the same media type would send:

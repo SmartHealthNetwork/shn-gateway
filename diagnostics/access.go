@@ -71,7 +71,8 @@ type AccessLine struct {
 	Network *AccessNetwork `json:"network,omitempty"`
 	// AnswerError is why an inbound leg's answer (the participant's, or the
 	// gateway's own refusal) could not be authorized (engine.AnswerErrorClasses):
-	// cancelled, timeout, auth, unreachable or other; absent otherwise.
+	// cancelled, timeout, auth, unreachable, redirect-refused or other;
+	// absent otherwise.
 	AnswerError string `json:"answerError,omitempty"`
 	// AuthorizeError is why no authority could be obtained for a request leg
 	// this gateway was sending.
@@ -120,6 +121,12 @@ type AccessLine struct {
 	// that could not be carried, with why
 	// (engine.ExchangeRecord.AnswerHeadersNotCarried), never its value.
 	AnswerHeadersNotCarried []string `json:"answerHeadersNotCarried,omitempty"`
+	// ReadsFailed is the error class of each read of the participant's system
+	// of record that failed while the answer was still built from what could
+	// be read, one per failed read, in read order
+	// (engine.ExchangeRecord.ReadsFailed, engine.BackendErrorClasses). Absent
+	// when none failed. Never a URL, an identifier or text. Evolving.
+	ReadsFailed []string `json:"readsFailed,omitempty"`
 	// HubDelivered is the Hub's own word, on its error answer to an ingress
 	// call's leg, on whether the recipient's gateway received the request
 	// (engine.ExchangeRecord.HubDelivered): "no", "yes" or "unknown". Absent
@@ -190,9 +197,10 @@ type AccessBackend struct {
 	// (engine.ExchangeRecord.BackendRedirects), never a URL: "same-origin" or
 	// "cross-origin" for a hop followed (a cross-origin one, and every later
 	// hop of its chain, without the bearer or configured headers),
-	// "https-to-http-refused" for a downgrade that was not sent, and
+	// "https-to-http-refused" for a downgrade that was not sent,
 	// "token-redirect-refused" for any other redirect of a token request,
-	// which is never followed.
+	// which is never followed, and "cross-origin-refused" for a redirect to
+	// another origin of a request that carries a body, never followed.
 	Redirects []string `json:"redirects,omitempty"`
 }
 

@@ -18,23 +18,38 @@ func (w *fhirOperationWriter) Unwrap() http.ResponseWriter { return w.ResponseWr
 func fhirOperationValue(status int, value any) any {
 	if failure, ok := value.(map[string]string); ok && status >= 400 {
 		if message, exists := failure["error"]; exists {
-			code := "processing"
-			switch status {
-			case http.StatusBadRequest:
-				code = "invalid"
-			case http.StatusUnauthorized:
-				code = "login"
-			case http.StatusForbidden:
-				code = "forbidden"
-			case http.StatusUnprocessableEntity:
-				code = "not-supported"
-			case http.StatusServiceUnavailable:
-				code = "transient"
-			case http.StatusGatewayTimeout:
-				code = "timeout"
-			}
-			return map[string]any{"resourceType": "OperationOutcome", "issue": []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}}
+			return refusalOutcome(status, message, nil)
 		}
 	}
 	return value
+}
+
+// refusalOutcome is this gateway's own refusal as an OperationOutcome: one
+// error issue whose code follows the status and whose diagnostics is the
+// refusal's message, then one invalid issue for each validator issue the
+// refusal echoes, in order. The same body answers a client on a FHIR
+// operation route (fhirOperationValue) and a requester on a leg whose answer
+// envelope is FHIR (respondLegError), so a client reads one shape whichever
+// end refused.
+func refusalOutcome(status int, message string, echoed []string) map[string]any {
+	code := "processing"
+	switch status {
+	case http.StatusBadRequest:
+		code = "invalid"
+	case http.StatusUnauthorized:
+		code = "login"
+	case http.StatusForbidden:
+		code = "forbidden"
+	case http.StatusUnprocessableEntity:
+		code = "not-supported"
+	case http.StatusServiceUnavailable:
+		code = "transient"
+	case http.StatusGatewayTimeout:
+		code = "timeout"
+	}
+	issues := []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}
+	for _, e := range echoed {
+		issues = append(issues, map[string]string{"severity": "error", "code": "invalid", "diagnostics": e})
+	}
+	return map[string]any{"resourceType": "OperationOutcome", "issue": issues}
 }

@@ -404,7 +404,7 @@ gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx",
 |---|---|---|
 | `request_build` | `canceled`, `deadline`, `other` | The population request could not be constructed. |
 | `token_acquisition` | `canceled`, `deadline`, `other` | The SMART client could not acquire a token; no population request was sent. |
-| `transport` | `canceled`, `deadline`, `other`, `https_to_http_refused` | The population HTTP client returned an error, including a refused redirect. `https_to_http_refused` (from v1.9.0): your engine redirected the request from `https` to `http`, which the gateway never follows; `status` is the redirect's. |
+| `transport` | `canceled`, `deadline`, `other`, `https_to_http_refused`, `cross_origin_refused` | The population HTTP client returned an error, including a refused redirect. `https_to_http_refused` (from v1.9.0): your engine redirected the request from `https` to `http`, which the gateway never follows; `status` is the redirect's. `cross_origin_refused` (from v1.10.0): your engine redirected the request, which carries a body, to another origin, which the gateway never follows; `status` is the redirect's. |
 | `body_read` | `canceled`, `deadline`, `other` | Reading the population response failed, even if its status was also non-2xx. |
 | `http_status` | `non_2xx` | The population response body was read, but its HTTP status was not successful. |
 | `qr_extract` | `invalid_json`, `wrong_resource_type` | The successful HTTP response could not be extracted as a QuestionnaireResponse. |

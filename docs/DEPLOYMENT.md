@@ -281,6 +281,73 @@ that cannot reach the database cannot see the deletion: it keeps verifying with 
 key until a reload succeeds, and at most until the key's own `not_after` (24 hours, plus a
 bearer lifetime and a minute). To retire the key there at once, restart that replica.
 
+## Connection bounds
+
+The main listener and the loopback observer stream hold a connection only while
+the client on it makes progress. These are fixed bounds: there is no setting for
+any of them. The Prometheus pull listener, when it is on, keeps its own: request
+headers and the whole request within 10 s, the answer within 30 s, and an idle
+connection closed after 60 s.
+
+| Bound | Value | What happens past it |
+| --- | --- | --- |
+| Request headers | 10 s | The connection is closed. Over TLS the handshake must also finish within it. |
+| Header size | 64 KiB | The request is answered `431 Request Header Fields Too Large`. |
+| Idle keep-alive | 120 s | An idle kept-alive connection is closed. |
+| Request body, no progress | 30 s | A body that sends no byte for 30 s is cut (main listener). |
+| Request body, in all | 10 min | A body still arriving after 10 min is cut (main listener). |
+| Answer, no progress | 30 s | A client that does not take the next 8 KiB of the answer within 30 s is cut (main listener). Over HTTP/2, also a connection that takes no frame (at most about 8 KiB) within 30 s. |
+
+What these mean in practice:
+
+- **Headers within 10 s.** Over HTTP/1.1 a client that has not sent its whole
+  header block 10 s after it started is cut. Over HTTP/2 (TLS inside the
+  container) a stream whose headers never complete is ended by the idle bound
+  instead, at 120 s.
+- **Headers up to 64 KiB.** That is the same ceiling an AWS Application Load
+  Balancer places on a request's headers, and many times the size of the
+  headers the network itself adds to a call.
+- **Idle at 120 s.** This sits above a load balancer's usual 60 s idle timeout
+  (the AWS Application Load Balancer's default), so the load balancer always
+  closes an idle connection first and never sends a request on one the gateway
+  is closing. If you raise your load balancer's idle timeout, keep it under 120 s.
+- **Bodies by progress, not by size.** A slow upload that keeps moving is never
+  cut for being slow: a large request over a slow link completes as long as no
+  30 s pass without a byte and it is done within 10 min. A documentation
+  attachment submission keeps its own rule instead: the whole submission must
+  arrive within 30 s of the gateway starting to read it (16 MiB at the default
+  ceiling, so about 4.5 Mbit/s).
+  A body the gateway does not read to its end (up to 256 KiB of the rest is
+  drained so the connection can be reused) is held to the same rules while it
+  drains: cut after 30 s with no byte, or once the body's 10 min have passed
+  (for a drain that starts within 30 s of that or later, 30 s after it starts).
+- **Answers by progress, not by time.** A call whose answer takes a long time
+  to prepare (a prior authorization the payer holds open, a large search) is
+  never cut for the wait. Only a client that stops taking the answer once it
+  is being sent is cut: the gateway sends an answer 8 KiB at a time, and cuts
+  the call when a piece is not taken within 30 s (about 270 bytes a second at
+  the slowest). Over HTTP/2, a connection that takes no frame (at most about
+  8 KiB) within 30 s is closed, with every call on it.
+- **HTTP/2.** Over TLS the gateway offers HTTP/2 with Go's standard settings,
+  among them at most 250 concurrent streams on one connection. The header-size
+  and idle bounds above apply to HTTP/2 too (the header limit is the header list
+  size it advertises), and the main listener departs from Go's settings in one
+  more field: its connection write progress bound (Go's
+  `WriteByteTimeout`) is 30 s, where Go sets none. The observer keeps Go's
+  settings.
+- **The observer.** The loopback observer stream carries the header, header
+  size and idle bounds only, so its event stream runs for as long as its
+  reader stays.
+
+With TLS at the load balancer (topology 1), the load balancer reads each
+request's headers itself before it forwards the request, so slow-header
+clients rarely reach the gateway. With TLS inside the container (topology 2),
+clients reach the gateway directly and these bounds are what protect it.
+
+A cut is not an exchange refusal: nothing records it as one. Each cut is
+counted in `shn.gateway.listener.cuts` and logged on one line (see
+MONITORING.md, "Connection cuts").
+
 ## Stopping the gateway
 
 On `SIGTERM` or an interrupt, the gateway stops in this order, each step bounded:
@@ -329,3 +396,4 @@ start, and the step takes no time.
 - [ ] `SHN_STORE_DATABASE_URL` set if the Da Vinci ingress routes run at more than one replica (a single reachable instance otherwise)
 - [ ] That DSN and its database protected as key material — TLS, encryption at rest, least-privilege role (see "The signing key's trust boundary")
 - [ ] The container's stop timeout is 45 s (see "Stopping the gateway")
+- [ ] The load balancer's idle timeout is under 120 s (see "Connection bounds")

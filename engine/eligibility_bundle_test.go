@@ -592,12 +592,12 @@ func TestEligibilityBundle_RecordsAnswerAFAISBundle(t *testing.T) {
 // level, and recorded under no network rule.
 func TestEligibilityBundle_RecordsDoNotAnswerABatch(t *testing.T) {
 	t.Parallel()
-	const want = `{"error":"this payer answers coverage eligibility from its records one request at a time, so it does not answer a batch of requests: this is the payer's answer, not a network refusal"}`
+	const want = "this payer answers coverage eligibility from its records one request at a time, so it does not answer a batch of requests: this is the payer's answer, not a network refusal"
 	for _, level := range eligibilityLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
 			ans := p.send(t, "coverage-eligibility", "", eligBatch(t, eligibilityRequest(t, dtrFrameMember), eligibilityRequest(t, anotherHeldMember)))
-			if ans.status != http.StatusNotImplemented || strings.TrimSpace(string(ans.body)) != want {
+			if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusNotImplemented || msg != want {
 				t.Fatalf("answer %d %s, want 501 %s", ans.status, ans.body, want)
 			}
 			if rec := got.only(t); rec.Rule != ExchangeOther {

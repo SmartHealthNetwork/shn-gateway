@@ -238,11 +238,8 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	g.recordLeg(ex.ID, legProj.Project(child, "answered"))
-	// The payer's own media type, as on the other carried legs.
-	ct := carriedFHIRMediaType(answerType)
-	if ct == "" {
-		ct = mediaFHIRJSON
-	}
+	// The payer's own media type, whatever it is, as on the other carried legs.
+	ct := writableAnswerMediaType(answerType)
 	g.writeRelayedAnswer(w, stated, ct,
 		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})

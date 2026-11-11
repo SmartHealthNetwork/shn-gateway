@@ -5,7 +5,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -57,10 +56,7 @@ func TestBackendDeadline_SlowSystemIsItsOwnTimeout(t *testing.T) {
 				if ans.status != http.StatusGatewayTimeout || !ans.framed {
 					t.Fatalf("answer %d (framed %v) %s, want this gateway's framed 504", ans.status, ans.framed, ans.body)
 				}
-				var refusal struct {
-					Error string `json:"error"`
-				}
-				if err := json.Unmarshal(ans.body, &refusal); err != nil || refusal.Error != errUpstreamTimedOut {
+				if msg, echoed := gatewayRefusal(t, r.leg, ans.contentType, ans.body); len(echoed) != 0 || msg != errUpstreamTimedOut {
 					t.Fatalf("answer body %s, want the gateway's own refusal %q", ans.body, errUpstreamTimedOut)
 				}
 				if bytes.Contains(ans.body, []byte("payer")) && !bytes.Contains(ans.body, []byte("payer's system")) {

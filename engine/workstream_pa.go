@@ -234,8 +234,14 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 			route("GET /.well-known/davinci-configuration", noCredential, g.handleDavinciConfiguration)
 		}
 	case "payer":
+		// The public JWK Set of the key its CDS Hooks client JWTs are signed
+		// with, whether or not the payer's ingress is enabled: the payer's CDS
+		// service fetches it to verify them (its jku names it).
+		if g.cfg.CDSClientJWKS != nil {
+			route("GET /cds-client/jwks.json", noCredential, g.handleCDSClientJWKS)
+		}
 		if !g.cfg.IngressEnabled {
-			return nil
+			return out
 		}
 		// The payer's own system creates an attachment-request Task at a
 		// provider's base (cdexroute.ProviderPrefix), listed at

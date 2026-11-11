@@ -51,6 +51,21 @@ func redirectTo(url string) func(*http.Request, http.ResponseWriter) {
 
 func okAnswer(_ *http.Request, w http.ResponseWriter) { _, _ = io.WriteString(w, "ok") }
 
+// get sends a bodiless GET to url through hc: a request that follows a
+// redirect to another origin (one that carries a body never does).
+func get(t *testing.T, ctx context.Context, hc *http.Client, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 // A redirect to another path of the same origin keeps the bearer: the token
 // was issued for that origin. The hop is recorded as same-origin.
 func TestRedirect_SameOriginKeepsTheBearer(t *testing.T) {
@@ -75,9 +90,9 @@ func TestRedirect_SameOriginKeepsTheBearer(t *testing.T) {
 	}
 }
 
-// A redirect to another origin (another host, or another port) is followed
-// without Authorization, at every hop of a chain, and its answer is the
-// answer. The hops are recorded as cross-origin.
+// A bodiless request's redirect to another origin (another host, or another
+// port) is followed without Authorization, at every hop of a chain, and its
+// answer is the answer. The hops are recorded as cross-origin.
 func TestRedirect_CrossOriginNeverCarriesTheBearer(t *testing.T) {
 	var tokens int32
 	ts := countingTokenServer(t, &tokens, 0)
@@ -85,7 +100,7 @@ func TestRedirect_CrossOriginNeverCarriesTheBearer(t *testing.T) {
 	middle := newHopServer(t, redirectTo(last.URL+"/end"))
 	first := newHopServer(t, redirectTo(middle.URL+"/next"))
 	ctx, obs := WithRedirectObservation(context.Background())
-	resp := post(t, ctx, refreshClient(t, ts.URL), first.URL+"/start", []byte(`{"phi":true}`))
+	resp := get(t, ctx, refreshClient(t, ts.URL), first.URL+"/start")
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || string(b) != "ok" {
@@ -127,7 +142,7 @@ func TestRedirect_BackToTheOriginCarriesNoBearer(t *testing.T) {
 			})
 			ctx, obs := WithRedirectObservation(context.Background())
 			ctx, refresh := WithCredentialRefreshObservation(ctx)
-			resp := post(t, ctx, refreshClient(t, ts.URL), home.URL+"/start", []byte(`{}`))
+			resp := get(t, ctx, refreshClient(t, ts.URL), home.URL+"/start")
 			resp.Body.Close()
 			if !slices.Equal(home.seen(), []string{"Bearer AT-1", ""}) || !slices.Equal(away.seen(), []string{""}) {
 				t.Fatalf("home %q, away %q; want the bearer on the first request only", home.seen(), away.seen())
@@ -177,7 +192,7 @@ func TestRedirect_ACrossOrigin401DoesNotRefresh(t *testing.T) {
 	home := newHopServer(t, redirectTo(away.URL+"/x"))
 	hc := refreshClient(t, ts.URL)
 	ctx, refresh := WithCredentialRefreshObservation(context.Background())
-	resp := post(t, ctx, hc, home.URL, []byte(`{}`))
+	resp := get(t, ctx, hc, home.URL)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized || len(away.seen()) != 1 || len(home.seen()) != 1 || len(refresh.Resends()) != 0 {
 		t.Fatalf("answer %d, away %d, home %d sends, resends %q; want the other origin's 401, once each, none", resp.StatusCode, len(away.seen()), len(home.seen()), refresh.Resends())
@@ -305,7 +320,7 @@ func TestRefuseCleartextRedirect(t *testing.T) {
 
 // Every value the observation records is in the closed list.
 func TestRedirectValues_Closed(t *testing.T) {
-	want := []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused}
+	want := []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectCleartextRefused, RedirectTokenRefused, RedirectCrossOriginRefused}
 	if !slices.Equal(RedirectValues, want) {
 		t.Fatalf("RedirectValues %q, want %q", RedirectValues, want)
 	}

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	"github.com/SmartHealthNetwork/shn-gateway/validatorissue"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -752,7 +753,10 @@ func (t certificationTransport) CloseIdleConnections() {
 	}
 }
 func (t certificationTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A certification sidecar follows no redirect (serviceclient): a 3xx is
+	// the call's failure, the lane not answering, never followed.
 	response, err := t.inner.RoundTrip(r)
+	response, err = serviceclient.Check(r, response, err)
 	if err != nil {
 		return nil, err
 	}

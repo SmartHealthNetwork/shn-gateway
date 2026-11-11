@@ -40,11 +40,14 @@ const (
 	IngressBearerTTL = 5 * time.Minute
 	ingressJTIWindow = 5 * time.Minute
 	ingressScope     = "system/Davinci.write"
-	// TaskWriteScope is the one scope a payer gateway's attachment-request
-	// Task routes admit (POST <per-provider base>/Task, GET /cdex/providers): SMART
-	// v1's system-level write of the Task resource. It is checked on every
-	// call (ingressScopeRefused), unlike the provider ingress's routes, which
-	// take any bearer the token endpoint issued.
+	// TaskWriteScope is SMART v1's system-level write of the Task resource:
+	// the scope a payer gateway's SMART configuration advertises and a payer's
+	// ingress client is registered for when it lists none. The
+	// attachment-request Task routes (POST <per-provider base>/Task, POST /Task,
+	// GET /cdex/providers) take a bearer granted it or any other scope that
+	// permits creating a Task (ingressscope.go), checked on every call
+	// (ingressScopeRefused), unlike the provider ingress's routes, which take
+	// any bearer the token endpoint issued.
 	TaskWriteScope = "system/Task.write"
 	assertionType  = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
@@ -290,8 +293,10 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 		oauthUnavailable(w, "signing key unavailable")
 		return
 	}
-	scope := r.FormValue("scope")
-	if scope != "" && !scopeAllowed(scope, reg.Scopes) {
+	// The requested scope is a space-delimited set (RFC 6749 §3.3), each one the
+	// client is registered for; the bearer and the answer state the set granted.
+	scope, granted := grantScope(r.FormValue("scope"), reg.Scopes)
+	if !granted {
 		// A bad request, not a spent credential: the client fixes the scope and retries
 		// with the assertion it already holds.
 		oauthErr(w, http.StatusBadRequest, "invalid_scope", "scope not allowed")
@@ -367,15 +372,6 @@ func signBearer(kid string, key *ecdsa.PrivateKey, clientID, scope, aud string, 
 	return tok.SignedString(key)
 }
 
-func scopeAllowed(requested string, allowed []string) bool {
-	for _, a := range allowed {
-		if a == requested {
-			return true
-		}
-	}
-	return false
-}
-
 // verifyBearer checks the Authorization bearer against the key store's public key
 // for the bearer's kid, ES384-pinned, config-pinned aud. The alg and kid shape are
 // checked BEFORE the store is consulted so a forged header cannot drive lookups;
@@ -393,8 +389,8 @@ func (s *ingressAuthServer) verifyBearer(r *http.Request) (client string, ok boo
 	return client, ok, unavailable
 }
 
-// verifyBearerScope is verifyBearer with the scope the token endpoint granted
-// the bearer ("" when the client asked for none).
+// verifyBearerScope is verifyBearer with the scope set the token endpoint
+// granted the bearer ("" when the client asked for none).
 func (s *ingressAuthServer) verifyBearerScope(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	raw, present := bearerToken(r.Header.Get("Authorization"))
 	if !present {
@@ -462,23 +458,26 @@ func audUnder(aud, base string) bool {
 // It touches no shared store, so it keeps answering through a key-store outage.
 // Authority is edge-only (never reaches authorize()); org-level TPO. Scope is not
 // enforced on a provider's ingress routes, by either path; a payer's Task routes
-// require TaskWriteScope on both (ingressScopeRefused). A registered client implicitly
-// gains both auth modes.
+// require a scope that permits creating a Task on both (ingressScopeRefused). A
+// registered client implicitly gains both auth modes.
 func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
 	client, _, ok := s.verifyDirectBearerScope(r)
 	return client, ok
 }
 
-// verifyDirectBearerScope is verifyDirectBearer with the scope the token
-// states, kept only when the client's registration allows it ("" otherwise):
-// a client cannot grant itself a scope its registration does not.
+// verifyDirectBearerScope is verifyDirectBearer with the scope set the token
+// states, kept, as the token endpoint would grant it, only when the client's
+// registration allows every scope in it ("" otherwise): a client cannot grant
+// itself a scope its registration does not.
 func (s *ingressAuthServer) verifyDirectBearerScope(r *http.Request) (client, scope string, ok bool) {
 	client, claims, ok := s.verifyDirectBearerClaims(r)
 	if !ok {
 		return "", "", false
 	}
-	if stated, _ := claims["scope"].(string); stated != "" && scopeAllowed(stated, s.clients[client].Scopes) {
-		scope = stated
+	if stated, _ := claims["scope"].(string); stated != "" {
+		if granted, allowed := grantScope(stated, s.clients[client].Scopes); allowed {
+			scope = granted
+		}
 	}
 	return client, scope, true
 }

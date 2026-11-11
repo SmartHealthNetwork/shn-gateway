@@ -415,6 +415,12 @@ type upstreamReply struct {
 // (upstreamReply{}, LegResult{}, error) → responderFailed answers it as this
 // gateway's own framed 502 or 504 (responderFailure).
 func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
+	return n.postVia(ctx, n.client, base, path, p, leg, label)
+}
+
+// postVia is post, sent with client: the CRD legs send with the CDS client
+// (cdsHTTPClient), every other leg with the responder's own.
+func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base, path string, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
 	// The label names whose system the call is to: the payer's, unless the
 	// responder forwards to another party's (WithUpstreamParty).
 	label = n.upstreamParty() + " " + label
@@ -504,7 +510,7 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 	if x != nil {
 		callStart = n.now()
 	}
-	resp, err := n.client.Do(req)
+	resp, err := client.Do(req)
 	x.resent(refresh.Resends())
 	x.redirected(redirects.Hops())
 	// The system redirected the forward from https to http: the hop was not
@@ -520,6 +526,20 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 		systemAnswered(ctx)
 		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s redirected from https to http: %w", label, err), sent: true, cleartextRedirect: true}
+	}
+	// The system redirected the forward, a request that carries a body, to
+	// another origin: the hop was not sent (smartauth.ErrCrossOriginBodyRedirect).
+	// The system answered, with its 3xx, and the request was sent to it, so it
+	// is refused as delivered, on routing (responderFailed). The failure
+	// carries the refusal alone, never net/http's URL error, which holds the
+	// redirect's path and query; this gateway's log names the cause for its
+	// own operator.
+	if cross := (*smartauth.CrossOriginRedirectError)(nil); err != nil && errors.As(err, &cross) && resp != nil {
+		x.backend(resp.StatusCode, x.since(n.now, callStart), BackendHTTP3xx)
+		x.sent(p)
+		systemAnswered(ctx)
+		logCrossOriginRedirect(ctx, label, leg, cross)
+		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s: %w", label, cross), sent: true, crossOriginRedirect: cross.Origin}
 	}
 	if err != nil {
 		class := callEndedClass(callCtx, backendClass(0, err))
@@ -608,6 +628,16 @@ type responderCorrelationKey struct{}
 // line about that call can name it too.
 func withResponderCorrelation(ctx context.Context, corrID string) context.Context {
 	return context.WithValue(ctx, responderCorrelationKey{}, corrID)
+}
+
+// logCrossOriginRedirect tells this gateway's operator that its participant's
+// system redirected a request that carries a body to another origin, which
+// was not followed: the registered endpoint is to be pointed at the final
+// address. It names the redirect's status and origin, never its path or
+// query.
+func logCrossOriginRedirect(ctx context.Context, label, leg string, cross *smartauth.CrossOriginRedirectError) {
+	corr, _ := ctx.Value(responderCorrelationKey{}).(string)
+	log.Printf("gateway: upstream %s: your system answered %d, a redirect to another origin (%s), and a request that carries a body is not sent there: point the registered endpoint at the final address (leg %s, correlation %s)", label, cross.StatusCode, cross.Origin, leg, corr)
 }
 
 // logUpstreamAbandoned writes the payer gateway's own line when its call to

@@ -83,9 +83,14 @@ Prefer `private_key_jwt` whenever your server supports asymmetric registration.
 
 **The client identity is yours, not the network's.** The gateway is just a
 client of *your* authorization server, exactly like any other backend
-integration. Nothing is issued by the network operator, and the gateway does not
-host a JWKS endpoint: your **public** key is registered at your authorization
-server, and the **private** key never leaves your environment. Three steps:
+integration. Nothing is issued by the network operator: your **public** key is
+registered at your authorization server, and the **private** key never leaves
+your environment. (From shn-gateway v1.10.0 a payer's gateway also signs its calls
+to the payer's CDS service with the same `PAYER_DAVINCI_CLIENT_KEY`, as a CDS Hooks
+client JWT, and serves that key's **public** JWK Set at `GET /cds-client/jwks.json`
+for the CDS service to verify them: see
+[CDS Hooks client authentication](CONFIGURATION.md#cds-hooks-client-authentication-payer_davinci_cds_auth).)
+Three steps:
 
 1. **Generate an asymmetric key pair** — EC P-384 (for `ES384`) or RSA (for
    `RS384`). For example, with `openssl`:
@@ -146,10 +151,21 @@ Worth checking:
   endpoint that does not answer fails it, so the call that needed the token is not sent;
   the failure names the answer's status and the origin its `Location` named, if any, never
   its path or query.
+- **A request that carries a body follows no redirect to another origin (from
+  shn-gateway v1.10.0).** A forwarded operation (a PAS, CRD, DTR, eligibility or CDex
+  request) and a `$populate` request go only to your registered endpoint: when your
+  system answers one with a redirect to another origin (another scheme, host or port),
+  whatever its code, the gateway does not send it there. A forwarded operation is
+  refused `502` on routing, and the requester is told your system received it, since it
+  answered; the reason names the redirect's origin, never its path or query, and your
+  gateway logs it, so point your registered endpoint at the final address. A `$populate`
+  request fails at its transport (`cross_origin_refused`). A redirect within your
+  system's own origin is followed as before.
 - **Redirects (from shn-gateway v1.9.0).** When your system answers a call with a
   redirect, the gateway follows it as a direct client would, with two rules, whether or
   not the call carries a token. A
-  redirect to another origin (another scheme, host or port) is followed without
+  redirect to another origin (another scheme, host or port), of a read (a `GET` or `HEAD` with no body)
+  from v1.10.0, is followed without
   `Authorization`, whatever set it, and without any header `PAYER_DAVINCI_BACKEND_HEADERS`
   configures: the token was issued for your system, and those headers configured for it,
   so neither is sent elsewhere. Neither is sent after the first hop to another origin, for
@@ -299,7 +315,9 @@ Four steps, all on your side:
    ```
 
    `scope` is optional; if you send one it must be among the client's registered
-   `scopes`. Bearers live **5 minutes**. Without `SHN_STORE_DATABASE_URL` they are
+   `scopes`. From shn-gateway v1.10.0 it may be a set, separated by single spaces, each one
+   registered for the client; the answer's `scope` states the set granted. Bearers live
+   **5 minutes**. Without `SHN_STORE_DATABASE_URL` they are
    signed with a key the gateway generates at startup, so a restart invalidates
    outstanding bearers — fetch one per run rather than caching across sessions; with
    the store DSN set the signing key is shared and outlives a restart.
@@ -329,11 +347,17 @@ Four steps, all on your side:
    FHIR `OperationOutcome`, whose issue diagnostic is
    `ingress authentication required`.
 
-   `$submit` and `$questionnaire-package` return `application/fhir+json` for
-   successful FHIR resources and locally generated errors. Local errors carry an
+   `$submit` and `$questionnaire-package` return a relayed success with the media
+   type the payer's system stated from v1.10.0 (`application/fhir+json` before, and
+   when it states none or one no header can carry), and `application/fhir+json`
+   for locally generated errors. Local errors carry an
    `OperationOutcome` with `issue[].severity`, `code`, and `diagnostics`; status
    codes retain their authentication, subject, routing, and availability meanings.
-   A framed upstream refusal keeps the upstream status, body, and media type.
+   A framed upstream refusal keeps the upstream status, body, and media type. From
+   v1.10.0 a counterpart gateway's own refusal on these routes is itself an
+   `OperationOutcome` (`application/fhir+json`), so the routes answer a client
+   with one error shape whichever gateway refused; a counterpart on an earlier
+   release still sends `{"error": …}`, relayed as it arrived.
    CDS Hooks routes retain JSON responses, and the token endpoint retains OAuth
    error responses.
 
@@ -380,8 +404,10 @@ Task Attachment Request.
 - **On the payer's side,** set `PAYER_DAVINCI_INGRESS=1`, with the gateway's public base URL
   (`PAYER_DAVINCI_INGRESS_BASE_URL`) and your system's registered clients
   (`INGRESS_CLIENTS_FILE`). Your system gets a bearer from the gateway's own token endpoint
-  (SMART Backend Services, `system/Task.write`), lists the providers that take the request with
-  `GET /cdex/providers`, and creates the Task at a provider's base, `POST {base}/Task`. The base
+  (SMART Backend Services, `system/Task.write`, or from shn-gateway v1.10.0 any `system/Task`
+  scope that permits creating a Task with no query, such as `system/Task.c`), lists the providers that take
+  the request with `GET /cdex/providers`, and creates the Task at a provider's base,
+  `POST {base}/Task`. The base
   names the provider, so the network routes the Task by the address alone. From shn-gateway
   v1.7.0, it can instead create the Task at the gateway's plain `POST /Task`, which routes it to
   the provider whose organization NPI its `Task.owner` names. See

@@ -48,6 +48,8 @@ import (
 	engine "github.com/SmartHealthNetwork/shn-gateway/engine"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/auditappend"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/nosniff"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
@@ -271,6 +273,12 @@ type config struct {
 	PayerDavinciScope        string
 	PayerDavinciClientKID    string
 	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
+	// PayerCDSAuth is how CDS calls to the payer (CRD: the service listing
+	// and each hook) authenticate: a CDS Hooks client JWT signed with the
+	// payer client key, or the payer client's access token
+	// (PAYER_DAVINCI_CDS_AUTH, PAYER_DAVINCI_CDS_JWT_ISS,
+	// PAYER_DAVINCI_CDS_JWT_JKU; payercdsauth.go).
+	PayerCDSAuth payerCDSAuth
 	// PayerDavinciCRDServiceID optionally names the partner's CDS service for the
 	// order-select leg (hooks order-select and order-sign). Empty ⇒ each request goes to
 	// the one service the partner's {CDS base}/cds-services listing offers for the
@@ -1066,6 +1074,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, err
 		}
 	}
+	cdsAuth, err := checkPayerCDSAuth(role, cfg, getenv("PAYER_DAVINCI_CDS_AUTH"), getenv("PAYER_DAVINCI_CDS_JWT_ISS"), getenv("PAYER_DAVINCI_CDS_JWT_JKU"))
+	if err != nil {
+		return config{}, err
+	}
+	cfg.PayerCDSAuth = cdsAuth
 	if raw := cfg.PayerDavinciBackendHeadersRaw; raw != "" {
 		if cfg.PayerDavinciBaseURL == "" {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_BACKEND_HEADERS set requires PAYER_DAVINCI_BASE_URL")
@@ -1257,12 +1270,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if len(clients) == 0 {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_INGRESS requires INGRESS_CLIENTS_FILE with >=1 registered client (a mounted-but-universally-401 ingress is a footgun)")
 		}
-		// Every route the payer ingress mounts takes only a bearer granted
-		// engine.TaskWriteScope: a client that cannot be granted it would be
-		// refused on every call, so it is a registration error, not a client.
+		// Every route the payer ingress mounts takes a bearer granted a
+		// system/Task scope that permits it: a client that can be granted
+		// none, or that registers a Task scope SMART does not spell, is a
+		// registration error, not a client (engine.CheckPayerIngressScopes).
 		for id, c := range clients {
-			if !slices.Contains(c.Scopes, engine.TaskWriteScope) {
-				return config{}, fmt.Errorf("gateway: ingress client %q lists no %s: every route of the payer ingress takes only a bearer granted it (list it, or leave scopes out)", id, engine.TaskWriteScope)
+			if err := engine.CheckPayerIngressScopes(c.Scopes); err != nil {
+				return config{}, fmt.Errorf("gateway: ingress client %q: %w", id, err)
 			}
 		}
 		cfg.IngressBaseURL = cfg.PayerDavinciIngressBaseURL
@@ -1802,7 +1816,14 @@ func resolveDiscovery(ctx context.Context, c *http.Client, cfg config) (trustAnc
 	boot := func(k endpointcert.Kind) *http.Client {
 		return bootClient(cfg.certs.Client(endpointcert.Of(k), c), bootFetchWaits, bootFetchBudget)
 	}
-	return resolveDiscoveryWaiting(ctx, discoveryClients{doc: boot(endpointcert.Discovery), authzKey: boot(endpointcert.AuthorizationKey), hubKey: boot(endpointcert.HubKey)}, cfg)
+	// Discovery and the trust anchors are the network's own services: their
+	// boot fetches follow no redirect (serviceclient), so a discovery that
+	// redirects fails the boot as one that does not answer usably.
+	return resolveDiscoveryWaiting(ctx, discoveryClients{
+		doc:      serviceclient.ServiceClient(boot(endpointcert.Discovery)),
+		authzKey: serviceclient.ServiceClient(boot(endpointcert.AuthorizationKey)),
+		hubKey:   serviceclient.ServiceClient(boot(endpointcert.HubKey)),
+	}, cfg)
 }
 
 // discoveryClients are the boot clients of the discovery document and the
@@ -2039,6 +2060,8 @@ type built struct {
 	// with the other workers, and its final export runs last at stop, after
 	// the audit outbox drains and the observe checks flush (MON-R14).
 	telemetry *otelsetup.Telemetry
+	// metrics is the one recording point (MON-R16), for the listeners' cuts.
+	metrics *telemetry.Registry
 }
 
 // The payer gateway's deadline for its own system (PAYER_DAVINCI_BACKEND_TIMEOUT):
@@ -2191,7 +2214,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// post-boot convergence; the boot gate drives build() and asserts this snapshot
 	// resolves the counterpart — deterministic, no ticker.
 	reg := shnsdk.NewRegistry()
-	registrarClient := kindClient(endpointcert.Registrar)
+	registrarClient := serviceclient.ServiceClient(kindClient(endpointcert.Registrar))
 	var feed *feedFreshness
 	if registrarURL != "" {
 		feed = newFeedFreshness(clock)
@@ -2386,9 +2409,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		SoR:                      sor,
 		Store:                    store,
 		Clock:                    clock, // production: time.Now; hermetic tests: the harness's injected clock (HandlerWithClock)
-		Client:                   kindClient(endpointcert.Hub),
-		AuthzClient:              kindClient(endpointcert.Authorization),
-		ConsentClient:            kindClient(endpointcert.Consent),
+		Client:                   serviceclient.ServiceClient(kindClient(endpointcert.Hub)),
+		AuthzClient:              serviceclient.ServiceClient(kindClient(endpointcert.Authorization)),
+		ConsentClient:            serviceclient.ServiceClient(kindClient(endpointcert.Consent)),
 		CertRecorder:             cfg.certs,
 		NPI:                      cfg.NPI,
 		ConsentURL:               firstNonEmpty(cfg.ConsentURL, endpoints.Consent),
@@ -2436,6 +2459,20 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// unauthenticated forward: the template's timeout over the payer's tagged transports
 			pdc = cfg.diagnostic.client(&http.Client{Timeout: template.Timeout, Transport: payerTransport(cfg.certs)})
 		}
+		// CDS calls (the listing and each CRD hook) carry a CDS Hooks client
+		// JWT when the payer client has a signing key, unless the payer keeps
+		// them on the access token (PAYER_DAVINCI_CDS_AUTH; payercdsauth.go).
+		// The diagnostic capture sits above the JWT, so it never records one
+		// (payerCDSHTTPClient).
+		cdsClient, cdsKey, cerr := payerCDSHTTPClient(cfg, reg, bundle.Identity.HolderID, stdout)
+		if cerr != nil {
+			return b, cerr
+		}
+		discoveryClient := pdc
+		if cdsClient != nil {
+			discoveryClient = cdsClient
+			gwCfg.CDSClientJWKS = cdsKey.JWKSet()
+		}
 		// FR-G26: the partner's CDS services are chosen per request by the request's hook
 		// (engine/workstream_pa_cds_services.go). The listing is read here once, best effort, to report which
 		// hook each configured service answers; a listing that cannot be read yet does not
@@ -2446,7 +2483,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.PayerDavinciCDSBaseURL != "" {
 			cdsBase = cfg.PayerDavinciCDSBaseURL
 		}
-		cdsServices, discErr := engine.DiscoverCDSServices(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), pdc, cdsBase, cfg.PayerDavinciBackendHeaders)
+		cdsServices, discErr := engine.DiscoverCDSServices(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), discoveryClient, cdsBase, cfg.PayerDavinciBackendHeaders)
 		if discErr != nil {
 			fmt.Fprintf(stdout, "gateway: WARNING the payer's CDS service listing is not readable yet (%v); CRD requests are refused until it is\n", discErr)
 		} else {
@@ -2528,6 +2565,9 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			fmt.Fprintf(stdout, "gateway: PAYER_ELIGIBILITY_URL unset — coverage eligibility is answered from the payer's records\n")
 		}
 		nativeOpts = append(nativeOpts, engine.WithCRDService(cfg.PayerDavinciCRDServiceID), engine.WithPASStore(store))
+		if cdsClient != nil {
+			nativeOpts = append(nativeOpts, engine.WithCDSClient(cdsClient))
+		}
 		native := engine.NewNativeResponder(pdc, cfg.PayerDavinciBaseURL, clock, nativeOpts...)
 		if discErr == nil {
 			native.PrimeCDSServices(cdsServices)
@@ -2826,7 +2866,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// appends yet.
 	auditAppender, err := auditappend.New(auditappend.Config{
 		Holder: bundle.Identity.HolderID, SignPriv: bundle.Identity.SignPriv,
-		Endpoint: endpoints.Audit, Store: auditStore, Client: kindClient(endpointcert.Audit), Metrics: auditM, Now: clock, Jitter: rand.Float64,
+		Endpoint: endpoints.Audit, Store: auditStore, Client: serviceclient.ServiceClient(kindClient(endpointcert.Audit)), Metrics: auditM, Now: clock, Jitter: rand.Float64,
 		Logf: log.Printf,
 	})
 	if err != nil {
@@ -2911,6 +2951,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		opsStats:        opsStats,
 		activeStats:     activeStats,
 		telemetry:       tel,
+		metrics:         metricsReg,
 		certification:   gwCfg.CertificationValidatorsByLine,
 		// Certification evidence is collected only where payload checks consume
 		// lanes (the engine starts no certification worker otherwise), so only
@@ -2936,18 +2977,22 @@ func loadTLSCert(certFile, keyFile string) (*tls.Certificate, error) {
 	return &cert, nil
 }
 
-// serverFor builds the main listener's *http.Server. A nil cert yields the plain
+// serverFor builds the main listener's *http.Server, with the connection
+// bounds the main and observer listeners carry and its HTTP/2 write progress
+// bound (boundMainServer; c records its cuts). A nil cert yields the plain
 // HTTP server that has always been the default; a non-nil cert pins TLS 1.2 as
-// the floor (below that is not acceptable for PHI-bearing hops).
-func serverFor(addr string, h http.Handler, cert *tls.Certificate) *http.Server {
-	s := &http.Server{Addr: addr, Handler: h}
+// the floor (below that is not acceptable for PHI-bearing hops). Every answer
+// it serves carries X-Content-Type-Options: nosniff, set outermost, so an
+// answer any wrapper inside writes carries it too.
+func serverFor(addr string, h http.Handler, cert *tls.Certificate, c *cuts) *http.Server {
+	s := &http.Server{Addr: addr, Handler: nosniff.Handler(h)}
 	if cert != nil {
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{*cert},
 			MinVersion:   tls.VersionTLS12,
 		}
 	}
-	return s
+	return boundMainServer(s, c)
 }
 
 // Run wires the runtime (build), starts the background feed poller for post-boot
@@ -2984,24 +3029,38 @@ func Run(ctx context.Context, getenv func(string) string, stdout io.Writer) erro
 	// their handlers return, and emit their last events, before the
 	// diagnostic publisher drains.
 	var handlers sync.WaitGroup
-	main := serverFor(b.addr, countHandlers(b.handler, &handlers), b.tlsCert)
+	// The main and observer listeners carry the connection bounds
+	// (listenerbounds.go); the main listener also bounds each request's body
+	// and answer by progress.
+	mainCuts := &cuts{reg: b.metrics, out: stdout, listener: listenerMain}
+	main := serverFor(b.addr, countHandlers(boundRequests(b.handler, mainCuts), &handlers), b.tlsCert, mainCuts)
 	defer main.Close()
 	go func() {
-		if b.tlsCert != nil {
-			// Cert/key already loaded into TLSConfig at build time.
-			errc <- main.ListenAndServeTLS("", "")
+		ln, err := listenBounded(main, mainCuts)
+		if err != nil {
+			errc <- err
 			return
 		}
-		errc <- main.ListenAndServe()
+		// Over TLS the cert/key are already loaded into TLSConfig at build
+		// time.
+		errc <- serveBounded(main, ln)
 	}()
 	if b.observerAddr != "" {
 		// A bind failure here kills the gateway via the shared errc — FAIL-FAST by
 		// intent: OBSERVER_ADDR is explicit opt-in (the Kit supervisor sets it), and
 		// a silently-missing inspector stream is worse than a dead child the
 		// supervisor detects and restarts.
-		observer := &http.Server{Addr: b.observerAddr, Handler: b.observerHandler}
+		obsCuts := &cuts{reg: b.metrics, out: stdout, listener: listenerObserver}
+		observer := observerServer(b.observerAddr, b.observerHandler, obsCuts)
 		defer observer.Close()
-		go func() { errc <- observer.ListenAndServe() }()
+		go func() {
+			ln, err := listenBounded(observer, obsCuts)
+			if err != nil {
+				errc <- err
+				return
+			}
+			errc <- serveBounded(observer, ln)
+		}()
 	}
 	select {
 	case err := <-errc:
@@ -3171,7 +3230,8 @@ func HandlerWithClock(ctx context.Context, getenv func(string) string, stdout io
 		return nil, err
 	}
 	stopDiagnostic := b.startDiagnostic(ctx)
-	return &managedHandler{Handler: b.handler, close: func() {
+	// Every answer is marked nosniff, as on the listeners Run serves.
+	return &managedHandler{Handler: nosniff.Handler(b.handler), close: func() {
 		_ = b.gateway.Close()
 		b.lanes.Close()
 		if b.closeStore != nil {
@@ -3490,14 +3550,20 @@ func declareCapabilities(ctx context.Context, c *http.Client, registrarURL strin
 				log.Printf("gateway: capability declaration not applied, trying hourly: this holder is not registered, or the registrar takes no declaration: %v", err)
 			}
 		}
+		// A redirect the registrar answered is not followed (serviceclient):
+		// a failure as when it cannot be reached, named by its class.
+		class := ""
+		if serviceclient.IsRedirectRefused(err) {
+			class = " (" + serviceclient.RedirectRefused + ")"
+		}
 		switch {
 		case !slowed || !noRoute:
 			// Any other failure is said, at the slow pace too: it is not the
 			// absent route the tries slowed for.
 			if slowed {
-				log.Printf("gateway: capability declaration not stored: %v", err)
+				log.Printf("gateway: capability declaration not stored%s: %v", class, err)
 			} else {
-				log.Printf("gateway: capability declaration not stored, retrying in %s: %v", retry, err)
+				log.Printf("gateway: capability declaration not stored%s, retrying in %s: %v", class, retry, err)
 			}
 		default:
 			cell.set(declarationNoRoute)
@@ -3798,7 +3864,7 @@ func populateFailureObserver(stdout io.Writer) func(engine.PopulateFailure) {
 		switch note.Stage {
 		case "request_build", "token_acquisition", "transport", "body_read":
 			valid = note.Reason == "canceled" || note.Reason == "deadline" || note.Reason == "other" ||
-				(note.Stage == "transport" && note.Reason == "https_to_http_refused")
+				(note.Stage == "transport" && (note.Reason == "https_to_http_refused" || note.Reason == "cross_origin_refused"))
 		case "http_status":
 			valid = note.Reason == "non_2xx"
 		case "qr_extract":

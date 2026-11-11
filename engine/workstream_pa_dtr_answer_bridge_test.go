@@ -166,6 +166,12 @@ func e08RowTuned(t *testing.T, level ConformanceEnforcement, declared []string, 
 // e08RowRequest is e08RowTuned with the EHR's package request body given.
 func e08RowRequest(t *testing.T, level ConformanceEnforcement, declared []string, answer []byte, lanes func(map[string]shnsdk.Validator), observe func(ObserverEvent), payerLines []string, tune func(*Gateway), body []byte) e08Result {
 	t.Helper()
+	return e08RowFramed(t, level, declared, LegResult{Response: testResponse(answer)}, lanes, observe, payerLines, tune, body)
+}
+
+// e08RowFramed is e08RowRequest with the payer's gateway answering framed.
+func e08RowFramed(t *testing.T, level ConformanceEnforcement, declared []string, framed LegResult, lanes func(map[string]shnsdk.Validator), observe func(ObserverEvent), payerLines []string, tune func(*Gateway), body []byte) e08Result {
+	t.Helper()
 	env := newInProcessExchange(t)
 	// E-08 is module 2's: these rows run with it on unless tune turns it off.
 	env.originator.cfg.TranslateIGLines = true
@@ -208,7 +214,7 @@ func e08RowRequest(t *testing.T, level ConformanceEnforcement, declared []string
 		entry.ContractVersions = payerLines
 		env.originator.cfg.Reg.Set(env.payerID, entry)
 	}
-	env.payerReturns(LegResult{Response: testResponse(answer)})
+	env.payerReturns(framed)
 	// Through the ingress route, so the exchange record names the edits made.
 	req := httptest.NewRequest(http.MethodPost, "/Questionnaire/$questionnaire-package", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/fhir+json")

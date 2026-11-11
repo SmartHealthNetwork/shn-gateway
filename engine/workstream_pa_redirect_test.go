@@ -108,22 +108,27 @@ func TestNativeForward_AnHTTPSToHTTPRedirectIsRefusedAtEveryLevel(t *testing.T) 
 }
 
 // A redirect the policy follows is recorded by its origin class, and the
-// answer at its end is the answer: here another https origin, reached without
-// the bearer (smartauth's rule), whose answer is relayed.
+// answer at its end is the answer: here a redirect within the system's own
+// origin (a forward carries a body, so it follows no other), whose answer is
+// relayed.
 func TestNativeForward_AFollowedRedirectIsRecordedByItsOriginClass(t *testing.T) {
 	answer := decidedAnswer(t)
-	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var system *httptest.Server
+	system = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
+		if r.URL.Query().Get("moved") == "" {
+			http.Redirect(w, r, system.URL+r.URL.Path+"?moved=1", http.StatusTemporaryRedirect)
+			return
+		}
 		w.Header().Set("Content-Type", "application/fhir+json")
 		_, _ = w.Write(answer)
 	}))
-	t.Cleanup(other.Close)
-	system := redirectingSystem(t, http.StatusTemporaryRedirect, func() string { return other.URL })
+	t.Cleanup(system.Close)
 	rec, ans := redirectExchange(t, EnforcementNone, system.Client(), system.URL)
 	if ans.status != http.StatusOK {
-		t.Fatalf("answer %d %s, want the other origin's answer", ans.status, ans.body)
+		t.Fatalf("answer %d %s, want the system's answer", ans.status, ans.body)
 	}
-	if want := []string{smartauth.RedirectCrossOrigin}; !slices.Equal(rec.BackendRedirects, want) {
+	if want := []string{smartauth.RedirectSameOrigin}; !slices.Equal(rec.BackendRedirects, want) {
 		t.Fatalf("redirects %q, want %q", rec.BackendRedirects, want)
 	}
 	if rec.Backend == nil || rec.Backend.Status != http.StatusOK || rec.Backend.ErrorClass != "" {

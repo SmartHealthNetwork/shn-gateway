@@ -16,7 +16,8 @@
       "consent": null,
       "observe": true,
       "frameOperations": [],
-      "advertise": true
+      "advertise": true,
+      "answerEnvelope": "fhir"
     }
   ]
 }

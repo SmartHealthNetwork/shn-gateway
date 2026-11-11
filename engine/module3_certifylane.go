@@ -193,6 +193,7 @@ func NewQualifiedCertificationValidator(line string, client *shnsdk.OperationVal
 // newGatedCertification builds a gated client on the standard schedule
 // without starting its attempts.
 func newGatedCertification(lane *DiscoveredLane, client *shnsdk.OperationValidator, qualify LaneQualifier, reason string) *GatedCertificationValidator {
+	serviceValidator(client) // a certification client follows no redirect
 	ctx, cancel := context.WithCancel(context.Background())
 	return &GatedCertificationValidator{
 		lane: lane, client: client, qualify: qualify, reason: reason, line: lane.Line(),

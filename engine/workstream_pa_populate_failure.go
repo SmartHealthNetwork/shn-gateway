@@ -36,6 +36,10 @@ const (
 	// request from https to http, and the hop was not sent
 	// (smartauth.ErrCleartextRedirect); Status is the redirect's.
 	populateReasonCleartextRedirect = "https_to_http_refused"
+	// populateReasonCrossOriginRedirect: the engine redirected the populate
+	// request, which carries a body, to another origin, and the hop was not
+	// sent (smartauth.ErrCrossOriginBodyRedirect); Status is the redirect's.
+	populateReasonCrossOriginRedirect = "cross_origin_refused"
 )
 
 func populateBoundaryFailure(stage string, status int, err error) *PopulateFailure {
@@ -44,6 +48,8 @@ func populateBoundaryFailure(stage string, status int, err error) *PopulateFailu
 	case stage == populateStageTransport && errors.Is(err, smartauth.ErrCleartextRedirect):
 		// The engine's own redirect; a token endpoint's is a token failure.
 		reason = populateReasonCleartextRedirect
+	case stage == populateStageTransport && errors.Is(err, smartauth.ErrCrossOriginBodyRedirect):
+		reason = populateReasonCrossOriginRedirect
 	case errors.Is(err, context.Canceled):
 		reason = populateReasonCanceled
 	case errors.Is(err, context.DeadlineExceeded):

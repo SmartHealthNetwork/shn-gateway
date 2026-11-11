@@ -79,7 +79,12 @@ func TestRequestLeg_AuthorizeFailureAnswersItsCause(t *testing.T) {
 		{"a 500", answer(http.StatusInternalServerError, `{"error":"policy error"}`), http.StatusBadGateway, wantAuthzFailed("500"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
 		{"a 502 stating no rule", answer(http.StatusBadGateway, `{"error":"decision audit failed"}`), http.StatusBadGateway, wantAuthzFailed("502"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
 		{"a 501", answer(http.StatusNotImplemented, ``), http.StatusBadGateway, wantAuthzFailed("501"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
-		{"a 302", answer(http.StatusFound, ``), http.StatusBadGateway, wantAuthzFailed("302"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
+		// A redirect is not followed (serviceclient): the Framework did not
+		// answer usably, answered as when it cannot be reached, its class
+		// redirect-refused.
+		{"a 302", answerWith(http.StatusFound, ``, http.Header{"Location": []string{"https://elsewhere.test/secret-path?q=secret-query"}}), http.StatusServiceUnavailable, errAuthzUnreachable.Error(), "", RefusedByProviderGateway, RefusalAuthority, redirectRefused},
+		{"a 307 to the same origin", answerWith(http.StatusTemporaryRedirect, ``, http.Header{"Location": []string{"/other?q=secret-query"}}), http.StatusServiceUnavailable, errAuthzUnreachable.Error(), "", RefusedByProviderGateway, RefusalAuthority, redirectRefused},
+		{"a 300 with no Location", answer(http.StatusMultipleChoices, ``), http.StatusServiceUnavailable, errAuthzUnreachable.Error(), "", RefusedByProviderGateway, RefusalAuthority, redirectRefused},
 		{"a 400", answer(http.StatusBadRequest, `{"error":"bad assertion"}`), http.StatusBadGateway, wantAuthzRefusedThisGateway("400"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
 		{"a 401", answer(http.StatusUnauthorized, `{"error":"assertion expired"}`), http.StatusBadGateway, wantAuthzRefusedThisGateway("401"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},
 		{"a 404", answer(http.StatusNotFound, ``), http.StatusBadGateway, wantAuthzRefusedThisGateway("404"), "", RefusedByProviderGateway, RefusalAuthority, ExchangeOther},

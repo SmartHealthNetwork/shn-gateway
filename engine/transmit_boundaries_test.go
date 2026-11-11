@@ -94,8 +94,9 @@ func assertLocalFault(t *testing.T, rec *httptest.ResponseRecorder) {
 }
 
 // assertFramedLocalFault: a fault after authentication is this gateway's
-// answer — framed to the requester, 500 with the ownership fault inside.
-func assertFramedLocalFault(t *testing.T, rec *httptest.ResponseRecorder, requester inboundTestRequester) {
+// answer on leg tx — framed to the requester, 500 with the ownership fault
+// inside, in the leg's answer envelope.
+func assertFramedLocalFault(t *testing.T, rec *httptest.ResponseRecorder, requester inboundTestRequester, tx string) {
 	t.Helper()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want the framed answer leg; body %s", rec.Code, rec.Body.String())
@@ -104,8 +105,7 @@ func assertFramedLocalFault(t *testing.T, rec *httptest.ResponseRecorder, reques
 	if err != nil {
 		t.Fatal(err)
 	}
-	var body map[string]string
-	if hdr.Status != http.StatusInternalServerError || json.Unmarshal(answer, &body) != nil || body["error"] != errOwnershipFault {
+	if msg, echoed := gatewayRefusal(t, tx, hdr.Headers["Content-Type"], answer); len(echoed) != 0 || hdr.Status != http.StatusInternalServerError || msg != errOwnershipFault {
 		t.Fatalf("framed %d %s, want 500 with the ownership fault", hdr.Status, answer)
 	}
 }
@@ -299,7 +299,7 @@ func TestBoundaryQuestionnaireAnswerMustBeRelayed(t *testing.T) {
 	r := newSignedInboundRequest(t, g, requester.ID)
 	r = r.WithContext(withRequestFrameOperation(r.Context(), shnsdk.FrameOperationQuestionnairePackage))
 	g.handleDTRInbound(rec, r, env, shnsdk.Token{Subject: coveredPCI(t, g)}, dtrFramedPackageFor(t, g), "")
-	assertFramedLocalFault(t, rec, requester)
+	assertFramedLocalFault(t, rec, requester, "dtr-questionnaire-fetch")
 	if refused.count() == 0 {
 		t.Fatal("the refusal was not observed")
 	}

@@ -326,7 +326,7 @@ type lineBridgeRows struct {
 
 // answerBridge carries one answer a workstream's module 2 contribution edits
 // to the requester's system (chainBridge.AdaptAnswer).
-type answerBridge func(b chainBridge, ctx context.Context, answer []byte, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string)
+type answerBridge func(b chainBridge, ctx context.Context, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string)
 
 // AdaptAnswer carries an answer to the requester's system. An answer a
 // workstream's module 2 contribution edits (lineBridgeRows.answers; the PA
@@ -334,7 +334,7 @@ type answerBridge func(b chainBridge, ctx context.Context, answer []byte, routed
 // answer is carried exactly as it arrived.
 func (b chainBridge) AdaptAnswer(ctx context.Context, key relay.Key, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (relay.Payload, string, int, string) {
 	if bridge := answerBridges[key]; bridge != nil {
-		return bridge(b, ctx, answer, routed, declared, x)
+		return bridge(b, ctx, answer, contentType, routed, declared, x)
 	}
 	return relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType), routed, 0, ""
 }

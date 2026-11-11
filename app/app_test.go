@@ -2038,7 +2038,7 @@ func TestLoadTLSCert_FailsFastOnBadPath(t *testing.T) {
 
 // TestServerFor_PlainWhenNoCert: nil cert => no TLSConfig, unchanged default.
 func TestServerFor_PlainWhenNoCert(t *testing.T) {
-	s := serverFor("127.0.0.1:0", http.NewServeMux(), nil)
+	s := serverFor("127.0.0.1:0", http.NewServeMux(), nil, nil)
 	if s.TLSConfig != nil {
 		t.Fatalf("TLSConfig = %v, want nil for a plaintext listener", s.TLSConfig)
 	}
@@ -2363,7 +2363,7 @@ func TestServerFor_RealTLSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := serverFor(ln.Addr().String(), mux, cert)
+	srv := serverFor(ln.Addr().String(), mux, cert, nil)
 	if srv.TLSConfig == nil {
 		t.Fatal("TLSConfig = nil, want TLS configured")
 	}

@@ -136,12 +136,13 @@ func (g *Gateway) dtrAnswerSourceLine(ctx context.Context, answer []byte, family
 //     nothing is renamed: the answer is carried exactly as it arrived.
 //   - Every other answer is carried exactly as it arrived.
 //
-// routed is the contract token the leg ran at, and declared the tokens this
-// gateway declares; wrote is the token of the line the answer is written in
+// contentType is the media type the payer's system stated, which the answer
+// keeps whether it is carried as sent or renamed. routed is the contract token
+// the leg ran at, and declared the tokens this gateway declares; wrote is the
+// token of the line the answer is written in
 // (routed when carried as sent, this gateway's line when carried across, empty
 // on a refusal). status is non-zero for a refusal, with its message.
-func (b chainBridge) carryDTRAnswer(ctx context.Context, answer []byte, routed string, declared []string, x ExchangeIdentity) (carried relay.Payload, wrote string, status int, msg string) {
-	const contentType = "application/fhir+json"
+func (b chainBridge) carryDTRAnswer(ctx context.Context, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (carried relay.Payload, wrote string, status int, msg string) {
 	g := b.g
 	payerLine := shnsdk.LineOf(routed)
 	exact := relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), contentType)
