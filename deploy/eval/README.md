@@ -32,14 +32,42 @@ validation.
 > them (see
 > [docs/INTEGRATION.md → Seed your own FHIR server](../../docs/INTEGRATION.md#seed-your-own-fhir-server)).
 
+## Before you start
+
+This bundle assumes a host that already runs containers; setting one up is
+outside this guide. Check that you have:
+
+- **Linux (amd64 or arm64) or macOS**, with Docker Engine 23 or later and its
+  **Buildx and Compose v2 plugins** (`docker buildx version`,
+  `docker compose version`). A Docker installed without the Buildx plugin
+  cannot run steps 1 and 2.
+- **A user that can run `docker`** (rootful Docker Engine on Linux), and on
+  Linux `sudo` for the one permission step in step 0.
+- **`bash`, `git`, `curl` and `jq`**, and the `shn` CLI (below).
+- **Ports `127.0.0.1:8080` and `127.0.0.1:8082` free.**
+- **A synchronized clock.** A signed scenario request is valid for one minute.
+- **Outbound HTTPS.** At run time, to `accounts.shn-preview.org` and the hosts
+  its discovery descriptor names. During the first build, to GitHub (the
+  reference requester's source), the container registries the images come
+  from, and the package registries the builds download from.
+- **Room for two Java servers and the builds.** This guide states no measured
+  memory or disk figure yet.
+
+The bundled FHIR server keeps its data in memory: if it loses its database or
+is restarted, its data is gone (see
+[When something goes wrong](#when-something-goes-wrong)).
+
 ## Prerequisite: an SHN developer account
 
 You need an **approved SHN developer account** before running this bundle.
 Request one at `https://developers.shn-preview.org` (no account needed to
-submit the request). Once approved, register a provider client and download
-your bundle:
+submit the request). Once approved, install the `shn` CLI from the latest
+[shn-sdk](https://github.com/SmartHealthNetwork/shn-sdk) release (its README
+gives the install options), sign in (add `--no-browser` on a
+host without a browser), register a provider client and download your bundle:
 
 ```sh
+shn login --accounts https://accounts.shn-preview.org
 shn register --accounts https://accounts.shn-preview.org \
   --role provider --name my-org --base-url https://my-org.example.com \
   -out ./my-provider-bundle
@@ -47,6 +75,11 @@ shn register --accounts https://accounts.shn-preview.org \
 
 Keep the resulting directory — its path is what you'll pass as `SHN_SECRETS`
 below. Keys are generated client-side and never leave your machine.
+
+**The provider's `--base-url`** is checked at registration but never dialed in
+this bundle, where your gateway originates all eight use cases: use an https
+hostname you control, not the placeholder above
+([DEPLOYMENT.md → Your registered address must be https](../../docs/DEPLOYMENT.md#your-registered-address-must-be-https)).
 
 ## Run it — three steps
 
@@ -65,6 +98,25 @@ the gateway reads at boot. The key is a credential: keep it out of the bundle
 and out of version control. To replace it, run the command again with `--force`
 and restart the gateway. A bundle without `scenario-callers.json` stops the
 gateway at boot, naming the file.
+
+**On Linux, then let the gateway read the bundle** (once per bundle). The
+gateway runs as uid/gid `65532`, and `shn register` writes the bundle readable
+by you only, so the gateway stops at boot with `permission denied` naming a
+file in `/etc/shn`. Give group `65532` read access; the setgid bit on the
+directory keeps a file the CLI rewrites later, such as `scenario-callers.json`
+after `shn scenario-key --force`, in that group:
+
+```sh
+sudo chgrp -R 65532 /abs/path/to/my-provider-bundle
+sudo chmod 2750 /abs/path/to/my-provider-bundle
+chmod 0640 /abs/path/to/my-provider-bundle/*
+ls -ld /abs/path/to/my-provider-bundle    # drwxr-s---
+```
+
+You still own the files, so the `shn` CLI keeps working on the bundle, and
+nobody outside the group can read the keys. Docker Desktop on macOS does not
+apply file modes to shared folders, so there the step is not needed. The step
+assumes rootful Docker Engine without user-namespace remapping.
 
 **Step 1 — build the reference requester.** This clones and builds
 `br-provider` from pinned upstream source; there's no published image to pull.
@@ -113,7 +165,8 @@ shn send-test --gateway http://127.0.0.1:8080 --discovery https://accounts.shn-p
 
 Use `shn` from shn-sdk v1.0.0 or later: it states the UC-06 and UC-07 attestation answers,
 which this gateway requires, and an earlier `shn` fails both scenarios with
-`422 answer is required`.
+`422 answer is required`. The shn-sdk version a gateway release's notes say it
+pins is the library the gateway is built with, not a requirement on your CLI.
 
 **A pend is a valid answer.** The evaluation payer pends some prior authorizations
 when they're submitted and decides them later, as a real payer may. A
@@ -163,6 +216,15 @@ caches the layers.
 
 Once both are built once and the FHIR server has booted once, later
 `docker compose up` runs come back in seconds.
+
+### When something goes wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| The gateway exits at boot: `scenario callers: read /etc/shn/scenario-callers.json: … permission denied` (or another file in `/etc/shn`) | The gateway, uid/gid `65532`, cannot read your bundle. Run the permission step under step 0. |
+| The gateway's log shows a `validator_qualification` `failed` line for lines `2.1` and `2.2` (and `/internal/checks` reports `validator-lane-2.1` and `validator-lane-2.2` failing `lane-unqualified`; with `CHECKS_TOKEN` unset it answers only from inside the gateway container's own network, for example `docker run --rm --network container:eval-gateway-1 alpine wget -qO- http://127.0.0.1:8080/internal/checks`, and a request from the Docker host gets `403`) | Expected in this bundle. It runs only the 2.0 line's validator; the gateway's default 2.1 and 2.2 lanes name validator services this bundle does not start, and the gateway keeps retrying them. `/health` is unaffected, and nothing the bundle sends to the hosted evaluation payer needs them. If you point the bundle at your own payer on the 2.1 or 2.2 line, see [CONFIGURATION.md → Exchange contract lines](../../docs/CONFIGURATION.md#exchange-contract-lines-shn_contract_versions). |
+| A scenario returns `503 {"error":"system of record unavailable. …"}` (on its first run, or after earlier ones passed), and `hapi`'s log shows `Table … not found` | The bundled FHIR server keeps its data in memory: if it loses its database, or is restarted, it comes back empty. `/internal/checks` can still report `FHIR_DATA_URL` passing, because that check reads only the server's `/metadata`. Restart it, then seed it again: `SHN_SECRETS=/abs/path/to/my-provider-bundle docker compose -f compose.eval.yml restart hapi`, then `SHN_SECRETS=/abs/path/to/my-provider-bundle docker compose -f compose.eval.yml run --rm --no-deps seed`. The seed is safe to repeat and waits until the FHIR server is ready again; the gateway needs no restart. |
+| The gateway's version ends in `+dirty` | This bundle builds the gateway from your clone, and a `docker build` from a clone records `+dirty` because `.dockerignore` leaves tracked files out of the build. It does not mean your clone was changed. The published image reports its release tag ([CONFIGURATION.md](../../docs/CONFIGURATION.md), "The build's own version"). |
 
 ## Point it at your own payer (payer self-test)
 
@@ -233,9 +295,8 @@ you downloaded: `none` from v1.0.0, which checks no payload and records nothing,
 `observe` every message is checked against its FHIR profile — and a payer's CDS Hooks answer
 against the CDS Hooks response rules — each defect is recorded as a finding in the gateway's
 log and observer stream, and the message relays as sent, apart from the gateway's registered
-edits (the callback removed, prefetch and coverage obtained where the provider opts in with
-`ENRICH_NATIVE_REQUESTS=true`, and payer identity mapping):
-nothing is refused for conformance.
+edits (the callback removed, and prefetch and coverage obtained where the provider opts in
+with `ENRICH_NATIVE_REQUESTS=true`): nothing is refused for conformance.
 Network rules refuse at every level regardless: authentication, authority, consent, routing, replay, message integrity, and
 the check of a payload this gateway itself translated between IG lines.
 

@@ -394,7 +394,7 @@ memory (Linux).
 | `shn.gateway.exchange.stage.duration` | `shn_gateway_exchange_stage_duration_seconds` | `ExchangeStageLatency` | histogram | `s` | `shn.direction`, `shn.exchange`, `shn.stage` | Time an exchange spent in each stage; an exchange's stages sum to its duration. |
 | `shn.gateway.active_requests` | `shn_gateway_active_requests` | `ActiveRequests` (peak each minute) | updowncounter | `{request}` | `shn.direction` | Exchanges in flight. In EMF, the peak each minute. |
 | `shn.gateway.exchange.request.size` | `shn_gateway_exchange_request_size_bytes` | `RequestBytes` | histogram | `By` | `shn.direction`, `shn.exchange` | Size of an exchange's request body, when it was read to its end. |
-| `shn.gateway.exchange.response.size` | `shn_gateway_exchange_response_size_bytes` | `ResponseBytes` | histogram | `By` | `shn.direction`, `shn.exchange` | Size of the answer body an exchange wrote. |
+| `shn.gateway.exchange.response.size` | `shn_gateway_exchange_response_size_bytes` | `ResponseBytes` | histogram | `By` | `shn.direction`, `shn.exchange` | Size of the answer body an exchange wrote; 0 on a call that came as a `HEAD`, whose answer carries no body (from shn-gateway v1.12.0). |
 | `shn.gateway.conformance.findings` | `shn_gateway_conformance_findings_total` | `ConformanceFinding` | counter | `{finding}` | `shn.exchange`, `shn.conformance.level`, `shn.finding.kind`, `shn.finding.action`, `shn.finding.tolerated` | Conformance findings recorded, by level, kind, the decision recorded and whether the peer was tolerated. |
 | `shn.gateway.validator.duration` | `shn_gateway_validator_duration_seconds` | `ValidatorLatency` | histogram | `s` | `shn.ig_line`, `shn.lane` | Duration of a $validate call, by IG line and lane. |
 | `shn.gateway.conformance.checks.dropped` | `shn_gateway_conformance_checks_dropped_total` | `ObserveCheckDropped` | counter | `{check}` | none | Observe checks dropped because the observe queue was full or closed. |
@@ -518,7 +518,13 @@ Each `$validate` call and each finding adds one line wherever it happens. A
 leg that waits on a check also adds its `validate` stage line: a conformance
 check at `observe`, `structural` or `strict`, and, at every level, module 2's
 certification of a message it translates between IG lines
-(`TRANSLATE_IG_LINES`). Module 2 also validates a DTR answer to learn its IG
+(`TRANSLATE_IG_LINES`). From v1.12.0 a PAS 2.1 or 2.2 request Bundle read against
+its profile is still one `$validate` call, but the payload a `validate.result` line
+describes is the copy the gateway sent its validator: the Bundle without that
+profile, each Claim declaring its Claim profile ([CONFIGURATION.md](CONFIGURATION.md),
+`TRANSLATE_IG_LINES`), and its `detail` is the validator's answer on that copy alone: it does
+not include the request Bundle profile's own constraints, which the gateway reads itself and
+the check's finding includes. Module 2 also validates a DTR answer to learn its IG
 line, at every level, with no stage line of its own. With module 2 off, a leg
 at `none` makes no `$validate` call. Some lines are written on a timer whatever the
 traffic, and are not in these counts: `ActiveRequests`, two a minute, and the
@@ -587,7 +593,7 @@ quantiles.
 
 ## Stopping
 
-A stop takes up to 43 s, or 32 s without `DIAGNOSTIC_SINK_URL`; the final metrics export
+A stop takes up to 44 s, or 33 s without `DIAGNOSTIC_SINK_URL`; the final metrics export
 is one step of it, after the audit outbox drains and the observe checks flush, within 5 s.
 Give the container a 45 s stop timeout: see
 [DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway).

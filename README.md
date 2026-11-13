@@ -125,7 +125,11 @@ same gate: an **SHN developer account**.
    machine. The `-out` directory is the **secrets bundle** every gateway below
    expects as `SHN_SECRETS`. (A **responder** role — `payer`, `facility`,
    `phg` — must register a `--base-url` that's genuinely, publicly reachable:
-   the Hub dials it. See [§5 Payer](#payer).)
+   the Hub dials it. See [§5 Payer](#payer).) A provider's `--base-url` is
+   checked at registration too, so use an https hostname you control rather
+   than the placeholder above; it is not dialed unless the provider takes a
+   payer's request for documentation (§6), and `shn rotate` cannot change it
+   ([DEPLOYMENT.md](docs/DEPLOYMENT.md#your-registered-address-must-be-https)).
 
 SHN is currently in a preview phase: use only synthetic data — never
 production PHI — until told otherwise. When SHN reaches production, the only
@@ -148,7 +152,9 @@ Approval isn't instant. None of the following needs an account:
   From v1.0.0 it runs on linux/amd64 and linux/arm64, and each image carries a
   signed SPDX SBOM. To build it yourself instead, clone this repository and run
   `docker build -t shn-gateway .` with BuildKit, Docker's default builder since
-  Engine 23.
+  Engine 23. Add `--build-arg GATEWAY_VERSION=<tag>` for a clone at a release
+  tag: without it, the build reports `<tag>+dirty`, because `.dockerignore`
+  leaves tracked files out of the build.
 - Pre-stage your configuration against
   [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — which env vars you'll
   set, where your FHIR system of record lives.
@@ -173,11 +179,22 @@ real audit trail, real profile validation, not a local loopback.
 git clone https://github.com/SmartHealthNetwork/shn-gateway.git
 cd shn-gateway/deploy/eval
 
+# Step 0 — create the caller that drives the scenarios (once)
+shn scenario-key --bundle /abs/path/to/your-provider-bundle
+# On Linux, let the gateway (uid/gid 65532) read the bundle (once per bundle)
+sudo chgrp -R 65532 /abs/path/to/your-provider-bundle
+sudo chmod 2750 /abs/path/to/your-provider-bundle
+chmod 0640 /abs/path/to/your-provider-bundle/*
+
 # Step 1 — build the reference requester (pinned upstream source; several minutes the first time)
 bash brprovider/build.sh build
 
 # Step 2 — bring up the bundle, pointing at your secrets bundle from §3
 SHN_SECRETS=/abs/path/to/your-provider-bundle docker compose -f compose.eval.yml up --build
+
+# Step 3 — once everything reports ready, in another terminal in this directory, run all eight use cases
+shn send-test --gateway http://127.0.0.1:8080 --discovery https://accounts.shn-preview.org \
+  --scenario-key ./scenario-caller-send-test.sign --bundle /abs/path/to/your-provider-bundle
 ```
 
 The seeded FHIR server's first boot can take up to ~20 minutes while it
@@ -355,8 +372,9 @@ different build.
   so PHI-bearing resources never leave it to be validated —
   [`deploy/bundle/`](deploy/bundle/README.md) ships this wiring ready-made.
 - **Run as non-root.** The published image runs as uid/gid 65532
-  (distroless); a self-mounted bundle needs `0750`/`0640` permissions with
-  matching group ownership.
+  (distroless); a self-mounted bundle needs group `65532`, the directory
+  `2750` (setgid, so a file the CLI rewrites stays in the group) and its files
+  `0640`: `sudo chgrp -R 65532 <bundle> && sudo chmod 2750 <bundle> && chmod 0640 <bundle>/*`.
 - **Durable state, if you pend claims.** The gateway boots on an in-memory
   store by default — including in PAS-native payer mode. Set
   `SHN_STORE_DATABASE_URL` to a Postgres DSN so in-flight (pended/resumable)
@@ -364,8 +382,11 @@ different build.
   PAS-native payer, where pended-claim state must outlive any single instance.
 - **Networking.** `PORT`/`HOST` control what the gateway binds to; beyond
   that, the only topology decision is the one your role already implies (a
-  provider is outbound-only; a responder needs a public https address, per
-  §5).
+  responder needs a public https address, per §5; a provider originates and
+  needs none, unless it takes a payer's request for documentation, which the
+  network delivers to its registered base URL, so it then needs one as a
+  responder does:
+  [`PROVIDER_CDEX_TASK_URL`](docs/CONFIGURATION.md#take-a-payers-request-for-documentation-the-attachment-request-task-provider-optional)).
 
 The complete environment-variable reference — everything above and everything
 role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
@@ -388,7 +409,7 @@ role-specific — is [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 | Payer never receives a delivery | The Hub can't reach the payer's `--base-url`. It must be a public https endpoint fronting the gateway (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) and must not redirect on `/substrate/inbound`. Re-check the tunnel/load balancer. |
 | Payer returns `403 missing or invalid hub assertion` | The request didn't come from the Hub (e.g. a direct curl to `/substrate/inbound`). Only the Hub can deliver; originate from a provider instead. |
 | Scenario call returns `400 unknown branch` / `unknown member` | The originate body must be `{"branch":"covered"}` or `{"branch":"notcovered"}`; the member must exist in the active system of record. A backend read failure is distinct from absence; see [read failures](docs/INTEGRATION.md#system-of-record-read-failures). |
-| Permission-denied reading the bundle (Docker) | The mounted bundle isn't readable by gid 65532. Apply `chgrp -R 65532` + `0750`/`0640` (§6). |
+| Permission-denied reading the bundle (Docker) | The mounted bundle isn't readable by gid 65532. Apply group `65532`, `2750` on the directory and `0640` on its files (§6). |
 | Registration rejected with `invalid baseURL: …` | `--base-url` must be a publicly resolvable https URL — not private/loopback/link-local. See [§3](#3-request-access) and [§5 Payer](#payer). |
 | `system of record authentication failed` / `unavailable` / `returned an invalid response` (502/503) | Check the backend credentials, availability or returned FHIR data. Do not change the patient identifier to work around a backend failure. See [read failures](docs/INTEGRATION.md#system-of-record-read-failures). |
 | `egress validation failed` (422) on originate | The resource your connector produced doesn't conform to its IG profile. Check the `issues` array in the response; fix the data your `SystemOfRecord` returns. |

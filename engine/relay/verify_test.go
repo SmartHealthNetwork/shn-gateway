@@ -68,7 +68,7 @@ func TestVerifyRowsCaughtByOneCheck(t *testing.T) {
 			d := mustDoc(t, b)
 			ops := r.ops(d)
 			fixedSplice(t, r.out, r.spans...)
-			_, err := Apply(b, "", EditPayorEdgeRestamp, ops...)
+			_, err := Apply(b, "", EditDTRCoverageObtain, ops...)
 			wantMismatch(t, err, r.fragment)
 		})
 	}
@@ -216,15 +216,15 @@ func TestApplyRefusesOperationsFromAnotherBody(t *testing.T) {
 	b2 := NewBody(raw, OriginPeerFrame) // same bytes, different body
 	d1 := mustDoc(t, b1)
 	op := d1.Replace(at(t, d1, "a"), []byte(`2`))
-	if _, err := Apply(b2, "", EditPayorEdgeRestamp, op); !errors.Is(err, ErrInvalidEdit) || !strings.Contains(err.Error(), "another body") {
+	if _, err := Apply(b2, "", EditDTRCoverageObtain, op); !errors.Is(err, ErrInvalidEdit) || !strings.Contains(err.Error(), "another body") {
 		t.Fatalf("want a foreign-operation refusal, got %v", err)
 	}
 	// A copy of the same Body is the same body.
 	b1copy := b1
-	if _, err := Apply(b1copy, "", EditPayorEdgeRestamp, op); err != nil {
+	if _, err := Apply(b1copy, "", EditDTRCoverageObtain, op); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Apply(b1, "", EditPayorEdgeRestamp, Op{}); !errors.Is(err, ErrInvalidEdit) {
+	if _, err := Apply(b1, "", EditDTRCoverageObtain, Op{}); !errors.Is(err, ErrInvalidEdit) {
 		t.Fatalf("zero Op: %v", err)
 	}
 }
@@ -235,7 +235,7 @@ func TestOpAndChangeDoNotPrintValues(t *testing.T) {
 	d := mustDoc(t, b)
 	op := d.Replace(at(t, d, "id"), []byte(`"`+secret+`2"`))
 	ins := d.InsertMember(d.Root(), "SECRETNAME", []byte(`1`))
-	c := Change{Edit: EditPayorEdgeRestamp, Ops: []Op{op, ins}}
+	c := Change{Edit: EditDTRCoverageObtain, Ops: []Op{op, ins}}
 	for _, v := range []any{op, c, &c, []Change{c}, Embed{Source: b, Start: 6, End: 19}} {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%d", "%q"} {
 			got := fmt.Sprintf(verb, v)
@@ -298,7 +298,7 @@ func TestSignatureCoverageEdges(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			b := NewBody([]byte(r.doc), OriginPeerFrame)
 			d := mustDoc(t, b)
-			_, err := Apply(b, "", EditPayorEdgeRestamp, d.Replace(at(t, d, r.path...), str))
+			_, err := Apply(b, "", EditDTRCoverageObtain, d.Replace(at(t, d, r.path...), str))
 			if r.carrier == "" {
 				if err != nil {
 					t.Fatalf("refused: %v", err)

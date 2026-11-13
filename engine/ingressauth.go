@@ -49,7 +49,15 @@ const (
 	// (ingressScopeRefused), unlike the provider ingress's routes, which take
 	// any bearer the token endpoint issued.
 	TaskWriteScope = "system/Task.write"
-	assertionType  = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	// TaskReadScope is SMART v1's system-level read of the Task resource: the
+	// scope the payer's read and vread of a Task at a provider's base
+	// (GET <per-provider base>/Task/{id}) are asked for with, advertised by a
+	// payer gateway's SMART configuration when one of its ingress clients is
+	// registered for a scope that permits reading. Each read route takes a
+	// bearer granted it or any other scope that permits reading a Task
+	// (ingressscope.go): system/Task.*, or a v2 scope with r.
+	TaskReadScope = "system/Task.read"
+	assertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
 	// maxAssertionLifetime caps the client_assertion lifetime (RFC 7523 / SMART
 	// Backend Services recommends <= 5 min). It MUST be <= ingressJTIWindow so a jti is

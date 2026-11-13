@@ -50,10 +50,10 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 		// gateway's own check of it.
 		answer int
 	}{
-		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 0, 502},
-		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 502},
-		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", `{"error":"populated QR subject does not match patient. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 422},
-		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", `{"error":"populated QR questionnaire does not match canonical. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}` + "\n", 1, 422},
+		{"token refusal", 401, 200, "", `gateway: populate_failure {"version":1,"stage":"token_acquisition","reason":"other","status":0}`, answeredRefusal(502, "$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."), 0, 502},
+		{"population status", 200, 503, "CANARY-POPULATION-BODY", `gateway: populate_failure {"version":1,"stage":"http_status","reason":"non_2xx","status":503}`, answeredRefusal(502, "$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."), 1, 502},
+		{"foreign subject", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-FOREIGN"},"questionnaire":"https://example.test/CANARY-CANONICAL"}`, "", answeredRefusal(422, "populated QR subject does not match patient. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."), 1, 422},
+		{"foreign canonical", 200, 200, `{"resourceType":"QuestionnaireResponse","subject":{"reference":"Patient/CANARY-STORE"},"questionnaire":"https://example.test/CANARY-FOREIGN"}`, "", answeredRefusal(422, "populated QR questionnaire does not match canonical. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."), 1, 422},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var calls, tokenCalls atomic.Int32
@@ -83,6 +83,9 @@ func TestBuildPopulateFailureEvidence(t *testing.T) {
 			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
 			if rr.Code != row.answer || rr.Body.String() != row.public {
 				t.Fatalf("public response=%d %q, want %d %q", rr.Code, rr.Body.String(), row.answer, row.public)
+			}
+			if got := rr.Header().Get(engine.HubDeliveredHeader); got != "yes" {
+				t.Fatalf("%s = %q after the CRD and DTR legs were answered, want yes", engine.HubDeliveredHeader, got)
 			}
 			var records []string
 			for _, line := range strings.Split(out.text(), "\n") {
@@ -373,6 +376,13 @@ func TestPopulateFailureEvidenceSchemaAndConcurrentOutput(t *testing.T) {
 	}
 }
 
+// answeredRefusal is the body the gateway writes for a refusal of status
+// with text after a leg of the call was answered: its own error, then the
+// delivered yes problem members (a recipient may have acted on the request).
+func answeredRefusal(status int, text string) string {
+	return fmt.Sprintf(`{"error":%[2]q,"type":"tag:smarthealthnetwork.org,2026:gateway/delivered/yes","title":"A recipient received this request and may have acted on it","status":%[1]d,"detail":%[2]q}`+"\n", status, text)
+}
+
 type populateFailingWriter struct{}
 
 func (populateFailingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
@@ -384,7 +394,7 @@ func TestBuildPopulateFailureEvidenceWriterFailurePreservesResponse(t *testing.T
 	h := populateFailureApp(t, map[string]string{"PROVIDER_DTR_POPULATE_URL": srv.URL}, populateFailingWriter{})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/scenario/uc08", strings.NewReader(populateFailureBody(t))))
-	if rr.Code != 502 || rr.Body.String() != `{"error":"$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand."}`+"\n" || calls.Load() != 1 {
+	if rr.Code != 502 || rr.Body.String() != answeredRefusal(502, "$populate upstream failed. The crd-order-select and dtr-questionnaire-fetch legs this request sent were carried and stand.") || rr.Header().Get(engine.HubDeliveredHeader) != "yes" || calls.Load() != 1 {
 		t.Fatalf("status=%d body=%q calls=%d", rr.Code, rr.Body.String(), calls.Load())
 	}
 }

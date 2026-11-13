@@ -102,15 +102,17 @@ func TestPASIngress_CarriedAnswerIsValidatedAtTheLevel(t *testing.T) {
 					t.Fatalf("the request must be carried once, network hits %d", env.routeHitCount())
 				}
 				if row.refused {
-					if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "ingress validation failed") {
-						t.Fatalf("answer %d %s, want the invalid answer refused 502", rec.Code, rec.Body)
-					}
+					// The payer answered, with an answer verified as its own, so the
+					// refusal states it delivered yes, its status and text as before.
+					wantDeliveredOutcome(t, rec, http.StatusBadGateway, deliveredYes, "ingress validation failed")
 					wantRefusal(t, xr, http.StatusBadGateway, RefusedByProviderGateway, RefusalConformance)
 					if o := lastLegOutcome(t, env.originator); o != "error" {
 						t.Fatalf("a refused answer's leg is recorded error, got %q", o)
 					}
-				} else if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
-					t.Fatalf("answer %d %s, want the payer's answer relayed exactly", rec.Code, rec.Body)
+				} else if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) ||
+					len(rec.Header().Values(HubDeliveredHeader)) > 0 {
+					t.Fatalf("answer %d delivered=%q %s, want the payer's answer relayed exactly, stating no delivery", rec.Code,
+						rec.Header().Get(HubDeliveredHeader), rec.Body)
 				}
 				if row.level == EnforcementNone {
 					if len(findings) != 0 {
@@ -177,13 +179,21 @@ func TestPASIngress_CarriedAnswerCheckUnavailable(t *testing.T) {
 			t.Run(leg.leg+"/"+level.String(), func(t *testing.T) {
 				_, rec, _, _, answer := carriedAnswerRun(t, leg, level, "", &shnsdk.FakeValidator{Err: errors.New("validator down")})
 				if level == EnforcementStrict {
+					// The gateway's own failure, after the payer answered: delivered yes.
 					if rec.Code != http.StatusInternalServerError {
 						t.Fatalf("answer %d %s, want the gateway's own failure 500", rec.Code, rec.Body)
 					}
+					text := readOutcome(t, rec).Issue[0].Diagnostics
+					if text == "" {
+						t.Fatalf("the 500 must say what failed: %s", rec.Body)
+					}
+					wantDeliveredOutcome(t, rec, http.StatusInternalServerError, deliveredYes, text)
 					return
 				}
-				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
-					t.Fatalf("answer %d %s, want the payer's answer relayed exactly", rec.Code, rec.Body)
+				if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) ||
+					len(rec.Header().Values(HubDeliveredHeader)) > 0 {
+					t.Fatalf("answer %d delivered=%q %s, want the payer's answer relayed exactly, stating no delivery", rec.Code,
+						rec.Header().Get(HubDeliveredHeader), rec.Body)
 				}
 			})
 		}

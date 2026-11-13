@@ -197,10 +197,15 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	var respPayload []byte
 	switch {
 	case set && lr.AnswerStatus != 0:
-		// The wire form a payer gateway framing its system's own 2xx sends,
-		// with the address headers it states for a DTR answer when it has any.
-		if len(lr.AddressHeaders) > 0 {
-			headers := maps.Clone(lr.AddressHeaders)
+		// The wire form a recipient's gateway framing its system's own 2xx
+		// sends, with the answer's own headers and the address headers it
+		// states (a DTR answer's, a Task create's) when it has any.
+		if len(lr.AddressHeaders) > 0 || len(lr.AnswerHeaders) > 0 {
+			headers := maps.Clone(lr.AnswerHeaders)
+			if headers == nil {
+				headers = map[string]string{}
+			}
+			maps.Copy(headers, lr.AddressHeaders)
 			headers["Content-Type"] = lr.Response.ContentType()
 			respPayload, err = shnsdk.EncodeHTTPFrameHeaders(lr.AnswerStatus, headers, responseBytes(lr))
 		} else {

@@ -1,5 +1,11 @@
 package engine
 
+import (
+	"context"
+
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
+)
+
 // certificationAdapter is a workstream's part in certifying the payloads its
 // legs carry (module3_certify.go) and in reading a validator's answer
 // (module3_classify.go): the message families, or species, it recognises,
@@ -26,10 +32,37 @@ type certificationAdapter interface {
 	// it is valid at a line of every group. nil when nothing in payload names its
 	// line: every line, as one group.
 	candidateGroups(contract string, payload []byte) [][]string
+	// undeclaredAnswerProfile is the profile, without a version, a payer's
+	// answer of contract that declares none is judged against at line on leg
+	// at structural and strict (owner decision D47): its line's own profile
+	// for what the answer is. ok is false where the workstream names none.
+	undeclaredAnswerProfile(contract string, payload []byte, line, leg string) (string, bool)
 	// excuse marks the issues of a reading of body at line against profile
 	// that are a known consequence of how the validator checks the
 	// workstream's profiles, not a defect in the message.
 	excuse(errs []fhirIssue, body []byte, line, profile string)
+	// reading is the workstream's own way to $validate a payload at line
+	// against profile where its lane cannot read that profile in one call,
+	// or nil where the one call is the reading (validateAt).
+	reading(line, profile string) laneReading
+}
+
+// laneReading $validates body on v and answers as v's one call would have:
+// one result whose issues name where they are in body.
+type laneReading func(ctx context.Context, v shnsdk.Validator, body []byte) (shnsdk.Result, error)
+
+// validateAt is every governed or certifying $validate of body at line
+// against profile on v: the compiled-in workstream's own reading where it has
+// one (certificationAdapter.reading), else v's one call. The governed check
+// (judgeLines) and module 3's certification (collectCertification) both read
+// through it, so one payload is read the same way by each.
+func validateAt(ctx context.Context, v shnsdk.Validator, body []byte, line, profile string) (shnsdk.Result, error) {
+	for _, a := range certificationAdapters() {
+		if read := a.reading(line, profile); read != nil {
+			return read(ctx, v, body)
+		}
+	}
+	return v.Validate(ctx, body, profile)
 }
 
 // claimSet is the lines one claim in a payload names, in 2.2, 2.1, 2.0
@@ -70,4 +103,11 @@ func certificationSource(certified []string, target string) string {
 		}
 	}
 	return best
+}
+
+// ValidateAtForTest is validateAt, for the platform's real-validator lane
+// tests (its conformance suite), which certify a payload by the reading the
+// gateway itself gives it. Test-only, like ClassifyFHIRForTest.
+func ValidateAtForTest(ctx context.Context, v shnsdk.Validator, body []byte, line, profile string) (shnsdk.Result, error) {
+	return validateAt(ctx, v, body, line, profile)
 }

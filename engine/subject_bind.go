@@ -913,29 +913,43 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 // 400 on every delivered leg, 422 on the payer's attachment request, as the
 // payer's ingress refuses the same Task. Recorded as authority either way.
 func (g *Gateway) bindInboundSubjectAs(ctx context.Context, member string, payload []byte, unidentifiable int) (pci string, status int, msg string) {
+	pci, status, msg, _ = g.bindInboundSubjectRecorded(ctx, member, payload, unidentifiable)
+	return pci, status, msg
+}
+
+// bindInboundSubjectRecorded is bindInboundSubjectAs, and whether it recorded
+// the rule of the refusal it returns: a caller whose leg refuses every
+// failure on a network primitive names one where none was recorded.
+func (g *Gateway) bindInboundSubjectRecorded(ctx context.Context, member string, payload []byte, unidentifiable int) (pci string, status int, msg string, recorded bool) {
 	if member == "" {
-		return "", http.StatusBadRequest, "unknown member"
+		return "", http.StatusBadRequest, "unknown member", false
 	}
 	pci, held, found, readErr := g.resolveSubjectBinding(ctx, member, payload)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
-		if errors.Is(readErr, errPatientUnidentifiable) {
+		unident := errors.Is(readErr, errPatientUnidentifiable)
+		if unident {
 			status = unidentifiable
 		}
-		return "", status, msg
+		return "", status, msg, unident
 	}
 	if !found || pci == "" {
 		// A member not held is refused only by a participant that requires
 		// known members (resolveSubjectBinding derives a subject otherwise):
 		// a check it opted into, recorded as conformance. A system of record
-		// that reports a member without an identifier names no rule.
+		// that reports a member without an identifier records no rule here:
+		// the CDex attachment request and Task read record it on the leg's
+		// authority (recorded is false), and the other legs that bind
+		// through this function do not yet. That gap is tracked in the SHN
+		// platform repository; it is not a choice of no rule.
 		if !found && g.cfg.RequireKnownMembers {
 			exchangeOf(ctx).refusing(RefusalConformance)
+			return "", http.StatusBadRequest, "unknown member", true
 		}
-		return "", http.StatusBadRequest, "unknown member"
+		return "", http.StatusBadRequest, "unknown member", false
 	}
 	involvedCollectorFrom(ctx).bound(pci, held)
-	return pci, 0, ""
+	return pci, 0, "", false
 }
 
 // SubjectBindingDiffersEvent is the observer event a payer leg raises when its

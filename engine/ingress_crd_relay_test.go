@@ -97,7 +97,9 @@ func ingressAt(t *testing.T, env *inProcessExchange, service string, body []byte
 	req := httptest.NewRequest(http.MethodPost, "/cds-services/"+service, bytes.NewReader(body))
 	req.SetPathValue("id", service)
 	rec := httptest.NewRecorder()
-	env.originator.handleCRDIngress(rec, req)
+	// Through the route as it is mounted (ingressRoute), so the call has its
+	// delivery mark.
+	env.originator.ingressRoute(RouteCRD)(rec, req)
 	return rec
 }
 

@@ -193,3 +193,34 @@ func TestSearchAndRead_DepthBound(t *testing.T) {
 		}
 	}
 }
+
+// A read is absent only on the server's definite answer that it holds no such
+// resource (404, or 410 for one deleted); every other failure is an error,
+// never absence.
+func TestReadAbsentOnlyOnADefiniteAnswer(t *testing.T) {
+	for _, row := range []struct {
+		code   int
+		absent bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusGone, true},
+		{http.StatusBadRequest, false},
+		{http.StatusForbidden, false},
+		{http.StatusInternalServerError, false},
+		{http.StatusServiceUnavailable, false},
+	} {
+		t.Run(http.StatusText(row.code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(row.code)
+			}))
+			defer srv.Close()
+			body, found, err := fhirclient.New(srv.URL, srv.Client()).Read(context.Background(), "Condition", "c1")
+			if found || body != nil {
+				t.Fatalf("%d: found %v body %q, want nothing", row.code, found, body)
+			}
+			if row.absent != (err == nil) {
+				t.Fatalf("%d: err %v, want absent %v", row.code, err, row.absent)
+			}
+		})
+	}
+}

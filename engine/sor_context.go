@@ -274,27 +274,20 @@ func (g *Gateway) coveragesNameOnePayer(lists [][]shnsdk.PayerIdentifier) bool {
 }
 
 // ownPayerIdentities is every payer identity a payer's gateway's participant is known by: the
-// identities its holder publishes on the network feed and, with the payer identity mapping on,
-// its configured and backend identities (ownRecordIdentifier). nil for a gateway that is not a
-// payer's, or one that knows none of them.
+// identities its holder publishes on the network feed. nil for a gateway that is not a payer's,
+// or one whose holder publishes none.
 func (g *Gateway) ownPayerIdentities() []shnsdk.PayerIdentifier {
-	if g.cfg.Role != "payer" {
+	if g.cfg.Role != "payer" || g.cfg.HolderID == "" {
+		return nil
+	}
+	e, ok := g.cfg.Reg.Lookup(g.cfg.HolderID)
+	if !ok {
 		return nil
 	}
 	var own []shnsdk.PayerIdentifier
-	add := func(ids []shnsdk.PayerIdentifier) {
-		for _, p := range ids {
-			if p.System != "" && p.Value != "" && !slices.Contains(own, p) {
-				own = append(own, p)
-			}
-		}
-	}
-	if m, ok := g.cfg.Responder.(ownRecordIdentifier); ok {
-		add(m.ownRecordIdentities())
-	}
-	if g.cfg.HolderID != "" {
-		if e, ok := g.cfg.Reg.Lookup(g.cfg.HolderID); ok {
-			add(e.PayerIDs)
+	for _, p := range e.PayerIDs {
+		if p.System != "" && p.Value != "" && !slices.Contains(own, p) {
+			own = append(own, p)
 		}
 	}
 	return own

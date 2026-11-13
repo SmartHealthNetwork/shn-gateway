@@ -534,6 +534,8 @@ func refusedBeforeTheNetwork(t *testing.T, env *inProcessExchange, rec *httptest
 	if n := env.routeHitCount(); n != 0 {
 		t.Fatalf("the refused request crossed the network (%d)", n)
 	}
+	// Nothing was sent, so nothing states delivery.
+	wantNoDeliveryStated(t, rec)
 }
 
 var patientOnly = `"patient":{"resourceType":"Patient","id":"example"}`

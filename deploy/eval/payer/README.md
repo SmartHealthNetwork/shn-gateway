@@ -121,6 +121,17 @@ again; delete that directory once no build is using it.
 bash ../brpayer/build.sh build
 ```
 
+**On Linux, first let the gateway read the bundle** (once per bundle). The
+gateway runs as uid/gid `65532`, and `shn register` writes the bundle readable
+by you only, so the gateway stops at boot with `permission denied`. The same
+step as the provider bundle's (see [`../README.md`](../README.md), step 0):
+
+```sh
+sudo chgrp -R 65532 /abs/path/to/my-payer-bundle
+sudo chmod 2750 /abs/path/to/my-payer-bundle
+chmod 0640 /abs/path/to/my-payer-bundle/*
+```
+
 **Step 2 — bring up the bundle**, pointing `SHN_SECRETS` at the bundle
 directory from the prerequisite step:
 

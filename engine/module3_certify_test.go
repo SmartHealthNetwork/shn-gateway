@@ -609,10 +609,10 @@ const x12ServiceType = "https://codesystem.x12.org/005010/1365"
 // lacks required elements and the sentinel Claim does not parse: invalid is
 // what they are, on every lane. Each synthetic PAS request bundle at its own
 // line has only errors the lane could not check: the X12 code system it does
-// not load, the required-binding miss on that element, and on 2.1 and 2.2 the
-// Claim's match of neither Claim profile that follows (the no-match summaries
-// and the update profile's own Claim.related minimum). The lane gave no
-// verdict on the bundle, so it is unavailable, naming the code system. The
+// not load and the required-binding miss on that element (at 2.0 read whole;
+// at 2.1 and 2.2 read per entry, the bundle at base FHIR and its Claim at
+// profile-claim, which leaves no slice to match). The lane gave no verdict on
+// the bundle, so it is unavailable, naming the code system. The
 // 2.1 bundle's answer from the 2.0 lane is the same X12 terminology alone,
 // so it too is unavailable. Every other bundle answer holds a verdict the lane
 // did reach: a missing required element or slice (the 2.0 bundle at 2.1 and
@@ -624,6 +624,13 @@ func TestCertificationRecordsWhatRealLanesAnswer(t *testing.T) {
 	validators := map[string]shnsdk.Validator{}
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		rec := certifyRecording(t, "lane-"+line+"-certify-collect")
+		if line != "2.0" {
+			// At 2.1 and 2.2 the collector reads a request bundle per entry;
+			// the recordings' whole-bundle answers there are the classifier
+			// rows' data (TestCertificationTerminologyUnavailableIsOnlyTerminology,
+			// TestCertificationClaimExceptionScope), not asked here.
+			rec.Subset()
+		}
 		v := NewCertificationOperationValidator(rec.Server().URL + "/fhir")
 		t.Cleanup(v.Client.CloseIdleConnections)
 		validators[line] = v

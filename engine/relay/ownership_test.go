@@ -173,14 +173,14 @@ func TestCheckRows(t *testing.T) {
 	relayKey := Key{"leg-r", RoleRecipient, DirectionResponse, OutcomeAnswered}
 	inputKey := Key{"leg-i", RoleRequester, DirectionRequest, OutcomeOriginated}
 	table := map[Key]Rule{
-		edited:      {Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditPayorEdgeRestamp}},
+		edited:      {Allowed: []Ownership{OwnershipRelayed, OwnershipEdited}, Edits: []EditID{EditDTRCoverageObtain}},
 		authoredKey: {Allowed: []Ownership{OwnershipAuthored}, Builders: []BuilderID{BuilderSDKPASSubmit}},
 		relayKey:    {Allowed: []Ownership{OwnershipRelayed}},
 		inputKey:    {Allowed: []Ownership{OwnershipAuthored}, Builders: []BuilderID{BuilderSDKPASSubmit}, InputEdits: []EditID{EditEvidenceSubjectRekey}},
 	}
 	body := NewBody([]byte(`{"payor":"a","hook":"order-sign"}`), OriginPeerFrame)
 	d := mustDoc(t, body)
-	restamp, err := Apply(body, fhirJSON, EditPayorEdgeRestamp, d.Replace(at(t, d, "payor"), []byte(`"b"`)))
+	oneEdit, err := Apply(body, fhirJSON, EditDTRCoverageObtain, d.Replace(at(t, d, "payor"), []byte(`"b"`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestCheckRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	both, err := ApplyChanges(body, fhirJSON,
-		Change{Edit: EditPayorEdgeRestamp, Ops: []Op{d.Replace(at(t, d, "payor"), []byte(`"b"`))}},
+		Change{Edit: EditDTRCoverageObtain, Ops: []Op{d.Replace(at(t, d, "payor"), []byte(`"b"`))}},
 		Change{Edit: EditCDSCallbackStrip, Ops: []Op{d.RemoveMember(d.Root(), "hook")}})
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestCheckRows(t *testing.T) {
 	}{
 		{"relayed at a relay transmit", relayKey, exact, true},
 		{"relayed where edits are permitted", edited, exact, true},
-		{"permitted edit", edited, restamp, true},
+		{"permitted edit", edited, oneEdit, true},
 		{"registered builder", authoredKey, submit, true},
 		{"input edit listed", inputKey, noted, true},
 		{"no input edit where one is listed", inputKey, submit, true},
@@ -239,8 +239,8 @@ func TestCheckRows(t *testing.T) {
 		{"relayed at an authored transmit", authoredKey, exact, false},
 		{"edit not listed", edited, strip, false},
 		{"one of two edits not listed", edited, both, false},
-		{"edited at a relay transmit", relayKey, restamp, false},
-		{"edited at an authored transmit", authoredKey, restamp, false},
+		{"edited at a relay transmit", relayKey, oneEdit, false},
+		{"edited at an authored transmit", authoredKey, oneEdit, false},
 		{"input edit not listed", authoredKey, noted, false},
 	} {
 		t.Run(r.name, func(t *testing.T) {
@@ -297,13 +297,13 @@ func TestCheckRefusesTestPayloadOutsideTests(t *testing.T) {
 func TestOwnershipErrorText(t *testing.T) {
 	body := NewBody([]byte(`{"payor":"a"}`), OriginPeerFrame)
 	d := mustDoc(t, body)
-	restamp, err := Apply(body, fhirJSON, EditPayorEdgeRestamp, d.Replace(at(t, d, "payor"), []byte(`"b"`)))
+	oneEdit, err := Apply(body, fhirJSON, EditDTRCoverageObtain, d.Replace(at(t, d, "payor"), []byte(`"b"`)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	k := relayedAnswerKey(t)
-	err = Check(k)(restamp)
-	want := "relay: edited[E-03] payload not permitted at " + k.String() + ": ownership not permitted"
+	err = Check(k)(oneEdit)
+	want := "relay: edited[E-04] payload not permitted at " + k.String() + ": ownership not permitted"
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v", err)
 	}

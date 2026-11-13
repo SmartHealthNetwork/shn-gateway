@@ -215,12 +215,12 @@ func TestSupplementalReport_CheckAdmitsOnlyE06(t *testing.T) {
 	}
 	for name, p := range map[string]func() (relay.Payload, error){
 		"another edit": func() (relay.Payload, error) {
-			return relay.Apply(body, "application/fhir+json", relay.EditPayorEdgeRestamp, doc.Replace(ref, []byte(`"Patient/b"`)))
+			return relay.Apply(body, "application/fhir+json", relay.EditDTRCoverageObtain, doc.Replace(ref, []byte(`"Patient/b"`)))
 		},
 		"E-06 with another edit": func() (relay.Payload, error) {
 			return relay.ApplyChanges(body, "application/fhir+json",
 				relay.Change{Edit: relay.EditEvidenceSubjectRekey, Ops: []relay.Op{doc.Replace(ref, []byte(`"Patient/b"`))}},
-				relay.Change{Edit: relay.EditPayorEdgeRestamp, Ops: []relay.Op{doc.Replace(x, []byte(`2`))}})
+				relay.Change{Edit: relay.EditDTRCoverageObtain, Ops: []relay.Op{doc.Replace(x, []byte(`2`))}})
 		},
 	} {
 		pl, err := p()

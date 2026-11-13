@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,14 +23,38 @@ func carriedStatement(legs ...string) string {
 }
 
 // wantCarried fails unless body ends its refusal saying that exactly legs were
-// carried: a refusal at a later leg never reads as one before any leg.
+// carried: a refusal at a later leg never reads as one before any leg. Its
+// text is the error member, or on a FHIR operation route its OperationOutcome's
+// first diagnostics. A refusal after a carried leg states delivered yes in
+// its body (the problem type, or the issue's coding): that leg's recipient
+// answered and may have acted (deliveryMark).
 func wantCarried(t *testing.T, body string, legs ...string) {
 	t.Helper()
-	if want := carriedStatement(legs...); !strings.Contains(body, want+`"`) {
-		t.Fatalf("answer %s does not say %q", body, want)
+	var doc struct {
+		Error string `json:"error"`
+		Type  string `json:"type"`
+		Issue []struct {
+			Diagnostics string `json:"diagnostics"`
+			Details     *struct {
+				Coding []struct{ System, Code string } `json:"coding"`
+			} `json:"details"`
+		} `json:"issue"`
 	}
-	if n := strings.Count(body, "carried and stand") + strings.Count(body, "No leg of this request was sent"); n != 1 {
-		t.Fatalf("answer %s says which legs were carried %d times, want once", body, n)
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatalf("answer %s is not JSON: %v", body, err)
+	}
+	text, yes := doc.Error, doc.Type == deliveredSystem+"/yes"
+	if len(doc.Issue) > 0 {
+		is := doc.Issue[0]
+		text = is.Diagnostics
+		yes = is.Details != nil && len(is.Details.Coding) == 1 && is.Details.Coding[0].System == deliveredSystem && is.Details.Coding[0].Code == "yes"
+	}
+	wantCarriedText(t, text, legs...)
+	if len(legs) > 0 && !yes {
+		t.Fatalf("answer %s after the %v legs were carried does not state delivered yes", body, legs)
+	}
+	if len(legs) == 0 && (doc.Type != "" || len(doc.Issue) > 0 && doc.Issue[0].Details != nil) {
+		t.Fatalf("answer %s before any leg was sent states delivery", body)
 	}
 }
 
@@ -98,5 +123,25 @@ func TestAfterLegs(t *testing.T) {
 	}
 	if got := afterLegs(context.Background(), "refused"); got != "refused" {
 		t.Errorf("no tracker: %q, want the answer as it is", got)
+	}
+}
+
+// mounted is w and r as routes() and recordExchange give every requester
+// call: the delivery mark, on the writer and the context, so a handler driven
+// straight states delivery as the mounted route does (deliveryMark). A
+// harness without it would be more permissive than the real route.
+func mounted(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, *http.Request) {
+	return withDeliveryMark(w, r)
+}
+
+// wantCarriedText fails unless text, a refusal's own message, ends saying
+// that exactly legs were carried, once.
+func wantCarriedText(t *testing.T, text string, legs ...string) {
+	t.Helper()
+	if want := carriedStatement(legs...); !strings.HasSuffix(text, want) {
+		t.Fatalf("message %q does not end %q", text, want)
+	}
+	if n := strings.Count(text, "carried and stand") + strings.Count(text, "No leg of this request was sent"); n != 1 {
+		t.Fatalf("message %q says which legs were carried %d times, want once", text, n)
 	}
 }

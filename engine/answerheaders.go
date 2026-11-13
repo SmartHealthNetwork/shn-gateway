@@ -36,6 +36,14 @@ const (
 	AnswerHeaderDecodedFromGzip = "decoded-from-gzip"
 )
 
+// addressHeaderNames are the address headers a recipient's gateway states on
+// a 2xx answer for the requester's gateway alone (LegResult.AddressHeaders,
+// statedAnswer.address): a payer's on a framed DTR operation's answer
+// (operationBase, operationAddressTags, read by E-12), and a provider's on its
+// answer to a payer's attachment-request Task (taskLocation, read by E-16).
+// None is ever written to a participant.
+var addressHeaderNames = []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation}
+
 // AnswerHeaderNotCarriedValues is the closed list
 // ExchangeRecord.AnswerHeadersNotCarried draws from.
 var AnswerHeaderNotCarriedValues = func() []string {
@@ -43,9 +51,9 @@ var AnswerHeaderNotCarriedValues = func() []string {
 	for _, name := range answerHeaderNames {
 		out = append(out, name+":"+AnswerHeaderValueNotCarriable, name+":"+AnswerHeaderOverFrameLimit, name+":"+AnswerHeaderOverAnswerLimit)
 	}
-	// The address headers a payer's gateway states on a DTR answer, framed
-	// for the requester's gateway alone, can be left out the same ways.
-	for _, name := range []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags} {
+	// The address headers a recipient's gateway states, framed for the
+	// requester's gateway alone, can be left out the same ways.
+	for _, name := range addressHeaderNames {
 		out = append(out, name+":"+AnswerHeaderValueNotCarriable, name+":"+AnswerHeaderOverFrameLimit, name+":"+AnswerHeaderOverAnswerLimit)
 	}
 	return out
@@ -78,8 +86,9 @@ func answerHeadersOf(resp *http.Response) (map[string]string, []string) {
 type statedAnswer struct {
 	status  int
 	headers map[string]string
-	// address are the address headers a DTR answer's frame states between
-	// the two gateways (operationBase, operationAddressTags): framed with the
+	// address are the address headers an answer's frame states between the
+	// two gateways (addressHeaderNames: a DTR answer's operationBase and
+	// operationAddressTags, a Task create's taskLocation): framed with the
 	// answer, read by the requester's gateway, and never written to a
 	// participant (about leaves them out).
 	address map[string]string
@@ -140,13 +149,16 @@ func encodeAnswerFrame(status int, base, extra map[string]string, payload []byte
 
 // writeRelayedAnswer writes a peer's answer to this gateway's own participant
 // with what the answer states, for each header that still describes p and can
-// be written. An unframed answer states a 200 and no header.
-func (g *Gateway) writeRelayedAnswer(w http.ResponseWriter, answer statedAnswer, contentType string, p relay.Payload, k relay.Key) {
+// be written. An unframed answer states a 200 and no header. It reports
+// whether the answer was delivered: false when its transmit was refused and
+// this gateway's fault written instead.
+func (g *Gateway) writeRelayedAnswer(w http.ResponseWriter, answer statedAnswer, contentType string, p relay.Payload, k relay.Key) bool {
 	headers, notCarried := writableAnswerHeaders(answer.about(p))
 	if !g.writeAnswer(w, relayedAnswerStatus(answer.status), contentType, headers, p, k) {
-		return
+		return false
 	}
 	for _, value := range notCarried {
 		exchangeOfWriter(w).answerHeaderNotCarried(value)
 	}
+	return true
 }

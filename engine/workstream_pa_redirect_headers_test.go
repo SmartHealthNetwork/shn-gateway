@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -228,7 +229,8 @@ func TestNativeForward_WithConfiguredHeadersAnHTTPSToHTTPRedirectIsStillRefused(
 
 // The CDS service listing read, through the payer's SMART client, carries the
 // configured headers and the bearer to the payer's own system, and none of
-// them to another origin it is redirected to.
+// them to another origin it is redirected to, which receives only what a
+// fresh read of its address carries.
 func TestCDSServiceListing_ACrossOriginRedirectCarriesNoConfiguredHeader(t *testing.T) {
 	other := newRecordingOrigin(t, func(_ *http.Request, w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "application/json")
@@ -248,4 +250,125 @@ func TestCDSServiceListing_ACrossOriginRedirectCarriesNoConfiguredHeader(t *test
 	requirePartnerHeaders(t, "the payer's own system", sent[0])
 	requireBearer(t, "the payer's own system", sent[0])
 	requireNoPartnerHeader(t, "the other origin", away[0])
+	requireOnlyFreshReadHeaders(t, "the other origin", "application/json", away[0])
+}
+
+// requireOnlyFreshReadHeaders fails unless h, as another origin received it,
+// holds only what a fresh read of that address carries: Accept as the
+// request set it, and the User-Agent and Accept-Encoding the transport adds.
+func requireOnlyFreshReadHeaders(t *testing.T, who, accept string, h http.Header) {
+	t.Helper()
+	if got := h.Values("Accept"); len(got) != 1 || got[0] != accept {
+		t.Errorf("%s received Accept %q, want %q", who, got, accept)
+	}
+	for k, v := range h {
+		switch k {
+		case "Accept", "User-Agent", "Accept-Encoding":
+		default:
+			t.Errorf("%s received %s %q, want only Accept and the transport's User-Agent and Accept-Encoding", who, k, v)
+		}
+	}
+}
+
+// The client a payer gateway's native responder reaches its system with, used
+// for a read (a GET with no body) carrying every header a forward sets (the
+// configured headers, the bearer, the requester, the leg's correlation id and
+// an edit's disclosure): a redirect to another origin is sent there without
+// any of them, and so is the hop back to the payer's own system.
+func TestNativeResponder_ACrossOriginReadCarriesNoHeaderSetForTheSystem(t *testing.T) {
+	var system *recordingOrigin
+	other := newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
+		http.Redirect(w, r, system.URL+"/Task/back", http.StatusFound)
+	})
+	system = newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
+		if r.URL.Path == "/Task/1" {
+			http.Redirect(w, r, other.URL+"/Task/1", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+json")
+		_, _ = io.WriteString(w, `{"resourceType":"Task","id":"1"}`)
+	})
+	n := NewNativeResponder(smartClientFor(t, system.Server), system.URL, fixedClock, WithBackendHeaders(partnerHeadersForTest()))
+	ctx := withResponderCorrelation(context.Background(), "leg-0123")
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, system.URL+"/Task/1", nil)
+	req.Header.Set("Accept", "application/fhir+json")
+	n.applyBackendHeaders(req)
+	req.Header.Set(RequesterHeader, "payer-net-id")
+	req.Header.Set(EditedHeader, "identity-mapping")
+	setBackendCorrelation(ctx, req)
+	resp, err := n.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want the system's answer at the end of the chain", resp.StatusCode)
+	}
+	sent, away := system.requests(), other.requests()
+	if len(sent) != 2 || len(away) != 1 {
+		t.Fatalf("requests: system %d, other origin %d; want 2 and 1", len(sent), len(away))
+	}
+	requirePartnerHeaders(t, "the payer's own system", sent[0])
+	requireBearer(t, "the payer's own system", sent[0])
+	for _, k := range []string{RequesterHeader, EditedHeader, CorrelationHeader} {
+		if sent[0].Get(k) == "" {
+			t.Errorf("the payer's own system received no %s", k)
+		}
+	}
+	requireOnlyFreshReadHeaders(t, "the other origin", "application/fhir+json", away[0])
+	requireOnlyFreshReadHeaders(t, "the hop back to the payer's own system", "application/fhir+json", sent[1])
+}
+
+// A provider's gateway reading a payer's CDex Task (cdex-task-status) from
+// the provider's own Task endpoint, which redirects the read to another
+// origin that redirects it back, at every level: the provider's system
+// receives the read with the requester, the leg's correlation id and the
+// bearer; the other origin, and the hop back to the provider's system, each
+// receive only what a fresh read of its address carries. The Task at the end
+// of the chain names its member by number, so it is delivered as the read's
+// rule defines it, under the patient that number binds.
+func TestCDexTaskStatus_ACrossOriginRedirectCarriesOnlyTheKeptHeaders(t *testing.T) {
+	task := readTask(t, nil)
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			var system *recordingOrigin
+			other := newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
+				http.Redirect(w, r, system.URL+"/fhir/Task/back", http.StatusFound)
+			})
+			system = newRecordingOrigin(t, func(r *http.Request, w http.ResponseWriter) {
+				if r.URL.Path == "/fhir/Task/t-1" {
+					http.Redirect(w, r, other.URL+"/fhir/Task/t-1", http.StatusFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/fhir+json")
+				_, _ = w.Write(task)
+			})
+			client := smartClientFor(t, system.Server)
+			p := newReadProvider(t, level, newReadTaskSystem(t), nil, func(c *Config) {
+				c.ProviderCDexTaskURL = system.URL + "/fhir/Task"
+				c.ProviderCDexTaskClient = client
+				c.ProviderCDexReadClient = client
+			})
+			ans := p.readOf(t, "Task/t-1")
+			if !ans.framed || ans.status != http.StatusOK || !bytes.Equal(ans.body, task) {
+				t.Fatalf("answer %d (framed %v) %s, want the Task at the end of the chain", ans.status, ans.framed, ans.body)
+			}
+			if want := boundPCI(t, p, "Member123", task); ans.subject != want {
+				t.Errorf("the answer's token names %q, want the bound patient %q", ans.subject, want)
+			}
+			sent, away := system.requests(), other.requests()
+			if len(sent) != 2 || len(away) != 1 {
+				t.Fatalf("requests: provider's system %d, other origin %d; want 2 and 1", len(sent), len(away))
+			}
+			requireBearer(t, "the provider's own system", sent[0])
+			for _, k := range []string{RequesterHeader, CorrelationHeader} {
+				if sent[0].Get(k) == "" {
+					t.Errorf("the provider's own system received no %s", k)
+				}
+			}
+			requireOnlyFreshReadHeaders(t, "the other origin", "application/fhir+json", away[0])
+			requireOnlyFreshReadHeaders(t, "the hop back to the provider's own system", "application/fhir+json", sent[1])
+		})
+	}
 }

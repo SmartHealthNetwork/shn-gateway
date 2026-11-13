@@ -50,15 +50,17 @@ func TestNetworkRefusalConsultsNoPolicy(t *testing.T) {
 }
 
 // SHN's own bridged edit is module 2's: bridgedDecision refuses anything but a
-// valid verdict, with no policy argument, so the bridged check refuses at every
-// level, none included (TestValidateGovernedBridgedRunsAtNone runs it through
-// the choke point).
+// valid verdict or an unchecked one (a code the lane could not check, which
+// says nothing about the bytes), with no policy argument, so the bridged check
+// refuses at every level, none included (TestValidateGovernedBridgedRunsAtNone
+// runs it through the choke point).
 func TestBridgedDecisionIsModuleTwos(t *testing.T) {
 	for _, tc := range []struct {
 		v    Verdict
 		want Decision
 	}{
 		{VerdictValid, Record},
+		{VerdictUnchecked, Record},
 		{VerdictInvalid, Refuse},
 		{VerdictDeeper, Refuse},
 		{VerdictUnavailable, Refuse},

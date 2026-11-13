@@ -50,6 +50,9 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// A payer's attachment-request Task, which its own system sends, is
 		// relayed exactly.
 		k("cdex-attachment-request", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		// A payer's read of its Task, which its own system makes, is relayed
+		// exactly: its body is empty, and its path is its frame's readPath.
+		k("cdex-task-status", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 
 		// Requester to the network, with a request its own workflow makes.
 		k("coverage-eligibility", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):    {Allowed: paAuthored, Builders: []relay.BuilderID{relay.BuilderSDKEligibility}},
@@ -80,37 +83,36 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 			Edits:   []relay.EditID{relay.EditDTRAnswerLineNames, relay.EditDTRAdaptiveAddressRekey},
 		},
 		// A PAS answer reaches the requester's system with a pend's
-		// documentation return address re-keyed to the network.
+		// documentation return address re-keyed to the network; the answer
+		// to a payer's attachment-request Task, with a Location naming the
+		// Task at the payer gateway's base for the provider (E-16).
 		k("pas-claim", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):               paPendRekeyed,
 		k("pas-claim-inquire", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):       paPendRekeyed,
 		k("coverage-eligibility", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):    {Allowed: paRelayed},
 		k("pas-claim-update", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):        paPendRekeyed,
 		k("cdex-attachment-submit", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):  {Allowed: paRelayed},
-		k("cdex-attachment-request", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		k("cdex-attachment-request", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): paTaskLocated,
+		k("cdex-task-status", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):        {Allowed: paRelayed},
 
 		// Recipient to its participant's system, carrying the network's
-		// request. A prior-authorization Bundle and a CDS Hooks request are
-		// relayed exactly, or with the optional payer-identity mapping. A
-		// questionnaire operation's own input is relayed the same way.
-		k("crd-order-dispatch", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
-		},
-		k("crd-order-select", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMapped,
-		},
+		// request. A CDS Hooks request is relayed exactly. A
+		// prior-authorization Bundle, an inquiry and a questionnaire
+		// operation's own input can carry a questionnaire back to the payer:
+		// each is relayed exactly, or with the adaptive addresses this payer
+		// issued restored (E-13).
+		k("crd-order-dispatch", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		k("crd-order-select", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried):   {Allowed: paRelayed},
 		k("dtr-questionnaire-fetch", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paAddressRestored,
 		},
 		k("pas-claim", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paAddressRestored,
 		},
 		k("pas-claim-update", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paAddressRestored,
 		},
-		// An inquiry names an authorization; it is sent to the payer's own
-		// system exactly, or with only the payer identity mapped.
 		k("pas-claim-inquire", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paPayerIdentityMappedRestored,
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paAddressRestored,
 		},
 		// A coverage-eligibility request goes to the payer's own system only when
 		// the payer declares its own eligibility endpoint, and then exactly.
@@ -119,11 +121,14 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// exactly, or with the adaptive addresses this payer issued restored
 		// (E-13).
 		k("cdex-attachment-submit", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {
-			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: []relay.EditID{relay.EditDTRAdaptiveAddressRestore},
+			Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited}, Edits: paAddressRestored,
 		},
 		// A payer's attachment-request Task goes to the provider's own Task
 		// endpoint exactly, or with its payer-url re-keyed (E-11).
 		k("cdex-attachment-request", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): paTaskRekeyed,
+		// A payer's read of its Task goes to the provider's own system
+		// exactly: a read with no body, at the path its frame names.
+		k("cdex-task-status", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 
 		// Recipient to the network, answering. Patient-authored answers are
 		// the gateway's own messages; eligibility is the
@@ -148,6 +153,10 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// The provider's answer to the Task is its own message, relayed; nothing
 		// may author one.
 		k("cdex-attachment-request", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		// The Task the provider's system answers a read with is its own
+		// message, relayed; nothing may author one. The network's 404 for a
+		// Task the payer may not be delivered is this gateway's refusal.
+		k("cdex-task-status", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 	}
 	// An application error from the participant's system is relayed exactly
 	// as it answered (for coverage-eligibility, from a payer that declares its
@@ -155,7 +164,7 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 	// frame. A requester that did not cannot receive it: the gateway checks
 	// the error under this key, then answers with its own refusal under the
 	// refused key, so the participant's bytes never leave it unsealed.
-	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
+	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-status", "coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[k(leg, relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeUpstreamError)] = relay.Rule{Allowed: paRelayed}
 	}
 	return m
@@ -175,18 +184,19 @@ var (
 	// paUpdateInputEdits: a PAS update the gateway builds may also carry a
 	// facility's report E-14 re-pointed at the Claim's patient.
 	paUpdateInputEdits = []relay.EditID{relay.EditEvidenceSubjectRekey, relay.EditFacilityReportSubjectRekey}
-	// paPayerIdentityMapped is a request relayed exactly or with the payer
-	// identity mapped.
-	paPayerIdentityMapped = []relay.EditID{relay.EditPayorEdgeRestamp}
-	// paPayerIdentityMappedRestored is a request that can carry a
-	// questionnaire back to the payer: relayed exactly, with the payer
-	// identity mapped, or with the adaptive addresses this payer issued
-	// restored (E-13), or both.
-	paPayerIdentityMappedRestored = []relay.EditID{relay.EditPayorEdgeRestamp, relay.EditDTRAdaptiveAddressRestore}
+	// paAddressRestored is a request that can carry a questionnaire back to
+	// the payer: relayed exactly, or with the adaptive addresses this payer
+	// issued restored (E-13).
+	paAddressRestored = []relay.EditID{relay.EditDTRAdaptiveAddressRestore}
 	// paPendRekeyed is a PAS answer relayed exactly or with a pend's
 	// payer-url re-keyed to the network return path.
 	paPendRekeyed = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
 		Edits: []relay.EditID{relay.EditPASPendReturnRekey}}
+	// paTaskLocated is the answer to a payer's attachment-request Task relayed
+	// to its system exactly, or with a Location naming the Task at the payer
+	// gateway's base for the provider (E-16), its body unchanged.
+	paTaskLocated = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
+		Edits: []relay.EditID{relay.EditCDexTaskLocationRekey}}
 	// paTaskRekeyed is a payer's attachment-request Task forwarded to the
 	// provider's own system exactly or with its payer-url re-keyed to the
 	// network return path (E-11).

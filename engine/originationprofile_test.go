@@ -272,10 +272,16 @@ var providerOtherRoutes = []string{
 var otherRoleRoutes = map[string][]string{
 	// A payer's own Da Vinci ingress takes its system's attachment-request
 	// Tasks at each provider's base and at its plain Task endpoint, and lists
-	// the bases, behind its own token endpoint.
+	// the bases, behind its own token endpoint; its system reads and vreads a
+	// Task at a provider's base (at the plain endpoint, answered 404), and
+	// each base serves its CapabilityStatement, a provider's base its SMART
+	// configuration too.
 	// The payer's gateway serves the public JWK Set of its CDS Hooks client
 	// key, with or without the ingress.
 	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
+		"GET /cdex/provider/{provider}/Task/{id}", "GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
+		"GET /Task/{id}", "GET /Task/{id}/_history/{vid}", "GET /metadata", "GET /cdex/provider/{provider}/metadata",
+		"GET /cdex/provider/{provider}/.well-known/smart-configuration",
 		"POST /oauth/token", "GET /.well-known/smart-configuration", "GET /cds-client/jwks.json"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},
@@ -774,7 +780,7 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.CDSClientJWKS": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.ProviderCDexReadScope": true, "cfg.CDSClientJWKS": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 

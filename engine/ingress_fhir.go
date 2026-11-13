@@ -32,6 +32,16 @@ func fhirOperationValue(status int, value any) any {
 // envelope is FHIR (respondLegError), so a client reads one shape whichever
 // end refused.
 func refusalOutcome(status int, message string, echoed []string) map[string]any {
+	issues := []map[string]string{{"severity": "error", "code": refusalIssueCode(status), "diagnostics": message}}
+	for _, e := range echoed {
+		issues = append(issues, map[string]string{"severity": "error", "code": "invalid", "diagnostics": e})
+	}
+	return map[string]any{"resourceType": "OperationOutcome", "issue": issues}
+}
+
+// refusalIssueCode is the IssueType code of a refusal's issue, from its
+// status.
+func refusalIssueCode(status int) string {
 	code := "processing"
 	switch status {
 	case http.StatusBadRequest:
@@ -47,9 +57,5 @@ func refusalOutcome(status int, message string, echoed []string) map[string]any 
 	case http.StatusGatewayTimeout:
 		code = "timeout"
 	}
-	issues := []map[string]string{{"severity": "error", "code": code, "diagnostics": message}}
-	for _, e := range echoed {
-		issues = append(issues, map[string]string{"severity": "error", "code": "invalid", "diagnostics": e})
-	}
-	return map[string]any{"resourceType": "OperationOutcome", "issue": issues}
+	return code
 }

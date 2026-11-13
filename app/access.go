@@ -17,7 +17,7 @@ const accessLinePrefix = "gateway: access: "
 func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	line := diagnostics.AccessLine{
 		Time: r.Start.UTC(), CorrelationID: r.CorrelationID, Trace: r.Trace, CallID: r.CallID,
-		Direction: r.Direction, Route: r.Route, Exchange: r.Exchange, Operation: r.Operation,
+		Direction: r.Direction, Route: r.Route, Method: r.Method, Exchange: r.Exchange, Operation: r.Operation,
 		ContractLine: r.ContractLine, AnswerLine: r.AnswerLine, LineCarried: r.LineCarried, Sender: r.Sender, Recipient: r.Recipient,
 		RequestCiphertextHash: r.RequestCiphertextHash, ResponseCiphertextHash: r.ResponseCiphertextHash,
 		Outcome: r.Outcome, Status: r.Status, LatencyMs: r.Latency.Milliseconds(),
@@ -51,6 +51,12 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	line.AnswerError = r.AnswerError
 	line.AuthorizeError = r.AuthorizeError
 	line.InvolvedOmitted = r.InvolvedOmitted
+	if b := r.RequesterBinding; b != nil {
+		line.RequesterBinding = &diagnostics.AccessRequesterBinding{
+			Binding: b.Binding, Involvement: b.Involvement, Unbound: b.Unbound,
+			Outcome: b.Outcome, RefusedBy: b.RefusedBy, Status: b.Status, NotSent: b.NotSent, Resent: b.Resent,
+		}
+	}
 	return line
 }
 

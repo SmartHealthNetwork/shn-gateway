@@ -59,6 +59,16 @@ func classifyDeclared(fc findingContext, res shnsdk.Result, body []byte, line, p
 	return classifyFHIRUnchecked(res, body, line, profile)
 }
 
+// verdictExcuse is the declared-profile excuse the verdict of a check whose
+// lanes held what excuse says was read with: none for a payload whose declared
+// profiles are the gateway's own (classifyDeclared), else excuse.
+func verdictExcuse(fc findingContext, excuse func(string) bool) func(string) bool {
+	if fc.OwnDeclared {
+		return noDeclaredProfile
+	}
+	return excuse
+}
+
 // classifyDeclaredVerdict is classifyDeclared's verdict at no line, as the
 // observer reports a lane's result.
 func classifyDeclaredVerdict(fc findingContext, res shnsdk.Result, body []byte, profile string) Verdict {
@@ -94,6 +104,13 @@ func classifyFHIRExcusing(res shnsdk.Result, body []byte, line, profile string, 
 	}
 	if couldNotRun || len(unresolved) > 0 {
 		return VerdictUnavailable, unresolved
+	}
+	// Every error is a deeper rule's. When each is a code the lane could not
+	// check, or a summary or slice-match consequence of one on its own entry,
+	// the validator found no defect: it could not look (certificationUnchecked,
+	// the one reading certification shares).
+	if _, ok := certificationUncheckedExcusing(res, body, line, profile, excuse); ok {
+		return VerdictUnchecked, nil
 	}
 	return VerdictDeeper, nil
 }

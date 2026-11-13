@@ -316,25 +316,12 @@ func (n *nativeResponder) dtrBaseAt(line string) (string, bool) {
 }
 
 // forwardDTROperation sends a framed DTR operation's own input to the payer's
-// system at path and relays the answer exactly. When carrier is set, the
-// payer identity of every coverage in the input is mapped (when the mapping
-// is configured) and nothing else changes.
-func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract string, in relay.Body, path string, carrier payorEdgeCarrier, leg, label string) (LegResult, error) {
-	const fhirJSON = "application/fhir+json"
-	restore := n.adaptiveRestore(ctx, in)
-	var request relay.Payload
-	if carrier != 0 {
-		mapped, lr, err := n.payorEdgeRequest(ctx, in, carrier, fhirJSON, nil, restore)
-		if err != nil || lr.Status != 0 {
-			return lr, err
-		}
-		request = mapped
-	} else {
-		restored, err := restoredRequest(in, fhirJSON, restore)
-		if err != nil {
-			return LegResult{}, err
-		}
-		request = restored
+// system at path, exactly or with the adaptive addresses this payer issued
+// restored (E-13), and relays the answer exactly.
+func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract string, in relay.Body, path string, leg, label string) (LegResult, error) {
+	request, err := restoredRequest(in, "application/fhir+json", n.adaptiveRestore(ctx, in))
+	if err != nil {
+		return LegResult{}, err
 	}
 	target := n.resolvedURL(ctx, contract, n.dtrBase(), path)
 	if d, ok := verifiedRoundAddress(ctx); ok {
@@ -352,4 +339,18 @@ func (n *nativeResponder) forwardDTROperation(ctx context.Context, contract stri
 	}
 	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers,
 		AddressHeaders: n.addressHeaders(ctx, in, up.body)}, nil
+}
+
+// restoredRequest is in with the restore (E-13) operations applied, or in
+// exactly when there are none.
+func restoredRequest(in relay.Body, contentType string, restore []relay.Op) (relay.Payload, error) {
+	if len(restore) == 0 {
+		return relay.Exact(in, contentType), nil
+	}
+	p, err := relay.Apply(in, contentType, relay.EditDTRAdaptiveAddressRestore, restore...)
+	if err != nil {
+		var none relay.Payload
+		return none, fmt.Errorf("engine: adaptive address restore: %w", err)
+	}
+	return p, nil
 }

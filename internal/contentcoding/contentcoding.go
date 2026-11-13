@@ -177,13 +177,17 @@ const minCoded = 1024
 
 // Compress wraps h: its answer is gzip-coded when the request accepts gzip
 // (RFC 9110 §12.5.3) and the answer is at least minCoded bytes with a body to
-// code. An answer with no body (a HEAD, 1xx, 204 or 304), an event stream, or
-// one h coded itself is written as h wrote it. Every answer states that it
+// code. An answer with no body (1xx, 204 or 304), an event stream, or one h
+// coded itself is written as h wrote it. A HEAD is decided as the GET it
+// stands for (RFC 9110 §9.3.2, §8.6): its handler writes the GET's body, which
+// is coded or not by the same rules and handed to net/http, which sends the
+// head the same bytes give a GET (Content-Encoding, Content-Length when the
+// GET would state one) and none of the body. Every answer states that it
 // varies by Accept-Encoding. A route that carries a reusable credential or
 // session must not be wrapped (the package doc).
 func Compress(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		aw := &answerWriter{ResponseWriter: w, accepts: acceptsGzip(r.Header), head: r.Method == http.MethodHead}
+		aw := &answerWriter{ResponseWriter: w, accepts: acceptsGzip(r.Header)}
 		h.ServeHTTP(aw, r)
 		// Not deferred: a handler that panics has written no answer, and
 		// finishing one would write a 200 for it.
@@ -227,11 +231,11 @@ func acceptsGzip(h http.Header) bool {
 // whether to code it: at minCoded bytes, a flush, or the handler's return.
 type answerWriter struct {
 	http.ResponseWriter
-	accepts, head bool
-	status        int
-	held          []byte
-	decided       bool
-	zw            *gzip.Writer
+	accepts bool
+	status  int
+	held    []byte
+	decided bool
+	zw      *gzip.Writer
 }
 
 func (a *answerWriter) Unwrap() http.ResponseWriter { return a.ResponseWriter }
@@ -251,7 +255,7 @@ func (a *answerWriter) WriteHeader(status int) {
 		return
 	}
 	a.status = status
-	if a.head || status == http.StatusNoContent || status == http.StatusNotModified {
+	if status == http.StatusNoContent || status == http.StatusNotModified {
 		a.decide(false)
 	}
 }

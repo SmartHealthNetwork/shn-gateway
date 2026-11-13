@@ -75,7 +75,7 @@ type levelPayer struct {
 }
 
 // newLevelPayer builds the payer at level. opts are extra native-forward
-// options (the payer identity mapping, the partner's declared lines).
+// options (the partner's declared lines, the version route).
 func newLevelPayer(t *testing.T, level ConformanceEnforcement, opts ...NativeOption) *levelPayer {
 	t.Helper()
 	g, requester := newInboundTestGateway(t, true)
@@ -164,6 +164,8 @@ type payerAnswer struct {
 	header http.Header
 	// name is the transaction type the answer's envelope names.
 	name string
+	// frame is the headers the response frame states (nil when unframed).
+	frame map[string]string
 }
 
 // send delivers body on leg through handleInbound, bound to the covered
@@ -503,7 +505,7 @@ func TestLevelPayerDTRPackage_RequestContent(t *testing.T) {
 			RuleRequestShape, http.StatusBadRequest, "not a Patient reference"},
 		"coverage without a beneficiary beside the subject's": {dtrPackage(own, resourceParam("coverage", `{"resourceType":"Coverage","id":"cov-2","status":"active"}`)),
 			RuleRequestShape, http.StatusBadRequest, "not a Patient reference"},
-		// Without payer identity mapping the request is already routed here.
+		// The request is already routed here.
 		"coverage parameter not a Coverage": {dtrPackage(own, resourceParam("coverage", `{"resourceType":"Patient","id":"`+dtrFrameMember+`"}`)),
 			RuleRequestShape, http.StatusBadRequest, "questionnaire-package coverage parameter is not a Coverage"},
 		"Patient with no id": {dtrPackage(own, resourceParam("referenced", `{"resourceType":"Patient","name":[{"family":"Other"}]}`)),

@@ -296,12 +296,6 @@ type config struct {
 	// PayerDavinciBaseURL — there is nothing to verify against otherwise.
 	PayerDavinciContractVersions []string
 
-	// PayerDavinciPayorOwnRaw / PayerDavinciPayorBackendRaw are the raw
-	// PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND env values ("system|value"),
-	// parsed + validated by loadConfig into PayerDavinciPayorOwn/Backend below. Feeds
-	// engine.WithPayorEdgeIdentity (gateway/engine/payoredge.go). All-or-nothing:
-	// loadConfig refuses boot on a partial set; both empty ⇒ the payer-edge identity
-	// mapping seam is off (verbatim relay, the prior behavior).
 	PayerDavinciBackendHeadersRaw string
 	PayerDavinciBackendHeaders    http.Header
 	// PayerDavinciBackendCorrelationOff stops the leg's id being sent to the
@@ -320,12 +314,7 @@ type config struct {
 	// CoverageEligibilityRequest on. The request is then carried there exactly
 	// and the payer's answer relayed. Unset: the gateway answers eligibility
 	// from the payer's records. Set by PAYER_ELIGIBILITY_URL (payer role only).
-	PayerEligibilityURL         string
-	PayerDavinciPayorOwnRaw     string
-	PayerDavinciPayorBackendRaw string
-	PayerDavinciPayorOwn        shnsdk.PayerIdentifier
-	PayerDavinciPayorBackend    shnsdk.PayerIdentifier
-	PayerDavinciPayorEdge       bool // true iff both env vars were set and parsed clean
+	PayerEligibilityURL string
 
 	// OriginationProfile selects the per-UC origination lane: "demo" keeps the
 	// self-contained demo order shape; "provider-data" originates every UC off the
@@ -368,6 +357,14 @@ type config struct {
 	ProviderCDexScope        string
 	ProviderCDexClientKID    string
 	ProviderCDexClientSecret string // value, not a path (unlike *ClientKey)
+	// PROVIDER_CDEX_READ_SCOPE is the scope the gateway asks the same token
+	// endpoint, with the same client, for to read a Task at the provider's
+	// own Task endpoint (system/Task.r or system/Task.read, as the provider's
+	// authorization server registers it). Set, the provider takes the
+	// payer's read of its Task (cdex-task-status), from shn-gateway v1.12.0;
+	// it requires PROVIDER_CDEX_TASK_URL ending in a Task segment, with no
+	// query or fragment. Read trimmed: a blank value is unset.
+	ProviderCDexReadScope string
 
 	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
 	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
@@ -512,17 +509,6 @@ func splitTrimmed(v string) []string {
 	return out
 }
 
-// parsePayerIdentifier parses a "system|value" env value into a shnsdk.PayerIdentifier
-// (PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND) — fail-closed on anything
-// else (no "|", or an empty system/value either side of it).
-func parsePayerIdentifier(envName, raw string) (shnsdk.PayerIdentifier, error) {
-	system, value, ok := strings.Cut(raw, "|")
-	if !ok || system == "" || value == "" {
-		return shnsdk.PayerIdentifier{}, fmt.Errorf("gateway: %s must be \"system|value\" (both non-empty), got %q", envName, raw)
-	}
-	return shnsdk.PayerIdentifier{System: system, Value: value}, nil
-}
-
 // providerCDexSettings are the PROVIDER_CDEX_* settings, each with whether
 // it is set.
 func providerCDexSettings(cfg config) []struct {
@@ -541,6 +527,7 @@ func providerCDexSettings(cfg config) []struct {
 		{"PROVIDER_CDEX_SCOPE", cfg.ProviderCDexScope != ""},
 		{"PROVIDER_CDEX_CLIENT_KID", cfg.ProviderCDexClientKID != ""},
 		{"PROVIDER_CDEX_CLIENT_SECRET", cfg.ProviderCDexClientSecret != ""},
+		{"PROVIDER_CDEX_READ_SCOPE", cfg.ProviderCDexReadScope != ""},
 	}
 }
 
@@ -559,7 +546,7 @@ func checkProviderCDex(role string, cfg config) error {
 		return nil
 	}
 	if role != "provider" {
-		return fmt.Errorf("gateway: %s is provider-only (role=%q): only a provider takes the payer's attachment request", strings.Join(set, ", "), role)
+		return fmt.Errorf("gateway: %s is provider-only (role=%q): only a provider takes the payer's attachment request and its read of that Task", strings.Join(set, ", "), role)
 	}
 	if cfg.ProviderCDexTaskURL == "" {
 		return fmt.Errorf("gateway: %s set requires PROVIDER_CDEX_TASK_URL, the provider's own Task endpoint", strings.Join(set, ", "))
@@ -576,7 +563,34 @@ func checkProviderCDex(role string, cfg config) error {
 			return fmt.Errorf("gateway: PROVIDER_CDEX_TASK_URL requires %s: the Task is forwarded to the provider's own system only with its own credentials", req.key)
 		}
 	}
-	return checkClientAuthModeAlgs("PROVIDER_CDEX", cfg.ProviderCDexClientKey, cfg.ProviderCDexClientAlg, cfg.ProviderCDexClientKID, cfg.ProviderCDexClientSecret, providerCDexAlgs)
+	if err := checkClientAuthModeAlgs("PROVIDER_CDEX", cfg.ProviderCDexClientKey, cfg.ProviderCDexClientAlg, cfg.ProviderCDexClientKID, cfg.ProviderCDexClientSecret, providerCDexAlgs); err != nil {
+		return err
+	}
+	return checkProviderCDexRead(cfg)
+}
+
+// checkProviderCDexRead is the payer's read of its Task's admission: with
+// PROVIDER_CDEX_READ_SCOPE set, the gateway reads a Task below
+// PROVIDER_CDEX_TASK_URL, which must then end in a Task segment, with no query,
+// no fragment and no dot segment (cdexroute.TaskReadURL). The gateway declares
+// the read exactly when the scope is set, so it refuses to start rather than
+// declare a read it cannot make. Without the scope, any Task endpoint is taken
+// as before.
+func checkProviderCDexRead(cfg config) error {
+	if cfg.ProviderCDexReadScope == "" {
+		return nil
+	}
+	const fix = ": set it to the provider's Task endpoint, e.g. https://ehr.example/fhir/Task"
+	_, err := cdexroute.TaskReadURL(cfg.ProviderCDexTaskURL)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, cdexroute.ErrTaskURLDotSegment):
+		return fmt.Errorf(`gateway: PROVIDER_CDEX_READ_SCOPE set requires PROVIDER_CDEX_TASK_URL with no "." or ".." path segment (%q): remove the dot segments`, cfg.ProviderCDexTaskURL)
+	case errors.Is(err, cdexroute.ErrTaskURLNotAbsolute):
+		return fmt.Errorf("gateway: PROVIDER_CDEX_READ_SCOPE set requires PROVIDER_CDEX_TASK_URL to be an absolute http or https URL with a host (%q)"+fix, cfg.ProviderCDexTaskURL)
+	}
+	return fmt.Errorf("gateway: PROVIDER_CDEX_READ_SCOPE set requires PROVIDER_CDEX_TASK_URL to end in a Task segment, with no query or fragment (%q)"+fix, cfg.ProviderCDexTaskURL)
 }
 
 // providerCDexAlgs are the private_key_jwt algs the provider's Task forward
@@ -640,12 +654,19 @@ func reportCDSServices(stdout io.Writer, services []engine.CDSService, cfg confi
 }
 
 // removedSettings are settings this gateway no longer reads. A deployment that
-// still sets one does not start, so the change in behavior is never silent.
+// still sets one to a non-empty value does not start, so the change in
+// behavior is never silent; an empty value is unset.
 var removedSettings = []struct{ key, replacedBy string }{
 	{"PAYER_DAVINCI_CRD_COVERAGE_BUNDLE", "the payer receives the CDS Hooks request as the provider's system sent it; a coverage prefetch template that is a search is answered with a searchset Bundle"},
 	{"PAYER_DAVINCI_CRD_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_CRD_SERVICE_ID still names one)"},
 	{"PAYER_DAVINCI_DISPATCH_HOOK", "the request's hook is never changed; the payer's CDS service is chosen by the request's hook (PAYER_DAVINCI_DISPATCH_SERVICE_ID still names one)"},
+	{"PAYER_DAVINCI_PAYOR_OWN", payerIdentityMappingRemoved},
+	{"PAYER_DAVINCI_PAYOR_BACKEND", payerIdentityMappingRemoved},
 }
+
+// payerIdentityMappingRemoved is what replaced the payer identity mapping
+// (PAYER_DAVINCI_PAYOR_OWN, PAYER_DAVINCI_PAYOR_BACKEND, edit E-03).
+const payerIdentityMappingRemoved = "the payer's gateway carries the payer identifiers a request names to the payer's own system as sent; that system handles every payer identifier the payer registers on the network"
 
 // ignoredSettings are settings this gateway no longer reads, each with the
 // release from which it changed nothing and what it served. Unlike removedSettings, a
@@ -803,8 +824,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		payerDavinciBackendCorrelationRaw: getenv("PAYER_DAVINCI_BACKEND_CORRELATION"),
 		payerDavinciBackendTimeoutRaw:     getenv("PAYER_DAVINCI_BACKEND_TIMEOUT"),
 		PayerEligibilityURL:               getenv("PAYER_ELIGIBILITY_URL"),
-		PayerDavinciPayorOwnRaw:           getenv("PAYER_DAVINCI_PAYOR_OWN"),
-		PayerDavinciPayorBackendRaw:       getenv("PAYER_DAVINCI_PAYOR_BACKEND"),
 		OriginationProfile:                getenv("ORIGINATION_PROFILE"),
 
 		ProviderDTRNative:      getenv("PROVIDER_DTR_NATIVE") == "true",
@@ -826,6 +845,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderCDexScope:        getenv("PROVIDER_CDEX_SCOPE"),
 		ProviderCDexClientKID:    getenv("PROVIDER_CDEX_CLIENT_KID"),
 		ProviderCDexClientSecret: getenv("PROVIDER_CDEX_CLIENT_SECRET"),
+		ProviderCDexReadScope:    strings.TrimSpace(getenv("PROVIDER_CDEX_READ_SCOPE")),
 
 		ProviderDavinciIngress: getenv("PROVIDER_DAVINCI_INGRESS") != "",
 
@@ -1185,30 +1205,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 	}
 
-	// Payer-edge identity mapping seam (gateway/engine/payoredge.go): all-or-nothing —
-	// a partial set (one env var fat-fingered, the other forgotten) is a hard startup
-	// error, mirroring the exactly-one-mode credential-block precedent above. Both
-	// unset ⇒ the seam stays off (verbatim relay — every existing deployment's
-	// behavior is unaffected).
-	switch ownRaw, backendRaw := cfg.PayerDavinciPayorOwnRaw, cfg.PayerDavinciPayorBackendRaw; {
-	case ownRaw == "" && backendRaw == "":
-		// seam off
-	case ownRaw == "" || backendRaw == "":
-		return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together (both or neither)")
-	default:
-		own, oerr := parsePayerIdentifier("PAYER_DAVINCI_PAYOR_OWN", ownRaw)
-		if oerr != nil {
-			return config{}, oerr
-		}
-		backend, berr := parsePayerIdentifier("PAYER_DAVINCI_PAYOR_BACKEND", backendRaw)
-		if berr != nil {
-			return config{}, berr
-		}
-		cfg.PayerDavinciPayorOwn = own
-		cfg.PayerDavinciPayorBackend = backend
-		cfg.PayerDavinciPayorEdge = true
-	}
-
 	if cfg.ProviderDTRNative && cfg.ProviderDTRPopulateURL == "" {
 		return config{}, fmt.Errorf("gateway: PROVIDER_DTR_NATIVE=true requires PROVIDER_DTR_POPULATE_URL")
 	}
@@ -1260,7 +1256,22 @@ func loadConfig(getenv func(string) string) (config, error) {
 		// Every per-provider base the gateway lists is built under this base:
 		// a base they cannot be built under refuses to boot, so a serving
 		// gateway never lists a base it cannot build.
+		// A base whose path has a dot segment, or that holds a space, a
+		// control character, a character that is not ASCII or another
+		// character outside RFC 3986's set, cannot
+		// begin the Location a created Task is answered with (E-16), which
+		// the core checks by the same rule: it is refused here, with the fix.
 		if _, err := cdexroute.ProviderBase(cfg.PayerDavinciIngressBaseURL, "boot-check"); err != nil {
+			switch {
+			case errors.Is(err, cdexroute.ErrIngressBaseDotSegment):
+				return config{}, fmt.Errorf(`gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: its path has a "." or ".." segment, which no per-provider base or created Task's Location can be built under: remove the dot segments`, cfg.PayerDavinciIngressBaseURL)
+			case errors.Is(err, cdexroute.ErrIngressBaseSpaceOrControl):
+				return config{}, fmt.Errorf("gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: it holds a space or a control character, which a URL cannot carry: percent-encode spaces (%%20) or remove them, and remove any control character", cfg.PayerDavinciIngressBaseURL)
+			case errors.Is(err, cdexroute.ErrIngressBaseNotASCII):
+				return config{}, fmt.Errorf("gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: it holds a character that is not ASCII, which a URL cannot carry: give the host in its ASCII (punycode) form, and percent-encode any other such character", cfg.PayerDavinciIngressBaseURL)
+			case errors.Is(err, cdexroute.ErrIngressBaseNotURLCharacter):
+				return config{}, fmt.Errorf("gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: it holds a character a URL cannot carry (a backslash, a quote, \"<\", \">\", \"{\", \"}\", \"|\", \"^\" or a backtick): percent-encode it or remove it", cfg.PayerDavinciIngressBaseURL)
+			}
 			return config{}, fmt.Errorf("gateway: invalid PAYER_DAVINCI_INGRESS_BASE_URL %q: %v", cfg.PayerDavinciIngressBaseURL, err)
 		}
 		clients, err := loadIngressClientsScoped(cfg.ProviderDavinciIngressClientsFile, engine.TaskWriteScope)
@@ -1958,6 +1969,11 @@ type built struct {
 	// operatedPopulate reports whether build() handed engine.New the operated
 	// $populate populator, recorded for the same reason.
 	operatedPopulate bool
+	// cdexReadScope is the read scope exactly as build() handed it to
+	// engine.New, and cdexReadClient whether it handed it the client the Task
+	// is read with, recorded for the same reason.
+	cdexReadScope  string
+	cdexReadClient bool
 
 	diagnostic *diagnosticSource
 	gateway    *engine.Gateway
@@ -2533,27 +2549,6 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		if cfg.diagnostic != nil {
 			nativeOpts = append(nativeOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
 		}
-		// Payer-edge identity mapping seam (gateway/engine/payoredge.go): both env vars
-		// set (loadConfig's all-or-nothing rule) ⇒ CRD/DTR/PAS re-stamp the Coverage
-		// payor to PayerDavinciPayorBackend. Unset (the
-		// default) ⇒ no option appended, seam off, byte-identical to every existing
-		// deployment.
-		//
-		// Which requests this payer owns is decided against the identities this holder
-		// itself publishes on the converged /holders feed (reg, kept live by the
-		// registrar poller) as well as the configured one: the routing directory is
-		// many-to-many, so a provider routes here on ANY published identity and the
-		// edge must answer on any of them. Nothing is minted — the feed carries the
-		// participant's own attested claims — and the configured value remains an
-		// optional override that governs alone when this gateway cannot see its own
-		// feed entry.
-		if cfg.PayerDavinciPayorEdge {
-			nativeOpts = append(nativeOpts,
-				engine.WithPayorEdgeIdentity(cfg.PayerDavinciPayorOwn, cfg.PayerDavinciPayorBackend),
-				engine.WithPayorEdgePublishedIdentities(reg, bundle.Identity.HolderID,
-					func(note string) { fmt.Fprintf(stdout, "gateway: %s\n", note) }),
-			)
-		}
 		// Stated in every state, so a deployment's eligibility posture can be read
 		// from its boot line.
 		if cfg.PayerEligibilityURL != "" {
@@ -2611,6 +2606,17 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		gwCfg.ProviderCDexTaskURL = cfg.ProviderCDexTaskURL
 		gwCfg.ProviderCDexTaskClient = tc
+		// The payer's read of its Task: a second token, asked for the read
+		// scope, from the same token endpoint and client (loadConfig requires
+		// the endpoint, of the read's shape, with the scope).
+		if cfg.ProviderCDexReadScope != "" {
+			rc, err := providerCDexReadHTTPClient(cfg)
+			if err != nil {
+				return b, fmt.Errorf("gateway: PROVIDER_CDEX_READ_SCOPE: %w", err)
+			}
+			gwCfg.ProviderCDexReadScope = cfg.ProviderCDexReadScope
+			gwCfg.ProviderCDexReadClient = rc
+		}
 	}
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress || cfg.PayerDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
@@ -2929,6 +2935,8 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		enrichNativeRequests: gwCfg.EnrichNativeRequests,
 		fhirServerRead:       gwCfg.FHIRServerRead,
 		operatedPopulate:     operatedPopulate,
+		cdexReadScope:        gwCfg.ProviderCDexReadScope,
+		cdexReadClient:       gwCfg.ProviderCDexReadClient != nil,
 		responder:            gwCfg.Responder,
 
 		diagnostic:      cfg.diagnostic,
@@ -3473,28 +3481,40 @@ const (
 // capabilityDeclaration is what this gateway's system takes as a recipient: the
 // network's legs it compiles for its role, and each one its role takes only
 // once its participant configures it whose setting is set (engine.TakenLegs:
-// the payer's attachment request, with PROVIDER_CDEX_TASK_URL); and, for a
-// payer, the request frames it serves (declaredRequestFrames).
+// the payer's attachment request, with PROVIDER_CDEX_TASK_URL, and the payer's
+// read of its Task, with PROVIDER_CDEX_READ_SCOPE); and the request frames it
+// serves of its own (declaredRequestFrames).
 func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
 	return shnsdk.CapabilityDeclaration{
-		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL}.TakenLegs()),
+		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL, ProviderCDexReadScope: cfg.ProviderCDexReadScope}.TakenLegs()),
 		AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes,
-		RequestFrames:      declaredRequestFrames(cfg.Role),
+		RequestFrames:      declaredRequestFrames(cfg.Role, cfg.ProviderCDexTaskURL != ""),
 	}
 }
 
 // declaredRequestFrames is the request frames a gateway of role declares as
-// its own: a payer's gateway serves every frame this build decodes and
-// v1opsub, since it tags the adaptive addresses it issues, reads a round's
-// operationSubpath and restores the address (E-13). A provider's gateway
-// declares none of its own (nil, sent as nothing), so its registration's set
-// stands. A gateway rolled back to a release that declares none gives back,
-// at its first start, the set this one declared.
-func declaredRequestFrames(role string) []string {
-	if role != "payer" {
-		return nil
+// its own, each with every frame this build decodes:
+//   - a payer's gateway declares v1opsub, since it tags the adaptive
+//     addresses it issues, reads a round's operationSubpath and restores the
+//     address (E-13);
+//   - a provider's gateway that takes the payer's attachment request
+//     (takesCDexTask: PROVIDER_CDEX_TASK_URL is set) declares cdexloc, since
+//     it frames the tail of its system's Location on every 2xx answer to the
+//     Task whose Location lies under that endpoint, and records why when it
+//     frames none (E-16);
+//   - any other gateway declares none of its own (nil, sent as nothing), so
+//     its registration's set stands.
+//
+// A gateway rolled back to a release that declares none gives back, at its
+// first start, the set its registration carried.
+func declaredRequestFrames(role string, takesCDexTask bool) []string {
+	switch {
+	case role == "payer":
+		return append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1OpSub)
+	case role == "provider" && takesCDexTask:
+		return append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameCDexLoc)
 	}
-	return append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1OpSub)
+	return nil
 }
 
 // networkLegs is legs without any leg the SDK does not name: a test profile's,
@@ -3779,6 +3799,26 @@ func providerCDexHTTPClient(cfg config) (*http.Client, error) {
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("Task forward smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
+// providerCDexReadHTTPClient is the client the provider's gateway reads a
+// Task at the provider's own Task endpoint with: the Task forward's SMART
+// config (its token endpoint, client and credential, tagged as the forward
+// is: the read goes to the same endpoint), its token asked for
+// PROVIDER_CDEX_READ_SCOPE. It holds its own token, so neither scope's token
+// is sent for the other's call.
+func providerCDexReadHTTPClient(cfg config) (*http.Client, error) {
+	sc, err := providerCDexSmartConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sc.Scope = cfg.ProviderCDexReadScope
+	cfg.diagnostic.smart(&sc)
+	hc, err := smartauth.NewHTTPClient(sc)
+	if err != nil {
+		return nil, fmt.Errorf("Task read smartauth client: %w", err)
 	}
 	return hc, nil
 }

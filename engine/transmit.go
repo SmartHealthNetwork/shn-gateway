@@ -140,6 +140,12 @@ func (g *Gateway) writeAnswer(w http.ResponseWriter, status int, contentType str
 	for name, value := range headers {
 		w.Header().Set(name, value)
 	}
+	// A header edit's header (relay.HeaderEdited), after the answer's own:
+	// written from the payload alone, as the core's check of the edit, by its
+	// id, passed it.
+	if name, value, ok := p.EditedHeader(); ok {
+		w.Header().Set(name, value)
+	}
 	if k.Role == relay.RoleRequester && k.Direction == relay.DirectionResponse {
 		setEditedHeader(w.Header(), p)
 	}
@@ -149,10 +155,16 @@ func (g *Gateway) writeAnswer(w http.ResponseWriter, status int, contentType str
 }
 
 // writeJSON writes a JSON answer the gateway builds itself. A FHIR operation
-// route (fhirOperationWriter) answers an error as an OperationOutcome.
+// route (fhirOperationWriter) answers an error as an OperationOutcome. An error
+// is a refusal (writeRefusal): it states delivery once a leg of the call was
+// answered.
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if status >= http.StatusBadRequest {
+		writeRefusal(w, status, v, "")
+		return
+	}
 	contentType := "application/json"
-	if _, ok := w.(*fhirOperationWriter); ok {
+	if isFHIROperation(w) {
 		v = fhirOperationValue(status, v)
 		contentType = "application/fhir+json"
 	}
@@ -162,10 +174,56 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	} else {
 		b = nil
 	}
-	if status < http.StatusBadRequest {
-		writeLocalJSON(w, status, contentType, b)
-		return
+	writeLocalJSON(w, status, contentType, b)
+}
+
+// writeRefusal writes v, an error answer (status 400 or more) this gateway
+// builds itself, as writeJSON always has: on a FHIR operation route the
+// OperationOutcome (fhirOperationValue), elsewhere v as JSON. It is the one
+// writer of every such answer (TestRefusals_AllGoThroughWriteRefusal), so it
+// decides by structure whether the answer states delivery:
+//   - delivered is what the failure itself says (relayOriginationError's
+//     reading of a leg's error, through writeDeliveredMaybe), "" for none;
+//   - once a leg of the call has handed back an answer verified as its
+//     recipient's own (recipientMayHaveActed), a recipient may have acted on
+//     the request, so the answer is delivered yes whatever refused it and
+//     whatever delivered says, at every level and on every route;
+//   - a delivered answer carries HubDeliveredHeader and, in its body, the
+//     marks markDelivered adds to it, its status and every member it had kept.
+//
+// A refusal before any leg was answered states no delivery: it is written as
+// before.
+func writeRefusal(w http.ResponseWriter, status int, v any, delivered deliveredMaybe) {
+	if recipientMayHaveActed(w) {
+		delivered = deliveredYes
 	}
+	contentType := "application/json"
+	if isFHIROperation(w) {
+		v = fhirOperationValue(status, v)
+		contentType = "application/fhir+json"
+	}
+	b, err := json.Marshal(v)
+	if err == nil {
+		b = append(b, '\n') // the json.Encoder framing every caller has always sent
+	} else {
+		b = nil
+	}
+	if delivered != "" {
+		w.Header().Set(HubDeliveredHeader, string(delivered))
+		if marked, problem := markDelivered(b, status, delivered); marked != nil {
+			b = marked
+			if problem && problemDetailsRoute(w) {
+				contentType = "application/problem+json"
+			}
+		}
+	}
+	writeRefusalBody(w, status, contentType, b)
+}
+
+// writeRefusalBody writes b, a refusal this gateway built itself, as its
+// answer: authored by the gateway's refusal builder and transmitted under the
+// writer's refusal key, so the exchange record holds what was sent.
+func writeRefusalBody(w http.ResponseWriter, status int, contentType string, b []byte) {
 	k, g := refusalKey(w)
 	p, perr := relay.Authored(relay.BuilderGatewayRefusal, b, contentType)
 	if perr == nil {

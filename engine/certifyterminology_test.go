@@ -25,12 +25,14 @@ import (
 // as the lane wrote it so a mutation changes only what it names.
 type outcomeIssues []map[string]any
 
-// recordedOutcome is rec's one answer to body (at any profile), as issues.
+// recordedOutcome is rec's one answer to body asked against a profile, as
+// issues. A request bundle's per-entry reading also asks the bundle at base
+// FHIR (no profile); that answer is not this one.
 func recordedOutcome(t *testing.T, rec *testrecord.Recording, body []byte) outcomeIssues {
 	t.Helper()
 	var found []byte
 	for _, ex := range rec.Exchanges {
-		if jsonEqualForTest(ex.Request.Body, body) {
+		if len(ex.Request.Query["profile"]) > 0 && jsonEqualForTest(ex.Request.Body, body) {
 			if found != nil {
 				t.Fatal("two recorded answers for the body")
 			}

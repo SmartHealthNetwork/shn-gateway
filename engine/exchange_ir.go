@@ -55,6 +55,14 @@ type Content struct {
 	// beside Operation; "" for every other request. It is sent only to a
 	// recipient that declares shnsdk.RequestFrameV1OpSub.
 	Subpath string
+	// ReadPath is the path of a read below the recipient's base
+	// (shnsdk.FrameHeaderReadPath), as the participant's system sent it and
+	// shnsdk.ParseCDexTaskReadPath read it: set only on a leg whose catalog
+	// row says its request frame carries one (legSpec.ReadPath), whose
+	// request has no body. A request that names one is always sent in a
+	// request frame carrying it: a recipient that does not declare the leg is
+	// never routed it, so no request-frame token gates it.
+	ReadPath string
 	// MediaType is the participant's declared FHIR JSON media type for a
 	// carried request (mediatype.go), stamped as the request frame's
 	// Content-Type whenever the request is framed; "" keeps

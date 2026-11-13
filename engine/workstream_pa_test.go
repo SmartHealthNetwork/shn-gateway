@@ -22,6 +22,7 @@ func TestPACatalog_Ops(t *testing.T) {
 		"pas-claim-inquire":       "pas-inquire",
 		"cdex-attachment-submit":  "cdex-attachment-submit",
 		"cdex-attachment-request": "cdex-attachment-request",
+		"cdex-task-status":        "cdex-task-read",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))
@@ -40,13 +41,14 @@ func TestPACatalog_Ops(t *testing.T) {
 
 // TestPACatalog_ReqFrames pins each PA leg's request frame: every leg a
 // provider originates is framed provider-tpo, and the payer's attachment
-// request, the one leg a payer originates, payer-payment. The inbound
+// request and its read of that Task, the two legs a payer originates,
+// payer-payment. The inbound
 // side binds the token to the catalog row's frame (handleInbound), so a frame
 // changes only here and in the taxonomy together.
 func TestPACatalog_ReqFrames(t *testing.T) {
 	for legType, spec := range paCatalog {
 		want := "provider-tpo"
-		if legType == legCDexRequest {
+		if legType == legCDexRequest || legType == legCDexTaskStatus {
 			want = "payer-payment"
 		}
 		if spec.ReqFrame != want {
@@ -136,6 +138,7 @@ func TestPACatalog_Pinned(t *testing.T) {
 		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
 		"cdex-attachment-submit":  {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "cdex-attachment-submit", RespOp: "cdex-attachment-submit-response", Scope: "attachment-only", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-attachment-submit", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
 		"cdex-attachment-request": {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-attachment-request", RespOp: "cdex-attachment-request-response", Scope: "attachment-request-only", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-attachment-request", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexTaskURL, AnswerEnvelope: "fhir"},
+		"cdex-task-status":        {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-read", RespOp: "cdex-task-read-response", Scope: "task-status-only", Physics: readOnly, Seam: "provider-native", WireName: "pa.cdex-task-status", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true, AnswerEnvelope: "fhir"},
 	}
 	if !reflect.DeepEqual(paCatalog, want) {
 		for tx := range want {
@@ -170,8 +173,11 @@ func TestAnsweredLegs_AttachmentRequestNotDeclared(t *testing.T) {
 	for _, catalog := range workstreamCatalogs() {
 		for leg, spec := range catalog {
 			want := ""
-			if leg == legCDexRequest {
+			switch leg {
+			case legCDexRequest:
 				want = settingProviderCDexTaskURL
+			case legCDexTaskStatus:
+				want = settingProviderCDexReadScope
 			}
 			if spec.TakenWhenSet != want {
 				t.Errorf("%s: TakenWhenSet = %q, want %q", leg, spec.TakenWhenSet, want)
@@ -195,8 +201,10 @@ func TestAnsweredLegs_AttachmentRequestNotDeclared(t *testing.T) {
 	}
 	for role, want := range before {
 		got := AnsweredLegs(role)
-		if slices.Contains(got, legCDexRequest) {
-			t.Errorf("AnsweredLegs(%s) declares %s", role, legCDexRequest)
+		for _, leg := range []string{legCDexRequest, legCDexTaskStatus} {
+			if slices.Contains(got, leg) {
+				t.Errorf("AnsweredLegs(%s) declares %s", role, leg)
+			}
 		}
 		got = slices.DeleteFunc(got, func(leg string) bool { return profile[leg] })
 		if !slices.Equal(got, want) || got == nil {

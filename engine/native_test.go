@@ -267,7 +267,7 @@ func TestNativeForward_NeverCallsEgressAdapt(t *testing.T) {
 // through after Handle's version rule: the PA adapter's forwards and what they
 // post with.
 var nativeForwardFuncs = []string{
-	"nativeResponder.Handle", "nativeResponder.post", "nativeResponder.postVia", "paWorkstream.forward",
+	"nativeResponder.Handle", "nativeResponder.post", "nativeResponder.postVia", "nativeResponder.sendVia", "paWorkstream.forward",
 	"forwardDTRQuestionnaireFetch", "nativeResponder.forwardCRD", "nativeResponder.forwardDTROperation",
 	"nativeResponder.forwardEligibility", "nativeResponder.handlePASClaimNative",
 	"nativeResponder.handlePASClaimUpdateNative", "nativeResponder.handlePASInquireNative",

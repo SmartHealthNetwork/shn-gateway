@@ -122,6 +122,28 @@ var paLineMarkers = map[string]bool{
 	certificationDTR + "qr-coverage":                      true,
 }
 
+// undeclaredAnswerProfile is the line profile a PAS answer that declares no
+// profile is judged against (owner decision D47): a response Bundle against
+// the PAS response Bundle profile (the inquiry one on an inquiry leg), a bare
+// ClaimResponse against profile-claimresponse (profile-claiminquiryresponse),
+// each without a version, so each candidate line's lane resolves its own.
+// Nothing else: a DTR answer's profile is the check's own, and the PAS 2.2.1
+// inquiry answer's Parameters wrapper has no profile.
+func (c paCertification) undeclaredAnswerProfile(contract string, payload []byte, line, leg string) (string, bool) {
+	if contract != "pa.pas" {
+		return "", false
+	}
+	species := c.species(payload)
+	if species != "PASResponseBundle" && species != "ClaimResponse" {
+		return "", false
+	}
+	p, ok := c.profile(species, line, leg)
+	if !ok {
+		return "", false
+	}
+	return canonicalOf(p), true
+}
+
 // candidateGroups: a DTR $questionnaire-package answer names its line by its
 // parameters. The output Parameters profile slices parameter.name open at
 // every line, so a line of the other name family leaves those parameters

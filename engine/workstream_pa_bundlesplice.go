@@ -53,17 +53,8 @@ func spliceBundleEntries(body []byte, had int, entries []bundleEntryBytes) ([]by
 	for _, e := range entries {
 		// Only JSON's own white space (RFC 8259) surrounds the record.
 		r := bytes.Trim(e.resource, " \t\r\n")
-		if !utf8.Valid(r) {
-			return nil, fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried)
-		}
-		if loneSurrogateEscape(r) {
-			return nil, fmt.Errorf("%w: it holds a lone surrogate escape", errRecordNotCarried)
-		}
-		if len(r) == 0 || r[0] != '{' || !json.Valid(r) {
-			return nil, fmt.Errorf("%w: it is not exactly one JSON object", errRecordNotCarried)
-		}
-		if oneSpellingPerMember(r) != nil {
-			return nil, fmt.Errorf("%w: it names a member twice, or in another case", errRecordNotCarried)
+		if why := uncarriableRecordBytes(r); why != "" {
+			return nil, fmt.Errorf("%w: it %s", errRecordNotCarried, why)
 		}
 		added = append(added, ',')
 		added = append(added, `{"fullUrl":`...)
@@ -92,6 +83,24 @@ func spliceBundleEntries(body []byte, had int, entries []bundleEntryBytes) ([]by
 	}
 	closeAt += start
 	return slices.Concat(body[:closeAt], added, body[closeAt:]), nil
+}
+
+// uncarriableRecordBytes is why r, a record's bytes, cannot be carried as
+// read (spliceBundleEntries), or "" when it can: it is not UTF-8, holds a lone
+// surrogate escape, is not exactly one JSON object, or names a member twice in
+// an object, whatever its case under Unicode case folding.
+func uncarriableRecordBytes(r []byte) string {
+	switch {
+	case !utf8.Valid(r):
+		return "is not UTF-8"
+	case loneSurrogateEscape(r):
+		return "holds a lone surrogate escape"
+	case len(r) == 0 || r[0] != '{' || !json.Valid(r):
+		return "is not exactly one JSON object"
+	case oneSpellingPerMember(r) != nil:
+		return "names a member twice, or in another case"
+	}
+	return ""
 }
 
 // topLevelValueSpan returns the byte span [start, end) of member key's value

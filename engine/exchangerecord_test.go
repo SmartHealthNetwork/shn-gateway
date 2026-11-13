@@ -296,6 +296,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 	}{
 		{"replay", hubAnswers{status: 409, reason: "replay detected", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
 		{"large envelope budget", hubAnswers{status: 503, reason: "large envelope budget exhausted", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
+		{"a Hub instance not yet ready", hubAnswers{status: 503, reason: "registry not yet loaded", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"authority", hubAnswers{status: 403, reason: "authz token verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"authority, the token's patient", hubAnswers{status: 403, reason: "authz token's patient does not fit the leg", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"authentication", hubAnswers{status: 401, reason: "assertion verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthentication},
@@ -303,7 +304,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"unknown leg", hubAnswers{status: 400, reason: "unknown transaction type", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"answer's leg", hubAnswers{status: 502, reason: "unknown transaction type", delivered: "yes"}, ExchangeRefused, RefusedByHub, RefusalIntegrity},
 		{"integrity", hubAnswers{status: 502, reason: "payload hash mismatch", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalIntegrity},
-		{"audit", hubAnswers{status: 502, reason: "audit append failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAudit},
+		{"audit", hubAnswers{status: 503, reason: "audit append failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAudit},
 		{"stale timestamp", hubAnswers{status: 400, reason: "stale or future timestamp", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalReplay},
 		{"involved refused", hubAnswers{status: 400, reason: "involved patients refused: another patient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"a leg the recipient does not take", hubAnswers{status: 422, reason: "the recipient does not take cdex-attachment-submit: it declares no legs, and cdex-attachment-submit is since 1.1.0", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
@@ -321,6 +322,7 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"recipient not reached", hubAnswers{status: 502, reason: "forward to recipient failed: the recipient could not be reached", delivered: "no"}, ExchangeUnreachable, "", ""},
 		// Not the Hub's route handler: a load balancer in front of it.
 		{"load balancer 502", hubAnswers{status: 502, reason: "Bad Gateway"}, ExchangeOther, "", ""},
+		{"an unmarked 503 is not the Hub's, whatever its reason says", hubAnswers{status: 503, reason: "registry not yet loaded"}, ExchangeOther, "", ""},
 		{"load balancer 403", hubAnswers{status: 403, reason: "Forbidden"}, ExchangeUnreachable, "", ""},
 		{"hub not reached", hubAnswers{fail: true}, ExchangeUnreachable, "", ""},
 	}
@@ -372,13 +374,16 @@ func TestExchangeRecord_Panics(t *testing.T) {
 	}
 }
 
-// Unset, the seam is not there: the handler gets the writer it was given.
+// Unset, the seam is not there: the handler gets the writer it was given,
+// under only the call's delivery mark, which a requester's call has whether
+// or not its exchange is recorded (deliveryMark).
 func TestExchangeRecord_UnsetIsAbsent(t *testing.T) {
 	g := &Gateway{}
 	w := httptest.NewRecorder()
 	g.recordExchange(RoutePAS, DirectionIngress, func(got http.ResponseWriter, r *http.Request) {
-		if got != http.ResponseWriter(w) || exchangeOf(r.Context()) != nil {
-			t.Fatal("the unset seam wrapped the call")
+		d, ok := got.(*deliveryWriter)
+		if !ok || d.ResponseWriter != http.ResponseWriter(w) || exchangeOf(r.Context()) != nil || exchangeOfWriter(got) != nil {
+			t.Fatal("the unset seam wrapped the call: want only the delivery mark's writer")
 		}
 	})(w, httptest.NewRequest(http.MethodPost, "/", nil))
 }
@@ -1477,6 +1482,27 @@ func TestExchangeRecord_SettlingRules(t *testing.T) {
 	}
 }
 
+// A Hub instance that has not yet read the network's membership: its caller
+// gets the Hub's 503 with its reason and wait, and the record names routing.
+func TestExchangeRecord_AHubNotYetReadyAnswersItsCaller(t *testing.T) {
+	t.Parallel()
+	env := newInProcessExchange(t)
+	var got exchangeRecords
+	env.originator.cfg.ExchangeObserved = got.observe
+	env.originator.cfg.Client = &http.Client{Transport: hubAnswers{next: env.substrate, status: http.StatusServiceUnavailable, reason: "registry not yet loaded", delivered: "no"}}
+	w := httptest.NewRecorder()
+	env.originator.ingressRoute(RouteCRD)(w, env.crdIngressRequest(t))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "hub refused the exchange: registry not yet loaded") {
+		t.Fatalf("answer %d %s, want the Hub's 503 with its reason", w.Code, w.Body)
+	}
+	if got := w.Header().Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After %q, want the Hub's wait, 3 when it states none", got)
+	}
+	if rec := got.only(t); rec.Outcome != ExchangeRefused || rec.RefusedBy != RefusedByHub || rec.Rule != RefusalRouting {
+		t.Fatalf("record %s %s/%s, want refused hub/routing", rec.Outcome, rec.RefusedBy, rec.Rule)
+	}
+}
+
 // ---- the Hub reason table, timeouts, the DTR leg and 1xx ----
 
 // Every Hub reason the record names a rule for, with that rule. The strings
@@ -1496,6 +1522,7 @@ func TestHubRules(t *testing.T) {
 		"unknown sender": RefusalAuthentication, "response leg sender mismatch": RefusalIntegrity,
 		"response leg authorization failed": RefusalAuthority, "replay detected": RefusalReplay,
 		"unknown recipient": RefusalRouting, "response audit append failed": RefusalAudit,
+		"registry not yet loaded": RefusalRouting,
 	}
 	for reason, rule := range want {
 		if hubRules[reason] != rule {
@@ -2568,12 +2595,12 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 		return out
 	}
 	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", ExchangeOther}
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", "cdex-task-status", ExchangeOther}
 	wantKinds = append(wantKinds, profileLegs()...)
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

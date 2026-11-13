@@ -54,11 +54,9 @@ func parseConformantPASSubjects(bundleJSON []byte) (conformantPASSubjects, int, 
 // repeated member name is read one way only); a Claim with no patient (the
 // subject, RuleSubjectPCI); and, when coverageAddresses is set, a bundle with
 // no Coverage. coverageAddresses says the Coverage's payor addresses this
-// request: the provider ingress routes it by that payor (recipientForWith),
-// and a payer whose identity mapping is configured addresses its own system by
-// it (locatePayorEdge). A payer without that mapping receives a request that
-// is already routed, so there no Coverage at all is the request's own shape
-// (RuleRequestShape), handed to refuses. The other content defects, handed to
+// request: the provider ingress routes it by that payor (recipientForWith). A
+// payer receives a request that is already routed, so there no Coverage at all
+// is the request's own shape (RuleRequestShape), handed to refuses. The other content defects, handed to
 // refuses: no order and a Coverage with no beneficiary (RuleRequestShape: the
 // subject is Claim.patient and routing reads Coverage.payor, so neither needs
 // them), and an order, Coverage, QuestionnaireResponse or DiagnosticReport that
@@ -837,19 +835,16 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 // keys the pend ledger; "" on every reject. Status 0
 // = accept.
 //
-// A bundle with no Coverage is the request's own shape (RuleRequestShape) on a payer
-// without identity mapping; with the mapping configured it refuses at every level,
-// because the mapping addresses the payer's own system by the Coverage's payor.
+// A bundle with no Coverage is the request's own shape (RuleRequestShape): the request is
+// already routed here.
 //
 // The subject (Claim.patient, bound by this payer's own system, the unknown-member setting
 // applying inside resolveSubjectPCI) and a bundle that cannot be read refuse at every
 // level; the bundle's own shape and consistency (readConformantPASSubjects) are not checked at
 // none, recorded at observe and refused at strict. Below strict the bundle is bound to Claim.patient and forwarded as sent.
 func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byte) (memberRef, subjectPCI string, status int, msg string) {
-	// The request is already routed here. No Coverage is its own shape unless
-	// this payer's identity mapping addresses its own system by the Coverage's
-	// payor.
-	s, status, msg := readConformantPASSubjects(bundleJSON, g.mapsPayerIdentity(), func(rule string) bool {
+	// The request is already routed here, so no Coverage is its own shape.
+	s, status, msg := readConformantPASSubjects(bundleJSON, false, func(rule string) bool {
 		return g.guard(ctx, KindContent, rule, bundleJSON)
 	})
 	if status != 0 {

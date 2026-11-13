@@ -169,7 +169,8 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, in.sorID, member)
 	if err != nil {
 		// Answered as failEvidenceLinkage answers it: evidence the gateway's
-		// own edit cannot carry 422, a record it could not prepare 500, a read
+		// own edit cannot carry 422, a record it could not prepare 500, a
+		// record the system answered as something else 502 naming it, a read
 		// the system failed to answer with its own status and reason, anything
 		// else 502.
 		if status, why, ok := evidenceFidelityRefusal(err); ok {
@@ -181,12 +182,19 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 			return out, http.StatusInternalServerError, err.Error(), err
 		}
 		status, msg := http.StatusBadGateway, "PAS evidence linkage failed"
+		var unreadable *evidenceUnreadableError
 		var readErr *SoRReadError
-		if errors.As(err, &readErr) {
+		switch {
+		case errors.As(err, &unreadable):
+			msg += ": " + unreadable.Error()
+		case errors.As(err, &readErr):
 			var why string
 			status, why = SoRFailureResponse(err)
 			msg += ": " + why
 		}
+		// Anything else is recorded as the provider gateway's own refusal
+		// under no named rule, whatever legs came before it
+		// (TestProviderData_TheDispatchRecordsItsOwnEvidenceRefusal).
 		return out, status, msg, err
 	}
 	// This helper owns the pas-claim leg wholesale — a single-shot submit+resolve —

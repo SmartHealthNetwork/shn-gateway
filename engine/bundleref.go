@@ -163,9 +163,7 @@ func routingOrganization(ids []shnsdk.PayerIdentifier) json.RawMessage {
 // urn:uuid) names the entry whose fullUrl equals it, and a relative "[type]/[id]"
 // names the entry whose resource has that type and id, whatever its fullUrl.
 // A version-specific (_history) or otherwise differently spelled reference
-// names no entry. The payer-identity mapping (relaylocate.go) matches payor
-// and insurer references by the same rule; it refuses several matches, because
-// it rewrites the identity of the one it resolves.
+// names no entry.
 func entryAnswers(ref, fullURL, typ, id string) bool {
 	return (fullURL != "" && fullURL == ref) || (typ != "" && id != "" && ref == typ+"/"+id)
 }

@@ -169,7 +169,7 @@ func TestSettingSet_AnUnknownSettingIsUnset(t *testing.T) {
 		t.Fatal("settingSet reads only the settings this engine holds")
 	}
 	for leg, setting := range LegsTakenWhenSet() {
-		probe := Config{Role: "provider", ProviderCDexTaskURL: "x"}
+		probe := Config{Role: "provider", ProviderCDexTaskURL: "x", ProviderCDexReadScope: "x"}
 		if !probe.settingSet(setting) {
 			t.Errorf("%s's setting %q is one settingSet cannot read: the leg could never be taken", leg, setting)
 		}

@@ -171,6 +171,36 @@ func TestScenarioClients(t *testing.T) {
 	}
 }
 
+// TestHTTPResult_CarriesTheAnswersHeaders: both transports (the bearer POST
+// and the bearer-less /scenario POST) return the answer's headers with its
+// status and body, so a caller reads a header that states something by
+// structure (here X-SHN-Delivered and the media type) from the result.
+func TestHTTPResult_CarriesTheAnswersHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.Header().Set("X-SHN-Delivered", "yes")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"error":"refused"}`))
+	}))
+	defer srv.Close()
+	d, _ := testDriver(t, srv)
+	d.cfg.ProviderDataURL = srv.URL
+	bearer, err := d.PostCRD([]byte(`{"hook":"order-sign"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario, err := d.RunProviderDataScenario("/scenario/dispatch", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, res := range map[string]HTTPResult{"bearer POST": bearer, "scenario POST": scenario} {
+		if res.Status != http.StatusUnprocessableEntity || string(res.Body) != `{"error":"refused"}` ||
+			res.Header.Get("X-SHN-Delivered") != "yes" || res.Header.Get("Content-Type") != "application/problem+json" {
+			t.Fatalf("%s: status %d header %v body %s, want the answer's status, headers and body", name, res.Status, res.Header, res.Body)
+		}
+	}
+}
+
 // TestCRDServiceID: a request goes to the ingress service advertised for its
 // hook; any other request goes to the order-sign service, which refuses it.
 func TestCRDServiceID(t *testing.T) {

@@ -48,6 +48,8 @@ func (paWorkstream) answer(leg string) answerHandler {
 		return paAddressIssuer((*Gateway).handleCDexSubmitInbound)
 	case "cdex-attachment-request":
 		return (*Gateway).handleCDexRequestInbound
+	case "cdex-task-status":
+		return (*Gateway).handleCDexTaskReadInbound
 	}
 	return nil
 }

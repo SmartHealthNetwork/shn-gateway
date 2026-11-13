@@ -92,13 +92,21 @@ func TestParse_ReadsASubjectFromTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a leg flagged from-answer is refused: %v", err)
 	}
-	flagged := 0
-	for _, l := range tx.Legs {
-		if l.FromAnswer() {
-			flagged++
+	flaggedIn := func(tx Taxonomy) []string {
+		var out []string
+		for _, l := range tx.Legs {
+			if l.FromAnswer() {
+				out = append(out, l.TransactionType)
+			}
 		}
+		return out
 	}
-	if flagged != 1 {
-		t.Fatalf("%d legs report a subject from the answer, want the 1 flagged", flagged)
+	// The shipped taxonomy flags the payer's read of its Task alone; the
+	// body above flags one leg more.
+	if got := flaggedIn(PA()); len(got) != 1 || got[0] != "cdex-task-status" {
+		t.Fatalf("the shipped taxonomy flags %v, want [cdex-task-status]", got)
+	}
+	if got := flaggedIn(tx); len(got) != 2 {
+		t.Fatalf("%v report a subject from the answer, want the shipped leg and the 1 flagged", got)
 	}
 }

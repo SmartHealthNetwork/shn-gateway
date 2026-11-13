@@ -737,7 +737,8 @@ func TestRefusalRouteInfoCarriesStructuredFields(t *testing.T) {
 }
 
 // A validate.result reports a check that could not run as the validator
-// unavailable, not as a verdict on the payload; a real error beside it is one.
+// unavailable, and one that could not check a code as unchecked, not as a
+// verdict on the payload; a real error beside either is one.
 func TestObserver_ACheckThatCouldNotRunIsNotInvalid(t *testing.T) {
 	timeout := regexTimeoutIssue(regexTimeoutURL)
 	for _, tc := range []struct {
@@ -754,6 +755,7 @@ func TestObserver_ACheckThatCouldNotRunIsNotInvalid(t *testing.T) {
 		{"could not run beside a deeper error", regexResult(timeout, regexErr("Terminology_TX_NoValid_1_CC", "Bundle.entry[1].resource.maritalStatus", "x")), nil, "validator unavailable"},
 		{"could not run with the summary on its entry", regexResult(regexErr(summaryProfileNoMatch, "Bundle.entry[0].resource", "did not match"), timeout), nil, "validator unavailable"},
 		{"a profile regex that timed out", regexResult(regexErr(validatorissue.RegexTimedOut, regexTimeoutURL, "x")), nil, "validator unavailable"},
+		{"only a code the lane could not check", regexResult(reasonCodeGap("Bundle.entry[0].resource.code")...), nil, "unchecked"},
 		{"the validator did not answer", shnsdk.Result{}, context.DeadlineExceeded, "validator unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

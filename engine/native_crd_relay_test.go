@@ -277,19 +277,16 @@ func TestNativeCRD_HookNeverRewritten(t *testing.T) {
 			}
 		})
 	}
-	t.Run("with the payer identity mapped, only the identity changes", func(t *testing.T) {
-		own := shnsdk.PayerIdentifier{System: "urn:shn:payer", Value: "OWN"}
-		backend := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00001"}
+	t.Run("a prefetch coverage naming any payer is sent exactly", func(t *testing.T) {
 		p := newCDSPayer(t, referencePayerServices...)
-		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil, WithPayorEdgeIdentity(own, backend))
+		n := NewNativeResponder(p.srv.Client(), p.srv.URL, nil)
 		for _, hook := range []string{"order-sign", "order-dispatch"} {
 			req := []byte(`{"hook":"` + hook + `","context":{"patientId":"p1"},"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1","payor":[{"identifier":{"system":"urn:shn:payer","value":"OWN"}}]}}}`)
 			if res, err := n.Handle(context.Background(), legFor(hook), "c", "pci", req); err != nil || res.Status != 0 {
 				t.Fatalf("%s: %v %+v", hook, err, res)
 			}
-			want := bytes.Replace(bytes.Replace(req, []byte("urn:shn:payer"), []byte(backend.System), 1), []byte(`"OWN"`), []byte(`"00001"`), 1)
-			if sent := p.sent(hook + "-crd"); len(sent) != 1 || !bytes.Equal(sent[0], want) {
-				t.Fatalf("%s: the payer received %q\nwant %q", hook, sent, want)
+			if sent := p.sent(hook + "-crd"); len(sent) != 1 || !bytes.Equal(sent[0], req) {
+				t.Fatalf("%s: the payer received %q\nwant the request exactly", hook, sent)
 			}
 		}
 	})
@@ -350,6 +347,13 @@ func TestNativeCRD_EmbeddedValidationObservesOnly(t *testing.T) {
 			}
 			return shnsdk.Result{Valid: true}, nil
 		}, "invalid"},
+		{"only a code the lane could not check", func(b []byte) (shnsdk.Result, error) {
+			if bytes.Contains(b, []byte(covInfo)) {
+				gap := reasonCodeGap("DeviceRequest.extension[0].extension[0].value.ofType(CodeableConcept)")
+				return shnsdk.Result{Issues: []string{gap[0].Diagnostics, gap[1].Diagnostics}, Details: gap}, nil
+			}
+			return shnsdk.Result{Valid: true}, nil
+		}, "unchecked"},
 		{"valid", func([]byte) (shnsdk.Result, error) { return shnsdk.Result{Valid: true}, nil }, "valid"},
 	} {
 		for _, tail := range embeddedValidationTails {

@@ -41,10 +41,11 @@ type LegResult struct {
 	// AnswerHeaders are the headers the network carries of that answer, as it
 	// gave them. An answer this gateway built states none.
 	AnswerHeaders map[string]string
-	// AddressHeaders are the address headers a payer gateway states on a 2xx
-	// answer to a framed DTR operation (operationBase, operationAddressTags),
-	// framed for the requester's gateway only: never written to a
-	// participant.
+	// AddressHeaders are the address headers a recipient's gateway states on
+	// a 2xx answer (addressHeaderNames): a payer's on a framed DTR operation's
+	// answer (operationBase, operationAddressTags), a provider's on its answer
+	// to a payer's Task (taskLocation), framed for the requester's gateway
+	// only: never written to a participant.
 	AddressHeaders map[string]string
 	Status         int          // connector-signalled HTTP outcome (409/422); 0 = proceed
 	Message        string       // body for a non-zero Status

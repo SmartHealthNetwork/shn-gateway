@@ -165,7 +165,7 @@ type crdEmbeddedValidation struct {
 	Path         string `json:"path"`
 	ResourceType string `json:"resourceType"`
 	Line         string `json:"line"`
-	Outcome      string `json:"outcome"` // valid | invalid | unavailable
+	Outcome      string `json:"outcome"` // valid | invalid | unavailable | unchecked
 	// Ms is the time the $validate call took (to its failure for an
 	// unavailable one; 0 with no validator).
 	Ms int64 `json:"ms"`
@@ -269,10 +269,8 @@ func (g *Gateway) validateCRDEmbedded(ctx context.Context, leg, corr, line strin
 				v.Outcome = "unavailable"
 			case res.Valid:
 				v.Outcome = "valid"
-			case classifyFHIR(res, e.resource, line, "") == VerdictUnavailable:
-				v.Outcome = "unavailable"
 			default:
-				v.Outcome = "invalid"
+				v.Outcome = embeddedValidationOutcome(res, e.resource, line, "")
 			}
 		}
 		log.Printf("gateway: %s answer %s (%s) at CRD %s: %s (observed, not enforced)", leg, v.Path, v.ResourceType, v.Line, v.Outcome)

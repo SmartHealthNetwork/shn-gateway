@@ -72,6 +72,11 @@ type pendResumeSubstrate struct {
 	patientRef string
 	// pendedItem is the supplemental item the canned PENDED response asks for.
 	pendedItem string
+	// questionnaire, when set, is the Questionnaire the CRD card advertises and
+	// the DTR fetch serves, in place of the lumbar-MRI one: a lane whose order
+	// rides another questionnaire (the provider-data G0151 HomeHealthAssessment)
+	// is answered with the tree its resume amends.
+	questionnaire []byte
 	// encKeys maps a recipient holder id to the keypair the stub stands in for, so
 	// it can open that holder's sealed requests.
 	encKeys map[string]encPair
@@ -195,12 +200,20 @@ func (s *pendResumeSubstrate) handleRoute(body []byte) (*http.Response, error) {
 	respOp, respFrame := "pas-response", "payer-coverage"
 	switch txType {
 	case "crd-order-select":
+		canonical := fhirseed.LumbarMRIQuestionnaireCanonical
+		if s.questionnaire != nil {
+			canonical, err = shnsdk.ParseQuestionnaireURL(s.questionnaire)
+		}
 		cov := shnsdk.CardCoverage{Covered: shnsdk.CoveredCovered, PANeeded: shnsdk.PANeededAuthNeeded,
-			Questionnaires: []string{fhirseed.LumbarMRIQuestionnaireCanonical}}
+			Questionnaires: []string{canonical}}
 		respPayload = crdAnswerFor(cov)
 		respOp, respFrame = "crd-cards", "payer-coverage"
 	case "dtr-questionnaire-fetch":
-		respPayload, err = testQuestionnairePackage(fhirseed.DemoLumbarQuestionnaire())
+		questionnaire := fhirseed.DemoLumbarQuestionnaire()
+		if s.questionnaire != nil {
+			questionnaire = s.questionnaire
+		}
+		respPayload, err = testQuestionnairePackage(questionnaire)
 		respOp, respFrame = "dtr-questionnaire", "payer-coverage"
 	case "pas-claim":
 		respPayload, err = testPendedResponse(s.patientRef, "corr-pend", s.pendedItem, s.clock())

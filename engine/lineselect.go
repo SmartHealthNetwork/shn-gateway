@@ -252,6 +252,11 @@ const errRecipientAtCapacity = "the recipient's gateway has no room for this env
 //
 // A request payload the ownership table refused is this gateway's own fault:
 // it is answered 500 here, before any other mapping.
+//
+// Every failure after the request may have reached the recipient — the Hub's
+// error marked delivered yes or unknown, an unmarked Hub 5xx, a connection
+// lost or a wait ended after the request was sent, a Hub answer this gateway
+// could not accept — is answered through writeDeliveredMaybe, and only those.
 func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 	if isOwnershipFault(err) {
 		writeOwnershipFault(w)
@@ -278,8 +283,14 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		return true
 	}
 	// A Hub leg that produced no answer within the client's budget is a 504
-	// that says so (and how long the wait was).
+	// that says so (and how long the wait was). After the request was sent,
+	// the recipient may have received it: delivered unknown.
 	if errors.Is(err, errHubTimeout) {
+		var timedOut *hubTimeoutError
+		if errors.As(err, &timedOut) && timedOut.sent {
+			writeDeliveredMaybe(w, http.StatusGatewayTimeout, deliveredUnknown, err.Error())
+			return true
+		}
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
 		return true
 	}
@@ -307,8 +318,10 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		return true
 	}
 	// The Hub's own refusal is reported as the Hub answered it: its status and
-	// reason. A refusal after the recipient was reached says so instead,
-	// so the caller does not resend a request the payer may have acted on.
+	// reason. A refusal after the recipient was reached says so instead
+	// (writeDeliveredMaybe, by the Hub's delivered mark or this gateway's
+	// reading of an unmarked one), so the caller does not resend a request the
+	// payer may have acted on.
 	var refused *hubRefusalError
 	if errors.As(err, &refused) {
 		// The recipient answered, and its answer was refused on the way back:
@@ -320,17 +333,16 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 				writeAnswerTooLarge(w)
 				return true
 			}
-			w.Header().Set(HubDeliveredHeader, "yes")
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": errAnswerRefusedDelivered})
+			writeDeliveredMaybe(w, http.StatusBadGateway, deliveredYes, errAnswerRefusedDelivered)
 			return true
 		}
 		switch refused.delivered {
 		case "yes":
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer was lost on the way back (" +
-				refused.reason + "); it may have acted on the request: check its outcome before resending"})
+			writeDeliveredMaybe(w, http.StatusBadGateway, deliveredYes, "the recipient received this request and answered, but its answer was lost on the way back ("+
+				refused.reason+"); it may have acted on the request: check its outcome before resending")
 		case "unknown":
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient may have received this request (" +
-				refused.reason + "): check its outcome before resending"})
+			writeDeliveredMaybe(w, http.StatusBadGateway, deliveredUnknown, "the recipient may have received this request ("+
+				refused.reason+"): check its outcome before resending")
 		default:
 			// The recipient's gateway refused the leg before acting on it (its
 			// own attestation, relayed by the Hub): nothing was done, so the
@@ -371,8 +383,9 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 			if status < 400 || status > 599 || (status/100 == 4 && status != http.StatusConflict) {
 				status = http.StatusBadGateway
 			}
-			// The Hub's budget for large envelopes had no room: its wait reaches
-			// the caller.
+			// The Hub's budget for large envelopes had no room, or the instance
+			// has not yet read the network's membership: its wait reaches the
+			// caller.
 			if refused.retryAfter > 0 {
 				w.Header().Set("Retry-After", strconv.Itoa(refused.retryAfter))
 			}
@@ -386,9 +399,19 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		writeAnswerTooLarge(w)
 		return true
 	}
+	// Refused once verified as the recipient's own answer (its token, its
+	// sender and its correlation; answerLostError.verified), the recipient
+	// answered: delivered yes. Before that, something in front of the
+	// recipient may have written it: the recipient may have received the
+	// request, no more.
+	if errors.As(err, &lost) && lost.verified {
+		writeDeliveredMaybe(w, http.StatusBadGateway, deliveredYes, "the recipient received this request and answered, but its answer could not be accepted ("+
+			lost.cause+"); it may have acted on the request: check its outcome before resending")
+		return true
+	}
 	if errors.As(err, &lost) {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the recipient received this request and answered, but its answer could not be accepted (" +
-			lost.cause + "); it may have acted on the request: check its outcome before resending"})
+		writeDeliveredMaybe(w, http.StatusBadGateway, deliveredUnknown, "the recipient may have received this request ("+
+			lost.cause+"): check its outcome before resending")
 		return true
 	}
 	var re *RelayError

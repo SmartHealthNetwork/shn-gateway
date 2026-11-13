@@ -134,7 +134,7 @@ func TestOrigination_PayorByIdentifierAloneNoPACheckIsCarried(t *testing.T) {
 	aimStubAt(t, stub, "MBR-D-UC02")
 	gw.cfg.SoR = payorByIdentifier{gw.cfg.SoR}
 	rec := httptest.NewRecorder()
-	gw.handleUC02(rec, post(gw, "/scenario/uc02", ""))
+	gw.handleUC02(markedPost(rec, gw, "/scenario/uc02", ""))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"paRequired":false`) {
 		t.Fatalf("answer %d %s, want 200 with no authorization required", rec.Code, rec.Body)
 	}

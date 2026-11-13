@@ -68,7 +68,7 @@ func dropFact(t *testing.T, fact string) func(map[string]json.RawMessage) {
 
 func startUC06(gw *Gateway, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	gw.handleUC06Start(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/start", strings.NewReader(body)))))
+	gw.handleUC06Start(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/start", strings.NewReader(body))))))
 	return rec
 }
 
@@ -150,7 +150,7 @@ func pendThenComplete(t *testing.T, line, startBody string, completeEdit func(ma
 	}
 	body := editBody(t, testRouteBody(gw, "/scenario/uc06/complete", `"resumeToken":"`+started.ResumeToken+`"`), completeEdit)
 	rec := httptest.NewRecorder()
-	gw.handleUC06Complete(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(body)))))
+	gw.handleUC06Complete(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06/complete", strings.NewReader(body))))))
 	return rec, stub
 }
 
@@ -253,8 +253,8 @@ func TestSingleCallAmendment_CertificationTypeRefusedAtTheAmendment(t *testing.T
 			t.Run(line+"/uc06/"+name, func(t *testing.T) {
 				gw, stub := uc06RouteFixture(t, line)
 				rec := httptest.NewRecorder()
-				gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06",
-					strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc06", ""), edit))))))
+				gw.handleUC06(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06",
+					strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc06", ""), edit)))))))
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 					t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
 				}
@@ -267,8 +267,8 @@ func TestSingleCallAmendment_CertificationTypeRefusedAtTheAmendment(t *testing.T
 		t.Run(line+"/uc07/absent", func(t *testing.T) {
 			gw, stub := uc07RouteFixture(t, line)
 			rec := httptest.NewRecorder()
-			gw.handleUC07(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
-				strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc07", ""), noCert))))))
+			gw.handleUC07(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
+				strings.NewReader(editBody(t, testRouteBody(gw, "/scenario/uc07", ""), noCert)))))))
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "certificationType") {
 				t.Fatalf("%d %s, want 422 naming certificationType", rec.Code, rec.Body.String())
 			}
@@ -333,7 +333,7 @@ func TestUC07Complete_RefusesAtTheAmendment(t *testing.T) {
 			before := len(stub.legTypes)
 			body := editBody(t, testRouteBody(gw, "/scenario/uc07/complete", `"resumeToken":"`+started.ResumeToken+`"`), tc.edit)
 			rec := httptest.NewRecorder()
-			gw.handleUC07Complete(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(body)))))
+			gw.handleUC07Complete(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete", strings.NewReader(body))))))
 			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("%d %s, want %d naming %q", rec.Code, rec.Body.String(), tc.status, tc.want)
 			}
@@ -379,7 +379,7 @@ func TestUC05_AmendmentCertificationTypeRefusedAtTheAmendment(t *testing.T) {
 				}
 				body := editBody(t, testRouteBody(gw, "/scenario/uc05", ""), func(m map[string]json.RawMessage) { delete(m, "certificationType") })
 				rec := httptest.NewRecorder()
-				gw.handleUC05(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(body)))))
+				gw.handleUC05(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc05", strings.NewReader(body))))))
 				if denied {
 					var got uc05Resp
 					if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || !got.ConsentDenied {

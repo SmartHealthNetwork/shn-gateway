@@ -94,15 +94,21 @@ func (g *Gateway) handleCDexRequestInbound(w http.ResponseWriter, r *http.Reques
 		refuse(RefusalAuthority, http.StatusUnprocessableEntity, errCDexRequestNoPatient)
 		return
 	}
-	subjectPCI, status, msg := g.bindInboundSubjectAs(ctx, member, body, http.StatusUnprocessableEntity)
+	subjectPCI, status, msg, recorded := g.bindInboundSubjectRecorded(ctx, member, body, http.StatusUnprocessableEntity)
 	if status != 0 {
+		// A member the system of record reports without an identifier
+		// names no one patient: refused on the leg's authority, as a Task
+		// naming no member is. A rule the bind recorded stands.
+		if status == http.StatusBadRequest && !recorded {
+			exchangeOf(ctx).refusing(RefusalAuthority)
+		}
 		g.refuseInbound(w, r, legCDexAttachmentRequest, env, tok, answerTok, status, msg, nil)
 		return
 	}
 	g.noteSubjectBinding(ctx, legCDexRequest, env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	payer := env.Metadata.Sender
 	ids := g.attestedPayerIDs(payer)
-	g.noteCDexRequester(task, ids, env.Metadata.CorrelationID)
+	g.noteCDexRequester(task, ids, env.Metadata.CorrelationID, legCDexRequest)
 	payload, err := g.cdexTaskReturnRekey(ctx, body, "application/fhir+json", payer)
 	if err != nil {
 		g.refuseCDexTaskRekey(w, r, env, tok, answerTok, err)
@@ -173,8 +179,10 @@ func requesterHeaderValue(payer string, ids []shnsdk.PayerIdentifier) string {
 // requester identifier is not one the network attests for the payer that
 // sent it, or cannot be read: either way the Task does not say it is the
 // payer's own. A Task that names its requester by a reference alone, or names
-// none, states no identifier to compare. The Task is carried as sent.
-func (g *Gateway) noteCDexRequester(task cdextask.Task, attested []shnsdk.PayerIdentifier, corrID string) {
+// none, states no identifier to compare. The Task is carried as sent. leg is
+// the leg the Task is carried on: the attachment request, or the payer's read
+// of its Task.
+func (g *Gateway) noteCDexRequester(task cdextask.Task, attested []shnsdk.PayerIdentifier, corrID, leg string) {
 	id := task.Requester.Identifier
 	differs := false
 	switch {
@@ -190,14 +198,16 @@ func (g *Gateway) noteCDexRequester(task cdextask.Task, attested []shnsdk.PayerI
 		}
 	}
 	if differs {
-		g.observe(ObserverEvent{Kind: CDexRequesterDiffersEvent, Direction: "ingress", LegType: legCDexRequest, CorrelationID: corrID})
+		g.observe(ObserverEvent{Kind: CDexRequesterDiffersEvent, Direction: "ingress", LegType: leg, CorrelationID: corrID})
 	}
 }
 
 // forwardCDexTask sends the Task to the provider's own Task endpoint, as
 // prepared (relayed exactly, or with its return path re-keyed), and relays
 // whatever comes back with the provider's own media type: its 201 and an
-// error alike.
+// error alike. A 2xx answer states, for the payer's gateway alone, the tail
+// of the Location its system answered when that Location lies under the Task
+// endpoint (cdexTaskLocationFrame, E-16); the Location itself is never carried.
 func (n *nativeResponder) forwardCDexTask(ctx context.Context, p relay.Payload) (LegResult, error) {
 	up, bad, err := n.post(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDexTask)), n.baseURL, "", p, legCDexRequest, "CDex Task create")
 	if err != nil {
@@ -206,5 +216,6 @@ func (n *nativeResponder) forwardCDexTask(ctx context.Context, p relay.Payload) 
 	if bad.Status != 0 {
 		return bad, nil
 	}
-	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers, ResponseSubjectForeign: true}, nil
+	return LegResult{Response: relay.Exact(up.body, up.contentType), AnswerStatus: up.status, AnswerHeaders: up.headers,
+		AddressHeaders: cdexTaskLocationFrame(ctx, up, n.baseURL), ResponseSubjectForeign: true}, nil
 }

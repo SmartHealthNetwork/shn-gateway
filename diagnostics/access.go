@@ -29,6 +29,11 @@ type AccessLine struct {
 	// (a leg from the network).
 	Direction string `json:"direction"`
 	Route     string `json:"route"`
+	// Method is "HEAD" on a call that came as a HEAD, which the gateway
+	// serves as the GET its route takes, without the answer's body
+	// (engine.ExchangeRecord.Method). Absent on every other call, made with
+	// its route's own method.
+	Method string `json:"method,omitempty"`
 	// Exchange is the leg's transaction type, or "other".
 	Exchange     string `json:"exchange"`
 	Operation    string `json:"operation,omitempty"`
@@ -132,6 +137,52 @@ type AccessLine struct {
 	// (engine.ExchangeRecord.HubDelivered): "no", "yes" or "unknown". Absent
 	// when the leg drew no error answer from the Hub, and on an inbound leg.
 	HubDelivered string `json:"hubDelivered,omitempty"`
+	// RequesterBinding is, on an ingress call whose leg's request names no
+	// patient (a payer's read of its CDex Task, from shn-gateway v1.12.0),
+	// the binding the gateway reported to the Hub of the patient the answer
+	// disclosed, and what became of the report
+	// (engine.ExchangeRecord.RequesterBinding). Present only when the answer
+	// was a 2xx whose token named a patient; the line is written once the
+	// report is done, after the answer. Evolving.
+	RequesterBinding *AccessRequesterBinding `json:"requesterBinding,omitempty"`
+}
+
+// AccessRequesterBinding is the requester-side binding record a gateway
+// reported to the Hub, and what became of it. Metadata only: never a patient
+// identifier or a token.
+type AccessRequesterBinding struct {
+	// Binding is "bound" (the gateway bound the patient through its own
+	// records) or "unavailable" (it could not).
+	Binding string `json:"binding"`
+	// Involvement is the binding's involvement when bound: "requester-held"
+	// (a member the participant's records hold) or "requester-derived".
+	Involvement string `json:"involvement,omitempty"`
+	// Unbound is why the binding is unavailable
+	// (engine.RequesterUnboundReasons): "unreadable-answer", "no-member",
+	// "unknown-member", "unidentifiable" or "system-of-record-unavailable".
+	// It is the gateway's own; the Hub is told only "unavailable".
+	Unbound string `json:"unbound,omitempty"`
+	// Outcome is what became of the report
+	// (engine.RequesterBindingOutcomes): "accepted" (the Hub answered 204),
+	// "refused" (any other answer, with Status and RefusedBy), "unknown"
+	// (sent, with no answer: the Hub may have recorded it), "not-sent"
+	// (nothing reached the Hub and nothing refused it, with NotSent), or
+	// "other". The record is sent once, and sent again once only when the
+	// Hub's 503 states it never took it (Resent).
+	Outcome string `json:"outcome"`
+	// RefusedBy is "hub", or "authorization-framework" when the Framework
+	// refused the binding's token and nothing was sent; with Status, present
+	// exactly when Outcome is "refused".
+	RefusedBy string `json:"refusedBy,omitempty"`
+	Status    int    `json:"status,omitempty"`
+	// NotSent is why nothing was sent (engine.RequesterNotSentReasons):
+	// "authorization-failed", "hub-unreachable" or "record-unbuildable".
+	NotSent string `json:"notSent,omitempty"`
+	// Resent is true when a second send of the record was begun, after the
+	// Hub answered the first with a 503 carrying X-SHN-Delivered: no (it
+	// never took it); Outcome is then the second send's. Absent when it was
+	// sent once, or not at all.
+	Resent bool `json:"resent,omitempty"`
 }
 
 // AccessStages is an inbound leg's time in each stage of its answer, in

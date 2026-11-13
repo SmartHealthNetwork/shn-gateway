@@ -180,9 +180,13 @@ Worth checking:
   from v1.10.0, is followed without
   `Authorization`, whatever set it, and without any header `PAYER_DAVINCI_BACKEND_HEADERS`
   configures: the token was issued for your system, and those headers configured for it,
-  so neither is sent elsewhere. Neither is sent after the first hop to another origin, for
-  the rest of the redirect chain, even when it leads back to your system: another origin
-  chose that hop. A chain of redirects within your system's origin keeps them. A `401`
+  so neither is sent elsewhere. From v1.12.0, such a hop carries no header at all but
+  `Accept`, `Accept-Language` and `User-Agent`, what any client sends any server: no
+  header the gateway sets for your system (such as `X-SHN-Requester` or
+  `X-Correlation-Id`), no `Referer`, and no `PAYER_DAVINCI_BACKEND_HEADERS` header,
+  even one named `Accept-Language` or `User-Agent`. Every later hop of the chain is sent
+  the same way, even when it leads back to your system: another origin chose that hop.
+  A chain of redirects within your system's origin keeps every header. A `401`
   from another origin, or from your system to a hop back, is the answer, with no fresh
   token fetched. A redirect from `https` to `http` is never followed, whatever its origin: a
   `307` or `308` would send the request's body in cleartext. A read your system
@@ -246,9 +250,8 @@ to choose the payer. A Coverage read from your system of record only to choose t
 is not sent, so a CDS Hooks request with no `prefetch.coverage`, for a member your system
 of record holds, reaches the payer with no Coverage (one read through `fhirServer` is
 carried, as above), and gets
-whatever the payer's own system answers for it (a payer's gateway carries it as sent,
-even one that maps its payer identity, from v0.60.0; earlier releases of that mapping
-refused it `400`). Send `prefetch.coverage`, with a payor that names the payer (its
+whatever the payer's own system answers for it (a payer's gateway carries it as sent).
+Send `prefetch.coverage`, with a payor that names the payer (its
 identifier, or a payor Organization carrying it in the same prefetch), when you want
 the payer to decide on the member's coverage. A signature inside a message travels untouched, apart from
 the documentation return address re-keyed as [below](#documentation-for-a-prior-authorization-cdex);
@@ -422,8 +425,14 @@ Task Attachment Request.
   `POST {base}/Task`. The base
   names the provider, so the network routes the Task by the address alone. From shn-gateway
   v1.7.0, it can instead create the Task at the gateway's plain `POST /Task`, which routes it to
-  the provider whose organization NPI its `Task.owner` names. See
-  [the payer's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#ask-a-provider-for-documentation-the-payers-attachment-request-task-payer-optional).
+  the provider whose organization NPI its `Task.owner` names. From shn-gateway v1.12.0, the
+  provider's `2xx` reaches your system with a `Location` naming the created Task at the base of
+  the provider it went to, at either route, when the provider's gateway states the Task's id
+  (disclosed by `X-SHN-Edited: cdex-task-location-rekey`; the body and its `ETag` are the
+  provider's). Your system reads the Task at that `Location` when that provider serves reads
+  (below). See
+  [the payer's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#ask-a-provider-for-documentation-the-payers-attachment-request-task-payer-optional)
+  and [the created Task's Location](CONFIGURATION.md#the-created-tasks-location-e-16-payer-and-provider).
 - **On the provider's side,** set `PROVIDER_CDEX_TASK_URL` to the endpoint your system takes the
   Task at, with your gateway's Da Vinci ingress and its base URL (`PROVIDER_DAVINCI_INGRESS`,
   `PROVIDER_DAVINCI_INGRESS_BASE_URL`), and the client your gateway authenticates to your system
@@ -437,8 +446,81 @@ Task Attachment Request.
   submission, that address is re-keyed to your gateway's return path for that payer, so documentation your system sends
   there with `$submit-attachment` reaches that payer through the network. The forward says so in
   an `X-SHN-Edited` header, and names the payer the network authenticated in an
-  `X-SHN-Requester` header. Your system's answer reaches the payer's system as it sent it. See
+  `X-SHN-Requester` header. Your system's answer reaches the payer's system as it sent it; from
+  shn-gateway v1.12.0 its `Location` is not carried, and, when it lies under
+  `PROVIDER_CDEX_TASK_URL`, your gateway states the Task's id to the payer's gateway, which names
+  the Task at its own address instead. See
   [the provider's attachment-request Task in CONFIGURATION.md](CONFIGURATION.md#take-a-payers-request-for-documentation-the-attachment-request-task-provider-optional).
+
+**A payer reads its Task at a provider** (from shn-gateway v1.12.0), to learn its status: a plain
+FHIR read or vread of the Task it created.
+
+- **On the provider's side,** set `PROVIDER_CDEX_READ_SCOPE` beside `PROVIDER_CDEX_TASK_URL`: the
+  scope your gateway asks the same token endpoint, with the same client, for to read a Task
+  (`system/Task.r` or `system/Task.read`, as your authorization server registers it), so your
+  client must be allowed to read Tasks. `PROVIDER_CDEX_TASK_URL` must then end in a `Task`
+  segment, with no query, fragment or dot segment, or your gateway refuses to start. Your system receives a
+  `GET` of `PROVIDER_CDEX_TASK_URL/{id}` (or `/{id}/_history/{vid}`) with the payer's query as
+  sent, no body, `Accept: application/fhir+json`, and the reading payer named in
+  `X-SHN-Requester`, which your system need not read. Your system answers as it would any read.
+  The network delivers a Task only to the payer it carried that Task for, judged by the Task's
+  `payer-url` (the return path your gateway wrote at the create); any other `2xx` answer reaches
+  the payer as the network's own `404`, never your Task. A subsetting query that leaves out `Task.input` (for example `_summary=true`, or `_elements` not naming `input`) leaves out the `payer-url`, so it gets that `404` too; one that keeps `Task.input` is delivered. Your own `404`, `410` and other errors
+  reach the payer as you sent them. A Task that is delivered is bound to its patient: keep the
+  member number on `Task.for`, or serve your Tasks under your system of record's FHIR base
+  (`FHIR_DATA_URL`) when `Task.for` becomes a reference to your own `Patient`. See
+  [the payer's read of its Task in CONFIGURATION.md](CONFIGURATION.md#take-a-payers-read-of-its-task-provider-optional).
+- **On the payer's side,** register a scope that permits reading a Task (`system/Task.read`,
+  `system/Task.*`, or a v2 scope with `r`) for your system's client, beside its create scope, and
+  ask for both in one token. Your system reads the Task where it created it: at the provider's
+  base, `GET {base}/Task/{id}`, or a version with `GET {base}/Task/{id}/_history/{vid}`, as at a
+  provider's own FHIR server (the direct-integration shape: create and read at one base, every
+  address relative to it). The read is carried exactly, its query as sent, and the provider's
+  answer comes back as it came: a `2xx` with its status, media type, `ETag`, `Last-Modified`
+  and `Retry-After`; any other with its status, media type and body, and none of its other
+  headers. A `HEAD` is served as the `GET`, without the body.
+  `GET /cdex/providers` marks each base that serves reads (`"reads": true`), and each base's
+  `GET {base}/metadata` declares `read` and `vread` exactly there, so no base advertises a read
+  the network would refuse. A read at the gateway's plain `GET /Task/{id}` names no provider and
+  is answered `404`, with an OperationOutcome naming where a Task is read: a Task created at the
+  plain endpoint is read at the base of the provider it was routed to. After a `2xx` answer, your
+  gateway binds the Task's patient through your own records, as at the create, and reports that
+  binding to the network, which records the read under the patient your create was; your access
+  line says what became of the report (`requesterBinding`). See
+  [the payer's read of its Task in CONFIGURATION.md](CONFIGURATION.md#read-the-task-at-the-providers-base-payer-from-shn-gateway-v1120).
+
+### Reading the Task back
+
+**What the network's `404` still lets a payer tell apart.** A provider's gateway delivers a read's
+answer only for a Task the network carried for the reading payer: one whose `payer-url` is that
+gateway's return path for that payer. Any other `2xx` answer of the provider's is answered with
+the network's own `404`, an OperationOutcome its gateway writes (`Task not found`), the same bytes
+whatever is wrong with the Task, and recorded as that gateway's own refusal on `authority`. The
+provider's own `404` for an id it does not hold, and its `410` for a deleted Task, are carried as
+the provider sent them: the network does not replace them. So your system can tell an id that
+exists at that provider but is not yours from one that does not exist there, by the body: the
+network's `404` is always the same fixed OperationOutcome,
+`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Task not found"}]}`.
+Your own gateway's access line records any non-`2xx` of the provider's side the same way, as
+`upstream-error`, with no author or rule (the Hub's own refusals are recorded `refused` by the
+`hub`, with their rule); that the network's `404` was written by the provider's
+gateway, on `authority`, is on the provider gateway's own record and in the network's audit. Your
+system learns nothing of that Task's content or its patient.
+
+This is accepted and stated rather than closed: making the network's `404` match the provider's
+own would mean replacing the provider's own `404` and `410`, which would change what the
+provider's answer says. Integrated directly, a provider that does not separate payers releases
+the whole Task, and one that answers forbidden reveals the same existence; only a provider that
+answers not found in both cases reveals less. FHIR R4 notes the same kind of disclosure for a
+server that allows a create at a client-chosen address (`security.html`, Access Denied Response
+Handling).
+
+These Tasks cannot be read through the network, and each is answered that `404`: a Task created
+outside the network or by the provider itself, one whose stored copy lost its `payer-url`, and one
+whose `payer-url` the provider's gateway did not re-key when it was created (its access line
+names why, `E-11:…`). `X-SHN-Requester`, which names your payer on the provider's forward, is
+information only: no provider's system is required to read it, and nothing the network decides
+depends on it.
 
 ## A non-FHIR backend (custom connector)
 
@@ -687,7 +769,14 @@ along with the message's own consistency (for example, one patient throughout a
 request). What the FHIR check covers, per leg:
 
 - A resource is checked against the profiles it declares in its own `meta.profile`,
-  and otherwise against its base FHIR R4 definition only.
+  and otherwise against its base FHIR R4 definition only, with one exception: from
+  v1.12.0, at `structural` and `strict`, a payer's PAS answer that declares no
+  profile is checked against its line's own PAS profile. A `$submit` or update
+  answer's response Bundle is checked against `profile-pas-response-bundle` and a
+  bare ClaimResponse against `profile-claimresponse`; an inquiry answer's against
+  `profile-pas-inquiry-response-bundle` and `profile-claiminquiryresponse`. The
+  answer is valid when any candidate line accepts it. The PAS 2.2.1 inquiry
+  answer's `Parameters` wrapper has no profile and is checked as before.
 - A few resources your gateway builds are checked against a named profile: the
   DTR QuestionnaireResponse it sends (the DTR QuestionnaireResponse profile of
   the leg's IG line), a QuestionnaireResponse it populates (base R4
@@ -771,8 +860,7 @@ defect does, is `CONFORMANCE_ENFORCEMENT`, a setting on your own gateway:
   conformance check runs and no finding is recorded. The message
   relays as sent, apart from the gateway's registered edits (the callback removed,
   prefetch and coverage obtained when the provider opts in with
-  `ENRICH_NATIVE_REQUESTS=true`, and payer identity mapping; participant protocol
-  §7a.4).
+  `ENRICH_NATIVE_REQUESTS=true`; participant protocol §7a.4).
 - `observe` (the default when the variable is unset, before v1.0.0): every check runs and each
   defect is recorded as a finding — it does not stop the message, which is carried
   as sent, apart from the gateway's registered edits. A validator that cannot be

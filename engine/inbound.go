@@ -267,6 +267,17 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if subpath, ok := inboundFrameSubpath(payload); ok {
 		r = r.WithContext(withRequestFrameSubpath(r.Context(), subpath))
 	}
+	// A request frame may carry the path of a read below the recipient's base
+	// (legSpec.ReadPath), on the leg that defines it alone.
+	readPath, hasReadPath, status, msg := inboundFrameReadPath(env.Metadata.TransactionType, payload)
+	if status != 0 {
+		x.refusing(frameRefusalRule(status))
+		g.refuseInboundRequest(w, r, env, tok, status, msg)
+		return
+	}
+	if hasReadPath {
+		r = r.WithContext(withRequestFrameReadPath(r.Context(), readPath))
+	}
 
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	// The leg is verified and open: what follows is its answer.

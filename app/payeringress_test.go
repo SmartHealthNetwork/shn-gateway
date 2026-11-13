@@ -31,6 +31,59 @@ func TestLoadConfig_PayerIngress(t *testing.T) {
 			t.Fatalf("config %+v", cfg)
 		}
 	})
+	// From shn-gateway v1.12.0, a base whose path has a dot segment, or that
+	// holds a space, a control character, a character that is not ASCII or
+	// another character outside RFC 3986's set, refuses to boot, naming the setting and the fix: it
+	// cannot begin the Location a created Task is answered with (E-16). A
+	// canonical base boots, with a port, a path, or both.
+	dotDot := strings.Repeat(".", 2)
+	const dotFix = `its path has a "." or ".." segment, which no per-provider base or created Task's Location can be built under: remove the dot segments`
+	const asciiFix = "it holds a character that is not ASCII, which a URL cannot carry: give the host in its ASCII (punycode) form, and percent-encode any other such character"
+	const spaceFix = "it holds a space or a control character, which a URL cannot carry: percent-encode spaces (%20) or remove them, and remove any control character"
+	const urlCharFix = "it holds a character a URL cannot carry (a backslash, a quote, \"<\", \">\", \"{\", \"}\", \"|\", \"^\" or a backtick): percent-encode it or remove it"
+	for base, want := range map[string]string{
+		"https://payer-gw.test/./fhir":                dotFix,
+		"https://payer-gw.test/fhir/" + dotDot:        dotFix,
+		"https://payer-gw.test/a/" + dotDot + "/fhir": dotFix,
+		"https://payer-gw.test/fhir/%2E":              dotFix,
+		"https://payer-gw.test/%2e%2E/fhir":           dotFix,
+		"https://payer-gw.test/fhir/./":               dotFix,
+		"https://zahler-g\u00fc.test":                 asciiFix,
+		"https://payer-gw.test/f\u00fchr":             asciiFix,
+		"https://payer-gw.test:8443/fhir\u00a0":       asciiFix,
+		"https://payer-gw.test/f hir":                 spaceFix,
+		"https://payer-gw.test/fhir ":                 spaceFix,
+		"https://payer-gw.test/a\\..\\fhir":           urlCharFix,
+		"https://payer-gw.test/f\"hir":                urlCharFix,
+		"https://payer-gw.test/f<hir>":                urlCharFix,
+		"https://payer-gw.test/f{hir}":                urlCharFix,
+		"https://payer-gw.test/f|h^i`r":               urlCharFix,
+	} {
+		t.Run("a base not canonical: "+base, func(t *testing.T) {
+			_, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": base, "INGRESS_CLIENTS_FILE": clients})
+			if err == nil || !strings.Contains(err.Error(), "invalid PAYER_DAVINCI_INGRESS_BASE_URL") || !strings.Contains(err.Error(), want) {
+				t.Fatalf("want a boot refusal naming the setting and %q, got %v", want, err)
+			}
+		})
+	}
+	// A control character is refused earlier, by the boot check every URL
+	// setting gets (url.Parse refuses it), naming the setting.
+	for _, base := range []string{"https://payer-gw.test/f\thir", "https://payer-gw.test/fhir\x7f", "https://payer-gw.test/fhir\x00"} {
+		t.Run("a control character: "+base, func(t *testing.T) {
+			_, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": base, "INGRESS_CLIENTS_FILE": clients})
+			if err == nil || !strings.Contains(err.Error(), "invalid PAYER_DAVINCI_INGRESS_BASE_URL") {
+				t.Fatalf("want a boot refusal naming the setting, got %v", err)
+			}
+		})
+	}
+	for _, base := range []string{"https://payer-gw.test", "https://payer-gw.test:8443/fhir/r4", "https://xn--zahler-g-r2a.test/fhir", "https://payer-gw.test/fhir.v2/..."} {
+		t.Run("a canonical base: "+base, func(t *testing.T) {
+			cfg, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": base, "INGRESS_CLIENTS_FILE": clients})
+			if err != nil || cfg.IngressBaseURL != base {
+				t.Fatalf("a canonical base %q: %v (%q)", base, err, cfg.IngressBaseURL)
+			}
+		})
+	}
 	for name, row := range map[string]struct {
 		env  map[string]string
 		want string
@@ -53,11 +106,12 @@ func TestLoadConfig_PayerIngress(t *testing.T) {
 		})
 	}
 	// A client registers any SMART system/Task scope, v1 or v2, granular
-	// included, and at least one that permits a route with no query: every
-	// route creates a Task, so one registered only to read is refused; scopes
-	// for another resource beside one are kept as before. A Task scope that is not one
-	// of SMART's spellings refuses the start, naming the scope, and so does a
-	// client whose Task scopes permit no route.
+	// included, and at least one that permits creating a Task with no query:
+	// the ingress is for creating the payer's Task, and its read routes read
+	// one its system created, so one registered only to read is refused;
+	// scopes for another resource beside one are kept as before. A Task scope
+	// that is not one of SMART's spellings refuses the start, naming the
+	// scope, and so does a client whose Task scopes permit no create.
 	scoped := func(scopes string) string {
 		return strings.Replace(testValidClientsJSON(t), `"scopes":["system/Davinci.write"]`, `"scopes":`+scopes, 1)
 	}
@@ -88,7 +142,7 @@ func TestLoadConfig_PayerIngress(t *testing.T) {
 	} {
 		t.Run("refused with "+name, func(t *testing.T) {
 			_, err := load(map[string]string{"PAYER_DAVINCI_INGRESS": "1", "PAYER_DAVINCI_INGRESS_BASE_URL": "https://payer-gw.test", "INGRESS_CLIENTS_FILE": writeClientsFile(t, scoped(scopes))})
-			if err == nil || !strings.Contains(err.Error(), "lists no system/Task scope that permits a route") {
+			if err == nil || !strings.Contains(err.Error(), "lists no system/Task scope that permits creating a Task") {
 				t.Fatalf("%s: want a boot refusal, got %v", scopes, err)
 			}
 		})

@@ -13,7 +13,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -321,21 +320,22 @@ func TestPayerDTR_PackageSubjectBound(t *testing.T) {
 }
 
 // TestPayerDTR_FramedParametersPostedExactly: the payer's system receives
-// the published package input exactly as the requester sent it, or, with the
-// payer identity mapping on, with only the payer identifier tokens of every
-// coverage changed.
+// the published package input exactly as the requester sent it, whatever
+// payer identifiers its coverages name: the request is already routed here.
 func TestPayerDTR_FramedParametersPostedExactly(t *testing.T) {
 	t.Parallel()
-	backend := shnsdk.PayerIdentifier{System: "urn:example:payer-backend", Value: "BACKEND-7"}
-	for _, tc := range []struct {
-		fixture string
-		own     shnsdk.PayerIdentifier
-	}{
-		{"valid/dtr-package-params-2.0.json", shnsdk.CMSPayerIdentity},
-		{"valid/dtr-package-params-2.2.json", shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.4.7", Value: "10D0202020"}},
-	} {
-		body := dtrPackageFixture(t, tc.fixture)
-		t.Run(tc.fixture+"/exact", func(t *testing.T) {
+	foreign := strings.Replace(dtrCoverage("cov-2", dtrFrameMember), `"00001"`, `"99999"`, 1)
+	bodies := map[string][]byte{
+		"valid/dtr-package-params-2.0.json": dtrPackageFixture(t, "valid/dtr-package-params-2.0.json"),
+		"valid/dtr-package-params-2.2.json": dtrPackageFixture(t, "valid/dtr-package-params-2.2.json"),
+		"two coverages": dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)),
+			resourceParam("coverage", dtrCoverage("cov-2", dtrFrameMember)), questionnaireParam),
+		"coverages naming two payers": dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)),
+			resourceParam("coverage", foreign), questionnaireParam),
+		"a coverage naming another payer": dtrParams(resourceParam("coverage", foreign), questionnaireParam),
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
 			d := newDTRPayer(t)
 			if got := d.send(t, shnsdk.FrameOperationQuestionnairePackage, body); got.status != http.StatusOK {
 				t.Fatalf("answer = %d %s", got.status, got.body)
@@ -344,65 +344,7 @@ func TestPayerDTR_FramedParametersPostedExactly(t *testing.T) {
 				t.Fatalf("payer's system received\n%s\nwant exactly\n%s", d.partner.lastBody, body)
 			}
 		})
-		t.Run(tc.fixture+"/payer identity mapped", func(t *testing.T) {
-			d := newDTRPayer(t, WithPayorEdgeIdentity(tc.own, backend))
-			if got := d.send(t, shnsdk.FrameOperationQuestionnairePackage, body); got.status != http.StatusOK {
-				t.Fatalf("answer = %d %s", got.status, got.body)
-			}
-			sent := d.partner.lastBody
-			if bytes.Equal(sent, body) {
-				t.Fatal("the mapping made no edit")
-			}
-			if !bytes.Contains(sent, []byte(`"`+backend.Value+`"`)) {
-				t.Fatalf("payer's system did not receive the mapped identity: %s", sent)
-			}
-			restored := bytes.ReplaceAll(sent, []byte(`"`+backend.System+`"`), []byte(`"`+tc.own.System+`"`))
-			restored = bytes.ReplaceAll(restored, []byte(`"`+backend.Value+`"`), []byte(`"`+tc.own.Value+`"`))
-			if !bytes.Equal(restored, body) {
-				t.Fatalf("bytes other than the payer identifier changed:\n%s\nwant\n%s", sent, body)
-			}
-		})
 	}
-
-	t.Run("every coverage is mapped", func(t *testing.T) {
-		d := newDTRPayer(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, backend))
-		body := dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)), resourceParam("coverage", dtrCoverage("cov-2", dtrFrameMember)), questionnaireParam)
-		if got := d.send(t, shnsdk.FrameOperationQuestionnairePackage, body); got.status != http.StatusOK {
-			t.Fatalf("answer = %d %s", got.status, got.body)
-		}
-		var sent struct {
-			Parameter []struct {
-				Name     string          `json:"name"`
-				Resource json.RawMessage `json:"resource"`
-			} `json:"parameter"`
-		}
-		if err := json.Unmarshal(d.partner.lastBody, &sent); err != nil {
-			t.Fatal(err)
-		}
-		mapped := 0
-		for _, p := range sent.Parameter {
-			if p.Name != "coverage" {
-				continue
-			}
-			if got, ok := shnsdk.ParsePayerIdentifier(p.Resource, nil); !ok || got != backend {
-				t.Fatalf("coverage %s was sent with payer %v, want %v", p.Resource, got, backend)
-			}
-			mapped++
-		}
-		if mapped != 2 {
-			t.Fatalf("%d coverages mapped, want 2", mapped)
-		}
-	})
-
-	t.Run("a coverage naming another payer is refused before sending", func(t *testing.T) {
-		d := newDTRPayer(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, backend))
-		foreign := strings.Replace(dtrCoverage("cov-2", dtrFrameMember), `"00001"`, `"99999"`, 1)
-		body := dtrParams(resourceParam("coverage", dtrCoverage("cov-1", dtrFrameMember)), resourceParam("coverage", foreign), questionnaireParam)
-		got := d.send(t, shnsdk.FrameOperationQuestionnairePackage, body)
-		d.requireRefused(t, got, http.StatusUnprocessableEntity, "name more than one payer")
-		only := dtrParams(resourceParam("coverage", foreign), questionnaireParam)
-		d.requireRefused(t, d.send(t, shnsdk.FrameOperationQuestionnairePackage, only), http.StatusBadRequest, "does not match this gateway's own payer identity")
-	})
 }
 
 // TestInboundFrameOperation: the operation header is read from a request

@@ -546,6 +546,12 @@ var censusPersonas = map[string]censusPersona{
 		demo:    Demo{BirthDate: "1960-08-14", FamilyName: "Nwosu-PatientAttest"},
 		inforce: true,
 	},
+	// MBR-PD-UC08 — the provider-data denial persona (J3490, not covered), as the
+	// platform seeder's demographics table holds it.
+	"MBR-PD-UC08": {
+		demo:    Demo{BirthDate: "1962-07-14", FamilyName: "Nakamura"},
+		inforce: true,
+	},
 }
 
 // Canary twins are generated, never hand-copied: each clones its original's

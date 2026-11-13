@@ -173,9 +173,10 @@ func TestCRDIngress_NoContentWithABodyIsRefused(t *testing.T) {
 	})
 }
 
-// Every registered edit of an answer drops its ETag, by the row that discloses
-// the edit, and leaves what still describes the answer. An unedited answer
-// keeps all of it.
+// Every registered edit of an answer's body drops its ETag, by the row that
+// discloses the edit, and leaves what still describes the answer; a header
+// edit (E-16) keeps every header, since the body is the participant's byte for
+// byte. An unedited answer keeps all of it.
 func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 	stated := statedAnswer{status: http.StatusOK, headers: map[string]string{
 		shnsdk.FrameHeaderETag: `"v1"`, shnsdk.FrameHeaderLastModified: "yesterday", shnsdk.FrameHeaderRetryAfter: "1",
@@ -204,9 +205,26 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 		member, _ := doc.Member(doc.Elems(exts)[0], "valueUrl")
 		return body, doc, member
 	}
-	var edits int
+	var edits, headerEdits int
 	for _, e := range relayEdits {
 		if e.Direction != relay.DirectionResponse {
+			continue
+		}
+		if e.Kind == relay.EditKindSetHeader {
+			// A header edit changes no byte of the body: the answer's
+			// headers, its ETag among them, still describe it, and are kept.
+			headerEdits++
+			if dropped := relay.EditDropsAnswerHeaders(relayEdits, e.ID); len(dropped) != 0 {
+				t.Errorf("%s drops %v, but changes no byte of the body", e.ID, dropped)
+			}
+			edited, err := headerEdited(relayedResponse([]byte(`{}`)), e.ID, e.Header, "https://payer.example/cdex/provider/p/Task/t-1",
+				relay.HeaderInputs{relay.TaskLocationInputBase: "https://payer.example/cdex/provider/p", relay.TaskLocationInputTail: "Task/t-1"})
+			if err != nil {
+				t.Fatalf("%s: %v", e.ID, err)
+			}
+			if got := stated.about(edited); len(got) != 3 || got[shnsdk.FrameHeaderETag] != `"v1"` {
+				t.Errorf("%s: %v, want every header kept", e.ID, got)
+			}
 			continue
 		}
 		edits++
@@ -226,8 +244,8 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 			t.Errorf("%s: %v", e.ID, got)
 		}
 	}
-	if edits == 0 {
-		t.Fatal("no edit of an answer: this row proves nothing")
+	if edits == 0 || headerEdits == 0 {
+		t.Fatal("no edit of an answer's body, or none of its header: this row proves nothing")
 	}
 }
 
@@ -277,9 +295,10 @@ func TestNoteStatedAnswer(t *testing.T) {
 }
 
 func TestAnswerHeaderNotCarriedValues_Closed(t *testing.T) {
-	// The answer's own headers, and the address headers a payer's gateway
-	// states for the requester's gateway alone.
-	names := append(slices.Clone(answerHeaderNames), shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags)
+	// The answer's own headers, and the address headers a recipient's gateway
+	// states for the requester's gateway alone: a payer's on a DTR answer, a
+	// provider's on its answer to a payer's Task (E-16).
+	names := append(slices.Clone(answerHeaderNames), shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation)
 	for _, reason := range []string{AnswerHeaderValueNotCarriable, AnswerHeaderOverFrameLimit, AnswerHeaderOverAnswerLimit} {
 		for _, name := range names {
 			if !slices.Contains(AnswerHeaderNotCarriedValues, name+":"+reason) {

@@ -135,7 +135,7 @@ func TestRegisterOwnershipBuildsAndChecksTheTable(t *testing.T) {
 		"the requester's application error":      {[]string{"toy-leg"}, map[Key]Rule{{"toy-leg", RoleRequester, DirectionResponse, OutcomeUpstreamError}: ok}, "is the table's own row"},
 		"a row that permits nothing":             {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {}}, "permits nothing"},
 		"an ownership value that does not exist": {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{0}}}, "invalid ownership"},
-		"edits without Edited":                   {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{OwnershipRelayed}, Edits: []EditID{EditPayorEdgeRestamp}}}, "edits are listed without Edited"},
+		"edits without Edited":                   {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{OwnershipRelayed}, Edits: []EditID{EditDTRCoverageObtain}}}, "edits are listed without Edited"},
 		"Edited without edits":                   {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{OwnershipEdited}}}, "Edited without edits"},
 		"builders without Authored":              {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{OwnershipRelayed}, Builders: []BuilderID{BuilderSDKPASSubmit}}}, "builders are listed without Authored"},
 		"Authored without builders":              {[]string{"toy-leg"}, map[Key]Rule{toyCarried: {Allowed: []Ownership{OwnershipAuthored}}}, "Authored without builders"},

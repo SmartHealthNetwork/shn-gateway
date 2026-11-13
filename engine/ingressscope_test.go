@@ -155,16 +155,17 @@ func TestCheckPayerIngressScopes(t *testing.T) {
 		scopes []string
 		want   string
 	}{
-		{nil, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Davinci.write"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Patient.read"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Task.c?status=requested"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Task.uds"}, "lists no system/Task scope that permits a route"},
-		// Registered only to read: every route the payer's ingress mounts creates.
-		{[]string{"system/Task.read"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Task.rs"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Task.read", "system/Task.c?status=requested"}, "lists no system/Task scope that permits a route"},
-		{[]string{"system/Davinci.write", "system/Task.u"}, "lists no system/Task scope that permits a route"},
+		{nil, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Davinci.write"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Patient.read"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Task.c?status=requested"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Task.uds"}, "lists no system/Task scope that permits creating a Task"},
+		// Registered only to read: a payer's ingress is for creating its Task,
+		// and its read routes read one its system created.
+		{[]string{"system/Task.read"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Task.rs"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Task.read", "system/Task.c?status=requested"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Davinci.write", "system/Task.u"}, "lists no system/Task scope that permits creating a Task"},
 		{[]string{"system/task.read"}, `"system/task.read" is not a SMART system/Task scope`},
 		{[]string{TaskWriteScope, "System/Task.read"}, `"System/Task.read" is not a SMART system/Task scope`},
 		{[]string{"system/Task.rc"}, `"system/Task.rc" is not a SMART system/Task scope`},
@@ -184,21 +185,27 @@ func TestCheckPayerIngressScopes(t *testing.T) {
 
 // The create routes' refusal names what they take: the reason is the fixed
 // sentence registered for it, and the challenge names the v1 write scope a
-// client asks for today.
+// client asks for today. The read routes' names the read scope, and a
+// permission no route takes has neither.
 func TestScopeReason_Create(t *testing.T) {
-	r := scopeReason(taskCreate)
-	if r == "" || !slices.Contains(coreRefusalReasons(), r) {
-		t.Fatalf("create reason %q is not a registered reason", r)
-	}
-	for _, s := range []string{"insufficient_scope", TaskWriteScope, "system/Task.c", "system/Task.*"} {
-		if !strings.Contains(string(r), s) {
-			t.Errorf("create reason %q does not name %s", r, s)
+	for need, want := range map[taskPermission][]string{
+		taskCreate: {"insufficient_scope", TaskWriteScope, "system/Task.c", "system/Task.*"},
+		taskRead:   {"insufficient_scope", TaskReadScope, "system/Task.r", "system/Task.*"},
+	} {
+		r := scopeReason(need)
+		if r == "" || !slices.Contains(coreRefusalReasons(), r) {
+			t.Fatalf("reason %q is not a registered reason", r)
+		}
+		for _, s := range want {
+			if !strings.Contains(string(r), s) {
+				t.Errorf("reason %q does not name %s", r, s)
+			}
 		}
 	}
-	if scopeReason(taskRead) != "" {
-		t.Fatalf("a read reason before any route takes read: %q", scopeReason(taskRead))
+	if challengeScope(taskCreate) != TaskWriteScope || challengeScope(taskRead) != TaskReadScope {
+		t.Fatalf("challenges %q and %q, want %s and %s", challengeScope(taskCreate), challengeScope(taskRead), TaskWriteScope, TaskReadScope)
 	}
-	if challengeScope(taskCreate) != TaskWriteScope {
-		t.Fatalf("create challenge %q, want %s", challengeScope(taskCreate), TaskWriteScope)
+	if scopeReason(taskUpdate) != "" || challengeScope(taskUpdate) != "" {
+		t.Fatalf("a permission no route takes: reason %q, challenge %q", scopeReason(taskUpdate), challengeScope(taskUpdate))
 	}
 }

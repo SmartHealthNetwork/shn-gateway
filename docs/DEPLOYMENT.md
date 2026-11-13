@@ -357,12 +357,13 @@ On `SIGTERM` or an interrupt, the gateway stops in this order, each step bounded
 | The listener stops taking calls and waits for the calls in flight | 5 s | calls in flight |
 | The calls still running are cut, and their handlers return | 2 s | calls that outlast the listener's wait |
 | The in-memory audit outbox sends what it holds | 10 s | records queued, without `SHN_STORE_DATABASE_URL` |
+| A payer's requester-side binding records under way finish, or are cut and written as they stand | 1 s | a payer's reads of its CDex Task just answered |
 | Queued conformance checks finish | 10 s | checks queued, at `observe` |
 | The final metrics export | 5 s | OpenTelemetry export on (`OTEL_METRICS_EXPORTER=otlp`) |
 | The diagnostic publisher delivers what it holds | 10 s | `DIAGNOSTIC_SINK_URL` set |
 | The diagnostic publisher's last heartbeat | 1 s | `DIAGNOSTIC_SINK_URL` set |
 
-In all, a stop takes up to 43 s, or 32 s without `DIAGNOSTIC_SINK_URL`. Give the
+In all, a stop takes up to 44 s, or 33 s without `DIAGNOSTIC_SINK_URL`. Give the
 gateway's container a stop timeout of 45 s:
 
 - `docker run --stop-timeout 45`;
@@ -376,8 +377,12 @@ gateway SHN hosts for you gets 45 s.
 
 A gateway killed before its stop ends loses what the remaining steps would have done:
 the findings of conformance checks still queued, the metrics the final export would
-have sent, the diagnostic observations not yet delivered, and the audit records still
-in an in-memory outbox. An outbox that drains
+have sent, the diagnostic observations not yet delivered, the audit records still
+in an in-memory outbox, and the access lines of a payer's reads whose binding records were
+still under way. A stop that reaches the binding records' step waits 0.5 s for them, cuts
+them, and waits 0.5 s more; each read's access line is then written with what its record had
+come to: `unknown` once any byte of it was written to the Hub, `other` before, and `other` while
+it waits to send it again after the Hub's `503` stated it took none of it. An outbox that drains
 logs how many records it holds before it starts
 (`gateway: audit: stopping with <n> records in the in-memory outbox`) and reports the
 same count as `AuditQueueDepth`. When the drain ends, it counts what it could not

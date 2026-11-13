@@ -83,7 +83,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	"Gateway.postEnvelope": {kind: excluded, callers: []string{"Gateway.roundTripInner"},
 		reason: "posts the sealed envelope roundTripInner built from its checked request"},
 	// Requests to the participant's own system.
-	"nativeResponder.postVia": {kind: transmits, body: sendsRequest},
+	"nativeResponder.sendVia": {kind: transmits, body: sendsRequest},
 	// Answers to the network.
 	"Gateway.buildResponseLeg": {kind: transmits, noSink: true, body: sendsAnswer},
 	"writeLeg": {kind: excluded,
@@ -97,7 +97,7 @@ var transmitBoundaries = map[string]boundaryRule{
 	// Answers to the participant's own system (the ingress writers, the
 	// relayed application errors) and every refusal.
 	"Gateway.writeAnswer": {kind: transmits, body: sendsAnswer},
-	"writeJSON":           {kind: transmits, body: sendsAnswer},
+	"writeRefusalBody":    {kind: transmits, body: sendsAnswer},
 	// The engine's own reads of a payload before its transmit.
 	"Gateway.admit": {kind: transmits, noSink: true, body: readsOnly},
 
@@ -126,6 +126,10 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "whether an explicit validator lane can be reached: a metadata read with no body; never an exchange"},
 	"Gateway.handleIngressMetadata": {kind: excluded,
 		reason: "this gateway's own CapabilityStatement"},
+	"Gateway.writeCDexMetadata": {kind: excluded,
+		reason: "the CapabilityStatement of a base of this payer gateway's own ingress"},
+	"Gateway.postRequesterBinding": {kind: excluded,
+		reason: "the requester-side binding record this gateway files with the Hub after an answer: tokens the Authorization Framework signed and its own binding, never a participant's message"},
 	"Gateway.handleCDSDiscovery": {kind: excluded,
 		reason: "this gateway's own CDS Services discovery document"},
 	"Gateway.handleDavinciConfiguration": {kind: excluded,

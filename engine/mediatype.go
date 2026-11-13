@@ -172,9 +172,11 @@ func noteStatedAnswer(ctx context.Context, hdr shnsdk.HTTPFrameHeader) {
 			sink.headers[name] = v
 		}
 	}
-	// The address headers a payer's gateway states for the requester's
-	// gateway (the re-key, E-12, reads them); never written to a participant.
-	for _, name := range []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags} {
+	// The address headers a recipient's gateway states for the requester's
+	// gateway alone: a payer's on a DTR answer (the re-key, E-12, reads them)
+	// and a provider's on its answer to a payer's Task (the Location, E-16,
+	// reads it); never written to a participant.
+	for _, name := range addressHeaderNames {
 		if v := hdr.Headers[name]; v != "" {
 			if sink.address == nil {
 				sink.address = map[string]string{}

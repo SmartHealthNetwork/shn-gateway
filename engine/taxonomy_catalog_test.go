@@ -171,7 +171,7 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		"crd-order-select": "payer-native", "crd-order-dispatch": "payer-native",
 		"pas-claim": "payer-native", "pas-claim-update": "payer-native", "pas-claim-inquire": "payer-native",
 		"patient-dtr": "phg-inbound", "cdex-attachment-submit": "payer-native",
-		"cdex-attachment-request": "provider-native",
+		"cdex-attachment-request": "provider-native", "cdex-task-status": "provider-native",
 	}
 	if len(paCatalog) != len(wantSeam) {
 		t.Fatalf("%d catalog legs, %d pinned", len(paCatalog), len(wantSeam))
@@ -182,6 +182,10 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		}
 		if (len(spec.FrameOperations) > 0) != (tx == "dtr-questionnaire-fetch") {
 			t.Errorf("%s: frame operations %v, want them only on dtr-questionnaire-fetch", tx, spec.FrameOperations)
+		}
+		// The one leg whose request frame carries a read's path.
+		if spec.ReadPath != (tx == "cdex-task-status") {
+			t.Errorf("%s: ReadPath %v, want it only on cdex-task-status", tx, spec.ReadPath)
 		}
 	}
 	// Rejection row: an adapter row that names no seam is refused.

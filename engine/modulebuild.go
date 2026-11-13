@@ -104,7 +104,7 @@ func (g *Gateway) egressBuild(ctx context.Context, route legRoute, x ExchangeIde
 		var status int
 		var msg string
 		if len(route.Chain) > 0 {
-			status, msg = g.bridge().Certify(ctx, m.Contract, line, "", out).refusal()
+			status, msg = g.bridge().Certify(ctx, m.Contract, line, bridgedProfile(out, line, x.LegType), out).refusal()
 		} else {
 			status, msg = g.validateFHIRForContract(ctx, out, "egress", m.Contract, line, "")
 		}
@@ -113,6 +113,17 @@ func (g *Gateway) egressBuild(ctx context.Context, route legRoute, x ExchangeIde
 		}
 	}
 	return builtRequest{Payload: payload, Bytes: out, Reports: reports}, 0, "", nil
+}
+
+// bridgedProfile is the profile module 2's bridged check reads out against
+// at line on leg: the profile the line certifies out's species at for that
+// leg (profileFor, the same map certification uses), so a translation is
+// held to the target line's own profile, not only to base FHIR. "" for a
+// species no compiled-in workstream certifies, which is checked at the line's
+// base as before.
+func bridgedProfile(out []byte, line, leg string) string {
+	profile, _ := profileFor(detectSpecies(out), line, leg)
+	return profile
 }
 
 // sealTransformed seals out, built's bytes walked along route's chain, as

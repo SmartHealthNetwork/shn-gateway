@@ -127,20 +127,28 @@ func TestDeclareCapabilities_SendsTheRolesLegsOnce(t *testing.T) {
 // A payer's gateway declares the request frames it serves, v1opsub among
 // them: it tags the adaptive addresses it issues, reads a round's
 // operationSubpath and restores the address (E-13), so a provider's gateway
-// re-keys toward it and sends it rounds. A provider's gateway declares none of
-// its own: its declaration carries no requestFrames, so its registration's set
+// re-keys toward it and sends it rounds. A provider's gateway that takes the
+// payer's attachment request (PROVIDER_CDEX_TASK_URL) declares cdexloc, since
+// it frames the Task's location for the payer's gateway to write (E-16); one
+// that does not take it, or a gateway of another role, declares none of its
+// own: its declaration carries no requestFrames, so its registration's set
 // stands, as before.
 func TestDeclareCapabilities_APayerDeclaresItsRequestFrames(t *testing.T) {
 	want := append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameV1OpSub)
+	located := append(shnsdk.SupportedRequestFrames(), shnsdk.RequestFrameCDexLoc)
 	for _, c := range []struct {
-		role   string
+		name   string
+		cfg    config
 		frames []string
 	}{
-		{"payer", want},
-		{"provider", nil},
+		{"payer", config{Role: "payer"}, want},
+		{"payer with a Task URL", config{Role: "payer", ProviderCDexTaskURL: "https://provider.example/fhir/Task"}, want},
+		{"provider", config{Role: "provider"}, nil},
+		{"provider taking the Task", config{Role: "provider", ProviderCDexTaskURL: "https://provider.example/fhir/Task"}, located},
+		{"facility with a Task URL", config{Role: "facility", ProviderCDexTaskURL: "https://provider.example/fhir/Task"}, nil},
 	} {
-		t.Run(c.role, func(t *testing.T) {
-			d := capabilityDeclaration(config{Role: c.role})
+		t.Run(c.name, func(t *testing.T) {
+			d := capabilityDeclaration(c.cfg)
 			if (d.RequestFrames == nil) != (c.frames == nil) || !slices.Equal(d.RequestFrames, c.frames) {
 				t.Fatalf("declares request frames %#v, want %#v", d.RequestFrames, c.frames)
 			}
@@ -153,6 +161,12 @@ func TestDeclareCapabilities_APayerDeclaresItsRequestFrames(t *testing.T) {
 	}
 	if !shnsdk.SupportsRequestFrameV1OpSub(capabilityDeclaration(config{Role: "payer"}).RequestFrames) {
 		t.Fatal("a payer's declaration lacks v1opsub")
+	}
+	if !shnsdk.SupportsRequestFrameCDexLoc(capabilityDeclaration(config{Role: "provider", ProviderCDexTaskURL: "https://provider.example/fhir/Task"}).RequestFrames) {
+		t.Fatal("a provider's declaration taking the Task lacks cdexloc")
+	}
+	if shnsdk.SupportsRequestFrameCDexLoc(capabilityDeclaration(config{Role: "provider"}).RequestFrames) {
+		t.Fatal("a provider that takes no Task declares cdexloc")
 	}
 }
 

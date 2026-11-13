@@ -260,8 +260,63 @@ func newAuthoredQRSoR(member string, demo Demo, orderJSON []byte) *authoredQRSoR
 	}
 }
 
+// testHomeHealthAssessmentCanonical is the canonical the provider-data pend
+// fixture's questionnaire carries.
+const testHomeHealthAssessmentCanonical = "http://example.org/fhir/Questionnaire/HomeHealthAssessment"
+
+// testHomeHealthAssessment is the questionnaire the provider-data UC-06/UC-07
+// order (G0151) rides, the HomeHealthAssessment's shape trimmed and delivered
+// whole: the service category (1.1) and the physical-therapy group (3), whose
+// free-text functional limitations (3.2, hhaFunctionalStatusLinkID) is the item
+// the resume's clinician or patient attests. The attestation fills 1.1 and 3.1
+// from the order; 3.2 and 3.3 are optional here, as an order with no
+// supportingInfo states neither.
+func testHomeHealthAssessment() []byte {
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "Questionnaire", "id": "HomeHealthAssessment", "url": testHomeHealthAssessmentCanonical, "status": "active",
+		"item": []map[string]any{
+			{"linkId": "1", "type": "group", "text": "Service", "item": []map[string]any{
+				{"linkId": "1.1", "type": "choice", "text": "Service category", "required": true},
+			}},
+			{"linkId": "3", "type": "group", "text": "Physical therapy", "item": []map[string]any{
+				{"linkId": "3.1", "type": "string", "text": "Primary diagnosis"},
+				{"linkId": "3.2", "type": "text", "text": "Functional limitations"},
+				{"linkId": "3.3", "type": "text", "text": "Treatment goals"},
+			}},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// hhaPopulator stands in for the participant's own operated $populate on the
+// 0-CQL HomeHealthAssessment: it auto-pops nothing, answering an empty
+// response about the patient and the questionnaire asked for, which the
+// provider-data attestation then fills from the order.
+type hhaPopulator struct{}
+
+func (hhaPopulator) Populate(_ context.Context, packageJSON []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
+	q, err := extractQuestionnaireFromPackage(packageJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	canonical, err := shnsdk.ParseQuestionnaireURL(q)
+	if err != nil {
+		return nil, nil, err
+	}
+	b, err := json.Marshal(map[string]any{
+		"resourceType": "QuestionnaireResponse", "status": "in-progress",
+		"subject": map[string]string{"reference": pc.PatientRef}, "questionnaire": canonical,
+	})
+	return b, nil, err
+}
+
 // newAuthoredQRPendFixture wires scenarioToPend's UC-06 case: pas-claim answers
 // PENDED (pendResumeSubstrate's shape, reused verbatim from pendstate_pin_test.go).
+// The questionnaire it serves is the order's own (testHomeHealthAssessment), so
+// the resume can amend it with the item the lane attests.
 func newAuthoredQRPendFixture(t *testing.T, member string, demo Demo, orderJSON []byte, pendedItem string) (*Gateway, *pendResumeSubstrate, *capturingTransport) {
 	t.Helper()
 	keys := genAuthoredQRKeys(t)
@@ -275,11 +330,13 @@ func newAuthoredQRPendFixture(t *testing.T, member string, demo Demo, orderJSON 
 		pci:            pci,
 		patientRef:     "Patient/" + member,
 		pendedItem:     pendedItem,
+		questionnaire:  testHomeHealthAssessment(),
 		encKeys:        map[string]encPair{"payer": {pub: keys.payerEncPub, priv: keys.payerEncPriv}},
 		claimed:        map[string][]string{},
 	}
 	capture := &capturingTransport{inner: stub, encKeys: stub.encKeys, captured: map[string][][]byte{}}
 	gw := newAuthoredQRGateway(t, keys, newAuthoredQRSoR(member, demo, orderJSON), capture, clock)
+	WithPopulator(hhaPopulator{})(gw)
 	return gw, stub, capture
 }
 

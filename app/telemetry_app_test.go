@@ -201,7 +201,7 @@ func TestSeriesBounds_MON_R18(t *testing.T) {
 			t.Errorf("%s: bound %d, pinned %d", inst.Name, got, want[inst.Name])
 		}
 	}
-	if !toyProfileBuild && kinds != 12 {
+	if !toyProfileBuild && kinds != 13 {
 		t.Errorf("%d exchange kinds in a release build; the exchange instruments' bounds follow it", kinds)
 	}
 }

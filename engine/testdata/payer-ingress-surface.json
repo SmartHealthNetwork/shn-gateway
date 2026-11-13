@@ -1,6 +1,13 @@
 [
   "GET /.well-known/smart-configuration",
+  "GET /Task/{id}",
+  "GET /Task/{id}/_history/{vid}",
+  "GET /cdex/provider/{provider}/.well-known/smart-configuration",
+  "GET /cdex/provider/{provider}/Task/{id}",
+  "GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
+  "GET /cdex/provider/{provider}/metadata",
   "GET /cdex/providers",
+  "GET /metadata",
   "POST /Task",
   "POST /cdex/provider/{provider}/Task",
   "POST /oauth/token",

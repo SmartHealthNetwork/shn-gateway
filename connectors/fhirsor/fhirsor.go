@@ -498,7 +498,9 @@ func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([][]byt
 
 // ResolveByReference returns the raw bytes of a resource named by a relative reference
 // (e.g. "Organization/dme-1") via a direct FHIR read (GET {type}/{id}).
-// A direct 404 is absence; transport and malformed-response errors remain errors.
+// The server's definite answer that it holds no such resource (404, or 410
+// for one deleted) is absence; transport and malformed-response errors remain
+// errors, never absence.
 // Used to resolve an order's performer (the DME supplier Organization) for headless
 // order-dispatch origination.
 func (s *SoR) ResolveByReferenceContext(ctx context.Context, ref string) ([]byte, bool, error) {

@@ -738,7 +738,7 @@ func TestUC06SingleCall_AttestingClinicianRefusedAtTheAmendment(t *testing.T) {
 			gw.cfg.SoR = refRecord{orderRewrite{gw.cfg.SoR, requesterNamed(t, "Practitioner/prac-nonpi")}, "Practitioner/prac-nonpi",
 				[]byte(`{"resourceType":"Practitioner","id":"prac-nonpi","name":[{"family":"NoNPI"}]}`)}
 			rec := httptest.NewRecorder()
-			gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(body)))))
+			gw.handleUC06(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(body))))))
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), msgNoAttestingClinician) {
 				t.Fatalf("%d %s, want 422 %q", rec.Code, rec.Body, msgNoAttestingClinician)
 			}
@@ -1363,7 +1363,10 @@ func TestFailEvidenceLinkage(t *testing.T) {
 			x := &exchangeRecorder{}
 			ctx = context.WithValue(ctx, exchangeRecorderKey{}, x)
 			rec := httptest.NewRecorder()
-			failEvidenceLinkage(ctx, rec, row.err)
+			// The call answered its two legs (legAnswered, as roundTrip does).
+			w, req := mounted(rec, httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx))
+			legAnswered(req.Context())
+			failEvidenceLinkage(req.Context(), w, row.err)
 			switch row.status {
 			case http.StatusUnprocessableEntity:
 				// The fidelity of SHN's own edit, at the build.

@@ -68,13 +68,18 @@ func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 // CheckKind and its four constants are already declared in finding.go — do
 // not redeclare them here.
 
-// Verdict is what the check saw. Decide is total over all four so the table
+// Verdict is what the check saw. Decide is total over all five so the table
 // can be tested whole. VerdictInvalid is a defect that breaks the message's
 // structure, or one the check could not classify (fail closed).
 // VerdictUnavailable is a check that could not run: the validator failed, or
 // no validator lane serves the line. VerdictDeeper is a FHIR $validate whose
 // every defect the choke point classified as a deeper rule's (classifyFHIR):
-// the message is readable, and only strict refuses it.
+// the message is readable, and only strict refuses it. VerdictUnchecked is a
+// FHIR $validate whose every error is a code the lane could not check (a code
+// system it cannot check, such as a licensed X12 one) or a consequence of one
+// on the same slice (certificationUnchecked): the validator found no defect,
+// it could not look. A terminology gap is never a fault of the message, so no
+// level refuses it.
 type Verdict int
 
 const (
@@ -82,6 +87,7 @@ const (
 	VerdictInvalid
 	VerdictUnavailable
 	VerdictDeeper
+	VerdictUnchecked
 )
 
 // Decision is what the gateway does about an invalid verdict. Refuse is the
@@ -386,8 +392,6 @@ const (
 	// RuleEOBDecision: a payer decision this gateway's own record cannot hold
 	// (a denial whose ClaimResponse states preAuthRef): relayed, not recorded.
 	RuleEOBDecision = "eob.decision"
-	// RuleInsurer: a Claim.insurer reference that does not resolve.
-	RuleInsurer = "claim.insurer"
 )
 
 var networkRules = map[string]bool{RuleSubjectPCI: true, RuleSubjectToken: true, RuleDuplicateKey: true}
@@ -407,7 +411,7 @@ var structuralContentRefuses = map[string]bool{RuleRequestShape: true, RuleAnswe
 var contentRules = map[string]bool{
 	RulePatientMixed: true, RulePatientAnswer: true, RuleRequestShape: true,
 	RulePrefetchFill: true, RuleAttestation: true, RuleUpdateProvenance: true, RuleAnswerShape: true,
-	RuleEOBDecision: true, RuleInsurer: true,
+	RuleEOBDecision: true,
 }
 
 // Runs reports whether a payload conformance check runs at all. At none no
@@ -434,7 +438,9 @@ func (p ConformancePolicy) RunsKind(kind CheckKind) bool {
 // Decide is the whole table: what a payload conformance check that ran does
 // about what it saw.
 func (p ConformancePolicy) Decide(kind CheckKind, rule string, v Verdict) Decision {
-	if v == VerdictValid {
+	// A terminology gap is recorded at every level, strict included: the
+	// lane could not check the code, which says nothing about the message.
+	if v == VerdictValid || v == VerdictUnchecked {
 		return Record
 	}
 	switch {

@@ -538,24 +538,17 @@ func TestFHIRServerCarriedEntries(t *testing.T) {
 	}
 }
 
-// On the payer's side, a carried coverage is a coverage like any other: a
-// payer that maps its network identity to its own system's (E-03) maps the
-// identifier the carried searchset holds, in the payor Organization the
-// provider's gateway read or in the Coverage itself, and changes nothing
-// else; its own system receives the provider's carried request otherwise
-// byte for byte.
-func TestCarriedCoverageMappedByThePayersIdentityMapping(t *testing.T) {
-	for name, row := range map[string]struct {
-		handler func(http.ResponseWriter, *http.Request)
-		paths   []string
-	}{
-		"by the payor Organization read": {ehrRoutes(bareRefSearchset("o1"), ehrAnswer(200, "application/fhir+json", payorOrganization("o1", "00001"))),
-			[]string{"prefetch.coverage.entry.1.resource.identifier.0.system", "prefetch.coverage.entry.1.resource.identifier.0.value"}},
-		"by the Coverage's own identifier": {ehrAnswer(200, "application/fhir+json", statusSearchset("active:00001")),
-			[]string{"prefetch.coverage.entry.0.resource.payor.0.identifier.system", "prefetch.coverage.entry.0.resource.payor.0.identifier.value"}},
+// On the payer's side, a carried coverage is a coverage like any other: the
+// payer's own system receives the provider's carried request byte for byte,
+// the payer identifier in the payor Organization the provider's gateway read,
+// or in the Coverage itself, included.
+func TestCarriedCoverageReachesThePayersSystemExactly(t *testing.T) {
+	for name, handler := range map[string]func(http.ResponseWriter, *http.Request){
+		"by the payor Organization read":   ehrRoutes(bareRefSearchset("o1"), ehrAnswer(200, "application/fhir+json", payorOrganization("o1", "00001"))),
+		"by the Coverage's own identifier": ehrAnswer(200, "application/fhir+json", statusSearchset("active:00001")),
 	} {
 		t.Run(name, func(t *testing.T) {
-			e := newEHRServer(t, row.handler)
+			e := newEHRServer(t, handler)
 			env, _ := fhirServerEnv(t, e, FHIRServerReadPrivate)
 			rec := httptest.NewRecorder()
 			// An order-sign request: the hook the payer's stub system offers.
@@ -565,12 +558,11 @@ func TestCarriedCoverageMappedByThePayersIdentityMapping(t *testing.T) {
 				t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 			}
 			carried := sentRequest(t, env)
-			n, p := crdResponder(t, WithPayorEdgeIdentity(shnsdk.CMSPayerIdentity, payorMapped))
+			n, p := crdResponder(t)
 			if res := handleCRD(t, n, carried); res.Status != 0 {
 				t.Fatalf("status %d: %s", res.Status, res.Message)
 			}
-			assertSent(t, p, expectEdits(t, carried,
-				tokenEdit{row.paths[0], payorMapped.System}, tokenEdit{row.paths[1], payorMapped.Value}))
+			assertSent(t, p, carried)
 		})
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,14 +20,16 @@ import (
 )
 
 // providerTaskSystem is a provider's own Task endpoint: it records each
-// request it is sent and answers status with body.
+// request it is sent and answers status with body, and with each of
+// locations as a Location header (none when it holds none).
 type providerTaskSystem struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	bodies [][]byte
-	header []http.Header
-	status int
-	answer []byte
+	srv       *httptest.Server
+	mu        sync.Mutex
+	bodies    [][]byte
+	header    []http.Header
+	status    int
+	answer    []byte
+	locations []string
 }
 
 func newProviderTaskSystem(t *testing.T, status int, answer []byte) *providerTaskSystem {
@@ -37,8 +40,12 @@ func newProviderTaskSystem(t *testing.T, status int, answer []byte) *providerTas
 		s.mu.Lock()
 		s.bodies = append(s.bodies, b)
 		s.header = append(s.header, r.Header.Clone())
+		locations := slices.Clone(s.locations)
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/fhir+json")
+		for _, l := range locations {
+			w.Header().Add("Location", l)
+		}
 		w.WriteHeader(s.status)
 		_, _ = w.Write(s.answer)
 	}))
@@ -408,6 +415,9 @@ func TestCDexRequest_APayerURLItCannotRekeyIsCarriedExactly(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			sys := newProviderTaskSystem(t, http.StatusCreated, []byte(`{"resourceType":"Task"}`))
+			// Its system names the created Task, so the Task's location (E-16)
+			// is framed and only the re-key goes unmade.
+			sys.locations = []string{sys.srv.URL + "/fhir/Task/t-1"}
 			p := configuredProvider(t, EnforcementStrict, sys)
 			sent := c.body(t)
 			if ans := p.send(t, sent); ans.status != http.StatusCreated {

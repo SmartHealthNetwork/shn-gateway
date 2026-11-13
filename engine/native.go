@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptrace"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 const maxPartnerBody = 8 << 20 // 8 MiB cap on a partner response body
@@ -92,19 +92,6 @@ type nativeResponder struct {
 	// posture as this file's existing "gateway: WARNING ..." stdout
 	// precedent (gateway/app/app.go).
 	endpointEvidenceObserver func(note string)
-
-	// payorEdgeOwn / payorEdgeBackend implement the payer-edge identity mapping seam
-	// (payoredge.go, PAYER_DAVINCI_PAYOR_OWN / PAYER_DAVINCI_PAYOR_BACKEND): when both
-	// set, the legs a workstream maps re-stamp the inbound Coverage's payor identity from
-	// an identity this gateway OWNS to payorEdgeBackend — anything else refuses loudly
-	// (fail-closed). nil (the default) ⇒ seam off, every leg forwards its Coverage payor
-	// verbatim — byte-identical to every deployment that does not set the two env vars.
-	payorEdgeOwn     *shnsdk.PayerIdentifier
-	payorEdgeBackend *shnsdk.PayerIdentifier
-	// payorEdgePublished reports the payer identities this holder itself publishes on
-	// the network feed — the other half of "own" (payoredge.go, ownPayerIdentities).
-	// nil, or a holder with no published identity, ⇒ payorEdgeOwn alone decides.
-	payorEdgePublished func() []shnsdk.PayerIdentifier
 
 	// backendHeaders are fixed request headers a partner system routes on (a
 	// tenant or plan key its API gateway reads before any payload). They go on
@@ -252,22 +239,6 @@ func WithOwnContractVersions(tokens []string) NativeOption {
 	return func(n *nativeResponder) { n.ownContractVersions = tokens }
 }
 
-// WithPayorEdgeIdentity turns on the payer-edge identity mapping seam (payoredge.go):
-// own is the configured half of this deployment's payer identity (the assertion side —
-// WithPayorEdgePublishedIdentities supplies the other half, the identities this holder
-// publishes on the network feed), backend
-// is the identifier this responder's backend leg knows itself by (the re-stamp target).
-// Unset (the zero-value NativeOption slice) ⇒ seam off, every leg forwards
-// its Coverage payor verbatim (the prior behavior). Config loading enforces the
-// all-or-nothing rule (PAYER_DAVINCI_PAYOR_OWN / _BACKEND); this option itself has no
-// partial form.
-func WithPayorEdgeIdentity(own, backend shnsdk.PayerIdentifier) NativeOption {
-	return func(n *nativeResponder) {
-		o, b := own, backend
-		n.payorEdgeOwn, n.payorEdgeBackend = &o, &b
-	}
-}
-
 // ownDeclared is this responder's declared-set accessor — the nativeResponder mirror
 // of Gateway.declaredContractVersions(), with the same empty-means-build-default
 // rule, so the two halves of "what do we speak" cannot diverge.
@@ -404,6 +375,17 @@ type upstreamReply struct {
 	// notCarried the record of one it does not.
 	headers    map[string]string
 	notCarried []string
+	// locations are a 2xx answer's Location values as the system answered
+	// them, and answeredAt the URL that answer came from, after any redirect
+	// the forward followed: the target a relative Location is resolved
+	// against (RFC 9110 section 10.2.2). Neither is carried as a header; a
+	// workstream's own forward reads them (E-16).
+	locations  []string
+	answeredAt *url.URL
+	// redirected says the answer came after the call was redirected: a hop
+	// the connector observed, or a final request other than the one sent. The
+	// answer is then from another address than the one this gateway chose.
+	redirected bool
 }
 
 // post forwards the request p on leg to base+path, after checking p against
@@ -422,6 +404,25 @@ func (n *nativeResponder) post(ctx context.Context, base, path string, p relay.P
 // postVia is post, sent with client: the CRD legs send with the CDS client
 // (cdsHTTPClient), every other leg with the responder's own.
 func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base, path string, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
+	return n.sendVia(ctx, client, http.MethodPost, base+path, nil, p, leg, label)
+}
+
+// getVia reads target with client: a GET with no body, p being the network's
+// request it carries, which is empty (a read has none) and is checked against
+// the leg's row as a POST's body is. target is sent exactly as built, its path
+// and query never parsed again. It shares every failure class, the deadline,
+// the backend record, the record of a resend after a 401 and of a redirect,
+// and the leg's id sent to the system, with post.
+func (n *nativeResponder) getVia(ctx context.Context, client *http.Client, target *url.URL, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
+	return n.sendVia(ctx, client, http.MethodGet, target.String(), target, p, leg, label)
+}
+
+// sendVia sends the request p on leg to rawURL with method and client: a POST
+// carries p as its body, with its media type; a GET carries none, and asks
+// for FHIR JSON. target, when set, is the URL the request is sent to as
+// built, in place of rawURL parsed again; rawURL then only names it in log
+// lines, which read its host alone.
+func (n *nativeResponder) sendVia(ctx context.Context, client *http.Client, method, rawURL string, target *url.URL, p relay.Payload, leg, label string) (upstreamReply, LegResult, error) {
 	// The label names whose system the call is to: the payer's, unless the
 	// responder forwards to another party's (WithUpstreamParty).
 	label = n.upstreamParty() + " " + label
@@ -432,6 +433,12 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 		// observed by the inbound handler (responderFailed).
 		(*Gateway)(nil).ownershipRefused(k, err)
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: %w", label, err)
+	}
+	read := method == http.MethodGet
+	if read && len(body) != 0 {
+		// A read carries no body: one handed a body would send a request
+		// other than the network's.
+		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: a read carries no body", label)
 	}
 	// The call runs under the responder's own deadline, when it has one;
 	// the request's end still cuts it short (callEndedClass reads which).
@@ -461,16 +468,30 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 	// is noted on the record as one more call, and why.
 	refreshCtx, refresh := smartauth.WithCredentialRefreshObservation(callCtx)
 	refreshCtx, redirects := smartauth.WithRedirectObservation(refreshCtx)
-	req, err := http.NewRequestWithContext(refreshCtx, http.MethodPost, base+path, bytes.NewReader(body))
+	var reqBody io.Reader
+	if !read {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(refreshCtx, method, rawURL, reqBody)
 	if err != nil {
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request build failed: %w", label, err)
 	}
-	// Each leg's own media type (or the sender's declared FHIR media type),
-	// as a direct client would send it — never application/json on a FHIR
-	// operation.
-	ct := nativeRequestMediaType(ctx, p)
-	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Accept", acceptFor(ct))
+	if target != nil {
+		u := *target
+		req.URL, req.Host = &u, u.Host
+	}
+	if read {
+		// A FHIR read, as a direct client makes it: no body, no media type,
+		// and the answer asked for as FHIR JSON, which the network reads.
+		req.Header.Set("Accept", "application/fhir+json")
+	} else {
+		// Each leg's own media type (or the sender's declared FHIR media
+		// type), as a direct client would send it — never application/json
+		// on a FHIR operation.
+		ct := nativeRequestMediaType(ctx, p)
+		req.Header.Set("Content-Type", ct)
+		req.Header.Set("Accept", acceptFor(ct))
+	}
 	n.applyBackendHeaders(req)
 	// The headers a leg's handler sets on this forward (forwardHeaders: the
 	// payer's attachment request names its requester), and the disclosure
@@ -491,8 +512,8 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 		capture.response = nil
 	}
 	// The forward's event names the registered edits it is sent with (the
-	// payer identity mapping); the record names them once the bytes are sent
-	// (below).
+	// adaptive address restore, E-13); the record names them once the bytes
+	// are sent (below).
 	n.emitDiagnosticDetail(ctx, "native.request", body, true, 0, relayEditsDetail(p.Edits()), req, req.Header)
 	// Whether the request was written decides what a failure tells the
 	// requester: before, the payer's system never saw it; after, it may have
@@ -532,7 +553,7 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 		x.backend(resp.StatusCode, x.since(n.now, callStart), BackendHTTP3xx)
 		x.sent(p)
 		systemAnswered(ctx)
-		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
+		logUpstreamAbandoned(ctx, label, leg, rawURL, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s redirected from https to http: %w", label, err), sent: true, cleartextRedirect: true}
 	}
 	// The system redirected the forward, a request that carries a body, to
@@ -564,10 +585,10 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 			x.sent(p)
 		}
 		if timedOut() {
-			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, sent)
+			logUpstreamTimedOut(ctx, label, leg, rawURL, n.backendDeadline, sent)
 			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s did not answer within %s: %w", label, n.backendDeadline, err), sent: sent, timedOut: true}
 		}
-		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), sent)
+		logUpstreamAbandoned(ctx, label, leg, rawURL, time.Since(started), sent)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s unreachable: %w", label, err), sent: sent}
 	}
 	// The payer's system answered: the edits the forward carried were sent.
@@ -592,17 +613,25 @@ func (n *nativeResponder) postVia(ctx context.Context, client *http.Client, base
 		}
 		x.backend(resp.StatusCode, x.since(n.now, callStart), class)
 		if timedOut() {
-			logUpstreamTimedOut(ctx, label, leg, base+path, n.backendDeadline, true)
+			logUpstreamTimedOut(ctx, label, leg, rawURL, n.backendDeadline, true)
 			return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s answer not read within %s: %w", label, n.backendDeadline, err), sent: true, timedOut: true}
 		}
-		logUpstreamAbandoned(ctx, label, leg, base+path, time.Since(started), true)
+		logUpstreamAbandoned(ctx, label, leg, rawURL, time.Since(started), true)
 		return upstreamReply{}, LegResult{}, &upstreamFailure{err: fmt.Errorf("upstream %s read failed: %w", label, err), sent: true}
 	}
 	x.backend(resp.StatusCode, x.since(n.now, callStart), backendClass(resp.StatusCode, nil))
 	reply, result, err := upstreamAnswer(resp, rb, label)
+	if reply.status/100 == 2 && reply.answeredAt == nil {
+		// A transport that names no request answered the one sent.
+		u := *req.URL
+		reply.answeredAt = &u
+	}
 	for _, value := range reply.notCarried {
 		x.answerHeaderNotCarried(value)
 	}
+	// Read from the hops the connector observed and, for a client that
+	// observes none, from the request that was answered.
+	reply.redirected = len(redirects.Hops()) > 0 || (resp.Request != nil && resp.Request.URL != nil && resp.Request.URL.String() != req.URL.String())
 	return reply, result, err
 }
 
@@ -732,6 +761,11 @@ func upstreamAnswer(resp *http.Response, rb []byte, label string) (upstreamReply
 		return reply, LegResult{Status: resp.StatusCode, Response: relay.Exact(reply.body, resp.Header.Get("Content-Type"))}, nil
 	}
 	reply.headers, reply.notCarried = answerHeadersOf(resp)
+	reply.locations = slices.Clone(resp.Header.Values("Location"))
+	if resp.Request != nil && resp.Request.URL != nil {
+		u := *resp.Request.URL
+		reply.answeredAt = &u
+	}
 	return reply, LegResult{}, nil
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/diagnostics"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/dtraddress"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -322,48 +323,72 @@ func TestExchangeRecord_RequesterEdits(t *testing.T) {
 	})
 }
 
-// The recipient's forward to its own system: the payer identity mapping (E-03)
-// is named on the payer's own inbound record and its native.request event;
-// with the mapping off the request is forwarded exactly and names none.
+// The recipient's forward to its own system: restoring an adaptive address
+// this payer issued (E-13) is named on the payer's own inbound record and its
+// native.request event; a request carrying none is forwarded exactly and
+// names none.
 func TestExchangeRecord_RecipientEdits(t *testing.T) {
 	t.Parallel()
-	for _, mapped := range []bool{true, false} {
+	for _, restored := range []bool{true, false} {
 		var events capturedEvents
-		opts := []NativeOption{WithNativeDiagnostic(events.sink)}
-		if mapped {
-			opts = append(opts, withIdentityMapping()...)
-		}
-		p := newLevelPayer(t, EnforcementNone, opts...)
+		p := newLevelPayer(t, EnforcementNone, WithNativeDiagnostic(events.sink))
 		var got exchangeRecords
 		p.g.cfg.ExchangeObserved = got.observe
 		body := []byte(pasIngressBundle("00001", ""))
-		if ans := p.send(t, "pas-claim", "", body); ans.status != http.StatusOK {
-			t.Fatalf("mapped %v: answer %d %s", mapped, ans.status, ans.body)
-		}
 		var want []string
-		if mapped {
-			want = editStrings(relay.EditPayorEdgeRestamp)
-			if !bytes.Equal(p.partner.lastBody, mappedPayor(t, body)) {
-				t.Fatal("the mapping did not apply; the row proves nothing")
+		if restored {
+			body = withIssuedAddress(t, p, body)
+			want = editStrings(relay.EditDTRAdaptiveAddressRestore)
+		}
+		if ans := p.send(t, "pas-claim", "", body); ans.status != http.StatusOK {
+			t.Fatalf("restored %v: answer %d %s", restored, ans.status, ans.body)
+		}
+		if restored {
+			if bytes.Equal(p.partner.lastBody, body) || !bytes.Contains(p.partner.lastBody, []byte(`"valueUrl":"`+p.partner.srv.URL+`/forms/a"`)) {
+				t.Fatalf("the restore did not apply; the row proves nothing: %s", p.partner.lastBody)
 			}
+		} else if !bytes.Equal(p.partner.lastBody, body) {
+			t.Fatalf("the request was not forwarded exactly: %s", p.partner.lastBody)
 		}
 		r := got.only(t)
 		if r.Direction != DirectionInbound || !slices.Equal(r.Edits, want) || !slices.Equal(r.RequestEdits, want) || len(r.AnswerEdits) != 0 {
-			t.Fatalf("mapped %v: %s record edits %v (forward %v, answer %v), want %v, all the forward's", mapped, r.Direction, r.Edits, r.RequestEdits, r.AnswerEdits, want)
+			t.Fatalf("restored %v: %s record edits %v (forward %v, answer %v), want %v, all the forward's", restored, r.Direction, r.Edits, r.RequestEdits, r.AnswerEdits, want)
 		}
 		if r.AnswerOwnership != "relayed" || r.AnswerBuilder != "" {
-			t.Fatalf("mapped %v: answer %q by %q, want the payer's answer relayed", mapped, r.AnswerOwnership, r.AnswerBuilder)
+			t.Fatalf("restored %v: answer %q by %q, want the payer's answer relayed", restored, r.AnswerOwnership, r.AnswerBuilder)
 		}
 		wantEventEdits(t, &events, "native.request", want)
 	}
+}
+
+// withIssuedAddress is body (a PAS Bundle) with a QuestionnaireResponse
+// appended whose contained Questionnaire carries an adaptive address p's
+// payer gateway issued: the forward restores it to the payer's own (E-13).
+func withIssuedAddress(t *testing.T, p *levelPayer, body []byte) []byte {
+	t.Helper()
+	st := p.g.paState()
+	if st == nil || st.addressKey.IsZero() {
+		t.Fatal("the payer gateway issues no adaptive address; the row proves nothing")
+	}
+	base, ok := p.g.cfg.Responder.(*nativeResponder).dtrBaseAt("2.0")
+	if !ok {
+		t.Fatal("the payer has no DTR base")
+	}
+	tag := st.addressKey.Tag(dtraddress.Address{Family: dtraddress.FamilyPayer, Payer: p.g.cfg.HolderID, Provider: p.requester.ID,
+		Line: "2.0", Base: base, Remainder: "/forms/a"})
+	qr := `,{"resource":{"resourceType":"QuestionnaireResponse","status":"completed","questionnaire":"#q","subject":{"reference":"Patient/MBR-COVERED"},` +
+		`"contained":[{"resourceType":"Questionnaire","id":"q","status":"active","extension":[{"url":"` + questionnaireAdaptiveExtension + `",` +
+		`"valueUrl":"https://provider-gw.example/dtr/payer/` + p.g.cfg.HolderID + `/2.0/` + tag + `/forms/a"}]}]}}`
+	i := bytes.LastIndex(body, []byte("]"))
+	return slices.Concat(body[:i], []byte(qr), body[i:])
 }
 
 // The recorder keeps the closed set: only registered ids, each once, in the
 // order first transmitted; a nil recorder records nothing.
 func TestExchangeRecorder_EditsClosedSet(t *testing.T) {
 	list := addEdits(nil, []relay.EditID{relay.EditCDSCallbackStrip, "E-99", relay.EditCDSCoverageCarry})
-	list = addEdits(list, []relay.EditID{relay.EditCDSCoverageCarry, "", "e-01", relay.EditCDSCallbackStrip, relay.EditPayorEdgeRestamp})
-	want := editStrings(relay.EditCDSCallbackStrip, relay.EditCDSCoverageCarry, relay.EditPayorEdgeRestamp)
+	list = addEdits(list, []relay.EditID{relay.EditCDSCoverageCarry, "", "e-01", relay.EditCDSCallbackStrip, relay.EditDTRAdaptiveAddressRestore})
+	want := editStrings(relay.EditCDSCallbackStrip, relay.EditCDSCoverageCarry, relay.EditDTRAdaptiveAddressRestore)
 	if !slices.Equal(list, want) {
 		t.Fatalf("edits %v, want %v", list, want)
 	}
@@ -386,9 +411,9 @@ func TestExchangeRecord_EditsAreCloned(t *testing.T) {
 	strip := editStrings(relay.EditCDSCallbackStrip)
 	x.rec.Edits, x.rec.RequestEdits, x.rec.AnswerEdits = slices.Clone(strip), slices.Clone(strip), slices.Clone(strip)
 	g.emitExchange(x, &exchangeWriter{ResponseWriter: httptest.NewRecorder(), x: x}, &countingBody{}, false)
-	x.rec.Edits[0] = string(relay.EditPayorEdgeRestamp)
-	x.rec.RequestEdits[0] = string(relay.EditPayorEdgeRestamp)
-	x.rec.AnswerEdits[0] = string(relay.EditPayorEdgeRestamp)
+	x.rec.Edits[0] = string(relay.EditDTRAdaptiveAddressRestore)
+	x.rec.RequestEdits[0] = string(relay.EditDTRAdaptiveAddressRestore)
+	x.rec.AnswerEdits[0] = string(relay.EditDTRAdaptiveAddressRestore)
 	for name, got := range map[string][]string{"Edits": emitted.Edits, "RequestEdits": emitted.RequestEdits, "AnswerEdits": emitted.AnswerEdits} {
 		if !slices.Equal(got, strip) {
 			t.Fatalf("the emitted record's %s changed after it was emitted: %v", name, got)
@@ -407,7 +432,6 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 	}{
 		relay.EditCDSCallbackStrip:     {"cds-callback-strip", relay.RoleRecipient},
 		relay.EditCDSPrefetchObtain:    {"cds-prefetch-obtain", relay.RoleRecipient},
-		relay.EditPayorEdgeRestamp:     {"payor-edge-restamp", 0},
 		relay.EditDTRCoverageObtain:    {"dtr-coverage-obtain", relay.RoleRecipient},
 		relay.EditDTRPatientObtain:     {"dtr-patient-obtain", relay.RoleRecipient},
 		relay.EditEvidenceSubjectRekey: {"evidence-subject-rekey", relay.RoleRecipient},
@@ -424,6 +448,9 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		// E-14 is made to the facility's report in the claim update the
 		// provider's gateway sends: the payer receives it.
 		relay.EditFacilityReportSubjectRekey: {"facility-report-subject-rekey", relay.RoleRecipient},
+		// E-16 is made on the answer to the payer's own system: no other
+		// party receives it.
+		relay.EditCDexTaskLocationRekey: {"cdex-task-location-rekey", 0},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {
@@ -544,23 +571,23 @@ func TestExchangeRecord_RecipientEditsOnlyOnceSent(t *testing.T) {
 	}{
 		"a payer system dial error: never sent, no edits":           {sendFails{path: pasSubmitPath, err: dialRefused()}, nil},
 		"a bearer that could not be obtained: never sent, no edits": {sendFails{path: pasSubmitPath, wrote: true, err: tokenAcquisitionFailure(t)}, nil},
-		"the connection failed after the request was written":       {sendFails{path: pasSubmitPath, wrote: true, err: connReset()}, editStrings(relay.EditPayorEdgeRestamp)},
+		"the connection failed after the request was written":       {sendFails{path: pasSubmitPath, wrote: true, err: connReset()}, editStrings(relay.EditDTRAdaptiveAddressRestore)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var events capturedEvents
-			p := newLevelPayer(t, EnforcementNone, append(withIdentityMapping(), WithNativeDiagnostic(events.sink))...)
+			p := newLevelPayer(t, EnforcementNone, WithNativeDiagnostic(events.sink))
 			var got exchangeRecords
 			p.g.cfg.ExchangeObserved = got.observe
 			n := p.g.cfg.Responder.(*nativeResponder)
 			row.send.next = n.client.Transport
 			n.client = &http.Client{Transport: row.send}
-			if ans := p.send(t, "pas-claim", "", []byte(pasIngressBundle("00001", ""))); ans.status/100 == 2 {
+			if ans := p.send(t, "pas-claim", "", withIssuedAddress(t, p, []byte(pasIngressBundle("00001", "")))); ans.status/100 == 2 {
 				t.Fatalf("answer %d: the forward did not fail; the row proves nothing", ans.status)
 			}
 			if r := got.only(t); r.Outcome != ExchangeUpstreamError || !slices.Equal(r.Edits, row.want) {
 				t.Fatalf("record %s, edits %v, want upstream-error with %v", r.Outcome, r.Edits, row.want)
 			}
-			wantEventEdits(t, &events, "native.request", editStrings(relay.EditPayorEdgeRestamp))
+			wantEventEdits(t, &events, "native.request", editStrings(relay.EditDTRAdaptiveAddressRestore))
 		})
 	}
 }

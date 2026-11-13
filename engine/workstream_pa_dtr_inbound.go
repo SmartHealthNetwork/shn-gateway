@@ -189,8 +189,8 @@ func patientMember(ref string) (string, bool) {
 // resource or reference that has it names no member, and the defect is kept,
 // in document order, for bindPackageParameters to judge once it knows whether
 // the request has a subject at all. A defect that cannot be skipped (a body
-// that cannot be read, a coverage parameter that cannot be read, or one that is
-// not a Coverage on a payer that maps its identity) stops the walk.
+// that cannot be read, or a coverage parameter that cannot be read) stops the
+// walk.
 type packagePatients struct {
 	d       *relay.Document
 	members map[string]bool
@@ -200,10 +200,6 @@ type packagePatients struct {
 	// binds the same way).
 	first, coverage string
 	defects         []packageDefect
-	// mapsPayerIdentity: this payer maps its identity by the Coverage's
-	// payor, so a coverage parameter that is not a Coverage cannot be
-	// addressed (Gateway.mapsPayerIdentity).
-	mapsPayerIdentity bool
 }
 
 // packageDefect is a content defect of a questionnaire request: the rule it
@@ -309,19 +305,14 @@ func (p *packagePatients) parameterList(arr relay.NodeID, top bool) (coverages i
 			isCoverage := top && docText(d, param, "name") == "coverage"
 			if isCoverage {
 				// A coverage parameter that cannot be read refuses at every
-				// level. One that is not a Coverage refuses at every level on
-				// a payer that maps its identity, which addresses its own
-				// system by the Coverage's payor; without the mapping the
-				// request is already routed here, so it is the request's own
-				// shape (RuleRequestShape) and names no coverage. A Coverage
-				// with no beneficiary is the request's own shape too.
+				// level. One that is not a Coverage is the request's own shape
+				// (RuleRequestShape) and names no coverage: the request is
+				// already routed here. A Coverage with no beneficiary is the
+				// request's own shape too.
 				switch {
 				case d.Kind(res) != relay.KindObject:
 					return 0, &errNotCoverage
 				case docText(d, res, "resourceType") != "Coverage":
-					if p.mapsPayerIdentity {
-						return 0, &errNotCoverage
-					}
 					p.defect(RuleRequestShape, errNotCoverage)
 					isCoverage = false
 				default:
@@ -377,9 +368,10 @@ func docText(d *relay.Document, obj relay.NodeID, key string) string {
 // The request's subject is the patient its first coverage's beneficiary
 // names, else the first patient it names, bound by this payer's own system
 // (RuleSubjectPCI when the participant requires known members). That, a request
-// that cannot be read and a coverage parameter that is not a Coverage refuse
-// at every level. The rest is the request's own content, not checked at
-// none and recorded at observe: no coverage, a Coverage with no beneficiary, a
+// that cannot be read and a coverage parameter that cannot be read refuse at
+// every level. The rest is the request's own content, not checked at none and
+// recorded at observe: no coverage, a coverage parameter that is not a
+// Coverage, a Coverage with no beneficiary, a
 // patient-bearing reference naming no Patient and a Patient with no id
 // (RuleRequestShape, refused at structural and strict), and more than one
 // patient (RulePatientMixed, refused at strict), each refusal with strict's
@@ -391,7 +383,7 @@ func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte) (pci s
 	if err != nil || d.Kind(d.Root()) != relay.KindObject || docText(d, d.Root(), "resourceType") != "Parameters" {
 		return "", http.StatusBadRequest, "parse questionnaire-package parameters failed"
 	}
-	p := &packagePatients{d: d, members: map[string]bool{}, mapsPayerIdentity: g.mapsPayerIdentity()}
+	p := &packagePatients{d: d, members: map[string]bool{}}
 	coverages, refused := p.parameters(d.Root())
 	if refused == nil && coverages == 0 {
 		p.defect(RuleRequestShape, packagePatientsRefused{http.StatusBadRequest, "questionnaire-package request has no coverage"})

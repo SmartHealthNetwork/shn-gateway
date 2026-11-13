@@ -474,12 +474,12 @@ func TestDTRAddress_ARoundWithNoAddressTagsOnlyTheBase(t *testing.T) {
 	}
 }
 
-// The restore rides the payer identity mapping on a PAS claim: one change
-// makes both (E-03 and E-13), and the payer's system receives its own
-// address back beside the mapped identity.
-func TestDTRAddress_ThePASForwardRestoresWithTheIdentityMapping(t *testing.T) {
+// The restore is the one change the PAS forward makes to a claim (E-13): the
+// payer's system receives its own address back, and the payer identifier the
+// claim names exactly as sent.
+func TestDTRAddress_ThePASForwardRestoresAlone(t *testing.T) {
 	const base = "https://payer.example/fhir/dtr"
-	n := NewNativeResponder(nil, base, nil, WithCRDService("order-sign"), WithPayorEdgeIdentity(ownIdentity, backendIdentity))
+	n := NewNativeResponder(nil, base, nil, WithCRDService("order-sign"))
 	key, err := dtraddress.DeriveKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, ed25519.SeedSize)))
 	if err != nil {
 		t.Fatal(err)
@@ -492,15 +492,15 @@ func TestDTRAddress_ThePASForwardRestoresWithTheIdentityMapping(t *testing.T) {
 	bundle = append(append(append([]byte{}, bundle[:i]...), []byte(","+qr)...), bundle[i:]...)
 	ctx := withAddressIssuer(context.Background(), addressIssuer{key: key, payer: "payer", provider: "provider-1"})
 	in := peerBody(bundle)
-	p, lr, err := n.payorEdgeRequest(ctx, in, payorEdgeClaimBundle, "application/fhir+json", nil, n.adaptiveRestore(ctx, in))
-	if err != nil || lr.Status != 0 {
-		t.Fatalf("payorEdgeRequest: %v %+v", err, lr)
+	p, err := restoredRequest(in, "application/fhir+json", n.adaptiveRestore(ctx, in))
+	if err != nil {
+		t.Fatalf("restoredRequest: %v", err)
 	}
-	if !slices.Equal(p.Edits(), []relay.EditID{relay.EditPayorEdgeRestamp, relay.EditDTRAdaptiveAddressRestore}) {
-		t.Fatalf("edits %v, want E-03 and E-13 in one change", p.Edits())
+	if !slices.Equal(p.Edits(), []relay.EditID{relay.EditDTRAdaptiveAddressRestore}) {
+		t.Fatalf("edits %v, want E-13 alone", p.Edits())
 	}
 	out := string(relay.BytesForTest(p))
-	if !strings.Contains(out, `"valueUrl":"`+base+`/forms/a"`) || strings.Contains(out, "provider-gw.example") || !strings.Contains(out, backendIdentity.Value) {
+	if !strings.Contains(out, `"valueUrl":"`+base+`/forms/a"`) || strings.Contains(out, "provider-gw.example") || !strings.Contains(out, ownIdentity.Value) {
 		t.Fatalf("forwarded %s", out)
 	}
 }

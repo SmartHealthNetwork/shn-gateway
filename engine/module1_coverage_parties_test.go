@@ -323,7 +323,8 @@ func TestResume_AmendmentCarriesTheDependentParent(t *testing.T) {
 		t.Fatalf("the pend kept %d parent records, want 1", len(st.coverageParties))
 	}
 	rec := httptest.NewRecorder()
-	if !gw.completeClinician(rec, post(gw, "/scenario/uc06/complete", ""), st, "42") {
+	mw, mr := markedPost(rec, gw, "/scenario/uc06/complete", "")
+	if !gw.completeClinician(mw, mr, st, "42") {
 		t.Fatalf("completeClinician = %d %s", rec.Code, rec.Body)
 	}
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {
@@ -459,7 +460,8 @@ func TestResume_PatientAmendmentCarriesTheDependentParent(t *testing.T) {
 	gw.cfg.SoR = newDependentCoverageSoR(gw.cfg.SoR, parentFound)
 	st := pendFor(t, gw, "uc07", "MBR-UC07")
 	rec := httptest.NewRecorder()
-	if !gw.completePatient(rec, post(gw, "/scenario/uc07/complete", ""), st, "42") {
+	mw, mr := markedPost(rec, gw, "/scenario/uc07/complete", "")
+	if !gw.completePatient(mw, mr, st, "42") {
 		t.Fatalf("completePatient = %d %s", rec.Code, rec.Body)
 	}
 	for _, leg := range []string{"pas-claim", "pas-claim-update"} {

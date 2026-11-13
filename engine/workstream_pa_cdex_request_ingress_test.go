@@ -392,7 +392,8 @@ func scopedBearer(t *testing.T, g *Gateway, priv *ecdsa.PrivateKey, clientID, sc
 // insufficient_scope, recorded as the payer gateway's authority refusal,
 // before the Task is read and before the exchange is the leg's, at a
 // provider's base and at the plain Task endpoint alike. No bearer is 401. The
-// SMART configuration advertises system/Task.write alone: no route reads yet.
+// SMART configuration advertises system/Task.write alone: no client here is
+// registered for a scope that permits reading.
 func TestCDexRequestIngress_TakesAScopeThatPermitsCreate(t *testing.T) {
 	priv, pub := newTestClientKey(t)
 	g := payerGatewayWithAuth(t, "payer-system", pub)
@@ -905,6 +906,7 @@ func TestCDexRequestIngress_RelaysTheProvidersAnswer(t *testing.T) {
 				t.Fatalf("answer %d %s, want 502 and the provider's bytes not relayed", rec.Code, rec.Body)
 			}
 			wantRefusal(t, x, http.StatusBadGateway, RefusedByPayerGateway, RefusalIntegrity)
+			wantAnsweredRefusalYes(t, rec)
 		})
 		t.Run("repeated identifier value/"+level.String(), func(t *testing.T) {
 			_, rec, x := runCDexRequestIngress(t, level, cdexRequestTask(t),

@@ -25,6 +25,9 @@ validator to report healthy.
 - Docker + docker compose.
 - A registration bundle from `shn register -out <dir>` (your holder identity; keys are
   generated client-side and never leave you).
+- On Linux, that bundle readable by the gateway's uid/gid `65532`, which `shn register`
+  does not do for you: `sudo chgrp -R 65532 <dir> && sudo chmod 2750 <dir> && chmod 0640 <dir>/*`
+  (the [gateway README](../../README.md#6-going-to-production), "Run as non-root").
 
 ## Run
 ```bash
@@ -62,7 +65,7 @@ Compose does not automatically replace an unhealthy validator.
   from your environment; both are unset by default. Add connector env (`FHIR_DATA_URL`,
   `PAYER_DAVINCI_*`, `PROVIDER_DTR_*`, `SHN_STORE_DATABASE_URL`, …) per the gateway
   README to reach your own systems; the conformant common case needs none. Its service
-  sets `stop_grace_period: 45s`: a gateway's stop takes up to 43 s
+  sets `stop_grace_period: 45s`: a gateway's stop takes up to 44 s
   ([DEPLOYMENT.md](../../docs/DEPLOYMENT.md#stopping-the-gateway), "Stopping the
   gateway"), and Docker's default of 10 s would cut it. Run the gateway any other way and
   give its container the same 45 s.

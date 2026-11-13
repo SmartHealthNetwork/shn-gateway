@@ -183,7 +183,8 @@ func originRun(t *testing.T, g *Gateway) (*httptest.ResponseRecorder, *exchangeR
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testStatedBody(g, prefetchMember, "", false)))
 	req = withLegsTracked(req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x)))
-	g.runCRDThenDTROrder(&exchangeWriter{ResponseWriter: rec, x: x}, req, prefetchMember, "", "", "", "", false)
+	w, req := mounted(&exchangeWriter{ResponseWriter: rec, x: x}, req)
+	g.runCRDThenDTROrder(w, req, prefetchMember, "", "", "", "", false)
 	return rec, x
 }
 
@@ -320,8 +321,8 @@ func testUC07CompletePatientLegChecks(t *testing.T, level ConformanceEnforcement
 		token := start(t, gw)
 		before := len(stub.legTypes)
 		rec := httptest.NewRecorder()
-		gw.handleUC07Complete(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete",
-			strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", `"resumeToken":"`+token+`","answer":"not-a-score"`))))))
+		gw.handleUC07Complete(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07/complete",
+			strings.NewReader(testRouteBody(gw, "/scenario/uc07/complete", `"resumeToken":"`+token+`","answer":"not-a-score"`)))))))
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid patient answer") || len(stub.legTypes) != before {
 			t.Fatalf("%d %s legs %v, want 400 and no leg", rec.Code, rec.Body, stub.legTypes[before:])
 		}
@@ -335,8 +336,8 @@ func testUC07CompletePatientLegChecks(t *testing.T, level ConformanceEnforcement
 			extraRoles: map[string]string{"phg": "phg"}})
 		gw.cfg.ConformanceEnforcement = level
 		rec := httptest.NewRecorder()
-		gw.handleUC07(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
-			strings.NewReader(testRouteBody(gw, "/scenario/uc07", `"answer":"not-a-score"`))))))
+		gw.handleUC07(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07",
+			strings.NewReader(testRouteBody(gw, "/scenario/uc07", `"answer":"not-a-score"`)))))))
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid patient answer") {
 			t.Fatalf("%d %s, want 400", rec.Code, rec.Body)
 		}

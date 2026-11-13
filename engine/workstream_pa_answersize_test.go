@@ -83,9 +83,10 @@ func TestInbound_ASystemAnswerTooLargeToSealIsRefusedDelivered(t *testing.T) {
 // rule the Hub relays (unknown, "other", when the Hub relays none or one
 // outside the closed list), the Hub on its own read, or this gateway on its
 // read of the Hub's answer. The size refusal is answered 502 "response body too
-// large"; any other is answered as a delivered refusal of the answer. A Hub
-// reason without its delivered mark is not answered as delivered. Every row
-// at every level.
+// large"; any other is answered as a delivered refusal of the answer, each as
+// the problem of a delivered yes answer (writeDeliveredMaybe). A Hub reason
+// marked only unknown is not answered as the recipient having answered: it is
+// delivered unknown. Every row at every level.
 func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *testing.T) {
 	t.Parallel()
 	// hubOn is the Hub's answer to a POST of leg; hub is a provider's PAS
@@ -102,8 +103,8 @@ func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *test
 		}
 		return `{"error":"` + hubReasonRecipientRefusedAnswer + `","rule":"` + rule + `"}`
 	}
-	sizeAnswer := `{"error":"` + errResponseTooLarge + `"}`
-	refusedAnswer := `{"error":"` + errAnswerRefusedDelivered + `"}`
+	sizeAnswer := errResponseTooLarge
+	refusedAnswer := errAnswerRefusedDelivered
 	rows := map[string]struct {
 		err      error
 		by, rule string
@@ -138,23 +139,25 @@ func TestOrigination_AnAnswerRefusedAfterTheRecipientAnsweredIsDelivered(t *test
 				env := newInProcessExchange(t)
 				env.originator.cfg.ConformanceEnforcement = level
 				rec := httptest.NewRecorder()
-				if !env.originator.relayOriginationError(rec, row.err) || rec.Code != http.StatusBadGateway ||
-					string(bytes.TrimSpace(rec.Body.Bytes())) != row.answer || rec.Header().Get(HubDeliveredHeader) != "yes" {
-					t.Fatalf("answer %d delivered=%q %s, want 502 %s delivered yes", rec.Code, rec.Header().Get(HubDeliveredHeader), rec.Body.String(), row.answer)
+				if !env.originator.relayOriginationError(rec, row.err) {
+					t.Fatal("relayOriginationError did not answer")
 				}
+				wantDeliveredProblem(t, rec, http.StatusBadGateway, deliveredYes, "application/json", row.answer)
 			})
 		}
 	}
 	// The Hub marks these reasons delivered yes; the answer to the caller says
-	// delivered only on that mark.
+	// the recipient answered only on that mark. Marked unknown, the answer is
+	// delivered unknown, never the size refusal.
 	t.Run("unmarked", func(t *testing.T) {
 		err := hub(relayed(RefusalRouting), "unknown")
 		rec := httptest.NewRecorder()
 		env := newInProcessExchange(t)
 		env.originator.relayOriginationError(rec, err)
-		if rec.Header().Get(HubDeliveredHeader) != "" || strings.Contains(rec.Body.String(), `"error":"`+errResponseTooLarge+`"`) {
+		if strings.Contains(rec.Body.String(), `"error":"`+errResponseTooLarge+`"`) {
 			t.Fatalf("an unmarked reason answered %d delivered=%q %s", rec.Code, rec.Header().Get(HubDeliveredHeader), rec.Body.String())
 		}
+		wantDeliveredProblem(t, rec, http.StatusBadGateway, deliveredUnknown, "application/json", "the recipient may have received this request ("+hubReasonRecipientRefusedAnswer+"): check its outcome before resending")
 	})
 }
 

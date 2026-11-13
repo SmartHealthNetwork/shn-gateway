@@ -59,7 +59,8 @@ func TestDispatchRoutes_RefuseUnstatedFactsAtThePASBuild(t *testing.T) {
 				body = editBody(t, body, edit)
 			}
 			rec := httptest.NewRecorder()
-			run(fix.gw, rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))))
+			w, r := mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))))
+			run(fix.gw, w, r)
 			return rec, fix.stub.legTypes
 		}
 	}

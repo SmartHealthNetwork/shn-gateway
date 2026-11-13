@@ -243,9 +243,14 @@ func (c *Client) Search(ctx context.Context, resourceType string, q url.Values) 
 	b.Entry = entries
 	return &b, nil
 }
+
+// Read is a direct FHIR read (GET {type}/{id}). The server's definite
+// answer that it holds no such resource, 404 Not Found or 410 Gone (deleted),
+// is absence (found false, no error); any other failure is an error, never
+// absence.
 func (c *Client) Read(ctx context.Context, resourceType, id string) ([]byte, bool, error) {
 	body, status, err := c.get(ctx, resourceType+"/"+id)
-	if status == 404 {
+	if status == http.StatusNotFound || status == http.StatusGone {
 		return nil, false, nil
 	}
 	if err != nil {

@@ -424,7 +424,7 @@ func TestApplyNoOpIsRelayed(t *testing.T) {
 	rows["ensure an existing object"] = []Op{ens}
 	for name, ops := range rows {
 		t.Run(name, func(t *testing.T) {
-			p, err := Apply(b, fhirJSON, EditPayorEdgeRestamp, ops...)
+			p, err := Apply(b, fhirJSON, EditDTRCoverageObtain, ops...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -458,7 +458,7 @@ func TestApplyRefusals(t *testing.T) {
 		"zero op":        {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Apply(b, "", EditPayorEdgeRestamp, op)
+			_, err := Apply(b, "", EditDTRCoverageObtain, op)
 			if !errors.Is(err, ErrInvalidEdit) || errors.Is(err, ErrDuplicateKey) {
 				t.Fatalf("want ErrInvalidEdit (and not an input duplicate), got %v", err)
 			}
@@ -466,17 +466,17 @@ func TestApplyRefusals(t *testing.T) {
 	}
 	t.Run("overlapping changes", func(t *testing.T) {
 		_, err := ApplyChanges(b, "",
-			Change{Edit: EditPayorEdgeRestamp, Ops: []Op{d.Replace(at(t, d, "a"), []byte(`2`))}},
+			Change{Edit: EditDTRCoverageObtain, Ops: []Op{d.Replace(at(t, d, "a"), []byte(`2`))}},
 			Change{Edit: EditCDSCallbackStrip, Ops: []Op{d.RemoveMember(d.Root(), "a")}})
 		if !errors.Is(err, ErrInvalidEdit) {
 			t.Fatalf("want ErrInvalidEdit, got %v", err)
 		}
 	})
 	dup := NewBody(readFixture(t, "invalid/duplicate-key.json"), OriginPeerFrame)
-	if _, err := Apply(dup, "", EditPayorEdgeRestamp); !errors.Is(err, ErrDuplicateKey) {
+	if _, err := Apply(dup, "", EditDTRCoverageObtain); !errors.Is(err, ErrDuplicateKey) {
 		t.Fatalf("duplicate input: %v", err)
 	}
-	if _, err := Apply(Body{}, "", EditPayorEdgeRestamp); !errors.Is(err, ErrInvalidJSON) {
+	if _, err := Apply(Body{}, "", EditDTRCoverageObtain); !errors.Is(err, ErrInvalidJSON) {
 		t.Fatalf("empty input: %v", err)
 	}
 }
@@ -554,7 +554,7 @@ func TestApplyVerifyCatchesFaultySplice(t *testing.T) {
 				out, spans = hook(out, spans)
 				return out, spans, nil
 			})
-			p, err := Apply(body, "", EditPayorEdgeRestamp, ops...)
+			p, err := Apply(body, "", EditDTRCoverageObtain, ops...)
 			if !errors.Is(err, ErrVerifyMismatch) {
 				t.Fatalf("want ErrVerifyMismatch, got %v (%v)", err, p)
 			}
@@ -566,7 +566,7 @@ func TestApplyVerifyCatchesFaultySplice(t *testing.T) {
 	}
 	t.Run("unfaulted splice passes", func(t *testing.T) {
 		withSpliceHook(t, func(sd *splice.Doc, sops ...splice.Op) ([]byte, []splice.Edit, error) { return sd.Apply(sops...) })
-		if _, err := Apply(b, "", EditPayorEdgeRestamp, replaceA); err != nil {
+		if _, err := Apply(b, "", EditDTRCoverageObtain, replaceA); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -626,22 +626,22 @@ func TestApplySignedContent(t *testing.T) {
 		carrier string // "" = must be edited
 	}
 	rows := []row{
-		{"Bundle.signature: a token inside an entry", pas, EditPayorEdgeRestamp, func() []Op {
+		{"Bundle.signature: a token inside an entry", pas, EditDTRCoverageObtain, func() []Op {
 			return []Op{pasDoc.Replace(at(t, pasDoc, "entry", "0", "fullUrl"), str)}
 		}, "Bundle.signature"},
-		{"Bundle.signature: a member added to the Bundle", pas, EditPayorEdgeRestamp, func() []Op {
+		{"Bundle.signature: a member added to the Bundle", pas, EditDTRCoverageObtain, func() []Op {
 			return []Op{pasDoc.InsertMember(pasDoc.Root(), "x", []byte(`1`))}
 		}, "Bundle.signature"},
-		{"Bundle.signature: the signature itself removed", pas, EditPayorEdgeRestamp, func() []Op {
+		{"Bundle.signature: the signature itself removed", pas, EditDTRCoverageObtain, func() []Op {
 			return []Op{pasDoc.RemoveMember(pasDoc.Root(), "signature")}
 		}, "Bundle.signature"},
-		{"Bundle.signature: an entry appended", pas, EditPayorEdgeRestamp, func() []Op {
+		{"Bundle.signature: an entry appended", pas, EditDTRCoverageObtain, func() []Op {
 			return []Op{pasDoc.AppendElement(at(t, pasDoc, "entry"), []byte(`{}`))}
 		}, "Bundle.signature"},
-		{"signed prefetch Bundle: a token inside it", crd, EditPayorEdgeRestamp, func() []Op {
+		{"signed prefetch Bundle: a token inside it", crd, EditDTRCoverageObtain, func() []Op {
 			return []Op{crdDoc.Replace(at(t, crdDoc, "prefetch", "coverage", "entry", "0", "resource", "id"), str)}
 		}, "Bundle.signature"},
-		{"signed prefetch Bundle: the whole Bundle replaced", crd, EditPayorEdgeRestamp, func() []Op {
+		{"signed prefetch Bundle: the whole Bundle replaced", crd, EditDTRCoverageObtain, func() []Op {
 			return []Op{crdDoc.Replace(at(t, crdDoc, "prefetch", "coverage"), []byte(`null`))}
 		}, "Bundle.signature"},
 		{"signed prefetch Bundle: removed from prefetch", crd, EditCDSPrefetchObtain, func() []Op {
@@ -653,34 +653,34 @@ func TestApplySignedContent(t *testing.T) {
 		{"signed prefetch Bundle: the member after it removed", crd, EditCDSPrefetchObtain, func() []Op {
 			return []Op{crdDoc.RemoveMember(at(t, crdDoc, "prefetch"), "serviceHistory")}
 		}, ""},
-		{"signed prefetch Bundle: an unsigned sibling Bundle edited", crd, EditPayorEdgeRestamp, func() []Op {
+		{"signed prefetch Bundle: an unsigned sibling Bundle edited", crd, EditDTRCoverageObtain, func() []Op {
 			return []Op{crdDoc.Replace(at(t, crdDoc, "prefetch", "deviceHistory", "entry", "0", "resource", "id"), str)}
 		}, ""},
-		{"Provenance.signature: target by relative reference", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: target by relative reference", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "0", "resource", "insurer", "reference"), str)}
 		}, "Provenance.signature"},
-		{"Provenance.signature: target by fullUrl", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: target by fullUrl", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.InsertMember(at(t, provDoc, "entry", "1", "resource"), "gender", []byte(`"male"`))}
 		}, "Provenance.signature"},
-		{"Provenance.signature: contained target", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: contained target", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "3", "resource", "contained", "0", "name"), str)}
 		}, "Provenance.signature"},
-		{"Provenance.signature: the Provenance itself", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: the Provenance itself", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "5", "resource", "recorded"), str)}
 		}, "Provenance.signature"},
-		{"Provenance.signature: an untargeted resource", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: an untargeted resource", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "2", "resource", "status"), str)}
 		}, ""},
-		{"Provenance.signature: the containing resource outside its contained target", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: the containing resource outside its contained target", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "3", "resource", "name"), str)}
 		}, ""},
-		{"Provenance.signature: entry metadata outside the target", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Provenance.signature: entry metadata outside the target", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "0", "fullUrl"), str)}
 		}, ""},
-		{"Signature element: its enclosing resource", prov, EditPayorEdgeRestamp, func() []Op {
+		{"Signature element: its enclosing resource", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "4", "resource", "status"), str)}
 		}, "Signature in ServiceRequest"},
-		{"Signature element: nested Bundle signature in a response", inq, EditPayorEdgeRestamp, func() []Op {
+		{"Signature element: nested Bundle signature in a response", inq, EditDTRCoverageObtain, func() []Op {
 			return []Op{inqDoc.Replace(at(t, inqDoc, "parameter", "0", "resource", "entry", "0", "fullUrl"), str)}
 		}, "Bundle.signature"},
 	}
@@ -712,15 +712,15 @@ func TestApplySignedContent(t *testing.T) {
 	t.Run("the refusal names the change that touched signed content", func(t *testing.T) {
 		_, err := ApplyChanges(crd, "application/json",
 			Change{Edit: EditCDSCallbackStrip, Ops: []Op{crdDoc.RemoveMember(crdDoc.Root(), "fhirServer")}},
-			Change{Edit: EditPayorEdgeRestamp, Ops: []Op{crdDoc.Replace(at(t, crdDoc, "prefetch", "coverage", "type"), str)}})
+			Change{Edit: EditDTRCoverageObtain, Ops: []Op{crdDoc.Replace(at(t, crdDoc, "prefetch", "coverage", "type"), str)}})
 		var se *SignedContentError
-		if !errors.As(err, &se) || se.Edit != EditPayorEdgeRestamp {
+		if !errors.As(err, &se) || se.Edit != EditDTRCoverageObtain {
 			t.Fatalf("got %v", err)
 		}
 	})
 	t.Run("a signature element outside any resource covers the document", func(t *testing.T) {
 		b := NewBody([]byte(`{"a":1,"s":{"type":[],"when":"x","who":{}}}`), OriginPeerFrame)
-		_, err := Apply(b, "", EditPayorEdgeRestamp, mustDoc(t, b).Replace(at(t, mustDoc(t, b), "a"), []byte(`2`)))
+		_, err := Apply(b, "", EditDTRCoverageObtain, mustDoc(t, b).Replace(at(t, mustDoc(t, b), "a"), []byte(`2`)))
 		var se *SignedContentError
 		if !errors.As(err, &se) || se.Carrier != "Signature" {
 			t.Fatalf("got %v", err)
@@ -910,7 +910,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 			t.Errorf("Ownership(%d) = %q, want %q", o, o.String(), want)
 		}
 	}
-	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-03", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14"}) {
+	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14", "E-16"}) {
 		t.Fatalf("EditIDs = %v", got)
 	}
 	ids := EditIDs()
@@ -1056,11 +1056,11 @@ func TestErrorAndSummaryText(t *testing.T) {
 		t.Fatalf("zero Payload prints %q", got)
 	}
 	b := NewBody([]byte(`{"a":1}`), OriginPeerFrame)
-	p, err := Apply(b, "", EditPayorEdgeRestamp, mustDoc(t, b).Replace(at(t, mustDoc(t, b), "a"), []byte(`2`)))
+	p, err := Apply(b, "", EditDTRCoverageObtain, mustDoc(t, b).Replace(at(t, mustDoc(t, b), "a"), []byte(`2`)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(p); got != "relay.Payload{edited [E-03] 7 bytes}" {
+	if got := fmt.Sprint(p); got != "relay.Payload{edited [E-04] 7 bytes}" {
 		t.Fatalf("edited Payload prints %q", got)
 	}
 	a, err := Authored(BuilderGatewayRefusal, nil, "application/json")

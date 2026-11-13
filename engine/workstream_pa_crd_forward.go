@@ -56,10 +56,9 @@ func WithCRDDispatchService(serviceID string) NativeOption {
 	return func(n *nativeResponder) { n.paNative().crdDispatchServiceID = serviceID }
 }
 
-// forwardCRD sends a CDS Hooks request to the partner service chosen by its hook:
-// exactly as the network carried it, or with only the payer identity of its
-// prefetch coverage mapped (when that mapping is configured). The hook and every
-// other byte are never changed. The partner's answer is relayed exactly, with its
+// forwardCRD sends a CDS Hooks request to the partner service chosen by its hook,
+// exactly as the network carried it: the hook and every other byte are never
+// changed. The partner's answer is relayed exactly, with its
 // own media type, once it passes the CDS Hooks response rules at the served CRD
 // line; an answer that breaks one is refused (502) rather than repaired, and a
 // non-2xx answer is relayed as the partner's error.
@@ -68,10 +67,7 @@ func (n *nativeResponder) forwardCRD(ctx context.Context, contract, leg string, 
 	if err != nil || refused.Status != 0 {
 		return refused, err
 	}
-	request, refused, err := n.applyPayorEdgeToCRDRequest(ctx, in)
-	if err != nil || refused.Status != 0 {
-		return refused, err
-	}
+	request := relay.Exact(in, "application/json")
 	up, bad, err := n.postVia(endpointcert.WithTag(ctx, endpointcert.Of(endpointcert.CDS)), n.cdsHTTPClient(), n.paNative().cdsBaseURL, "/cds-services/"+serviceID, request, leg, "CRD")
 	if err != nil {
 		return LegResult{}, err // no-response fault → engine 500 → "hub routing failed"
@@ -182,21 +178,4 @@ func certifyCDSHooksAnswer(ctx context.Context, mod conformanceModule, emit func
 		Status:  http.StatusBadGateway,
 		Message: "payer CRD response is not a valid CDS Hooks response: " + strings.Join(refusing, "; "),
 	}
-}
-
-// applyPayorEdgeToCRDRequest is the CRD legs' payer-edge identity mapping
-// (payoredge.go): maps the payer identity of every Coverage in the CDS Hooks request's
-// prefetch.coverage (a bare Coverage or a Bundle) to n.payorEdgeBackend, ONLY when they
-// name an identity this gateway owns (ownPayerIdentities: the identities this holder
-// publishes on the network feed, union the configured one). Unconfigured, the request is
-// sent exactly. Configured, a request that carries no Coverage at all has no payor to map
-// and is sent exactly too: the network routed it here, and this payer's own system
-// answers it. That is a request whose prefetch is absent or null, whose prefetch.coverage
-// is absent or null, or whose prefetch.coverage Bundle's entry is absent, null or only
-// OperationOutcomes,
-// and no Coverage anywhere else in the body (relaylocate.go, carriesNoCoverage). A
-// Coverage naming no readable payor, or another payer, is refused, and so is a request
-// whose only Coverage is outside prefetch.coverage.
-func (n *nativeResponder) applyPayorEdgeToCRDRequest(ctx context.Context, in relay.Body) (relay.Payload, LegResult, error) {
-	return n.payorEdgeRequest(ctx, in, payorEdgeCDSHooksPrefetch, "application/json", nil, nil)
 }

@@ -80,12 +80,11 @@ func findingLines(f ConformanceFinding) []string {
 
 // wantRefused checks the ingress refused the payer's answer: 502 in the
 // operation's OperationOutcome, as the ingress refuses its other carried
-// answers, the leg recorded as an error, and none of the payer's bytes sent.
+// answers, delivered yes (the payer answered, with an answer verified as its
+// own), the leg recorded as an error, and none of the payer's bytes sent.
 func (r e08Result) wantRefused(t *testing.T, answer []byte) {
 	t.Helper()
-	if r.rec.Code != http.StatusBadGateway || !bytes.Contains(r.rec.Body.Bytes(), []byte(`"diagnostics":"ingress validation failed"`)) {
-		t.Fatalf("carried: %d %s", r.rec.Code, r.rec.Body.String())
-	}
+	wantDeliveredOutcome(t, r.rec, http.StatusBadGateway, deliveredYes, "ingress validation failed")
 	if bytes.Contains(r.rec.Body.Bytes(), []byte("ackage")) {
 		t.Fatalf("the refused answer reached the EHR: %s", r.rec.Body.String())
 	}

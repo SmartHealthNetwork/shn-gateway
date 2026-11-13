@@ -33,6 +33,9 @@ var stopSteps = map[string]time.Duration{
 	"The listener stops taking calls and waits for the calls in flight": listenerShutdownWait,
 	"The calls still running are cut, and their handlers return":        cutHandlerWait,
 	"The in-memory audit outbox sends what it holds":                    auditappend.DrainLimit,
+	// The engine's afterAnswerStopWait, twice, which its own
+	// TestStopAfterAnswersWaitsTheDocumentedBound holds at this figure.
+	"A payer's requester-side binding records under way finish, or are cut and written as they stand": time.Second,
 	// The engine's observeFlushTimeout, which its own
 	// TestCloseWaitsTheDocumentedFlushBound holds at this figure.
 	"Queued conformance checks finish":                10 * time.Second,

@@ -287,7 +287,6 @@ func TestCompress_Exclusions(t *testing.T) {
 		"small":        {small, http.MethodPost, message},
 		"no content":   {noContent, http.MethodPost, ""},
 		"not modified": {notModified, http.MethodGet, ""},
-		"head":         {writeBody(http.StatusOK, large), http.MethodHead, ""},
 		"stream":       {stream, http.MethodGet, large},
 		"precoded":     {precoded, http.MethodGet, large},
 	} {
@@ -543,5 +542,65 @@ func TestCompress_AFlushedHeadWritesItsStatusOnce(t *testing.T) {
 	})).ServeHTTP(w, r)
 	if len(w.statuses) != 1 || w.statuses[0] != http.StatusOK {
 		t.Fatalf("statuses %v, want one 200", w.statuses)
+	}
+}
+
+// TestCompress_AHeadHasTheGetsHead: a HEAD's answer head is the GET's, coded or
+// not (RFC 9110 §9.3.2): through a real server, with and without
+// Accept-Encoding: gzip, below and above the threshold, its Content-Encoding,
+// Content-Length and Vary equal the GET's, and it carries no body.
+func TestCompress_AHeadHasTheGetsHead(t *testing.T) {
+	h := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/fhir+json")
+			_, _ = io.WriteString(w, body)
+		}
+	}
+	// The threshold, and an answer whose coded bytes overflow net/http's
+	// buffer, so neither method states a length.
+	rng := rand.New(rand.NewPCG(1, 2))
+	var hb strings.Builder
+	for range 8000 {
+		hb.WriteByte(byte('a' + rng.IntN(26)))
+	}
+	huge := hb.String()
+	for name, body := range map[string]string{"below": message, "above": large, "above, chunked": huge} {
+		for _, accept := range []string{"", "gzip"} {
+			t.Run(name+"/"+accept, func(t *testing.T) {
+				srv := httptest.NewServer(Compress(h(body)))
+				defer srv.Close()
+				client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+				do := func(method string) (*http.Response, []byte) {
+					req, err := http.NewRequest(method, srv.URL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if accept != "" {
+						req.Header.Set("Accept-Encoding", accept)
+					}
+					resp, err := client.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer resp.Body.Close()
+					b, _ := io.ReadAll(resp.Body)
+					return resp, b
+				}
+				get, getBody := do(http.MethodGet)
+				head, headBody := do(http.MethodHead)
+				if len(headBody) != 0 || len(getBody) == 0 {
+					t.Fatalf("HEAD body %d bytes, GET %d", len(headBody), len(getBody))
+				}
+				for _, k := range []string{"Content-Encoding", "Content-Length", "Vary", "Content-Type"} {
+					if head.Header.Get(k) != get.Header.Get(k) {
+						t.Errorf("%s: HEAD %q, GET %q", k, head.Header.Get(k), get.Header.Get(k))
+					}
+				}
+				coded := get.Header.Get("Content-Encoding") == "gzip"
+				if want := accept == "gzip" && len(body) >= minCoded; coded != want {
+					t.Fatalf("GET coded %v, want %v", coded, want)
+				}
+			})
+		}
 	}
 }

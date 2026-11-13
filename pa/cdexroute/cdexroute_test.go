@@ -1,6 +1,7 @@
 package cdexroute
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -106,6 +107,68 @@ func TestProviderBase(t *testing.T) {
 	} {
 		if got, err := ProviderBase(tc.base, tc.provider); err == nil || !strings.Contains(err.Error(), "cdexroute") {
 			t.Errorf("%s: ProviderBase(%q, %q) = %q, %v; want an error", tc.name, tc.base, tc.provider, got, err)
+		}
+	}
+}
+
+// A per-provider base is built only under a canonical ingress base: one with
+// a "." or ".." path segment, spelled or percent-escaped, is refused
+// (ErrIngressBaseDotSegment), and so is one with a character that is not
+// ASCII, its host included (ErrIngressBaseNotASCII), a space or a control
+// character (ErrIngressBaseSpaceOrControl), or another character outside
+// RFC 3986's set, a backslash among them (ErrIngressBaseNotURLCharacter),
+// which relay.URLCharacter decides for both; the core relay refuses
+// the same in the Location a created Task is answered with (E-16). A
+// canonical base, with a port, an IPv6 host, no path or a path prefix, a dot
+// inside a segment, or a segment of three dots, is built under.
+func TestProviderBaseCanonicalIngressBase(t *testing.T) {
+	dotDot := strings.Repeat(".", 2)
+	for base, want := range map[string]error{
+		"https://gw.example/./fhir":             ErrIngressBaseDotSegment,
+		"https://gw.example/fhir/.":             ErrIngressBaseDotSegment,
+		"https://gw.example/fhir/./":            ErrIngressBaseDotSegment,
+		"https://gw.example/" + dotDot:          ErrIngressBaseDotSegment,
+		"https://gw.example/a/" + dotDot + "/b": ErrIngressBaseDotSegment,
+		"https://gw.example/%2E":                ErrIngressBaseDotSegment,
+		"https://gw.example/a/%2e%2E/b":         ErrIngressBaseDotSegment,
+		"https://g\u00fc.example":               ErrIngressBaseNotASCII,
+		"https://gw.example/f\u00fchr":          ErrIngressBaseNotASCII,
+		"https://gw.example/fhir\u00a0":         ErrIngressBaseNotASCII,
+		"https://gw.example:8443/\u65e5\u672c":  ErrIngressBaseNotASCII,
+		"https://gw.example/f hir":              ErrIngressBaseSpaceOrControl,
+		"https://gw.example/fhir ":              ErrIngressBaseSpaceOrControl,
+		" https://gw.example":                   ErrIngressBaseSpaceOrControl,
+		"https://gw.example/f\thir":             ErrIngressBaseSpaceOrControl,
+		"https://gw.example/fhir\x7f":           ErrIngressBaseSpaceOrControl,
+		"https://gw.example/fhir\x00":           ErrIngressBaseSpaceOrControl,
+		"https://gw.example/fhir\n":             ErrIngressBaseSpaceOrControl,
+		"https://gw.example/a\\b":               ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a\"b":               ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a<b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a>b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a{b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a}b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a|b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a^b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a`b":                ErrIngressBaseNotURLCharacter,
+		"https://gw.example/a\\..\\b":           ErrIngressBaseNotURLCharacter,
+	} {
+		if got, err := ProviderBase(base, "provider-1"); !errors.Is(err, want) || got != "" {
+			t.Errorf("ProviderBase(%q) = %q, %v; want %v", base, got, err, want)
+		}
+	}
+	for base, want := range map[string]string{
+		"https://gw.example":             "https://gw.example/cdex/provider/provider-1",
+		"https://gw.example:8443":        "https://gw.example:8443/cdex/provider/provider-1",
+		"https://[::1]:8443":             "https://[::1]:8443/cdex/provider/provider-1",
+		"http://[2001:db8::1]/fhir":      "http://[2001:db8::1]/fhir/cdex/provider/provider-1",
+		"https://gw.example/fhir/r4":     "https://gw.example/fhir/r4/cdex/provider/provider-1",
+		"https://gw.example/fhir.v2/...": "https://gw.example/fhir.v2/.../cdex/provider/provider-1",
+		"https://xn--g-eha.example/fhir": "https://xn--g-eha.example/fhir/cdex/provider/provider-1",
+		"https://gw.example/caf%C3%A9":   "https://gw.example/caf%C3%A9/cdex/provider/provider-1",
+	} {
+		if got, err := ProviderBase(base, "provider-1"); err != nil || got != want {
+			t.Errorf("ProviderBase(%q) = %q, %v; want %q", base, got, err, want)
 		}
 	}
 }

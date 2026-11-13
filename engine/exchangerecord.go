@@ -44,6 +44,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // ExchangeRecord is one call this gateway answered, as it saw it.
@@ -69,6 +70,10 @@ type ExchangeRecord struct {
 	Direction string
 	// Route is the route the call arrived on (ExchangeRoutes).
 	Route string
+	// Method is "HEAD" for a call that came as a HEAD, served as the GET its
+	// route takes without the answer's body; empty for every other call, made
+	// with its route's own method.
+	Method string
 	// Exchange is the leg's transaction type (ExchangeKinds), or ExchangeOther
 	// when the call was answered before a leg was known. On an inbound leg it
 	// is read from the envelope before the leg's token is verified; it is a
@@ -183,7 +188,8 @@ type ExchangeRecord struct {
 	// the answer written to it; on an inbound leg, the envelope from the Hub
 	// and the answer written back. RequestBytes is nil when the body was not
 	// read to its end (refused unread, or cut off at a limit), since its size
-	// is then not known; ResponseBytes is nil when the handler panicked.
+	// is then not known; ResponseBytes is nil when the handler panicked, and 0
+	// on a HEAD, whose answer carries no body.
 	RequestBytes, ResponseBytes *int64
 	// AnswerError is why an inbound leg's answer (the participant's, or this
 	// gateway's own refusal) could not be authorized (AnswerErrorClasses);
@@ -288,6 +294,13 @@ type ExchangeRecord struct {
 	// it never reached the Hub, or the error came from in front of it): this
 	// gateway never infers it. Always empty on an inbound leg.
 	HubDelivered string
+	// RequesterBinding is, on an ingress call whose leg's request names no
+	// patient (its row's subject: from-answer), the binding this gateway
+	// reported to the Hub of the patient the answer disclosed, and what
+	// became of the report (requesterbinding.go): set only when the answer
+	// was a 2xx whose token named a patient, after the answer was written.
+	// Nil when no report was due. Evolving.
+	RequesterBinding *RequesterBindingRecord
 }
 
 // LegStages is the time an inbound leg spent in each stage of its answer,
@@ -553,6 +566,97 @@ type exchangeRecorder struct {
 	// hubOut counts the requests to the Hub outstanding, since hubSince.
 	hubOut   int
 	hubSince time.Time
+	// after is closed once the call's work after its answer is done
+	// (afterAnswer); nil when it has none. The record waits for it.
+	after chan struct{}
+	// binding is the requester-side binding record that work reported:
+	// final once bindingFinal, otherwise what was known so far, with
+	// bindingMaySend set once a byte of it was written to the Hub, and
+	// cleared when the Hub states it never took it (its resend waits).
+	binding        *RequesterBindingRecord
+	bindingFinal   bool
+	bindingMaySend bool
+}
+
+// awaitAfterAnswer marks the call as having work after its answer, which its
+// record waits for, and returns the function that work calls once done.
+// Nil-safe: with no recorder the work still runs, and nothing waits.
+func (x *exchangeRecorder) awaitAfterAnswer() func() {
+	if x == nil {
+		return func() {}
+	}
+	ch := make(chan struct{})
+	x.with(func() { x.after = ch })
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+// requesterBindingOutcome notes the requester-side binding record the call
+// reported, and what became of it.
+func (x *exchangeRecorder) requesterBindingOutcome(rec RequesterBindingRecord) {
+	x.with(func() { x.binding, x.bindingFinal = &rec, true })
+}
+
+// requesterBindingPending notes the binding the report has so far, not yet
+// settled.
+func (x *exchangeRecorder) requesterBindingPending(rec RequesterBindingRecord) {
+	x.with(func() { x.binding = &rec })
+}
+
+// requesterBindingMaySend notes that a byte of the record was written to the
+// Hub: cut from now, it is unknown.
+func (x *exchangeRecorder) requesterBindingMaySend() {
+	x.with(func() { x.bindingMaySend = true })
+}
+
+// requesterBindingNotTaken notes that the Hub stated it never took the record
+// written to it (its 503 with HubDeliveredHeader no): cut before it is
+// written again, it is other.
+func (x *exchangeRecorder) requesterBindingNotTaken() {
+	x.with(func() { x.bindingMaySend = false })
+}
+
+// requesterBindingAborted notes a report that ended abnormally: other, with
+// the binding as far as it was known, and unavailable when it was not yet
+// known (the report had not bound the patient).
+func (x *exchangeRecorder) requesterBindingAborted() {
+	x.with(func() {
+		rec := RequesterBindingRecord{Binding: shnsdk.RequesterBindingUnavailable}
+		if x.binding != nil {
+			rec = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent}
+		}
+		rec.Outcome = ExchangeOther
+		x.binding, x.bindingFinal = &rec, true
+	})
+}
+
+// settledRequesterBinding is the requester-side binding record the call's
+// exchange record carries, for a call that had a report after its answer. A
+// report still under way (a stop wrote the record first) is settled by what
+// it had done: unknown once a byte was written, other before, with the
+// binding as far as it was known, unavailable when it had not bound the
+// patient yet. x.mu is held.
+func (x *exchangeRecorder) settledRequesterBinding() *RequesterBindingRecord {
+	var b RequesterBindingRecord
+	switch {
+	case x.binding != nil && x.bindingFinal:
+		b = *x.binding
+	case x.binding != nil:
+		b = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent, Outcome: ExchangeOther}
+		if x.bindingMaySend {
+			b.Outcome = RequesterBindingUnknown
+		}
+	default:
+		b = RequesterBindingRecord{Binding: shnsdk.RequesterBindingUnavailable, Outcome: ExchangeOther}
+	}
+	b.Outcome = closed(RequesterBindingOutcomes, b.Outcome)
+	if b.Unbound != "" {
+		b.Unbound = closed(RequesterUnboundReasons, b.Unbound)
+	}
+	if b.NotSent != "" {
+		b.NotSent = closed(RequesterNotSentReasons, b.NotSent)
+	}
+	return &b
 }
 
 func exchangeOf(ctx context.Context) *exchangeRecorder {
@@ -683,11 +787,6 @@ func requestEdits(p relay.Payload) []relay.EditID {
 
 // Why an edit was not made (ExchangeRecord.EditsNotMade).
 const (
-	// EditNotMadePayorEdgeNoCoverage: the payer identity mapping (E-03) was not
-	// made because the request a payer's gateway forwards to its own system
-	// carries no Coverage, so it names no payor identifier to re-key; the request
-	// is carried as sent.
-	EditNotMadePayorEdgeNoCoverage = "E-03:no-coverage"
 	// EditNotMadeNoStructuralPayerURL: a PAS Task in the answer names a
 	// payer-url input that is not a string valueUrl, so the return-path
 	// re-key (E-10) has no value to replace.
@@ -762,13 +861,34 @@ const (
 	EditNotMadeRekeyUnreadableAnswer = "E-12:unreadable-answer"
 	// EditNotMadeRekeyAddressNotWritable: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
 	EditNotMadeRekeyAddressNotWritable = "E-12:address-not-writable"
+	// EditNotMadeTaskLocationNotUnderBase: the provider's gateway framed no
+	// Task location (E-16) because its system's Location does not lie under
+	// the gateway's own Task endpoint by the segment-boundary match, or what
+	// follows that endpoint is not a Task id with an optional version.
+	EditNotMadeTaskLocationNotUnderBase = "E-16:location-not-under-base"
+	// EditNotMadeTaskLocationNoLocation: the provider's gateway framed no Task
+	// location (E-16) because its system's 2xx answer carried no Location.
+	EditNotMadeTaskLocationNoLocation = "E-16:no-location"
+	// EditNotMadeTaskLocationProviderGatewayOlder: the payer's gateway wrote
+	// no Location (E-16) because the provider's registry entry does not declare
+	// cdexloc, so its gateway does not frame the Task's location.
+	EditNotMadeTaskLocationProviderGatewayOlder = "E-16:provider-gateway-older"
+	// EditNotMadeTaskLocationNoTail: the payer's gateway wrote no Location
+	// (E-16) because the provider's gateway declares cdexloc but framed no
+	// Task location on this answer; its own record says why.
+	EditNotMadeTaskLocationNoTail = "E-16:no-tail"
+	// EditNotMadeTaskLocationUnreadableTail: the payer's gateway wrote no
+	// Location (E-16) because the Task location the provider's gateway framed
+	// is not a Task id with an optional version.
+	EditNotMadeTaskLocationUnreadableTail = "E-16:unreadable-tail"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
-var EditNotMadeValues = []string{EditNotMadePayorEdgeNoCoverage, EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
+var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnreadableAnswer, EditNotMadePayerDoesNotTake, EditNotMadeDTRCheckCouldNotRun, EditNotMadeReportTypeNotCarried,
 	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake,
 	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest,
-	EditNotMadeRekeyPayerGatewayOlder, EditNotMadeRekeyNotTheRoundsAddress, EditNotMadeRekeyContainedInPackageResponse, EditNotMadeRekeyRequestCarriedAQuestionnaire, EditNotMadeRekeyNotUnderBase, EditNotMadeRekeyEscapedAddress, EditNotMadeRekeyBaseSpelledDifferently, EditNotMadeRekeyUnreadableTag, EditNotMadeRekeyUncleanRemainder, EditNotMadeRekeyUnreadableAddress, EditNotMadeRekeyUnreadableAnswer, EditNotMadeRekeyAddressNotWritable}
+	EditNotMadeRekeyPayerGatewayOlder, EditNotMadeRekeyNotTheRoundsAddress, EditNotMadeRekeyContainedInPackageResponse, EditNotMadeRekeyRequestCarriedAQuestionnaire, EditNotMadeRekeyNotUnderBase, EditNotMadeRekeyEscapedAddress, EditNotMadeRekeyBaseSpelledDifferently, EditNotMadeRekeyUnreadableTag, EditNotMadeRekeyUncleanRemainder, EditNotMadeRekeyUnreadableAddress, EditNotMadeRekeyUnreadableAnswer, EditNotMadeRekeyAddressNotWritable,
+	EditNotMadeTaskLocationNotUnderBase, EditNotMadeTaskLocationNoLocation, EditNotMadeTaskLocationProviderGatewayOlder, EditNotMadeTaskLocationNoTail, EditNotMadeTaskLocationUnreadableTail}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).
@@ -1439,6 +1559,11 @@ var hubRules = map[string]string{
 	"request body too large":                 RefusalRouting,
 	"response body too large":                RefusalRouting,
 	"response audit append failed":           RefusalAudit,
+	// Routing, and transient: a Hub instance that has not yet read the
+	// network's membership once since it started routes nothing, refusing
+	// before it reads the envelope (the platform's readiness gate in front of
+	// the Hub service).
+	"registry not yet loaded": RefusalRouting,
 }
 
 // The Hub's reasons for an answer refused after the recipient answered
@@ -1659,6 +1784,11 @@ func (g *Gateway) inboundRoute() http.HandlerFunc {
 // recordExchange wraps a route so each call produces one ExchangeRecord.
 func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if direction == DirectionIngress {
+			// The requester's call: whether a leg of it was answered decides
+			// how its errors state delivery (deliveryMark), recorded or not.
+			w, r = withDeliveryMark(w, r)
+		}
 		if m := g.cfg.ActiveRequestMetric; m != nil {
 			dir := closed(ExchangeDirections, direction)
 			m(dir, 1)
@@ -1675,6 +1805,9 @@ func (g *Gateway) recordExchange(route, direction string, h http.HandlerFunc) ht
 		x.rec.Start = g.exchangeClock()
 		x.rec.Direction = closed(ExchangeDirections, direction)
 		x.rec.Route = closed(ExchangeRoutes, route)
+		if r.Method == http.MethodHead {
+			x.rec.Method = http.MethodHead
+		}
 		x.rec.Exchange = ExchangeOther
 		// This gateway's own side of the leg is known before anything is
 		// read: the sender of a call it originates, the recipient of a leg
@@ -1817,6 +1950,10 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	rec.RequestBytes = body.size()
 	if !panicked {
 		n := w.written.Load()
+		if rec.Method == http.MethodHead {
+			// The handler wrote the GET's body, and none of it was sent.
+			n = 0
+		}
 		rec.ResponseBytes = &n
 	}
 	if rec.Status == 0 && !panicked {
@@ -1885,6 +2022,37 @@ func (g *Gateway) emitExchange(x *exchangeRecorder, w *exchangeWriter, body *cou
 	if rec.Backend != nil && rec.Backend.ErrorClass != "" {
 		rec.Backend.ErrorClass = closed(BackendErrorClasses, rec.Backend.ErrorClass)
 	}
+	x.mu.Lock()
+	after := x.after
+	x.mu.Unlock()
+	if after != nil && !panicked {
+		// The call has work after its answer (a requester-side binding
+		// record): the record is settled as the call ended, and written once
+		// that work is done, with what it reported.
+		// A stop that cannot wait for the work any longer has it written
+		// with what the work noted (stopAfterAnswers): it is never lost.
+		st := g.afterStop()
+		st.records.Add(1)
+		go func() {
+			defer st.records.Done()
+			defer func() { _ = recover() }()
+			select {
+			case <-after:
+			case <-st.forced:
+			}
+			x.mu.Lock()
+			rec.RequesterBinding = x.settledRequesterBinding()
+			x.mu.Unlock()
+			g.observeExchange(rec, tally)
+		}()
+		return
+	}
+	g.observeExchange(rec, tally)
+}
+
+// observeExchange hands a settled record to Config.ExchangeObserved, and the
+// leg's result to its observe-level tally, if any.
+func (g *Gateway) observeExchange(rec ExchangeRecord, tally *legTally) {
 	if tally != nil {
 		// Deferred, so the leg's result is captured even when an exchange
 		// observer panics.

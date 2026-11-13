@@ -107,7 +107,7 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 	// Every other edit made by ApplyChanges, on exactly the value the exempt
 	// edits may change, is still refused (D127's row).
 	for _, id := range EditIDs() {
-		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) {
+		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) {
 			continue
 		}
 		rows = append(rows, row{"other edit " + string(id) + " on the signed payer-url", bundleSigned, id, replace(payerURL, rekeyed), "Bundle.signature", nil})
@@ -146,9 +146,9 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 		d := mustDoc(t, bundleSigned)
 		_, err := ApplyChanges(bundleSigned, fhirJSON,
 			Change{Edit: EditPASPendReturnRekey, Ops: []Op{d.Replace(at(t, d, payerURL...), []byte(rekeyed))}},
-			Change{Edit: EditPayorEdgeRestamp, Ops: []Op{d.Replace(at(t, d, "entry", "0", "resource", "id"), []byte(`"x"`))}})
+			Change{Edit: EditDTRCoverageObtain, Ops: []Op{d.Replace(at(t, d, "entry", "0", "resource", "id"), []byte(`"x"`))}})
 		var se *SignedContentError
-		if !errors.As(err, &se) || se.Edit != EditPayorEdgeRestamp {
+		if !errors.As(err, &se) || se.Edit != EditDTRCoverageObtain {
 			t.Fatalf("got %v", err)
 		}
 	})

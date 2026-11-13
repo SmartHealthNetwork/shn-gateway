@@ -42,8 +42,9 @@ type lineBridge interface {
 	AdaptAnswer(ctx context.Context, key relay.Key, answer []byte, contentType, routed string, declared []string, x ExchangeIdentity) (p relay.Payload, wrote string, status int, msg string)
 	// Certify is the bridged check of out, bytes the bridge changed, at
 	// contract's line, against profile ("" for the line's own): SHN's own
-	// edit, refused at every level when out is not valid there or the check
-	// cannot run, and never left to the observe worker.
+	// edit, refused at every level when out is not valid there (an unchecked
+	// reading, a code the lane could not check, is recorded and carried) or
+	// the check cannot run, and never left to the observe worker.
 	Certify(ctx context.Context, contract, line, profile string, out []byte) govResult
 }
 
@@ -298,9 +299,13 @@ func SelectChainRouteForTest(contract string, own, peerDeclared, lanedLines []st
 // bridgedDecision is what the bridged check decides about its verdict: bytes
 // module 2 changed are SHN's own edit (AGENTS.md, relay fidelity), so anything
 // but a valid verdict refuses, at every level and with no conformance level
-// stated at all. It is module 2's, not ConformancePolicy's.
+// stated at all. It is module 2's, not ConformancePolicy's. An unchecked
+// verdict is recorded, not refused, as at every level of module 3: the lane
+// could not check a code (a terminology gap no IG package fills), which says
+// nothing about the bytes, and a translation checked against its target
+// profile meets that gap on every real PAS request.
 func bridgedDecision(v Verdict) Decision {
-	if v == VerdictValid {
+	if v == VerdictValid || v == VerdictUnchecked {
 		return Record
 	}
 	return Refuse

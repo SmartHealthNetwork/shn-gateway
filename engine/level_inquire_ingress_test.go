@@ -51,7 +51,11 @@ func levelInquireRow(t *testing.T, level ConformanceEnforcement, body string, an
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 	ev := observeLevelEvents(env.originator)
 	rec := httptest.NewRecorder()
-	env.originator.handlePASInquireIngress(rec, httptest.NewRequest(http.MethodPost, "/Claim/$inquire", strings.NewReader(body)))
+	// Through the route as it is mounted (ingressRoute), so the call has its
+	// delivery mark.
+	req := httptest.NewRequest(http.MethodPost, "/Claim/$inquire", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/fhir+json")
+	env.originator.ingressRoute(RoutePASInquire)(rec, req)
 	return env, rec, ev
 }
 

@@ -188,6 +188,26 @@ evolving.
   The exception is this credential only, on these calls only, on a payer
   client with a signing key: no other full item changes, and it lets no minor
   release change another.
+- **An owner decision, 2026-11-09: v1.12.0 removes the payer identity
+  mapping.** The settings `PAYER_DAVINCI_PAYOR_OWN` and
+  `PAYER_DAVINCI_PAYOR_BACKEND` (class `PA workstream`, full) and the
+  registered edit E-03 (`payor-edge-restamp`) are removed in a minor release,
+  with no deprecation release and no major release.
+  - **What changes:** a payer's gateway carries the payer identifiers a
+    request names to the payer's own system exactly as sent, on every leg; the
+    payer's system handles every payer identifier the payer registers on the
+    network. A gateway that sets either setting to a non-empty value refuses
+    to start (Settings, below); an empty value is unset, and a gateway that
+    names either with an empty value starts as one that does not name it.
+  - **Why it was decided:** the Da Vinci guides have a payer tell providers
+    the identifiers its own system handles, and expect no intermediary to
+    translate them; the mapping served SHN's own test topology, whose
+    reference payers now handle their network identifiers themselves.
+  - **Retired values:** E-03 is retired and never reused (E-15, never
+    registered, also stays unused), and
+    `E-03:no-coverage` leaves the access line's `editsNotMade`.
+
+  This decision removes no other full item early.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -252,8 +272,9 @@ The classes are:
   Services): a workstream's own surface, documented under that workstream.
 - `PA workstream, evolving`: the Prior Authorization workstream's eligibility,
   patient-authored DTR and CDex documentation exchange items (the CDex legs,
-  from v1.1.0 `cdex-attachment-submit` and from v1.5.0
-  `cdex-attachment-request`, and their ingress, return paths and size limits),
+  from v1.1.0 `cdex-attachment-submit`, from v1.5.0
+  `cdex-attachment-request` and from v1.12.0 `cdex-task-status`, and their
+  ingress, return paths and size limits),
   owned by `PA workstream`, which are evolving while its CRD, DTR
   and PAS items are full.
 - `module 1` (building messages on a participant's behalf), `module 2`
@@ -447,6 +468,7 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PROVIDER_CDEX_SCOPE` | PA workstream, evolving | PA workstream |
 | `PROVIDER_CDEX_CLIENT_KID` | PA workstream, evolving | PA workstream |
 | `PROVIDER_CDEX_CLIENT_SECRET` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_READ_SCOPE` | PA workstream, evolving | PA workstream |
 | `PROVIDER_DAVINCI_INGRESS` | core | core |
 | `PROVIDER_DAVINCI_INGRESS_BASE_URL` | core | core |
 | `INGRESS_CLIENTS_FILE` | core | core |
@@ -476,8 +498,6 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PAYER_DAVINCI_BACKEND_HEADERS` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_BACKEND_CORRELATION` | PA workstream | PA workstream |
 | `PAYER_DAVINCI_BACKEND_TIMEOUT` | PA workstream | PA workstream |
-| `PAYER_DAVINCI_PAYOR_OWN` | PA workstream | PA workstream |
-| `PAYER_DAVINCI_PAYOR_BACKEND` | PA workstream | PA workstream |
 | `PAYER_ELIGIBILITY_URL` | PA workstream, evolving | PA workstream |
 | `ATTACHMENT_CEILING_BYTES` | PA workstream, evolving | PA workstream |
 | `ATTACHMENT_INFLIGHT_BYTES` | PA workstream, evolving | PA workstream |
@@ -499,6 +519,8 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PAYER_DAVINCI_CRD_COVERAGE_BUNDLE` | unsupported | PA workstream |
 | `PAYER_DAVINCI_CRD_HOOK` | unsupported | PA workstream |
 | `PAYER_DAVINCI_DISPATCH_HOOK` | unsupported | PA workstream |
+| `PAYER_DAVINCI_PAYOR_OWN` | unsupported | PA workstream |
+| `PAYER_DAVINCI_PAYOR_BACKEND` | unsupported | PA workstream |
 | `SSL_CERT_DIR` | core | core |
 | `SSL_CERT_FILE` | core | core |
 
@@ -566,6 +588,29 @@ members the system of record does not hold on the CRD, DTR and PAS legs
 `CONFORMANCE_ENFORCEMENT` takes `none` (the default when unset, from v1.0.0),
 `observe` (the default when unset before v1.0.0), `structural` or `strict` (see
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
+**Behavior change in v1.12.0: a translated message is checked at its target line's profile.**
+A message your gateway translates between IG lines (`TRANSLATE_IG_LINES`) is checked against the profile the target line certifies it at for its resource and leg, where it was checked against its base FHIR definition only; one that is not valid there is refused `422` at every level, a `fidelity` refusal at stage `verify`. At PAS 2.1 and 2.2 a request Bundle read against its request Bundle profile, asked for or declared, is read per entry, in one `$validate` call (the validator can stop without a verdict reading it whole), so a participant's request Bundle that declares that profile gets a verdict where it was recorded `unavailable` ([docs/CONFIGURATION.md](docs/CONFIGURATION.md), `TRANSLATE_IG_LINES`).
+
+**Behavior change in v1.12.0: a code the validator cannot check is never refused.**
+
+- **What reads `unchecked`.** A FHIR check reads `unchecked` at every level when every error is a code the validator could not check, or a slice-match consequence of one on the same entry. Such a code is in a code system the lane does not hold, X12 or any other, so it could neither check the code nor expand the value set bound there. The message is recorded and relayed, at `strict` too. Earlier releases read it as a deeper rule's defect, which `strict` refused.
+- **Which checks.** Every FHIR check module 3 runs: a payer's answer at a provider's gateway, a request at the gateway that receives it, and the checks of what module 1 builds and sends.
+- **What is unchanged.** A code the validator checked and did not find, an invariant, a structural defect, and any other defect beside such a code decide as before.
+- **SHN's own edits.** A payload module 2 translated between IG lines is refused at every level for anything but valid or `unchecked`: a translation whose only findings are codes the target line's lane could not check is carried, and so is a questionnaire package answer renamed into your line (E-08).
+- **The finding.** It gains the `verdict` value `unchecked` and the field `uncheckedCodeSystems`. Both are additive, so decode tolerantly.
+- **The observer.** `validate.result` and `crd.embedded.validated` say `unchecked` for such a result, where they said `invalid`.
+
+**Behavior change in v1.12.0: a PAS answer that declares no profile is checked against its line's profile.**
+
+- **What changes.** At `structural` and `strict`, a payer's PAS answer that declares no profile is checked against its line's own PAS profile, without a version, so each candidate line's validator applies its own.
+  - A `$submit` or update answer: a response Bundle against `profile-pas-response-bundle`, a bare ClaimResponse against `profile-claimresponse`.
+  - An `$inquire` answer: `profile-pas-inquiry-response-bundle` and `profile-claiminquiryresponse`.
+
+  That covers an answer a provider's gateway carries for its system and one module 1 takes. Earlier releases checked such an answer against its base FHIR definition only. Its finding now names the profile asked for in `profile`.
+- **The verdict.** The answer is valid when any candidate line's profile accepts it, as before. Otherwise the line closest to valid decides: a structural defect refuses at both levels, and a deeper one at `strict`. A code the validator cannot check is never refused (above).
+- **What is unchanged.** An answer that declares a profile is checked against what it declares. `observe` checks an undeclared answer against its base definition, as before, and `none` checks nothing. The PAS 2.2.1 inquiry answer's `Parameters` wrapper has no profile and is checked as before, and so is a DTR answer.
+- **The refusal** is the participant's own conformance choice at its level, never a network rule.
 
 **Behavior change in shn-gateway v1.4.0: a Coverage's party may be a `Patient` entry
 of its own.** A dependent's parent that a PAS request or answer carries as a `Patient` entry of
@@ -973,6 +1018,12 @@ The main listener, on `HOST` and `PORT`:
 | `POST /cdex/provider/{provider}/Task` | PA workstream, evolving | PA workstream |
 | `POST /Task (payer)` | PA workstream, evolving | PA workstream |
 | `GET /cdex/providers` | PA workstream, evolving | PA workstream |
+| `GET /cdex/provider/{provider}/Task/{id}` | PA workstream, evolving | PA workstream |
+| `GET /cdex/provider/{provider}/Task/{id}/_history/{vid}` | PA workstream, evolving | PA workstream |
+| `GET /Task/{id}` | PA workstream, evolving | PA workstream |
+| `GET /Task/{id}/_history/{vid}` | PA workstream, evolving | PA workstream |
+| `GET /cdex/provider/{provider}/metadata` | core | core |
+| `GET /cdex/provider/{provider}/.well-known/smart-configuration` | core | core |
 | `GET /cds-client/jwks.json` | PA workstream | PA workstream |
 | `GET /metadata` | core | core |
 | `POST /oauth/token` | core | core |
@@ -1171,10 +1222,48 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   `subject.reference`, when it is exactly that Patient, is re-pointed to
   `Patient/<member id>`, as the request names the patient. A resource contained in the
   record is not edited.
-- A record naming anything else (another patient, `Patient/<member id>` itself, a
-  versioned or absolute reference) is refused, `502 PAS evidence linkage failed`, and one
-  a signature covers is refused, `422 signed content cannot be edited (E-06, <carrier>)`,
-  each before the claim is sent. Before v1.7.0, a request with a record about the
+- Your system's answer to each read is first read as a FHIR resource of the referenced
+  type. An answer that cannot be (not a JSON resource, longer than 8 MiB, another
+  `resourceType`, a member named twice in an object, whatever its case, or, for a
+  Condition, Observation or DiagnosticReport, an element of the wrong type such as a
+  `reference` that is not a string) is a failed read of your system: `502 PAS evidence linkage
+  failed: system of record returned an invalid response`, recorded with outcome
+  `upstream-error`, or as refused on message integrity for a member named twice. A read
+  your system fails to answer (a timeout, a `5xx`, no answer at all) is `503 PAS evidence
+  linkage failed: system of record unavailable`, recorded with outcome `upstream-error`.
+  Neither is read as absence.
+- Whichever id your system holds the member's Patient under, each record read is then
+  decided before the claim is sent:
+  - a record whose `subject.reference` is not exactly the request's patient is refused
+    `422 a record read from the system of record cannot be carried as read: <type>/<id>'s
+    subject is not exactly the request's patient`: another patient, `Patient/<member id>`
+    itself where your system holds the member under its own id, a versioned or absolute
+    reference, a `Group` or other non-Patient reference, or a contained, `urn:`, malformed
+    or empty reference. Where your system holds the member under the member id, a record
+    naming the request's own Patient `fullUrl` is that patient and is carried;
+  - a record that names no `subject.reference` (no `subject`, or one with no string
+    `reference`) is refused `422 a record read from the system of record cannot be carried as read:
+    <type>/<id> names no subject.reference`: a record that does not say whose it is cannot
+    be filled as this patient's;
+  - a record whose bytes cannot be carried as read is refused `422 a record read from the
+    system of record cannot be carried as read: <type>/<id> is not UTF-8` or `<type>/<id>
+    holds a lone surrogate escape`;
+  - a record your system definitely does not hold (its read answers `404` or `410`) is
+    refused `422 a record the request references cannot be filled: <type>/<id> is not held
+    by the system of record`: the build fills evidence only from your system;
+  - a record a signature covers, that E-06 would re-point, is refused `422 signed content
+    cannot be edited (E-06, <carrier>)`;
+  - each `422` is recorded as the fidelity of the gateway's own build (refusal rule
+    `fidelity`, stage `build`), whatever legs the request or resume sent before;
+  - a record of the referenced type with another `id` is refused `502 PAS evidence linkage
+    failed: <type>/<id> as the system answered it is not that resource`, recorded with
+    outcome `upstream-error`;
+  - a record nested deeper, or holding more JSON tokens, than the gateway carries in a
+    request, or records that together take the request past its size bound, are refused
+    `502 PAS evidence linkage failed`, the gateway's own limit, recorded as its own refusal under
+    no named rule.
+
+  Before v1.7.0, a request with a record about the
   Patient your system holds the member under was refused with `502 PAS evidence linkage
   failed`, after the CRD and questionnaire legs had gone out, and a record naming
   `Patient/<member id>` while your system holds the member under another id was carried.
@@ -1334,6 +1423,58 @@ asking for it (`Claim/$inquire`, leg type `pas-claim-inquire`).
   route can receive either body: read an `OperationOutcome` first, then `error`.
 - No configuration changes.
 
+### The answer after the recipient may have acted
+
+**Additive in v1.12.0.**
+
+- A requester's gateway states by structure, on every error answer to its
+  participant once the recipient may have received the request, that a
+  recipient may have acted on it, with `X-SHN-Delivered`, by one rule. Once a
+  leg of the call has handed back an answer verified as its recipient's own,
+  every error written on that call is `yes`, whatever refuses it: the
+  gateway's own checks of the answer at any level, an opt-in conformance
+  check at `structural` or `strict` (the `502` `ingress validation failed`,
+  or, at `strict`, the `500` when the check could not run), an edit of SHN's
+  that cannot be made, its own failure, and a later leg of the same call (a
+  recipient may have acted: on a call that sends several legs, it may be an
+  earlier leg's). Before any answer, a leg's own failure states what it says:
+  `unknown` for the Hub's error marked `unknown`, a Hub `5xx` with no marker,
+  a connection to the Hub lost after the request was written, a leg with no
+  answer within the gateway's wait after it was sent (`504`), and a Hub
+  answer the gateway could not read, decode or verify; `yes` for the Hub's
+  error marked `yes`, and for an answer verified as the recipient's own and
+  then refused. A refusal before the request was sent states none. Earlier
+  releases set it on two answers only, both `yes`: an answer refused for
+  size, and a recipient's gateway refusing to send its system's answer.
+- On the CDS Hooks route the body keeps its media type, `application/json`,
+  and its members, its `error` member first and with the text it had; RFC
+  9457 problem details members follow them: `type`
+  (`tag:smarthealthnetwork.org,2026:gateway/delivered/yes` or `…/unknown`),
+  `title`, `status` and `detail` (the text again). On the FHIR operation
+  routes it is still an `OperationOutcome` (the envelope above), and its first
+  issue gains `details`, whose one coding has system
+  `tag:smarthealthnetwork.org,2026:gateway/delivered` and code `yes` or
+  `unknown`; its other issues are kept. On the `/scenario` routes, test
+  tooling outside the promise, it is `application/problem+json` with the same
+  members.
+- One text changes: a Hub `200` the gateway could not read, decode as an
+  envelope or verify the answer token of may have come from in front of the
+  Hub, so its `502` reads `the recipient may have received this request
+  (<reason>): check its outcome before resending` (`unknown`), where it read
+  `the recipient received this request and answered, but its answer could not
+  be accepted (<reason>); …`; so does one naming another sender than the
+  recipient or another correlation than the leg's. An answer verified as the
+  recipient's own and then refused (decryption, frame decode, a `204` with a
+  body, another contract line) keeps that text, marked `yes`. This one text
+  change was ruled with the rest of this section and is recorded as Changed in
+  the changelog.
+- Statuses, refusal rules, every other text and the exchange record's fields
+  are unchanged, as is every answer that states no delivery; the answer bytes
+  the record holds are those sent, marks included. An answer carried from the
+  recipient keeps its bytes; after an earlier leg of the same call was
+  answered, an error one also carries `X-SHN-Delivered: yes`.
+- No configuration or Go API changes.
+
 ### Amendments a provider's gateway builds, after a payer's 409
 
 **Evolving (v1.0):** amendments the gateway builds, and their re-send, are
@@ -1455,7 +1596,8 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   met by none of its lines (no validator answered for any of them, or the
   gateway has none), and also when no line's validator answered.
   Otherwise the verdict is the best one any line gave; a deeper-rule defect
-  beats a structural one.
+  beats a structural one, and from v1.12.0 a terminology gap (`unchecked`,
+  below) beats both.
 - **By level:**
   - `none`: no validator call and no finding.
   - `observe`: every outcome that is not valid is recorded, and the answer is
@@ -1463,6 +1605,15 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   - `structural`: a structural or unclassified defect is refused; a deeper-rule
     defect and an unavailable check are recorded; the answer is otherwise
     relayed.
+  - From v1.12.0, at every level, a line whose every error is a code the
+    validator could not check reads `unchecked`. Such a code is in a code system
+    the lane does not hold, X12 or any other, so it could neither
+    check the code nor expand the value set bound there. The verdict also covers
+    a slice-match consequence of such a code on the same entry. It is a
+    terminology gap, not a defect: it is recorded and the answer relayed, at
+    `strict` too, and the finding names the code systems in
+    `uncheckedCodeSystems`. A code the validator checked and did not find, and
+    any other defect beside a gap, decide as before.
   - `strict`: every defect is refused, and an unavailable check is refused with
     `500`.
 - **A refusal.** The gateway's own client receives `422 {"error":"ingress
@@ -1474,8 +1625,8 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   Any other checked answer records one conformance finding, except an
   unavailable check at `strict`, which is refused without one. The finding
   carries `declaredLine` (the line the leg was sent at), `lines` (each line
-  considered, in order, with its verdict: `valid`, `structural`, `deeper` or
-  `unavailable`; the line the leg was sent at, or a line of a claim none of
+  considered, in order, with its verdict: `valid`, `structural`, `deeper`,
+  `unchecked` (from v1.12.0) or `unavailable`; the line the leg was sent at, or a line of a claim none of
   whose lines has a validator, is listed as `unavailable` when it has none, and no validator diagnostic
   appears here) and `line` (the line the decision came from). An answer valid
   only on a line after the one the leg was sent at gets one finding with
@@ -1735,6 +1886,7 @@ table.
 | `eligibility-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-request-ingress` | PA workstream, evolving | PA workstream |
+| `cdex-read-ingress` | PA workstream, evolving | PA workstream |
 | `federated-query-ingress` | FQS workstream | FQS workstream |
 
 | Item | Class | Owner |
@@ -1950,6 +2102,7 @@ classify is written as `other`.
 | `callId` | test tooling | test tooling |
 | `direction` | core | core |
 | `route` | core | core |
+| `method` | core | core |
 | `exchange` | core | core |
 | `operation` | core | core |
 | `contractLine` | core | core |
@@ -2000,6 +2153,14 @@ classify is written as `other`.
 | `answerHeadersNotCarried` | core | core |
 | `readsFailed` | monitoring | core |
 | `hubDelivered` | core | core |
+| `requesterBinding.binding` | core | core |
+| `requesterBinding.involvement` | core | core |
+| `requesterBinding.unbound` | core | core |
+| `requesterBinding.outcome` | core | core |
+| `requesterBinding.refusedBy` | core | core |
+| `requesterBinding.status` | core | core |
+| `requesterBinding.notSent` | core | core |
+| `requesterBinding.resent` | core | core |
 
 | Item | Class | Owner |
 |---|---|---|
@@ -2015,6 +2176,9 @@ classify is written as `other`.
 | `answerError` | core | core |
 | `authorizeError` | core | core |
 | `involvedOmitted` | core | core |
+| `requesterBinding.outcome` | core | core |
+| `requesterBinding.unbound` | core | core |
+| `requesterBinding.notSent` | core | core |
 
 ### Access lines
 
@@ -2462,13 +2626,14 @@ protocol headers, the message frame's headers (a frame's version, `v1`, or
 holder's `messageFrames` and `requestFrames`), the network discovery
 document's fields, the registrar's holder fields the gateway reads, what its ingress serves to a
 participant's own systems (the bearer token, its scope, and the endpoint codes
-and CDS service ids its discovery documents name), and the headers and
-endpoints of optional diagnostic collection.
+and CDS service ids its discovery documents name, and from v1.12.0 the
+system its answers name delivery by, as a problem type and an OperationOutcome
+coding), and the headers and endpoints of optional diagnostic collection.
 
 Of the leg types, `coverage-eligibility` and `patient-dtr` (`PA workstream,
 evolving`) and `federated-query` (`FQS workstream`) are evolving at v1.0, and
-the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`
-and from v1.5.0 `cdex-attachment-request`) are evolving when they ship: a minor gateway release may change how the gateway
+the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`,
+from v1.5.0 `cdex-attachment-request` and from v1.12.0 `cdex-task-status`) are evolving when they ship: a minor gateway release may change how the gateway
 carries them. The wire protocol's own versioning still governs their names.
 
 | Item | Class | Owner |
@@ -2497,10 +2662,12 @@ carries them. The wire protocol's own versioning still governs their names.
 | `transactionType=patient-dtr` | PA workstream, evolving | PA workstream |
 | `transactionType=cdex-attachment-submit` | PA workstream, evolving | PA workstream |
 | `transactionType=cdex-attachment-request` | PA workstream, evolving | PA workstream |
+| `transactionType=cdex-task-status` | PA workstream, evolving | PA workstream |
 | `transactionType=federated-query` | FQS workstream | FQS workstream |
 | `POST <authz>/authorize` | core | core |
 | `X-Hub-Assertion` | core | core |
 | `X-SHN-Delivered` | core | core |
+| `tag:smarthealthnetwork.org,2026:gateway/delivered` | core | core |
 | `X-SHN-Not-Acted` | core | core |
 | `X-SHN-Leg-Id` | core | core |
 | `X-SHN-Edited` | core | core |

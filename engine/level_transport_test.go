@@ -15,40 +15,17 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// Per-level rows for checks that sit beside routing and the payer identity
-// mapping: a Claim insurer reference the mapping cannot resolve, an answer
-// whose frame stamps a contract line other than the one its leg was routed
-// on, a payer-side CRD request with no Coverage (which the mapping carries as
-// sent: it has no payor to map), and a payer-side PAS request with no
-// Coverage. Where the check
+// Per-level rows for checks that sit beside routing: a Claim insurer
+// reference that resolves to nothing, an answer whose frame stamps a contract
+// line other than the one its leg was routed on, a payer-side CRD request with
+// no Coverage, and a payer-side PAS request with no Coverage. Where the check
 // judges the participant's own content it is not checked at none, recorded at
 // observe and refused at strict with the status and body strict has always
 // given, and the message is carried or relayed exactly below strict. Where it
-// addresses the message (routing, the mapping's Coverage) or is SHN's own
-// frame metadata (the contract-line stamp) it refuses at every level.
-
-var (
-	levelOwnPayer     = shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00001"}
-	levelBackendPayer = shnsdk.PayerIdentifier{System: "urn:example:payer-backend", Value: "BACKEND-7"}
-)
-
-// withIdentityMapping configures the payer identity mapping from the payer id
-// the fixtures' Coverages name to the identity the payer's own system expects.
-func withIdentityMapping() []NativeOption {
-	return []NativeOption{WithPayorEdgeIdentity(levelOwnPayer, levelBackendPayer)}
-}
-
-// mappedPayor is body with its one payer identifier naming levelOwnPayer
-// replaced by levelBackendPayer: the request the participant's system
-// receives when the mapping maps the Coverage and nothing else.
-func mappedPayor(t *testing.T, body []byte) []byte {
-	t.Helper()
-	own := []byte(`{"system":"` + levelOwnPayer.System + `","value":"` + levelOwnPayer.Value + `"}`)
-	if n := bytes.Count(body, own); n != 1 {
-		t.Fatalf("fixture: want one own payer identifier, found %d", n)
-	}
-	return bytes.Replace(body, own, []byte(`{"system":"`+levelBackendPayer.System+`","value":"`+levelBackendPayer.Value+`"}`), 1)
-}
+// addresses the message (routing) or is SHN's own frame metadata (the
+// contract-line stamp) it refuses at every level. A request the network routed
+// to a payer is already addressed: the payer's gateway carries its payer
+// identifiers to the payer's system exactly as sent.
 
 // bundleWithout is a Bundle with the entries of the named resource types
 // removed.
@@ -88,12 +65,11 @@ func withReplaced(t *testing.T, body, old, new string) []byte {
 
 // ---- a Claim insurer reference that does not resolve ----
 
-// The payer identity mapping maps a Claim's insurer only when it names this
-// payer; the payer's system is addressed by the Coverages. An insurer
-// reference that resolves to no entry, or to several, is the requester's own
-// content: below strict the insurer is left as sent and the Coverage is
-// mapped as usual; strict refuses it with the mapping's 422.
-func TestLevelPayerPAS_UnresolvedInsurer(t *testing.T) {
+// A Claim's insurer is the requester's own content, and a payer's gateway
+// does not read it: an insurer reference that resolves to no entry, or to
+// several, reaches the payer's system exactly as sent at every level, its
+// answer is relayed exactly, and nothing is recorded.
+func TestLevelPayerPAS_UnresolvedInsurerCarriedAsSent(t *testing.T) {
 	t.Parallel()
 	// The amendment fixture names its payer's own entry; one mutation points its
 	// operative Claim's insurer at Organization/payer, which no entry of the
@@ -104,57 +80,42 @@ func TestLevelPayerPAS_UnresolvedInsurer(t *testing.T) {
 	rows := map[string]struct {
 		leg, path string
 		body      []byte
-		msg       string
 	}{
 		"submit, an insurer naming no entry": {"pas-claim", pasSubmitPath,
-			[]byte(pasIngressBundle("00001", `"insurer":{"reference":"Organization/absent-insurer"},`)),
-			`Organization/absent-insurer\" resolves to no resource in the request`},
+			[]byte(pasIngressBundle("00001", `"insurer":{"reference":"Organization/absent-insurer"},`))},
 		"submit, an insurer naming two entries": {"pas-claim", pasSubmitPath,
-			withReplaced(t, pasIngressBundle("00001", `"insurer":{"reference":"Organization/dup"},`), `"entry":[`, `"entry":[`+dup+`,`+dup+`,`),
-			`Organization/dup\" resolves to more than one resource in the request`},
-		"amendment, an insurer naming no entry": {"pas-claim-update", pasSubmitPath, update,
-			`Organization/payer\" resolves to no resource in the request`},
+			withReplaced(t, pasIngressBundle("00001", `"insurer":{"reference":"Organization/dup"},`), `"entry":[`, `"entry":[`+dup+`,`+dup+`,`)},
+		"amendment, an insurer naming no entry": {"pas-claim-update", pasSubmitPath, update},
 		"inquiry, an insurer naming no entry": {"pas-claim-inquire", pasInquirePath,
-			withReplaced(t, levelInquiry(t, "MBR-COVERED", ""), `"use":"preauthorization",`, `"use":"preauthorization","insurer":{"reference":"Organization/absent-insurer"},`),
-			`Organization/absent-insurer\" resolves to no resource in the request`},
+			withReplaced(t, levelInquiry(t, "MBR-COVERED", ""), `"use":"preauthorization",`, `"use":"preauthorization","insurer":{"reference":"Organization/absent-insurer"},`)},
 	}
 	for name, row := range rows {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				p := newLevelPayer(t, level, withIdentityMapping()...)
+				p := newLevelPayer(t, level)
 				if row.leg == "pas-claim-update" {
 					p.seedPend(t, related)
 				}
 				got := p.send(t, row.leg, "", row.body)
-				if refusesAt(level, RuleInsurer) {
-					p.wantRefused(t, got, http.StatusUnprocessableEntity, row.msg)
-				} else {
-					if got.status != http.StatusOK || !got.framed {
-						t.Fatalf("at %s the request must be forwarded: answer %d %s", level, got.status, got.body)
-					}
-					if want := mappedPayor(t, row.body); p.partner.lastPath != row.path || !bytes.Equal(p.partner.lastBody, want) {
-						t.Fatalf("at %s the participant's system must receive the request with only its Coverage mapped, at %s; got %s:\n%s\nwant\n%s", level, row.path, p.partner.lastPath, p.partner.lastBody, want)
-					}
-					if want := p.partner.respByPath[row.path]; !bytes.Equal(got.body, want) {
-						t.Fatalf("at %s the answer must be relayed exactly:\n got %s\nwant %s", level, got.body, want)
+				if got.status != http.StatusOK || !got.framed {
+					t.Fatalf("at %s the request must be forwarded: answer %d %s", level, got.status, got.body)
+				}
+				if p.partner.lastPath != row.path || !bytes.Equal(p.partner.lastBody, row.body) {
+					t.Fatalf("at %s the participant's system must receive the request as sent at %s; got %s:\n%s", level, row.path, p.partner.lastPath, p.partner.lastBody)
+				}
+				if want := p.partner.respByPath[row.path]; !bytes.Equal(got.body, want) {
+					t.Fatalf("at %s the answer must be relayed exactly:\n got %s\nwant %s", level, got.body, want)
+				}
+				// The insurer reference was read only by the payer identity
+				// mapping (its rule, claim.insurer, is retired with it).
+				for _, f := range p.content() {
+					if f.Rule == "claim.insurer" {
+						t.Fatalf("at %s an insurer finding was recorded: %v", level, findingsText(p.content()))
 					}
 				}
-				p.wantFindings(t, row.leg, RuleInsurer, "peer")
 			})
 		}
 	}
-}
-
-// The mapping's own addressing refuses at every level: a Coverage payor
-// reference that resolves to no entry.
-func TestLevelPayerPAS_CoveragePayorReferenceRefusesAtEveryLevel(t *testing.T) {
-	runPayerNetworkRows(t, map[string]payerNetworkRow{
-		"a Coverage payor naming no entry": {leg: "pas-claim", opts: withIdentityMapping(),
-			body: withReplaced(t, pasIngressBundle("00001", ""),
-				`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]`,
-				`"payor":[{"reference":"Organization/absent"}]`),
-			status: http.StatusUnprocessableEntity, msg: `Organization/absent\" resolves to no resource in the request`},
-	})
 }
 
 // ---- an answer stamped with another contract line ----
@@ -348,17 +309,14 @@ func crdSelectWithoutPrefetch(t *testing.T) []byte {
 	return out
 }
 
-// With the payer identity mapping configured, a CRD request that carries no
-// Coverage at all has no payor to map: the network routed it to this payer,
-// so the mapping carries it to the payer's own system as sent, and that
-// system answers it. The mapping changes nothing about what the payer's own
-// conformance level decides: order-select reads its subject's coverage
-// beneficiary as the request's own shape (RuleRequestShape), so a payer that
-// opts in to structural or strict refuses it there exactly as it does
-// without the mapping; at none and observe it reaches the payer's system
-// byte for byte. order-dispatch reads no coverage it requires, so it is
-// carried as sent at every level.
-func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) {
+// A CRD request that carries no Coverage at all is already routed to this
+// payer: its payer's own conformance level decides it. order-select reads its
+// subject's coverage beneficiary as the request's own shape
+// (RuleRequestShape), so a payer that opts in to structural or strict refuses
+// it there; at none and observe it reaches the payer's system byte for byte.
+// order-dispatch reads no coverage it requires, so it is carried as sent at
+// every level.
+func TestLevelPayerCRD_NoCoverageCarriedAsSent(t *testing.T) {
 	t.Parallel()
 	sel := map[string][]byte{
 		"no prefetch.coverage":   crdSelectWith(t, levelCRDSelectCoverage, `"other":{}`),
@@ -367,18 +325,12 @@ func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) 
 		"no prefetch":            crdSelectWithoutPrefetch(t),
 	}
 	for name, body := range sel {
-		for _, mapping := range []bool{true, false} {
-			for _, level := range allLevels {
-				t.Run(fmt.Sprintf("order-select/%s/mapping=%t/%s", name, mapping, level), func(t *testing.T) {
-					var opts []NativeOption
-					if mapping {
-						opts = withIdentityMapping()
-					}
-					p := newLevelPayer(t, level, opts...)
-					got := p.send(t, "crd-order-select", "", body)
-					p.wantRequestRow(t, "crd-order-select", got, body, crdSelectPath, RuleRequestShape, http.StatusBadRequest, "parse coverage beneficiary failed")
-				})
-			}
+		for _, level := range allLevels {
+			t.Run(fmt.Sprintf("order-select/%s/%s", name, level), func(t *testing.T) {
+				p := newLevelPayer(t, level)
+				got := p.send(t, "crd-order-select", "", body)
+				p.wantRequestRow(t, "crd-order-select", got, body, crdSelectPath, RuleRequestShape, http.StatusBadRequest, "parse coverage beneficiary failed")
+			})
 		}
 	}
 	dispatch := map[string][]byte{
@@ -389,7 +341,7 @@ func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) 
 	for name, body := range dispatch {
 		for _, level := range allLevels {
 			t.Run("order-dispatch/"+name+"/"+level.String(), func(t *testing.T) {
-				p := newLevelPayer(t, level, withIdentityMapping()...)
+				p := newLevelPayer(t, level)
 				got := p.send(t, "crd-order-dispatch", "", body)
 				if got.status != http.StatusOK || !got.framed {
 					t.Fatalf("at %s the request must be carried: answer %d %s", level, got.status, got.body)
@@ -408,28 +360,13 @@ func TestLevelPayerCRD_NoCoverageWithIdentityMappingCarriedAsSent(t *testing.T) 
 	}
 }
 
-// The mapping still refuses, at every level, a Coverage whose payor it
-// cannot read and one naming another payer: present, it addresses the
-// request.
-func TestLevelPayerCRD_CoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
-	t.Parallel()
-	foreign := `"coverage":{"resourceType":"Coverage","id":"c1","beneficiary":{"reference":"Patient/MBR-COVERED"},` +
-		`"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"99999"}}]}`
-	runPayerNetworkRows(t, map[string]payerNetworkRow{
-		"order-select: a Coverage naming no payor": {leg: "crd-order-select", body: conformantCRD("MBR-COVERED", "72148"), opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "inbound Coverage carries no resolvable payor identifier"},
-		"order-select: a Coverage naming another payer": {leg: "crd-order-select", body: crdSelectWith(t, levelCRDSelectCoverage, foreign), opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "inbound Coverage payor urn:oid:2.16.840.1.113883.6.300|99999 does not match this gateway's own payer identity"},
-	})
-}
-
 // ---- a PAS request with no Coverage ----
 
 // levelPASCoverageEntry is the Coverage entry of pasIngressBundle.
 const levelPASCoverageEntry = `,{"resource":{"resourceType":"Coverage","id":"cov1","beneficiary":{"reference":"Patient/MBR-COVERED"},"payor":[{"identifier":{"system":"urn:oid:2.16.840.1.113883.6.300","value":"00001"}}]}}`
 
-// A request routed to this payer is already addressed; without the payer
-// identity mapping a bundle with no Coverage is the request's own shape.
+// A request routed to this payer is already addressed: a bundle with no
+// Coverage is the request's own shape.
 func TestLevelPayerPAS_NoCoverage(t *testing.T) {
 	t.Parallel()
 	update, related := updateBundle(t, "Coverage")
@@ -451,45 +388,6 @@ func TestLevelPayerPAS_NoCoverage(t *testing.T) {
 				p.wantRequestRow(t, row.leg, got, row.body, pasSubmitPath, RuleRequestShape, http.StatusBadRequest, "PAS bundle carries no Coverage")
 			})
 		}
-	}
-}
-
-// With the payer identity mapping configured, a submission or amendment with
-// no Coverage refuses at every level. An inquiry with none is carried as sent
-// instead: it names no payor to re-key (TestPayorEdge_InquiryWithNoCoverageIsCarriedAtEveryLevel).
-func TestLevelPayerPAS_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
-	t.Parallel()
-	update, _ := updateBundle(t, "Coverage")
-	runPayerNetworkRows(t, map[string]payerNetworkRow{
-		"submit": {leg: "pas-claim", body: []byte(levelPASBundleWithout(t, levelPASCoverageEntry)), opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
-		"amendment": {leg: "pas-claim-update", body: update, opts: withIdentityMapping(),
-			status: http.StatusBadRequest, msg: "PAS bundle carries no Coverage"},
-	})
-}
-
-// The native forward reads the bundle again for the member and the order; with
-// the payer identity mapping configured its read refuses a bundle with no
-// Coverage at every level too, with the same status and body, and nothing is
-// sent to the payer's system.
-func TestLevelPayerPASResponder_NoCoverageWithIdentityMappingRefusesAtEveryLevel(t *testing.T) {
-	body := []byte(levelPASBundleWithout(t, levelPASCoverageEntry))
-	for _, level := range allLevels {
-		t.Run(level.String(), func(t *testing.T) {
-			p := newStubPartner(t)
-			n := NewNativeResponder(p.srv.Client(), p.srv.URL, fixedClock,
-				append([]NativeOption{WithCRDService("shn-order-select"), WithConformancePolicy(NewConformancePolicy(level))}, withIdentityMapping()...)...)
-			res, err := n.Handle(t.Context(), "pas-claim", "corr-1", "pci-1", body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if res.Status != http.StatusBadRequest || res.Message != "PAS bundle carries no Coverage" {
-				t.Fatalf("got %d %q", res.Status, res.Message)
-			}
-			if p.lastPath != "" {
-				t.Fatalf("a refused request reached the participant's system at %s", p.lastPath)
-			}
-		})
 	}
 }
 

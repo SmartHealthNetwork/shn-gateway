@@ -48,7 +48,7 @@ func legsByAnswerEnvelope(t *testing.T, envelope string) map[string]legSpec {
 func TestRefusalEnvelope_LegsSplitAsTheTaxonomySays(t *testing.T) {
 	keys := func(m map[string]legSpec) []string { return slices.Sorted(maps.Keys(m)) }
 	if got, want := keys(legsByAnswerEnvelope(t, legtaxonomy.AnswerEnvelopeFHIR)), []string{
-		"cdex-attachment-request", "cdex-attachment-submit", "coverage-eligibility", "dtr-questionnaire-fetch",
+		"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-status", "coverage-eligibility", "dtr-questionnaire-fetch",
 		"federated-query", "pas-claim", "pas-claim-inquire", "pas-claim-update",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("FHIR legs = %v, want %v", got, want)
@@ -319,8 +319,14 @@ var ingressRouteLegs = map[string][]string{
 	RouteCDexReturnSubmit: {"cdex-attachment-submit"},
 	RouteCDexRequestBase:  {"cdex-attachment-request"},
 	RouteCDexRequest:      {"cdex-attachment-request"},
+	RouteCDexReadBase:     {"cdex-task-status"},
+	RouteCDexRead:         {"cdex-task-status"},
 	RouteFederatedQuery:   {"federated-query"},
 }
+
+// noIngressRouteYet are the legs with an answer envelope that no ingress
+// route originates: patient-authored DTR, which only module 1 originates.
+var noIngressRouteYet = map[string]bool{"patient-dtr": true}
 
 // TestAnswerEnvelope_IsTheIngressRoutesEnvelope fences the taxonomy's answer
 // envelopes to the routes a participant's own system calls: a leg answers
@@ -357,9 +363,14 @@ func TestAnswerEnvelope_IsTheIngressRoutesEnvelope(t *testing.T) {
 	}
 	for _, envelope := range []string{legtaxonomy.AnswerEnvelopeFHIR, legtaxonomy.AnswerEnvelopeJSON} {
 		for leg := range legsByAnswerEnvelope(t, envelope) {
-			if !covered[leg] && leg != "patient-dtr" {
+			if !covered[leg] && !noIngressRouteYet[leg] {
 				t.Errorf("leg %s has no ingress route here", leg)
 			}
+		}
+	}
+	for leg := range noIngressRouteYet {
+		if covered[leg] {
+			t.Errorf("leg %s has an ingress route now: drop it from noIngressRouteYet", leg)
 		}
 	}
 }

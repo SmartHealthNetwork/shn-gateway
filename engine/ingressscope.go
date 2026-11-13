@@ -4,7 +4,8 @@
 // and checks. The token endpoint grants a space-delimited set (RFC 6749 §3.3),
 // each scope one the client is registered for, and each payer route takes a
 // bearer whose set holds a system-level Task scope that permits what the route
-// does: create for the attachment-request Task routes. A scope is read as SMART
+// does: create for the attachment-request Task routes, read for the read and
+// vread of a Task at a provider's base. A scope is read as SMART
 // defines it: v1's read, write and *, or v2's non-empty subset of c r u d s, in
 // that order. A v2 scope with a query (a granular scope) permits nothing here:
 // the gateway cannot enforce its filter, so admitting the route on it would be
@@ -131,15 +132,16 @@ func namesTask(scope string) bool {
 // CheckPayerIngressScopes is the boot rule for the scopes a payer gateway's
 // ingress client registers: every scope naming Task is one of SMART's
 // spellings (v1 read, write or *; v2 a subset of c r u d s in order, granular
-// included), and at least one permits a payer route with no query. Every route
-// the payer's ingress mounts creates a Task (from v1.10.0, when the rule took
-// read and v2 scopes), so that is a scope that permits create:
-// system/Task.write, system/Task.*, or a v2 scope with c. A misspelled Task
-// scope would be granted and then permit nothing, and a client whose Task
-// scopes permit no route (one registered only to read, say) could be granted
-// only bearers every route refuses, so each is a registration error. A granular scope, or
-// one for another resource or context, is kept beside such a scope and
-// permits nothing on these routes.
+// included), and at least one, with no query, permits creating a Task:
+// system/Task.write, system/Task.*, or a v2 scope with c (from v1.10.0, when
+// the rule took read and v2 scopes). Creating a Task is what the payer's
+// ingress is for: the read and vread of a Task at a provider's base (from
+// v1.12.0) read one the payer's system created, so a client registered only
+// to read is still a registration error. A misspelled Task scope would be
+// granted and then permit nothing, so it is one too. A scope that permits
+// reading, beside one that permits create, admits the read routes. A granular
+// scope, or one for another resource or context, is kept beside such a scope
+// and permits nothing on these routes.
 func CheckPayerIngressScopes(scopes []string) error {
 	usable := 0
 	for _, scope := range scopes {
@@ -155,16 +157,31 @@ func CheckPayerIngressScopes(scopes []string) error {
 		}
 	}
 	if usable == 0 {
-		return fmt.Errorf("lists no system/Task scope that permits a route of the payer ingress (each creates a Task: system/Task.write, system/Task.*, or a v2 scope with c, with no query): every route takes a bearer granted one (list one, or leave scopes out for %s)", TaskWriteScope)
+		return fmt.Errorf("lists no system/Task scope that permits creating a Task (system/Task.write, system/Task.*, or a v2 scope with c, with no query), which the payer ingress's Task routes and its provider listing take (list one, or leave scopes out for %s)", TaskWriteScope)
 	}
 	return nil
+}
+
+// scopesPermit reports whether any of scopes, a client's registered scopes,
+// is one with no query that permits need on Task: a bearer the token endpoint
+// grants that client can then reach a route that takes need.
+func scopesPermit(scopes []string, need taskPermission) bool {
+	for _, scope := range scopes {
+		if perms, granular, ok := parseTaskScope(scope); ok && !granular && perms&need == need {
+			return true
+		}
+	}
+	return false
 }
 
 // challengeScope is the scope a route that takes need names in its 403's
 // WWW-Authenticate challenge (RFC 6750 §3): the v1 scope a client asks for.
 func challengeScope(need taskPermission) string {
-	if need == taskCreate {
+	switch need {
+	case taskCreate:
 		return TaskWriteScope
+	case taskRead:
+		return TaskReadScope
 	}
 	return ""
 }

@@ -91,7 +91,7 @@ func TestOrigination_NoClinicianRefusedAtTheLegThatNamesIt(t *testing.T) {
 			var events []ObserverEvent
 			gw.cfg.Observer = func(e ObserverEvent) { events = append(events, e) }
 			rec := httptest.NewRecorder()
-			gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", ""))))))
+			gw.handleUC06(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", "")))))))
 			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), errNoOrderingClinician.Error()) {
 				t.Fatalf("%d %s, want 422 %q", rec.Code, rec.Body, errNoOrderingClinician)
 			}
@@ -225,7 +225,7 @@ func testAnswerIsRequired(t *testing.T, level ConformanceEnforcement) {
 		gw, stub := uc06RouteFixture(t, "2.0")
 		events := observe(gw)
 		rec := httptest.NewRecorder()
-		gw.handleUC06(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", testNoAnswer))))))
+		gw.handleUC06(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc06", strings.NewReader(testRouteBody(gw, "/scenario/uc06", testNoAnswer)))))))
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("%d %s, want 422", rec.Code, rec.Body)
 		}
@@ -240,7 +240,7 @@ func testAnswerIsRequired(t *testing.T, level ConformanceEnforcement) {
 			extraRoles: map[string]string{"phg": "phg"}})
 		events := observe(gw)
 		rec := httptest.NewRecorder()
-		gw.handleUC07(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07", strings.NewReader(testRouteBody(gw, "/scenario/uc07", testNoAnswer))))))
+		gw.handleUC07(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc07", strings.NewReader(testRouteBody(gw, "/scenario/uc07", testNoAnswer)))))))
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("%d %s, want 422", rec.Code, rec.Body)
 		}

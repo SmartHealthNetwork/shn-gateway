@@ -138,7 +138,7 @@ type ConformanceFinding struct {
 	Line          string `json:"line,omitempty"`
 	Profile       string `json:"profile,omitempty"`
 	Level         string `json:"level"`
-	Verdict       string `json:"verdict,omitempty"` // "unavailable" when the check could not run; "valid" when a candidate line after the first passed; absent for an invalid verdict
+	Verdict       string `json:"verdict,omitempty"` // "unavailable" when the check could not run; "valid" when a candidate line after the first passed; "unchecked" when the lane could not check a code; absent for an invalid verdict
 	Decision      string `json:"decision"`
 	Rule          string `json:"rule,omitempty"`
 	Path          string `json:"path,omitempty"`
@@ -171,6 +171,11 @@ type ConformanceFinding struct {
 	// sorted, at most eight named, the rest counted. Set on an unavailable finding they made unavailable, and on
 	// an invalid one beside the defect that decided it.
 	UnresolvedProfiles []string `json:"unresolvedProfiles,omitempty"`
+	// UncheckedCodeSystems names the code systems the line that decided could
+	// not check (certificationUnchecked), sorted: set on an unchecked finding,
+	// so a terminology gap is told apart from a defect. A code system's URL
+	// only, never a code or a diagnostic.
+	UncheckedCodeSystems []string `json:"uncheckedCodeSystems,omitempty"`
 
 	// binding and tally are the call this finding belongs to, taken from the
 	// request's context where the finding was made (bindFinding); they are
@@ -180,7 +185,7 @@ type ConformanceFinding struct {
 }
 
 // LineVerdictSummary is one line a candidate-line certification tried and what it
-// saw there: "valid", "structural", "deeper" or "unavailable", and how long
+// saw there: "valid", "structural", "deeper", "unchecked" or "unavailable", and how long
 // that line's $validate call took. Never a validator diagnostic.
 type LineVerdictSummary struct {
 	Line    string `json:"line"`
@@ -198,6 +203,8 @@ func findingVerdict(v Verdict) string {
 		return "valid"
 	case VerdictDeeper:
 		return "deeper"
+	case VerdictUnchecked:
+		return "unchecked"
 	case VerdictUnavailable:
 		return "unavailable"
 	}

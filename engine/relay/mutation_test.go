@@ -55,9 +55,9 @@ var (
 	// decision.
 	relayOnly = boundary{name: "relay-only", allowed: []Ownership{OwnershipRelayed}}
 	// payerRequest is a payer gateway sending a request to its payer: exact,
-	// or with the payer identity mapped.
+	// or with the adaptive addresses it issued restored.
 	payerRequest = boundary{name: "payer-request", allowed: []Ownership{OwnershipRelayed, OwnershipEdited},
-		edits: []EditID{EditPayorEdgeRestamp}}
+		edits: []EditID{EditDTRAdaptiveAddressRestore}}
 	// providerCRD is the provider gateway forwarding an EHR's CDS Hooks
 	// request.
 	providerCRD = boundary{name: "provider-crd-request", allowed: []Ownership{OwnershipRelayed, OwnershipEdited},
@@ -79,8 +79,8 @@ var (
 	realPayerRequest = boundary{name: "table: prior-authorization request to the payer",
 		key: &Key{"pas-claim", RoleRecipient, DirectionRequest, OutcomeCarried}}
 	// realQuestionnaireRequest is a payer gateway sending a questionnaire
-	// operation's input to its payer, from the ownership table: exact, with
-	// the payer identity mapped, or the older envelope's rebuilt request.
+	// operation's input to its payer, from the ownership table: exact, or
+	// with the adaptive addresses it issued restored.
 	realQuestionnaireRequest = boundary{name: "table: questionnaire request to the payer",
 		key: &Key{"dtr-questionnaire-fetch", RoleRecipient, DirectionRequest, OutcomeCarried}}
 	// realProviderCRD is the provider gateway sending its EHR's CDS Hooks
@@ -97,7 +97,7 @@ var (
 		key: &Key{"crd-order-dispatch", RoleRecipient, DirectionResponse, OutcomeAnswered}}
 	// realPayerCRDRequest and realPayerDispatchRequest are a payer gateway
 	// sending the network's CDS Hooks request to its payer, from the
-	// ownership table: exact, or with the payer identity mapped.
+	// ownership table: exact.
 	realPayerCRDRequest = boundary{name: "table: the CDS Hooks request to the payer",
 		key: &Key{"crd-order-select", RoleRecipient, DirectionRequest, OutcomeCarried}}
 	realPayerDispatchRequest = boundary{name: "table: the order-dispatch request to the payer",
@@ -159,9 +159,9 @@ func mutationRows() []mutationRow {
 			build: func(t *testing.T) (Payload, error) {
 				b := NewBody([]byte(`{"hook":"order-sign","fhirServer":"https://ehr.example"}`), OriginIngressRequest)
 				d := mustDoc(t, b)
-				return Apply(b, "application/json", EditPayorEdgeRestamp, d.Replace(at(t, d, "hook"), []byte(`"order-select"`)))
+				return Apply(b, "application/json", EditDTRCoverageObtain, d.Replace(at(t, d, "hook"), []byte(`"order-select"`)))
 			},
-			at:           []boundary{relayOnly, providerCRD, refusalWriter, realRelay, realRelayToEHR, realProviderCRD},
+			at:           []boundary{relayOnly, providerCRD, refusalWriter, realRelay, realRelayToEHR, realProviderCRD, realPayerCRDRequest, realPayerDispatchRequest},
 			wantTransmit: errBoundaryRefused,
 		},
 		{
@@ -221,7 +221,7 @@ func mutationRows() []mutationRow {
 			build: func(t *testing.T) (Payload, error) {
 				b := NewBody([]byte(`{"cards":[]}`), OriginUpstreamResponse)
 				d := mustDoc(t, b)
-				return Apply(b, "application/json", EditPayorEdgeRestamp, d.InsertMember(d.Root(), "systemActions", []byte(`[]`)))
+				return Apply(b, "application/json", EditDTRCoverageObtain, d.InsertMember(d.Root(), "systemActions", []byte(`[]`)))
 			},
 			at:           []boundary{realPayerCRDAnswer, realPayerDispatchAnswer},
 			wantTransmit: errBoundaryRefused,
@@ -247,7 +247,7 @@ func mutationRows() []mutationRow {
 			wantTransmit: errBoundaryRefused,
 		},
 		{
-			name: "an edit other than the payer-identity mapping on a request to the payer",
+			name: "an edit other than the adaptive address restore on a request to the payer",
 			build: func(t *testing.T) (Payload, error) {
 				b := NewBody([]byte(`{"resourceType":"Bundle","type":"collection","fhirServer":"https://ehr.example"}`), OriginPeerFrame)
 				d := mustDoc(t, b)
@@ -278,7 +278,7 @@ func mutationRows() []mutationRow {
 					return out, spans, err
 				}
 				defer func() { spliceHook = old }()
-				return Apply(b, fhirJSON, EditPayorEdgeRestamp, d.Replace(at(t, d, "payor"), []byte(`"new"`)))
+				return Apply(b, fhirJSON, EditDTRCoverageObtain, d.Replace(at(t, d, "payor"), []byte(`"new"`)))
 			},
 			wantBuild: ErrVerifyMismatch,
 		},
@@ -286,7 +286,7 @@ func mutationRows() []mutationRow {
 			name: "edit inside signed content",
 			build: func(t *testing.T) (Payload, error) {
 				b, d := signedBody(t)
-				return Apply(b, fhirJSON, EditPayorEdgeRestamp, d.Replace(at(t, d, "entry", "4", "resource", "id"), []byte(`"x"`)))
+				return Apply(b, fhirJSON, EditDTRCoverageObtain, d.Replace(at(t, d, "entry", "4", "resource", "id"), []byte(`"x"`)))
 			},
 			wantBuild: ErrSignedContent,
 		},
@@ -381,7 +381,9 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restamped, err := Apply(body, "application/json", EditPayorEdgeRestamp, d.Replace(at(t, d, "fhirServer"), []byte(`"x"`)))
+	issued := adaptiveBundle(`"valueUrl":`+networkAddress, "")
+	id := mustDoc(t, issued)
+	restored, err := Apply(issued, fhirJSON, EditDTRAdaptiveAddressRestore, id.Replace(at(t, id, append(adaptivePath, "valueUrl")...), []byte(payerAddress)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,15 +412,15 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 		{realProviderDTR, patientAdded},
 		{relayOnly, Exact(body, "application/json")},
 		{payerRequest, Exact(body, "application/json")},
-		{payerRequest, restamped},
+		{payerRequest, restored},
 		{providerCRD, edited},
 		{refusalWriter, refusal},
 		{realRelay, Exact(body, "application/json")},
 		{realRelayToEHR, Exact(body, "application/json")},
 		{realPayerRequest, Exact(body, "application/json")},
-		{realPayerRequest, restamped},
+		{realPayerRequest, restored},
 		{realQuestionnaireRequest, Exact(body, "application/json")},
-		{realQuestionnaireRequest, restamped},
+		{realQuestionnaireRequest, restored},
 		{realProviderCRD, Exact(body, "application/json")},
 		{realProviderCRD, edited},
 		{realProviderCRD, obtained},
@@ -427,9 +429,7 @@ func TestMutationBaselinesAreAdmitted(t *testing.T) {
 		{realPayerCRDAnswer, Exact(body, "application/json")},
 		{realPayerDispatchAnswer, Exact(body, "application/json")},
 		{realPayerCRDRequest, Exact(body, "application/json")},
-		{realPayerCRDRequest, restamped},
 		{realPayerDispatchRequest, Exact(body, "application/json")},
-		{realPayerDispatchRequest, restamped},
 	} {
 		if _, err := Transmit(c.p, c.bd.check); err != nil {
 			t.Errorf("%s refused %v: %v", c.bd.name, c.p, err)

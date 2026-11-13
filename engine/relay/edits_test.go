@@ -6,11 +6,17 @@ import (
 	"testing"
 )
 
-// editRows is one edit per closed id, the rows a registry may hold.
+// editRows is one edit per closed id, the rows a registry may hold: a header
+// edit's row sets one header of an answer and names the inputs the core's
+// check of its id reads.
 func editRows() []Edit {
 	var rows []Edit
 	for _, id := range EditIDs() {
-		rows = append(rows, Edit{ID: id, Name: "name-" + string(id), Role: RoleRequester, Direction: DirectionRequest})
+		row := Edit{ID: id, Name: "name-" + string(id), Role: RoleRequester, Direction: DirectionRequest}
+		if slices.Contains(headerEdits, id) {
+			row.Direction, row.Kind, row.Header, row.HeaderInputs = DirectionResponse, EditKindSetHeader, "Location", headerVerifiers[id].names()
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -42,7 +48,7 @@ func TestValidateEditsRows(t *testing.T) {
 func TestEditLookupsReadTheRows(t *testing.T) {
 	rows := []Edit{
 		{ID: EditCDSCallbackStrip, Name: "strip", Role: RoleRequester, Direction: DirectionRequest},
-		{ID: EditPayorEdgeRestamp, Name: "restamp", Role: RoleRecipient, Direction: DirectionRequest},
+		{ID: EditDTRAdaptiveAddressRestore, Name: "restore", Role: RoleRecipient, Direction: DirectionRequest},
 		{ID: EditDTRAnswerLineNames, Name: "names", Role: RoleRecipient, Direction: DirectionResponse},
 	}
 	for _, c := range []struct {
@@ -52,7 +58,7 @@ func TestEditLookupsReadTheRows(t *testing.T) {
 		ok   bool
 	}{
 		{EditCDSCallbackStrip, "strip", RoleRecipient, true},
-		{EditPayorEdgeRestamp, "restamp", 0, true},
+		{EditDTRAdaptiveAddressRestore, "restore", 0, true},
 		{EditDTRAnswerLineNames, "names", RoleRequester, true},
 		{EditCDSPrefetchObtain, "", 0, false},
 	} {

@@ -26,7 +26,8 @@ import (
 var errNoReturnPath = errors.New("no documentation return path")
 
 // noRekeyedAnswer is the payload a return-path re-key (pendReturnRekey,
-// cdexTaskReturnRekey) returns with an error.
+// cdexTaskReturnRekey) or the created Task's Location (cdexTaskLocated)
+// returns with an error.
 var noRekeyedAnswer relay.Payload
 
 // pasTempCodesSystem is the PAS code system that types a Task's payer-url input.

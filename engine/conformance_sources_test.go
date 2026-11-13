@@ -174,6 +174,13 @@ var validateCallSites = map[string]string{
 	"module3_certifylane.go:Validate": "delegating",
 	"observer.go:Validate":            "delegating",
 	"lanehealth.go:Validate":          "delegating",
+	// The one reading of a payload at a line (validateAt), which judgeLines
+	// and collectCertification call in place of a lane's Validate: a
+	// workstream's own reading where its lane cannot read a profile in one
+	// call, else the lane's one call.
+	"species.go:validateAt": "delegating",
+	"workstream_pa_request_bundle_read.go:readPASRequestBundle": "delegating",
+	"workstream_pa_request_bundle_read.go:reading":              "delegating",
 	// E-08's source evidence: an answer valid at its own DTR line is renamed,
 	// any other is carried as sent; the renamed answer's check and a carried
 	// answer's report both go through judgeLines.
@@ -514,7 +521,7 @@ func TestBridgedCheckIsModuleTwosCertify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"if len(route.Chain) > 0 {", "g.bridge().Certify(ctx, m.Contract, line, \"\", out)"} {
+	for _, want := range []string{"if len(route.Chain) > 0 {", "g.bridge().Certify(ctx, m.Contract, line, bridgedProfile(out, line, x.LegType), out)"} {
 		if !strings.Contains(string(src), want) {
 			t.Errorf("egressBuild no longer contains %q: a walked request's check must be module 2's Certify, chosen by the route's own chain", want)
 		}

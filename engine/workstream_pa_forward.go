@@ -52,14 +52,15 @@ func (paWorkstream) forward(leg string) forwardHandler {
 
 // forwardDTRQuestionnaireFetch sends a DTR request to the payer's system. A
 // request frame that names the operation carries that operation's own input,
-// which is sent to the payer's system exactly (or with only the payer identity
-// mapped). A request that names none is refused.
+// which is sent to the payer's system exactly, or with the adaptive addresses
+// this payer issued restored (forwardDTROperation). A request that names none
+// is refused.
 func forwardDTRQuestionnaireFetch(n *nativeResponder, ctx context.Context, contract, leg, _, _ string, in relay.Body, _ []byte) (LegResult, error) {
 	switch op := RequestFrameOperation(ctx); op {
 	case shnsdk.FrameOperationQuestionnairePackage:
-		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", payorEdgeParametersCoverage, leg, "DTR")
+		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$questionnaire-package", leg, "DTR")
 	case shnsdk.FrameOperationNextQuestion:
-		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$next-question", 0, leg, "DTR next-question")
+		return n.forwardDTROperation(ctx, contract, in, "/Questionnaire/$next-question", leg, "DTR next-question")
 	case "":
 		// The older request envelope, which carried a canonical and a coverage
 		// in place of the operation's own input, is no longer read.

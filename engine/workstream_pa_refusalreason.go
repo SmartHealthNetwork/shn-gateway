@@ -44,6 +44,9 @@ const (
 	reasonAttachmentBudget             refusalReason = errAttachmentBudget
 	reasonAttachmentOverDeclared       refusalReason = errAttachmentTooLarge
 	reasonEligibilityBatchLimit        refusalReason = msgEligibilityBatchLimit
+	reasonCDexReadPlainBase            refusalReason = errCDexReadPlainBase
+	reasonCDexReadPath                 refusalReason = errCDexReadPath
+	reasonCDexReadBody                 refusalReason = errCDexReadBody
 )
 
 // paRefusalReasons are the PA adapter's registered reasons.
@@ -63,5 +66,6 @@ func paRefusalReasons() []refusalReason {
 		reasonNextQuestionNoPayer, reasonNextQuestionUnknownPayer, reasonNextQuestionNoSubpath, reasonNextQuestionTwoAddresses,
 		reasonAttachmentBudget, reasonAttachmentOverDeclared,
 		reasonEligibilityBatchLimit,
+		reasonCDexReadPlainBase, reasonCDexReadPath, reasonCDexReadBody,
 	}
 }

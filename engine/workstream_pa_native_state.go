@@ -7,14 +7,6 @@ import "net/http"
 // paNativeState is the PA workstream's own forward state on one native
 // responder (workstream.newNativeState): where its operations go, which CDS
 // service answers a CRD leg, and the pend ledger its PAS legs keep.
-//
-// The payer-identity mapping (payoredge.go) runs on these PA legs, each on
-// its container: both CRD legs, crd-order-select and crd-order-dispatch, on
-// the CDS Hooks prefetch (prefetch.coverage, a bare Coverage or a Bundle);
-// dtr-questionnaire-fetch on the Parameters' coverage; and
-// pas-claim/pas-claim-update/pas-claim-inquire on the Claim Bundle (every
-// Coverage entry, and each Claim.insurer — an inquiry Bundle carries both, so
-// it maps on the same container as a submission).
 type paNativeState struct {
 	// cdsBaseURL is the CDS Hooks base (/cds-services/{id}); the responder's
 	// base unless WithCDSBaseURL names another.

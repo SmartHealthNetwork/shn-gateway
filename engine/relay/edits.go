@@ -17,6 +17,12 @@ const (
 	// message through the registered compatibility steps, verified by running
 	// them again (Transformed), never by spans.
 	EditKindRegisteredTransform EditKind = "registered-transform"
+	// EditKindSetHeader sets one named header on the answer the gateway writes
+	// to its own participant's system, and changes no byte of the body: the
+	// row names the header (Edit.Header) and the inputs its value is made from
+	// (Edit.HeaderInputs), the core checks the value by the edit's id
+	// (headerVerifiers), and the edit is made only by HeaderEdited.
+	EditKindSetHeader EditKind = "set-header"
 )
 
 // Edit declares one registered edit: the only changes a gateway may make to
@@ -46,6 +52,35 @@ type Edit struct {
 	// edit of an answer names ETagHeader: the bytes the caller receives are not
 	// the ones that validator named.
 	DropsAnswerHeaders []string
+	// Header is the one header an EditKindSetHeader edit sets, as it is
+	// written: one of the closed list of headers a header edit may set
+	// (EditableHeaders). Empty for every other kind.
+	Header string
+	// HeaderInputs name the facts an EditKindSetHeader edit's value is made
+	// from (HeaderInputs keys), the ones the core's check of that edit reads
+	// (headerVerifiers): HeaderEdited takes exactly these. Empty for every
+	// other kind. A row is data: the check of the value is the core's, by the
+	// edit's id, never the row's.
+	HeaderInputs []string
+}
+
+// HeaderInputs are the facts a header edit's value is made from, by the
+// names its row declares (Edit.HeaderInputs).
+type HeaderInputs map[string]string
+
+// editableHeaders are the headers of an answer a header edit may set: a
+// closed list, so no row can set a header that describes the body or the
+// exchange (Content-Type, Content-Length, ETag, X-SHN-Edited). A new one is
+// a reviewed change here.
+var editableHeaders = []string{"Location"}
+
+// EditableHeaders returns the headers a header edit may set, in order.
+func EditableHeaders() []string { return slices.Clone(editableHeaders) }
+
+// hasVerifier reports whether the core holds a check of header edit id.
+func hasVerifier(id EditID) bool {
+	v, ok := headerVerifiers[id]
+	return ok && v.verify != nil
 }
 
 // ETagHeader is the header an edit of an answer always drops.
@@ -53,8 +88,13 @@ const ETagHeader = "ETag"
 
 // ValidateEdits reports why rows cannot be a registry of edits, or nil: an
 // edit whose id is not in the closed set (EditIDs), an id two edits declare,
-// or an edit of an answer that leaves its ETag standing. It reads rows and
-// changes nothing.
+// an edit of an answer's body that leaves its ETag standing, or a header edit
+// (EditKindSetHeader) whose id the core does not check, or that is not one
+// listed header of an answer with the core's inputs and no path, or that
+// drops a header: it changes no byte of the body, so the
+// ETag still names the bytes the caller receives, and is kept. A row of any
+// other kind names no header and no verifier. It reads rows and changes
+// nothing.
 func ValidateEdits(rows []Edit) error {
 	closed := map[EditID]bool{}
 	for _, id := range editIDs {
@@ -69,9 +109,46 @@ func ValidateEdits(rows []Edit) error {
 			return fmt.Errorf("edit %s is declared twice", e.ID)
 		}
 		seen[e.ID] = true
+		if (e.Kind == EditKindSetHeader) != slices.Contains(headerEdits, e.ID) {
+			return fmt.Errorf("edit %s: a header edit's row, and only one, is of kind %s", e.ID, EditKindSetHeader)
+		}
+		if e.Kind == EditKindSetHeader {
+			if err := validateHeaderEdit(e); err != nil {
+				return err
+			}
+			continue
+		}
+		if e.Header != "" || len(e.HeaderInputs) != 0 {
+			return fmt.Errorf("edit %s is not a header edit and names a header or header inputs", e.ID)
+		}
 		if e.Direction == DirectionResponse && !slices.Contains(e.DropsAnswerHeaders, ETagHeader) {
 			return fmt.Errorf("edit %s changes an answer and does not drop its %s", e.ID, ETagHeader)
 		}
+	}
+	return nil
+}
+
+// validateHeaderEdit reports why e cannot be an EditKindSetHeader row: its id
+// is a header edit the core checks (headerVerifiers), and it sets one header a
+// header edit may set (editableHeaders), spelled as listed, on an answer,
+// names the inputs the core's check reads, at no JSON path, and drops no
+// header.
+func validateHeaderEdit(e Edit) error {
+	switch {
+	case e.Kind != EditKindSetHeader || !slices.Contains(headerEdits, e.ID):
+		return fmt.Errorf("edit %s is not a header edit", e.ID)
+	case e.Direction != DirectionResponse:
+		return fmt.Errorf("header edit %s is not made on an answer", e.ID)
+	case !slices.Contains(editableHeaders, e.Header):
+		return fmt.Errorf("header edit %s sets %q, not a header a header edit may set %v", e.ID, e.Header, editableHeaders)
+	case !hasVerifier(e.ID):
+		return fmt.Errorf("header edit %s has no check in the core (headerVerifiers)", e.ID)
+	case !slices.Equal(e.HeaderInputs, headerVerifiers[e.ID].names()):
+		return fmt.Errorf("header edit %s names the inputs %v, not %v, the ones the core's check of it reads", e.ID, e.HeaderInputs, headerVerifiers[e.ID].names())
+	case len(e.Paths) != 0:
+		return fmt.Errorf("header edit %s names a JSON path: it changes no byte of the body", e.ID)
+	case len(e.DropsAnswerHeaders) != 0:
+		return fmt.Errorf("header edit %s drops %v: it changes no byte of the body, so the answer's headers still describe it", e.ID, e.DropsAnswerHeaders)
 	}
 	return nil
 }
@@ -106,7 +183,7 @@ func EditName(rows []Edit, id EditID) (string, bool) {
 // edit a gateway makes to what it sends into the network reaches the leg's
 // other party: a requester's request edit (E-01, E-02, E-04 … E-07) is
 // received by the recipient. An edit a gateway makes to what it sends its
-// own participant's system (the payer identity mapping, E-03, on the
+// own participant's system (the adaptive address restore, E-13, on the
 // recipient's forward) is received by no other party: the role returned is 0.
 func EditReceivedBy(rows []Edit, id EditID) (Role, bool) {
 	e, ok := editIn(rows, id)

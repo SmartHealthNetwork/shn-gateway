@@ -40,7 +40,7 @@ func uc04RouteFixture(t *testing.T, line string) (*Gateway, *pendResumeSubstrate
 
 func runUC04(gw *Gateway, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	gw.handleUC04(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(body)))))
+	gw.handleUC04(mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, "/scenario/uc04", strings.NewReader(body))))))
 	return rec
 }
 

@@ -17,13 +17,14 @@ import (
 // downgrade that stopped it. A closed list, never the URL.
 const (
 	// RedirectSameOrigin: the hop went to the chain's first origin (scheme,
-	// host and port). It carried the bearer, and any header the deployment
-	// configured (ParticipantClientWith), unless an earlier hop of the chain
-	// had left that origin.
+	// host and port). It carried every header of the request, the bearer and
+	// any header the deployment configured (ParticipantClientWith) included,
+	// unless an earlier hop of the chain had left that origin.
 	RedirectSameOrigin = "same-origin"
-	// RedirectCrossOrigin: the hop went to another origin, without the bearer
-	// or any header the deployment configured; no later hop of the chain
-	// carries them, even back at the first origin.
+	// RedirectCrossOrigin: the hop went to another origin, carrying no header
+	// but Accept, Accept-Language and User-Agent, and none the deployment
+	// configured; no later hop of the chain carries any other, even back at
+	// the first origin.
 	RedirectCrossOrigin = "cross-origin"
 	// RedirectCleartextRefused: the system asked for a hop from https to
 	// http, and it was not sent (ErrCleartextRedirect); the chain ends there.
@@ -54,6 +55,19 @@ var RedirectValues = []string{RedirectSameOrigin, RedirectCrossOrigin, RedirectC
 // is sent, whatever its origin: a 307 or 308 replays the request body, which
 // would travel in cleartext.
 var ErrCleartextRedirect = errors.New("smartauth: a redirect from https to http is not followed")
+
+// crossOriginHeaders are the only request headers a redirect hop to another
+// origin than the chain's first carries, and every later hop of that chain:
+// what any client sends any server, naming nothing of the gateway, the
+// participant or the exchange. Every other header is dropped there, whoever
+// set it and whatever it is named: the bearer, a header the deployment
+// configured, a header the gateway sets for the participant's system (the
+// requester, the leg's correlation id, a disclosed edit), the Referer net/http
+// sets, and a header no one has named yet. A header the deployment configured
+// is dropped even when it has one of these names: it was configured for the
+// first origin. The list is closed; adding a name is a change to what a
+// participant's system lets another origin see.
+var crossOriginHeaders = []string{"Accept", "Accept-Language", "User-Agent"}
 
 // maxRedirects is net/http's own limit on a chain, kept.
 const maxRedirects = 10
@@ -95,8 +109,10 @@ func WithRedirectObservation(ctx context.Context) (context.Context, *RedirectObs
 // (RefuseCleartextRedirect), a hop to another origin of a request that
 // carries a body refused (RefuseCrossOriginBodyRedirect), a hop that would
 // change the request's method or drop its body not followed, the system's
-// 3xx returned as its answer (RefuseMethodChangeRedirect), and each hop it
-// lets through recorded with its origin class. NewHTTPClient's clients use
+// 3xx returned as its answer (RefuseMethodChangeRedirect), a hop to another
+// origin, and every later hop of its chain, sent with no header but Accept,
+// Accept-Language and User-Agent, and each hop it lets through recorded with
+// its origin class. NewHTTPClient's clients use
 // it; set it on any other.
 func CheckRedirect(req *http.Request, via []*http.Request) error {
 	return checkRedirectDropping(req, via, nil)
@@ -104,7 +120,7 @@ func CheckRedirect(req *http.Request, via []*http.Request) error {
 
 // checkRedirectDropping is CheckRedirect for a client whose requests may carry
 // the configured headers named in configured: a hop to another origin carries
-// none of them, nor Authorization.
+// none of them, even one crossOriginHeaders names.
 func checkRedirectDropping(req *http.Request, via []*http.Request, configured []string) error {
 	if len(via) >= maxRedirects {
 		return errors.New("stopped after 10 redirects")
@@ -118,7 +134,7 @@ func checkRedirectDropping(req *http.Request, via []*http.Request, configured []
 	if err := RefuseMethodChangeRedirect(req, via); err != nil {
 		return err
 	}
-	cross := dropCrossOriginCredentials(req, via, configured)
+	cross := dropCrossOriginHeaders(req, via, configured)
 	if o := redirectObservationFrom(req.Context()); o != nil {
 		class := RedirectSameOrigin
 		if cross {
@@ -129,32 +145,35 @@ func checkRedirectDropping(req *http.Request, via []*http.Request, configured []
 	return nil
 }
 
-// dropCrossOriginCredentials removes Authorization, and every header named in
-// configured (the fixed headers a deployment configures for that system, by
-// their names, whatever they hold), from a hop to another origin than the
-// chain's first (scheme, host and port), and from every later hop of that
-// chain, a hop back to the first origin included: once the chain has left
-// the origin, another origin chose where the hop goes (any path, and with a
-// 307 or 308 the method and body), so nothing configured for the origin is
-// sent for it. It reports whether this hop is cross-origin. Names match
-// without regard to case. A chain that never leaves the origin keeps them
-// all: they were configured for that origin. net/http's own rule keeps
-// Authorization for the same host on another port or scheme, and for a
-// subdomain, and keeps every other header wherever the hop goes.
-func dropCrossOriginCredentials(req *http.Request, via []*http.Request, configured []string) bool {
+// dropCrossOriginHeaders removes every header but those crossOriginHeaders
+// names, and every header named in configured (the fixed headers a deployment
+// configures for that system, by their names, whatever they hold) even when
+// crossOriginHeaders names it, from a hop to another origin than the chain's
+// first (scheme, host and port), and from every later hop of that chain, a
+// hop back to the first origin included: once the chain has left the origin,
+// another origin chose where the hop goes, so the hop is sent as a fresh read
+// of that address would be, with nothing the gateway set for the participant's
+// system. It reports whether this hop is cross-origin. Names match without
+// regard to case. A chain that never leaves the origin keeps every header:
+// they were set for that origin. net/http's own rule keeps Authorization for
+// the same host on another port or scheme, and for a subdomain, and keeps
+// every other header wherever the hop goes; this rule decides by origin.
+func dropCrossOriginHeaders(req *http.Request, via []*http.Request, configured []string) bool {
 	cross := !sameOrigin(req.URL, via[0].URL)
 	if !cross && !leftOrigin(via) {
 		return false
 	}
-	req.Header.Del("Authorization")
-	for _, name := range configured {
-		for k := range req.Header {
-			if strings.EqualFold(k, name) {
-				delete(req.Header, k)
-			}
+	for k := range req.Header {
+		if !namedIn(k, crossOriginHeaders) || namedIn(k, configured) {
+			delete(req.Header, k)
 		}
 	}
 	return cross
+}
+
+// namedIn reports whether names holds name, without regard to case.
+func namedIn(name string, names []string) bool {
+	return slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // leftOrigin reports whether any request of via, a redirect chain so far,
@@ -367,10 +386,11 @@ func port(u *url.URL) string {
 
 // ParticipantClient is a copy of c that never sends a redirect hop from https
 // to http (RefuseCleartextRedirect), and sends a hop to another origin, and
-// every later hop of that chain, without Authorization: the rules for every
-// client that
-// reaches a participant's own system, whether or not it carries a bearer. A
-// client with no redirect policy of its own gets CheckRedirect, which also
+// every later hop of that chain, with no header but Accept, Accept-Language
+// and User-Agent (no Authorization, no Referer, nothing the gateway set for
+// the participant's system): the rules for every client that reaches a
+// participant's own system, whether or not it carries a bearer. A client with
+// no redirect policy of its own gets CheckRedirect, which also
 // records each hop followed by its origin class; a client with its own policy
 // keeps it after the network's own rules have run (RefuseCleartextRedirect,
 // RefuseCrossOriginBodyRedirect and RefuseMethodChangeRedirect), so a stricter
@@ -386,11 +406,9 @@ func ParticipantClient(c *http.Client) *http.Client {
 // ParticipantClientWith is ParticipantClient for a client whose requests carry
 // fixed headers a deployment configures for the participant's system
 // (PAYER_DAVINCI_BACKEND_HEADERS): a hop to another origin than the chain's
-// first carries none of the headers configured names, as it carries no
-// Authorization, decided by the configured set's own names and never by a list
-// of names known to hold a credential, and neither does any later hop of that
-// chain, back at the first origin too; a chain that stays within the origin
-// keeps them.
+// first carries none of the headers configured names, even one named Accept,
+// Accept-Language or User-Agent, and neither does any later hop of that chain, back
+// at the first origin too; a chain that stays within the origin keeps them.
 // Wrapping a client ParticipantClient or ParticipantClientWith already wrapped
 // keeps the outer and the inner rules both. nil or empty configured is
 // ParticipantClient.
@@ -421,7 +439,7 @@ func ParticipantClientWith(c *http.Client, configured http.Header) *http.Client 
 		if err := RefuseMethodChangeRedirect(req, via); err != nil {
 			return err
 		}
-		dropCrossOriginCredentials(req, via, names)
+		dropCrossOriginHeaders(req, via, names)
 		return own(req, via)
 	}
 	return &cp

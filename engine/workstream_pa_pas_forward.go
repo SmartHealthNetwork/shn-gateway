@@ -57,16 +57,12 @@ func (n *nativeResponder) handlePASClaimUpdateNative(ctx context.Context, corrID
 	if status != 0 {
 		return LegResult{}, fmt.Errorf("engine: nativePAS parse conformant update bundle: status %d", status) // our fault → 500
 	}
-	// Payer-edge identity mapping (payoredge.go): map the bundle's Coverage payer
-	// identity (and a Claim.insurer naming this payer) BEFORE any store write, so a
-	// refusal never leaves a claim pended with no way to release it. Off (the default) ⇒
-	// the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(ctx, in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
+	// The bundle is sent exactly, or with the adaptive addresses this payer
+	// issued restored (E-13), built BEFORE any store write, so a failure never
+	// leaves a claim pended with no way to release it.
+	forward, err := restoredRequest(in, "application/fhir+json", n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
-	}
-	if refused.Status != 0 {
-		return refused, nil
 	}
 	related := f.relatedClaim
 	// The ledger records the amendment; it never decides whether the payer sees
@@ -306,21 +302,18 @@ func pendOutcomeOf(outcome string) string {
 func (n *nativeResponder) handlePASClaimNative(ctx context.Context, corrID, subjectPCI string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	// The inbound bind judged the bundle's content and recorded any defect; this
 	// read only refuses what strict refuses.
-	_, status, msg := readConformantPASSubjects(requestFHIR, n.mapsPayerIdentity(), func(rule string) bool {
+	_, status, msg := readConformantPASSubjects(requestFHIR, false, func(rule string) bool {
 		return n.module().Decide(KindContent, rule, VerdictInvalid) == Refuse
 	})
 	if status != 0 {
 		return LegResult{Status: status, Message: msg}, nil
 	}
-	// Payer-edge identity mapping (payoredge.go): map the bundle's Coverage payer
-	// identity (and a Claim.insurer naming this payer) before it is posted (and before
-	// any store side-effect below). Off (the default) ⇒ the bundle is sent exactly.
-	forward, refused, err := n.payorEdgeRequest(ctx, in, payorEdgeClaimBundle, "application/fhir+json", n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
+	// The bundle is sent exactly, or with the adaptive addresses this payer
+	// issued restored (E-13), before it is posted (and before any store
+	// side-effect below).
+	forward, err := restoredRequest(in, "application/fhir+json", n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
-	}
-	if refused.Status != 0 {
-		return refused, nil
 	}
 	// Endpoint evidence: $submit goes under the probe-retained, same-origin-validated
 	// #<line> PAS base the payer publishes for THIS routed pa.pas line (evidence absent ⇒
@@ -428,16 +421,6 @@ func (n *nativeResponder) recordLaterLine(ctx context.Context, rule string, read
 	fc.Whose = "own"
 	if f, ok := laterLineFinding(fc, n.module().Level().String(), rule, read, raw); ok {
 		countingEmit(ctx, n.emitFinding)(f)
-	}
-}
-
-// refusesRequest decides a defect of rule in the request this payer received
-// (raw), when called: the request is the requester's content, so the rule is
-// not checked at none, recorded at observe and refused at strict, and the
-// finding names the request as the peer's (the leg context handleInbound set).
-func (n *nativeResponder) refusesRequest(ctx context.Context, rule string, raw []byte) func() bool {
-	return func() bool {
-		return guardDefect(ctx, n.module(), n.emitFinding, KindContent, rule, VerdictInvalid, raw)
 	}
 }
 

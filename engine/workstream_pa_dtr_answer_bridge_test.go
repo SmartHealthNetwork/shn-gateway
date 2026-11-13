@@ -242,8 +242,9 @@ func (r e08Result) recordedEdits() []string {
 
 func (r e08Result) wantAnswered(t *testing.T, want []byte, edited bool) {
 	t.Helper()
-	if r.rec.Code != http.StatusOK {
-		t.Fatalf("answer %d %s", r.rec.Code, r.rec.Body.String())
+	if r.rec.Code != http.StatusOK || len(r.rec.Header().Values(HubDeliveredHeader)) > 0 {
+		t.Fatalf("answer %d delivered=%q %s, want the payer's answer, stating no delivery", r.rec.Code,
+			r.rec.Header().Get(HubDeliveredHeader), r.rec.Body.String())
 	}
 	if !bytes.Equal(r.rec.Body.Bytes(), want) {
 		t.Fatalf("the EHR received\n%s\nwant\n%s", r.rec.Body.Bytes(), want)
@@ -315,6 +316,54 @@ func TestDTRAnswerBridge_RenamesToTheRequestersLine(t *testing.T) {
 				e08Row(t, level, row.declared, row.answer).wantAnswered(t, want, true)
 			})
 		}
+	}
+}
+
+// E-08's check of the renamed answer is module 2's bridged check: a renamed
+// answer whose only finding at the requester's line is a code that line's lane
+// could not check (the unchecked reading) is carried renamed at every level,
+// as any bridged payload is, and its finding says so; a defect beside the gap
+// refuses it at every level.
+func TestDTRAnswerBridge_AnUncheckedCodeIsCarriedAndADefectBesideItRefuses(t *testing.T) {
+	t.Parallel()
+	answer := e08Answer("PackageBundle", []string{"Questionnaire", "QuestionnaireResponse"}, false)
+	want := e08Bridged(t, answer, "2.0", "2.2")
+	gap := reasonCodeGap("Parameters.parameter[0].resource/*Bundle/b*/.entry[1].resource")
+	invariant := shnsdk.Issue{Severity: "error", Code: "processing", MessageID: "http://hl7.org/fhir/StructureDefinition/Period#per-1",
+		Expression: []string{"Parameters.parameter[0].resource"}, Diagnostics: "Constraint failed: per-1"}
+	for _, level := range allLevels {
+		t.Run("only a gap/"+level.String(), func(t *testing.T) {
+			r := e08RowWith(t, level, declares22, answer, func(lanes map[string]shnsdk.Validator) {
+				lanes["2.2"] = issuesValidator{ifContains: `"resourceType"`, issues: gap}
+			})
+			r.wantAnswered(t, want, true)
+			var bridged []ConformanceFinding
+			for _, f := range r.findings {
+				if f.Kind == string(KindFHIRBridged) {
+					bridged = append(bridged, f)
+				}
+			}
+			if len(bridged) != 1 || bridged[0].Verdict != "unchecked" || bridged[0].Decision != Record.String() {
+				t.Fatalf("want one bridged finding recording unchecked, got %+v", r.findings)
+			}
+		})
+		t.Run("a gap beside a defect/"+level.String(), func(t *testing.T) {
+			r := e08RowWith(t, level, declares22, answer, func(lanes map[string]shnsdk.Validator) {
+				lanes["2.2"] = issuesValidator{ifContains: `"resourceType"`, issues: append(append([]shnsdk.Issue(nil), gap...), invariant)}
+			})
+			if r.rec.Code == http.StatusOK {
+				t.Fatalf("a renamed answer with a defect beside a gap was carried: %s", r.rec.Body.String())
+			}
+			var bridged []ConformanceFinding
+			for _, f := range r.findings {
+				if f.Kind == string(KindFHIRBridged) {
+					bridged = append(bridged, f)
+				}
+			}
+			if len(bridged) != 1 || bridged[0].Decision != Refuse.String() || bridged[0].Edit != "E-08" {
+				t.Fatalf("want one bridged E-08 finding refusing, got %+v", r.findings)
+			}
+		})
 	}
 }
 

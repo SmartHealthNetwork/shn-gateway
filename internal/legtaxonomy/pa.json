@@ -148,6 +148,22 @@
       "advertise": true,
       "since": "1.5.0",
       "answerEnvelope": "fhir"
+    },
+    {
+      "transactionType": "cdex-task-status",
+      "stagedName": "pa.cdex-task-status",
+      "physics": "request-response",
+      "request": {"frame": "payer-payment", "roles": ["payer"], "operation": "cdex-task-read"},
+      "response": {"frame": "provider-disclosure", "roles": ["provider"], "operation": "cdex-task-read-response"},
+      "scope": "task-status-only",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.12.0",
+      "answerEnvelope": "fhir",
+      "subject": "from-answer"
     }
   ]
 }

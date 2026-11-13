@@ -3,9 +3,11 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"slices"
 	"sort"
@@ -13,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/pasgraph"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -72,11 +75,21 @@ func evidencePrepareFailed(err error) bool { return errors.Is(err, errEvidencePr
 // the request names Patient/<member>. Each such record's root
 // subject.reference is re-pointed to Patient/<member> by registered edit E-06
 // (rekeyEvidenceSubject), exactly as the supplemental report's is. A record
-// whose subject is anything else (another patient, Patient/<member> under
-// another record id, a versioned or absolute reference, none) is answered as
-// not held, so the completion refuses it as evidence it cannot carry; one a
-// signature covers is refused with its *relay.SignedContentError. Contained
-// resources are not edited. With sorID equal to member, or unknown (""),
+// whose subject names anything else (another patient, Patient/<member> under
+// another record id, a versioned or absolute reference, a Group or any other
+// non-Patient reference, a contained or urn reference) is refused as a record
+// the build cannot carry (notThePatientsRecord, the fidelity of the gateway's
+// own edit): E-06 re-points only the exact record id, and cannot faithfully
+// make any other subject the request's patient. A record naming no
+// subject.reference is refused the same way (recordNamesNoSubject): a record
+// that does not say whose it is cannot be filled as this patient's. An answer
+// that is not the resource the reference names is the system's invalid answer
+// (recordUnreadable), and a record the system does not hold is answered as
+// not held, which the completion refuses (recordNotHeld). Each is decided
+// here, before E-06, so the answer does
+// not depend on which id the system holds the member under. One a signature
+// covers is refused with its *relay.SignedContentError. Contained resources
+// are not edited. With sorID equal to member, or unknown (""),
 // nothing is edited and the completion's own subject check decides. Each
 // record E-06 changed is noted on note, so the request that carries it names
 // the edit (relay.InputEdited); a record already naming the member notes
@@ -90,23 +103,141 @@ func evidenceReadByMember(read func(context.Context, string) ([]byte, bool, erro
 		if err != nil || !found {
 			return raw, found, err
 		}
+		if err := heldRecordFault(raw, ref); err != nil {
+			return nil, false, err
+		}
 		named, edited, err := rekeyEvidenceSubject(raw, "Patient/"+sorID, member)
 		var signed *relay.SignedContentError
 		switch {
 		case errors.As(err, &signed):
 			return nil, false, signed
+		case errors.Is(err, errEvidenceOtherSubject):
+			// A decided answer, never "not held": the record's subject is
+			// not the request's patient as the build can name it.
+			return nil, false, notThePatientsRecord(ref)
+		case errors.Is(err, errEvidenceNoSubject):
+			// Decided too: absent is not a match, and not "not held".
+			return nil, false, recordNamesNoSubject(ref)
+		case errors.Is(err, errEvidenceUnreadable):
+			// heldRecordFault read it, under the relay's limits, as the
+			// re-point reads it: not reached unless the two disagree.
+			return nil, false, recordUnreadable(ref)
 		case errors.Is(err, errEvidencePrepare):
 			// This gateway's own failure to prepare the record, never the
 			// record's: answered as such, not as evidence it cannot carry.
 			return nil, false, err
 		case err != nil:
-			return nil, false, nil
+			// rekeyEvidenceSubject answers only the errors above.
+			return nil, false, fmt.Errorf("%w: %v", errEvidencePrepare, err)
 		}
 		if edited {
 			note.made(relay.EditEvidenceSubjectRekey)
 		}
 		return named, true, nil
 	}
+}
+
+// notThePatientsRecord refuses ref, a clinical record the participant's
+// system answered whose subject is not exactly the request's patient (another
+// patient, or a reference form E-06 does not re-point): the build will not
+// carry it as this patient's evidence. It is the fidelity of the gateway's own
+// build (errRecordNotCarried: 422, recorded Rule fidelity at the build stage,
+// at every conformance level), the same refusal whichever request or
+// resume reaches it.
+func notThePatientsRecord(ref string) error {
+	return fmt.Errorf("%w: %s's subject is not exactly the request's patient", errRecordNotCarried, ref)
+}
+
+// recordNamesNoSubject refuses ref, a clinical record the participant's system
+// answered that names no subject.reference (no subject, or one with no string
+// reference): a record that does not say whose it is cannot be filled as this
+// patient's evidence. It is the fidelity of the gateway's own build, as
+// notThePatientsRecord is, and agrees with the supplemental report's refusal
+// of the same shape.
+func recordNamesNoSubject(ref string) error {
+	return fmt.Errorf("%w: %s names no subject.reference", errRecordNotCarried, ref)
+}
+
+// evidenceNotHeldError refuses ref, a clinical record the request references
+// that the participant's system definitely does not hold (its read answered
+// absence: 404 or 410, not a read that failed to answer): the build fills
+// evidence only from the participant's own system, and refuses when that
+// system cannot supply it. It is the fidelity of the gateway's own build, as
+// errRecordNotCarried is (errors.Is reports it as one), with its own message.
+type evidenceNotHeldError struct{ ref string }
+
+func (e *evidenceNotHeldError) Error() string {
+	return "a record the request references cannot be filled: " + e.ref + " is not held by the system of record"
+}
+
+func (e *evidenceNotHeldError) Is(target error) bool { return target == errRecordNotCarried }
+
+func recordNotHeld(ref string) error { return &evidenceNotHeldError{ref: ref} }
+
+// evidenceUnreadableError is the participant's system answering a read of a
+// clinical record with something other than that resource: not a JSON
+// resource, or one whose resourceType or id is not the reference's. It is the
+// system's invalid answer (a *SoRReadError of kind SoRInvalidResponse),
+// answered 502 naming the record.
+type evidenceUnreadableError struct{ ref string }
+
+func (e *evidenceUnreadableError) Error() string {
+	return e.ref + " as the system answered it is not that resource"
+}
+
+func (e *evidenceUnreadableError) Unwrap() error { return &SoRReadError{Kind: SoRInvalidResponse} }
+
+func recordUnreadable(ref string) error { return &evidenceUnreadableError{ref: ref} }
+
+// errEvidenceBound is a record read for the request that nests past the
+// request graph's own bound (pasgraph.MaxDepth), or past the relay's limits on
+// a body the gateway transmits, at its depth in the request: the gateway's own
+// limit,
+// refused as the completion refuses any other graph it will not read, never
+// blamed on the participant's system.
+var errEvidenceBound = errors.New("PAS evidence record past the request graph's bound")
+
+// heldRecordFault decides raw, the system's answer to a read of ref
+// (<type>/<id>), before its subject is read, the same on every path (the
+// E-06 wrapper and the completion's own check): nil when it is that resource
+// as bytes the build can carry; recordUnreadable when it is not a JSON object,
+// cannot be decoded, or is another resourceType or id; errRecordNotCarried,
+// naming ref, when its bytes cannot be carried as read
+// (uncarriableRecordBytes: the splice's own rule, the fidelity of the build);
+// and errEvidenceBound past the graph's own bound or the relay's limits on the
+// record as the request carries it: the gateway's own limits.
+func heldRecordFault(raw []byte, ref string) error {
+	r := bytes.Trim(raw, " \t\r\n")
+	if len(r) == 0 || r[0] != '{' || !json.Valid(r) {
+		return recordUnreadable(ref)
+	}
+	if why := uncarriableRecordBytes(r); why != "" {
+		return fmt.Errorf("%w: %s %s", errRecordNotCarried, ref, why)
+	}
+	var m map[string]any
+	if err := decodePASObject(r, &m); err != nil {
+		var c *pasgraph.CauseError
+		if errors.As(err, &c) && c.Cause() == pasgraph.RefusalBound {
+			return errEvidenceBound
+		}
+		return recordUnreadable(ref)
+	}
+	typ, id, ok := strings.Cut(ref, "/")
+	if !ok || m["resourceType"] != typ || m["id"] != id {
+		return recordUnreadable(ref)
+	}
+	// The record as the request carries it, at its depth in the Bundle (the
+	// resource of an entry of its entry array), under the relay's own limits
+	// on what a gateway transmits: over one is the gateway's limit.
+	nested := slices.Concat([]byte(`{"entry":[{"resource":`), r, []byte(`}]}`))
+	if _, err := relay.Doc(relay.NewBody(nested, relay.OriginUpstreamResponse)); err != nil {
+		var limit *relay.LimitError
+		if errors.As(err, &limit) {
+			return errEvidenceBound
+		}
+		return recordUnreadable(ref)
+	}
+	return nil
 }
 
 func retainPASRequestEvidence(ctx context.Context, body []byte, read func(context.Context, string) ([]byte, bool, error)) ([]byte, error) {
@@ -288,26 +419,55 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			if errors.Is(err, errEvidencePrepare) {
 				return nil, err
 			}
+			if errors.Is(err, errRecordNotCarried) {
+				// A record the build will not carry (notThePatientsRecord,
+				// recordNamesNoSubject, heldRecordFault's bytes): the fidelity
+				// of the build, never a failed read.
+				return nil, err
+			}
+			var unreadable *evidenceUnreadableError
+			if errors.As(err, &unreadable) {
+				return nil, err
+			}
+			if errors.Is(err, errEvidenceBound) {
+				return fail()
+			}
 			if err != nil {
 				return nil, safeSoRError(err)
 			}
-			total += len(raw)
-			if !found || total > pasGraphMaxBytes {
+			if !found {
+				// A definite absence, never a read that failed to answer
+				// (that is err, above): the build cannot fill it.
+				return nil, recordNotHeld(ref)
+			}
+			// The record is decided before the request's size bound, in the
+			// order the E-06 wrapper decides it, so a record's answer does not
+			// depend on which id the system holds the member under.
+			switch err := heldRecordFault(raw, ref); {
+			case errors.Is(err, errEvidenceBound):
 				return fail()
+			case err != nil:
+				return nil, err
 			}
 			var r map[string]any
-			if decodePASObject(raw, &r) != nil || r["resourceType"] != parts[0] || r["id"] != parts[1] {
-				return fail()
+			if decodePASObject(raw, &r) != nil {
+				return nil, recordUnreadable(ref)
 			}
 			subject, ok := r["subject"].(map[string]any)
 			if !ok {
-				return fail()
+				return nil, recordNamesNoSubject(ref)
 			}
 			s, ok := subject["reference"].(string)
 			if !ok {
-				return fail()
+				return nil, recordNamesNoSubject(ref)
 			}
 			if s != patient && base+"/"+s != patient {
+				// Not the request's patient's record: the fidelity
+				// of the build, whatever the request's legs before it.
+				return nil, notThePatientsRecord(ref)
+			}
+			total += len(raw)
+			if total > pasGraphMaxBytes {
 				return fail()
 			}
 			e := map[string]any{"fullUrl": full, "resource": r}

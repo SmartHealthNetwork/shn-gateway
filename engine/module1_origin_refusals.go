@@ -143,8 +143,9 @@ func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recip
 // cannot carry, recorded as the fidelity of SHN's own edit at the build: 422
 // with the signed-content refusal (D113) for evidence E-06 would re-point and
 // a signature covers, as the supplemental report's is, and 422 saying so for a
-// record read from the participant's system that the splice cannot carry as
-// read (errRecordNotCarried). ok is false for any other error.
+// record read from the participant's system that the build cannot carry as
+// read, or cannot fill because the system does not hold it (errRecordNotCarried).
+// ok is false for any other error.
 func evidenceFidelityRefusal(err error) (int, string, bool) {
 	var signed *relay.SignedContentError
 	if errors.As(err, &signed) {
@@ -160,9 +161,16 @@ func evidenceFidelityRefusal(err error) (int, string, bool) {
 // linked (completeAuthoredPASRequest), after the legs before the claim:
 // evidence the gateway's own edit cannot carry is refused 422
 // (evidenceFidelityRefusal), a record the gateway could not prepare is its own
-// 500, a read of the participant's system that failed to answer is a backend
-// failure (failOriginRead), and anything else the gateway's own 502. Each says
-// which legs were carried.
+// 500, a record the system answered with something other than that resource
+// is the system's invalid answer, 502 naming the record, and a read of the
+// participant's system that failed to answer is a backend failure, each
+// recorded as failOriginRead does, and anything else the gateway's own 502,
+// refused under no named rule: a request graph the completion will not read
+// (its own bounds and shape rules, and the relay's limits on a record as the
+// request carries it), an authored request that does not match its source,
+// or no system of record configured (cfg.SoR nil). A record the system does
+// not hold is refused 422 as evidence the build cannot fill
+// (evidenceFidelityRefusal). Each says which legs were carried.
 func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) {
 	const msg = "PAS evidence linkage failed"
 	if status, why, ok := evidenceFidelityRefusal(err); ok {
@@ -176,12 +184,21 @@ func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": withCarriedLegs(ctx, err.Error())})
 		return
 	}
+	var unreadable *evidenceUnreadableError
+	if errors.As(err, &unreadable) {
+		failOriginRead(ctx, w, http.StatusBadGateway, msg+": "+unreadable.Error(), err)
+		return
+	}
 	var readErr *SoRReadError
 	if errors.As(err, &readErr) {
 		status, why := SoRFailureResponse(err)
 		failOriginRead(ctx, w, status, msg+": "+why, err)
 		return
 	}
+	// The gateway's own refusal of the request it built, under no named rule,
+	// whatever legs came before it: decided here, never left to them, as the
+	// PAS tail's answer is recorded.
+	exchangeOf(ctx).refused(ExchangeOther)
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
 

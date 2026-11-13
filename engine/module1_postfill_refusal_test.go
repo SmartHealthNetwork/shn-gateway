@@ -297,7 +297,8 @@ func TestResume_OwnAnswerAfterItsLegSaysItWasCarried(t *testing.T) {
 			st := pendFor(t, gw, "uc06", "MBR-UC06")
 			gw.cfg.Store = authNumberWriteFails{gw.cfg.Store}
 			rec := httptest.NewRecorder()
-			if gw.completeClinician(rec, post(gw, "/scenario/uc06/complete", ""), st, "42") {
+			mw, mr := markedPost(rec, gw, "/scenario/uc06/complete", "")
+			if gw.completeClinician(mw, mr, st, "42") {
 				t.Fatal("the resume completed with its auth-number write failing")
 			}
 			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "holder write failed (auth number)") {

@@ -64,10 +64,14 @@ func New(cfg Config) *Driver {
 	return &Driver{cfg: cfg}
 }
 
-// HTTPResult is a raw HTTP response: the status code and the fully-read body.
-// Non-2xx statuses are not errors — callers assert on Status themselves.
+// HTTPResult is a raw HTTP response: the status code, the response's headers
+// and the fully-read body. Non-2xx statuses are not errors — callers assert on
+// Status themselves. Header is what the gateway answered with, so a caller can
+// read a header that states something by structure (X-SHN-Delivered, the media
+// type) beside the body.
 type HTTPResult struct {
 	Status int
+	Header http.Header
 	Body   []byte
 }
 
@@ -117,7 +121,7 @@ func (d *Driver) postBearer(path string, body []byte) (HTTPResult, error) {
 	if err != nil {
 		return HTTPResult{}, fmt.Errorf("scenariodriver: read response body for %s: %w", path, err)
 	}
-	return HTTPResult{Status: resp.StatusCode, Body: respBody}, nil
+	return HTTPResult{Status: resp.StatusCode, Header: resp.Header, Body: respBody}, nil
 }
 
 // postJSON is the bearer-less POST used by the provider gateway's provider-data
@@ -138,7 +142,7 @@ func (d *Driver) postJSON(base, path, jsonBody string) (HTTPResult, error) {
 	if err != nil {
 		return HTTPResult{}, fmt.Errorf("scenariodriver: read response body for %s: %w", path, err)
 	}
-	return HTTPResult{Status: resp.StatusCode, Body: body}, nil
+	return HTTPResult{Status: resp.StatusCode, Header: resp.Header, Body: body}, nil
 }
 
 // PostCRD mints a bearer and POSTs a CDS Hooks request to the ingress service

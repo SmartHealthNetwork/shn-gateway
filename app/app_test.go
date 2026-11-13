@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -890,83 +891,75 @@ func TestLoadConfig_PayerDavinciContractVersions(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_PayorEdgeIdentity covers the payer-edge identity mapping seam's
-// config surface (gateway/engine/payoredge.go): both unset ⇒ seam off; either alone ⇒
-// boot error (all-or-nothing); both set with a malformed "system|value" ⇒ boot error;
-// both set and well-formed ⇒ parsed onto cfg.PayerDavinciPayor{Own,Backend} and
-// cfg.PayerDavinciPayorEdge=true.
-func TestLoadConfig_PayorEdgeIdentity(t *testing.T) {
-	baseEnv := map[string]string{
+// TestBootRefusesRemovedPayerIdentitySettings: the payer identity mapping is
+// removed (PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND). A gateway
+// that sets either to a non-empty value does not start, and the refusal names
+// the setting and what the payer's own system does instead, on every role. An
+// empty value is unset: a gateway whose environment names either key with an
+// empty value starts exactly as one that does not name it.
+func TestBootRefusesRemovedPayerIdentitySettings(t *testing.T) {
+	const (
+		own     = "PAYER_DAVINCI_PAYOR_OWN"
+		backend = "PAYER_DAVINCI_PAYOR_BACKEND"
+		why     = " was removed and must be unset: the payer's gateway carries the payer identifiers a request names to the payer's own system as sent; that system handles every payer identifier the payer registers on the network"
+	)
+	base := map[string]string{
 		"ROLE": "payer", "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d",
 		"PAYER_DAVINCI_BASE_URL": "https://payer.example",
 	}
-
-	t.Run("both unset: seam off", func(t *testing.T) {
-		cfg, err := loadConfig(func(k string) string { return baseEnv[k] })
-		if err != nil {
-			t.Fatalf("both-unset should load: %v", err)
+	with := func(extra map[string]string) map[string]string {
+		e := map[string]string{}
+		for k, v := range base {
+			e[k] = v
 		}
-		if cfg.PayerDavinciPayorEdge {
-			t.Errorf("PayerDavinciPayorEdge should be false with both env vars unset")
+		for k, v := range extra {
+			e[k] = v
 		}
-	})
-
-	t.Run("own only: boot error", func(t *testing.T) {
-		env := map[string]string{"PAYER_DAVINCI_PAYOR_OWN": "urn:shn:demo-payer|SHN-BRIDGE-DEMO"}
-		for k, v := range baseEnv {
-			env[k] = v
-		}
-		_, err := loadConfig(func(k string) string { return env[k] })
-		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together") {
-			t.Fatalf("want an all-or-nothing error, got %v", err)
-		}
-	})
-
-	t.Run("backend only: boot error", func(t *testing.T) {
-		env := map[string]string{"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001"}
-		for k, v := range baseEnv {
-			env[k] = v
-		}
-		_, err := loadConfig(func(k string) string { return env[k] })
-		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN and PAYER_DAVINCI_PAYOR_BACKEND must be set together") {
-			t.Fatalf("want an all-or-nothing error, got %v", err)
-		}
-	})
-
-	t.Run("malformed value: boot error", func(t *testing.T) {
-		env := map[string]string{
-			"PAYER_DAVINCI_PAYOR_OWN":     "not-a-pipe-pair",
-			"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001",
-		}
-		for k, v := range baseEnv {
-			env[k] = v
-		}
-		_, err := loadConfig(func(k string) string { return env[k] })
-		if err == nil || !strings.Contains(err.Error(), "PAYER_DAVINCI_PAYOR_OWN") {
-			t.Fatalf("want a malformed-value error naming PAYER_DAVINCI_PAYOR_OWN, got %v", err)
-		}
-	})
-
-	t.Run("both set, well-formed: parsed onto cfg", func(t *testing.T) {
-		env := map[string]string{
-			"PAYER_DAVINCI_PAYOR_OWN":     "urn:shn:demo-payer|SHN-BRIDGE-DEMO",
-			"PAYER_DAVINCI_PAYOR_BACKEND": "urn:oid:2.16.840.1.113883.6.300|00001",
-		}
-		for k, v := range baseEnv {
-			env[k] = v
-		}
-		cfg, err := loadConfig(func(k string) string { return env[k] })
-		if err != nil {
-			t.Fatalf("happy path should load: %v", err)
-		}
-		if !cfg.PayerDavinciPayorEdge {
-			t.Fatalf("PayerDavinciPayorEdge should be true")
-		}
-		if cfg.PayerDavinciPayorOwn.System != "urn:shn:demo-payer" || cfg.PayerDavinciPayorOwn.Value != "SHN-BRIDGE-DEMO" {
-			t.Errorf("PayerDavinciPayorOwn = %+v", cfg.PayerDavinciPayorOwn)
-		}
-		if cfg.PayerDavinciPayorBackend.System != "urn:oid:2.16.840.1.113883.6.300" || cfg.PayerDavinciPayorBackend.Value != "00001" {
-			t.Errorf("PayerDavinciPayorBackend = %+v", cfg.PayerDavinciPayorBackend)
+		return e
+	}
+	control, err := loadConfig(env(base))
+	if err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	for name, extra := range map[string]map[string]string{
+		"both keys empty":      {own: "", backend: ""},
+		"own alone, empty":     {own: ""},
+		"backend alone, empty": {backend: ""},
+	} {
+		t.Run(name+": boots as unset", func(t *testing.T) {
+			cfg, err := loadConfig(env(with(extra)))
+			if err != nil {
+				t.Fatalf("an empty value refused the boot: %v", err)
+			}
+			if !reflect.DeepEqual(cfg, control) {
+				t.Fatalf("an empty value changed the configuration:\n got %+v\nwant %+v", cfg, control)
+			}
+		})
+	}
+	for name, row := range map[string]struct {
+		extra map[string]string
+		want  string
+	}{
+		"own alone, set":                   {map[string]string{own: "urn:shn:demo-payer|SHN-BRIDGE-DEMO"}, own},
+		"backend alone, set":               {map[string]string{backend: "urn:oid:2.16.840.1.113883.6.300|00001"}, backend},
+		"own set, backend empty":           {map[string]string{own: "urn:shn:demo-payer|SHN-BRIDGE-DEMO", backend: ""}, own},
+		"backend set, own empty":           {map[string]string{own: "", backend: "urn:oid:2.16.840.1.113883.6.300|00001"}, backend},
+		"both set: the first is named":     {map[string]string{own: "urn:shn:demo-payer|SHN-BRIDGE-DEMO", backend: "urn:oid:2.16.840.1.113883.6.300|00001"}, own},
+		"a value that is not system|value": {map[string]string{backend: "x"}, backend},
+	} {
+		t.Run(name+": refused", func(t *testing.T) {
+			_, err := loadConfig(env(with(row.extra)))
+			if err == nil || err.Error() != "gateway: "+row.want+why {
+				t.Fatalf("got %v\nwant gateway: %s%s", err, row.want, why)
+			}
+		})
+	}
+	t.Run("refused on every role", func(t *testing.T) {
+		for _, role := range []string{"provider", "facility", "phg"} {
+			e := map[string]string{"ROLE": role, "SHN_SECRETS": "/x", "SHN_DISCOVERY_URL": "https://d", own: "x"}
+			if _, err := loadConfig(env(e)); err == nil || err.Error() != "gateway: "+own+why {
+				t.Fatalf("%s: got %v", role, err)
+			}
 		}
 	})
 }

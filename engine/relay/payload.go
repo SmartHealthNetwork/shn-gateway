@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
 )
@@ -65,7 +67,8 @@ func (o Ownership) String() string {
 }
 
 // EditID names a registered edit. The set is closed; each edit is
-// disclosed to participants.
+// disclosed to participants. A retired id is never reused: E-03 (the payer
+// identity mapping) is retired, and E-15 was never registered.
 type EditID string
 
 const (
@@ -76,9 +79,6 @@ const (
 	// EditCDSPrefetchObtain adds a prefetch value the request left out,
 	// read from the provider's own system.
 	EditCDSPrefetchObtain EditID = "E-02"
-	// EditPayorEdgeRestamp maps the payer identity tokens of Coverage (and
-	// a claim's insurer) to the identity the payer's own system expects.
-	EditPayorEdgeRestamp EditID = "E-03"
 	// EditDTRCoverageObtain adds the patient's Coverage to a questionnaire
 	// package request that carried none, read from the provider's own
 	// system.
@@ -140,6 +140,13 @@ const (
 	// the report, the rest of its subject included, is the facility's. An
 	// input edit (InputEdited): the update is the builder's own and names it.
 	EditFacilityReportSubjectRekey EditID = "E-14"
+	// EditCDexTaskLocationRekey writes, on the 2xx answer to a payer's CDex
+	// attachment-request Task that the payer's gateway relays to its own
+	// system, a Location naming the created Task at the gateway's own base for
+	// the provider it was routed to: that base, then the tail the provider's
+	// gateway framed from its system's own Location. A header edit
+	// (HeaderEdited): no byte of the body changes, so its ETag is kept.
+	EditCDexTaskLocationRekey EditID = "E-16"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -148,12 +155,18 @@ const (
 	EditRegisteredTransform EditID = "E-09"
 )
 
-var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditPayorEdgeRestamp, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore, EditFacilityReportSubjectRekey}
+var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore, EditFacilityReportSubjectRekey, EditCDexTaskLocationRekey}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept
 // with its builder.
 var transformEdits = []EditID{EditRegisteredTransform}
+
+// headerEdits are the registered edits that set one header of an answer and
+// change no byte of its body, made only by HeaderEdited, never by
+// ApplyChanges: E-16. A registry row of one is an EditKindSetHeader row, and
+// only theirs is (ValidateEdits).
+var headerEdits = []EditID{EditCDexTaskLocationRekey}
 
 // inputEdits are the registered edits the gateway makes to a participant's
 // record before it puts the record inside a message it builds itself: the
@@ -194,7 +207,15 @@ type sealed struct {
 	// signed names the signatures, by carrier, whose covered content an
 	// exempt edit changed (signedExempt).
 	signed []string
+	// header is the one header a header edit sets (HeaderEdited), nil when
+	// the payload sets none.
+	header *editedHeader
 }
+
+// editedHeader is the header a header edit sets: its name, as its row writes
+// it, and the value the core's check of the edit (headerVerifiers, by its id)
+// passed.
+type editedHeader struct{ name, value string }
 
 // Ownership reports how the payload was made (0 for the zero Payload).
 func (p Payload) Ownership() Ownership {
@@ -232,6 +253,17 @@ func (p Payload) SignedEdited() []string {
 		return nil
 	}
 	return slices.Clone(p.c.signed)
+}
+
+// EditedHeader returns the header a header edit sets on the answer
+// (HeaderEdited): its name, as the edit's row writes it, and its verified
+// value. ok is false when the payload sets none. The one answer writer writes
+// it, after the answer's own headers.
+func (p Payload) EditedHeader() (name, value string, ok bool) {
+	if p.c == nil || p.c.header == nil {
+		return "", "", false
+	}
+	return p.c.header.name, p.c.header.value, true
 }
 
 // Builder returns the builder id of an OwnershipAuthored payload, and of an
@@ -276,6 +308,10 @@ func (p Payload) Format(f fmt.State, _ rune) {
 	}
 	if p.c.builder != "" {
 		parts = append(parts, string(p.c.builder))
+	}
+	if p.c.header != nil {
+		// The header's name only: its value is an address.
+		parts = append(parts, "+"+p.c.header.name)
 	}
 	if p.c.contentType != "" {
 		parts = append(parts, p.c.contentType)
@@ -345,6 +381,9 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 		}
 		if slices.Contains(transformEdits, c.Edit) {
 			return Payload{}, fmt.Errorf("%w: %s is made only by Transformed", ErrInvalidEdit, c.Edit)
+		}
+		if slices.Contains(headerEdits, c.Edit) {
+			return Payload{}, fmt.Errorf("%w: %s is made only by HeaderEdited", ErrInvalidEdit, c.Edit)
 		}
 	}
 	src := body.bytes()
@@ -479,6 +518,86 @@ func Transformed(src Payload, id EditID, out []byte, rederive func([]byte) ([]by
 		}
 	}
 	return Payload{c: &sealed{b: seal(bytes.Clone(out)), own: OwnershipEdited, edits: []EditID{id}, builder: src.c.builder, contentType: src.c.contentType, inputs: slices.Clone(src.c.inputs)}}, nil
+}
+
+// HeaderEdited returns src, a peer's message relayed exactly
+// (OwnershipRelayed), with the registered header edit id made: OwnershipEdited,
+// with id as its one edit, src's sealed bytes and media type unchanged, and the
+// header id's row names set to value (EditedHeader).
+//
+// rows is the gateway's registry of edits (ValidateEdits), from which id's row
+// is read and checked again (a header edit the core checks, setting a listed
+// header). in are the facts value was made from, by the names the row
+// declares, all of them and no other. The core decides what the edit touches,
+// one listed header and no byte of the body, and checks value with its own
+// check of id (headerVerifiers) against in: no row and no caller supplies one.
+// value must first be a non-empty HTTP field value a frame and a response can
+// carry exactly. Refused: an id that is not registered, in the closed set or
+// in rows (ErrUnknownEdit); a row that is not a valid header edit, a header
+// other than the row's (compared case-insensitively, as HTTP field names are),
+// inputs other than the row's, src that is not relayed exactly, or a value
+// that is empty or cannot be carried (ErrInvalidEdit); and a value the core's
+// check refuses (ErrVerifyMismatch).
+func HeaderEdited(rows []Edit, src Payload, id EditID, header, value string, in HeaderInputs) (Payload, error) {
+	if !slices.Contains(editIDs, id) {
+		return Payload{}, fmt.Errorf("%w: %q", ErrUnknownEdit, id)
+	}
+	row, ok := editIn(rows, id)
+	if !ok {
+		return Payload{}, fmt.Errorf("%w: %s is not in the registry", ErrUnknownEdit, id)
+	}
+	if err := validateHeaderEdit(row); err != nil {
+		return Payload{}, fmt.Errorf("%w: %v", ErrInvalidEdit, err)
+	}
+	switch {
+	case !strings.EqualFold(header, row.Header):
+		return Payload{}, fmt.Errorf("%w: %s sets %s, not %q", ErrInvalidEdit, id, row.Header, header)
+	case !sameInputs(in, row.HeaderInputs):
+		return Payload{}, fmt.Errorf("%w: %s is made from %v, not the inputs given", ErrInvalidEdit, id, row.HeaderInputs)
+	case src.Ownership() != OwnershipRelayed:
+		return Payload{}, fmt.Errorf("%w: %s is made only on a peer's message relayed exactly, not %s", ErrInvalidEdit, id, src.Ownership())
+	case !fieldValue(value):
+		return Payload{}, fmt.Errorf("%w: %s: the value is empty or not an HTTP field value", ErrInvalidEdit, id)
+	}
+	if err := headerVerifiers[id].verify(value, maps.Clone(in)); err != nil {
+		return Payload{}, fmt.Errorf("%w: %s: the registered verifier refused the value: %v", ErrVerifyMismatch, id, err)
+	}
+	return Payload{c: &sealed{b: src.c.b, own: OwnershipEdited, edits: []EditID{id}, contentType: src.c.contentType,
+		header: &editedHeader{name: row.Header, value: value}}}, nil
+}
+
+// sameInputs reports whether in names exactly the inputs names declares.
+func sameInputs(in HeaderInputs, names []string) bool {
+	if len(in) != len(names) {
+		return false
+	}
+	for _, n := range names {
+		if _, ok := in[n]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldValue reports whether s is a non-empty HTTP field value a response and
+// a frame carry exactly: valid UTF-8, no control character (a horizontal tab
+// within it aside) and no space or tab at either end (RFC 9110 section 5.5).
+func fieldValue(s string) bool {
+	if s == "" || !utf8.ValidString(s) {
+		return false
+	}
+	if c := s[0]; c == ' ' || c == '\t' {
+		return false
+	}
+	if c := s[len(s)-1]; c == ' ' || c == '\t' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // InputEdited returns src, a message the gateway built (OwnershipAuthored),

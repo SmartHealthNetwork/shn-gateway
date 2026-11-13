@@ -134,7 +134,7 @@ func (p *cdexRequestProvider) sendWith(t *testing.T, body []byte, mutate func(*s
 	if err != nil {
 		t.Fatalf("decode response frame: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, frame: hdr.Headers}
 }
 
 // cdexAttachmentRequestTask is a CDex 2.1.0 Task Attachment Request a payer's

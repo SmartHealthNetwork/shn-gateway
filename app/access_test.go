@@ -490,3 +490,59 @@ func TestAccessLineFor_BackendRedirects(t *testing.T) {
 		t.Fatalf("a record with no redirect rendered %s", b)
 	}
 }
+
+// The requester-side binding record a payer's read reported reaches the access
+// line under requesterBinding, each outcome kept apart with only the members
+// it has, resent only on a record sent a second time; a record with none
+// carries no requesterBinding member.
+func TestAccessLineFor_RequesterBinding(t *testing.T) {
+	for _, row := range []struct {
+		rec  engine.RequesterBindingRecord
+		want string
+	}{
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingAccepted},
+			`{"binding":"bound","involvement":"requester-held","outcome":"accepted"}`},
+		{engine.RequesterBindingRecord{Binding: "unavailable", Unbound: engine.RequesterUnboundNoMember, Outcome: engine.RequesterBindingRefused, RefusedBy: engine.RefusedByHub, Status: 409},
+			`{"binding":"unavailable","unbound":"no-member","outcome":"refused","refusedBy":"hub","status":409}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-derived", Outcome: engine.RequesterBindingRefused, RefusedBy: engine.RefusedByAuthorizationFramework, Status: 403},
+			`{"binding":"bound","involvement":"requester-derived","outcome":"refused","refusedBy":"authorization-framework","status":403}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingUnknown},
+			`{"binding":"bound","involvement":"requester-held","outcome":"unknown"}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingNotSent, NotSent: engine.RequesterNotSentHubUnreachable},
+			`{"binding":"bound","involvement":"requester-held","outcome":"not-sent","notSent":"hub-unreachable"}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingAccepted, Resent: true},
+			`{"binding":"bound","involvement":"requester-held","outcome":"accepted","resent":true}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingRefused, RefusedBy: engine.RefusedByHub, Status: 503, Resent: true},
+			`{"binding":"bound","involvement":"requester-held","outcome":"refused","refusedBy":"hub","status":503,"resent":true}`},
+	} {
+		rec := refusedRecord()
+		rec.RequesterBinding = &row.rec
+		b, err := json.Marshal(accessLineFor(rec).RequesterBinding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != row.want {
+			t.Errorf("requesterBinding\n got %s\nwant %s", b, row.want)
+		}
+	}
+	if b, _ := json.Marshal(accessLineFor(refusedRecord())); strings.Contains(string(b), "requesterBinding") {
+		t.Fatalf("a record with no report rendered %s", b)
+	}
+}
+
+// A call that came as a HEAD says so on its access line (method HEAD); every
+// other call carries no method member.
+func TestAccessLineFor_Method(t *testing.T) {
+	rec := refusedRecord()
+	rec.Method = http.MethodHead
+	b, err := json.Marshal(accessLineFor(rec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"method":"HEAD"`) {
+		t.Fatalf("line %s, want method HEAD", b)
+	}
+	if b, _ := json.Marshal(accessLineFor(refusedRecord())); strings.Contains(string(b), `"method"`) {
+		t.Fatalf("a record with no method rendered %s", b)
+	}
+}

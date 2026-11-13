@@ -25,3 +25,12 @@ func RelayEditName(id relay.EditID) (string, bool) {
 func RelayEditReceivedBy(id relay.EditID) (relay.Role, bool) {
 	return relay.EditReceivedBy(relayEdits, id)
 }
+
+// headerEdited is relay.HeaderEdited over the gateway's own registry
+// (relayEdits): the header id's row sets, its value checked against in by the
+// core's check of the edit, by its id, never one the row or the caller
+// supplies. It is the one
+// production call of relay.HeaderEdited (TestHeaderEditedIsCalledOnlyFromTheRegistryWrapper).
+func headerEdited(src relay.Payload, id relay.EditID, header, value string, in relay.HeaderInputs) (relay.Payload, error) {
+	return relay.HeaderEdited(relayEdits, src, id, header, value, in)
+}

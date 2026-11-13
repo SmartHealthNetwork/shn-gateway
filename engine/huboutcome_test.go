@@ -53,9 +53,10 @@ func TestIngressReportsTheRealOutcomeBehindTheHub(t *testing.T) {
 		// the Hub forwarded.
 		"unmarked 5xx in front of the Hub": {route: &answer{502, `<html>Bad Gateway</html>`, nil},
 			status: http.StatusBadGateway, contains: "the recipient may have received this request (Bad Gateway)"},
-		// A Hub 200 comes only after the recipient answered.
+		// A Hub 200 that is not an envelope may have come from in front of
+		// the Hub: the recipient may have received the request, no more.
 		"Hub 200 that is not an envelope": {route: &answer{200, `not an envelope`, nil},
-			status: http.StatusBadGateway, contains: "its answer could not be accepted (the Hub's answer is not an envelope)"},
+			status: http.StatusBadGateway, contains: "the recipient may have received this request (the Hub's answer is not an envelope)"},
 		"authorization denied": {authorize: &answer{403, `{"error":"denied"}`, nil},
 			status: http.StatusForbidden, contains: "authorization denied"},
 	}
@@ -137,7 +138,8 @@ func TestIngressHubConnectionLostAfterSendMayHaveBeenReceived(t *testing.T) {
 }
 
 // A response leg the provider cannot accept — here, one that fails its
-// verification — is reported as delivered-and-lost: the payer acted.
+// verification — is reported as possibly received: nothing verified says the
+// payer answered, so it is never said to have.
 func TestIngressAnswerThatFailsVerificationIsReportedAsDelivered(t *testing.T) {
 	env := newInProcessExchange(t)
 	env.substrate.mutateResp = func(b []byte) []byte {
@@ -145,56 +147,61 @@ func TestIngressAnswerThatFailsVerificationIsReportedAsDelivered(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	env.originator.withIngressCorrelation(env.originator.handleCRDIngress)(rec, env.crdIngressRequest(t))
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "its answer could not be accepted (response leg authorization failed)") {
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "the recipient may have received this request (response leg authorization failed)") ||
+		strings.Contains(rec.Body.String(), "answered") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 }
 
-// The Hub's refusal of a large envelope it has no room to hold reaches the
-// caller as a 503 with the Hub's wait, on the leg's own route as on any other,
-// and is recorded as the Hub's routing refusal. A wait that cannot be read is
-// the default; a 503 with another reason, or one the Hub did not write, states
-// no wait.
-func TestIngressRelaysTheHubsWaitOnALargeEnvelopeRefusal(t *testing.T) {
-	const budget = `{"error":"large envelope budget exhausted"}`
-	rows := map[string]struct {
-		body, delivered, retryAfter string
-		want                        string
-	}{
-		"the Hub's wait":      {budget, "no", "7", "7"},
-		"no wait stated":      {budget, "no", "", "5"},
-		"a wait out of range": {budget, "no", "600", "5"},
-		"a wait of zero":      {budget, "no", "0", "5"},
-		"a wait below zero":   {budget, "no", "-1", "5"},
-		"another reason":      {`{"error":"forward to recipient failed"}`, "no", "7", ""},
-		"not from the Hub":    {budget, "", "7", ""},
-	}
-	for name, row := range rows {
-		t.Run(name, func(t *testing.T) {
-			env := newInProcessExchange(t)
-			base := env.originator.cfg.Client.Transport
-			env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
-				if !strings.HasSuffix(r.URL.Path, "/route") {
-					return base.RoundTrip(r)
+// The Hub's refusal of a large envelope it has no room to hold, and of every
+// leg while an instance has not yet read the network's membership, reaches the
+// caller as a 503 with the Hub's wait, passed on as the Hub sent it, on the
+// leg's own route as on any other. A wait that cannot be read is that refusal's default; a 503 with
+// another reason, or one the Hub did not write, states no wait.
+func TestIngressRelaysTheHubsWaitOnTheRefusalsThatStateOne(t *testing.T) {
+	for reason, fallback := range map[string]string{hubReasonEnvelopeBudget: "5", hubReasonNotYetLoaded: "3"} {
+		refusal := `{"error":"` + reason + `"}`
+		rows := map[string]struct {
+			body, delivered, retryAfter string
+			want                        string
+		}{
+			"the Hub's wait":      {refusal, "no", "7", "7"},
+			"the longest wait":    {refusal, "no", "60", "60"},
+			"no wait stated":      {refusal, "no", "", fallback},
+			"a wait out of range": {refusal, "no", "600", fallback},
+			"a wait of zero":      {refusal, "no", "0", fallback},
+			"a wait below zero":   {refusal, "no", "-1", fallback},
+			"a wait not a number": {refusal, "no", "soon", fallback},
+			"another reason":      {`{"error":"forward to recipient failed"}`, "no", "7", ""},
+			"not from the Hub":    {refusal, "", "7", ""},
+		}
+		for name, row := range rows {
+			t.Run(reason+"/"+name, func(t *testing.T) {
+				env := newInProcessExchange(t)
+				base := env.originator.cfg.Client.Transport
+				env.originator.cfg.Client.Transport = diagnosticRoundTripper(func(r *http.Request) (*http.Response, error) {
+					if !strings.HasSuffix(r.URL.Path, "/route") {
+						return base.RoundTrip(r)
+					}
+					h := http.Header{"Content-Type": []string{"application/json"}}
+					if row.delivered != "" {
+						h.Set(HubDeliveredHeader, row.delivered)
+					}
+					if row.retryAfter != "" {
+						h.Set("Retry-After", row.retryAfter)
+					}
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(row.body)), Header: h}, nil
+				})
+				rec := httptest.NewRecorder()
+				env.originator.ingressRoute(cdexRoute(""))(rec, cdexPost(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), ""))
+				if got := rec.Header().Get("Retry-After"); got != row.want {
+					t.Errorf("Retry-After = %q, want %q (answer %d %.200s)", got, row.want, rec.Code, rec.Body)
 				}
-				h := http.Header{"Content-Type": []string{"application/json"}}
-				if row.delivered != "" {
-					h.Set(HubDeliveredHeader, row.delivered)
+				if row.want != "" && (rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), reason)) {
+					t.Errorf("answer %d %.200s, want 503 naming %q", rec.Code, rec.Body, reason)
 				}
-				if row.retryAfter != "" {
-					h.Set("Retry-After", row.retryAfter)
-				}
-				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(row.body)), Header: h}, nil
 			})
-			rec := httptest.NewRecorder()
-			env.originator.ingressRoute(cdexRoute(""))(rec, cdexPost(cdexSubmissionBody("MBR-COVERED", cdexPayerCMS), ""))
-			if got := rec.Header().Get("Retry-After"); got != row.want {
-				t.Errorf("Retry-After = %q, want %q (answer %d %.200s)", got, row.want, rec.Code, rec.Body)
-			}
-			if row.want != "" && (rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), hubReasonEnvelopeBudget)) {
-				t.Errorf("answer %d %.200s, want 503 naming the budget", rec.Code, rec.Body)
-			}
-		})
+		}
 	}
 }
 

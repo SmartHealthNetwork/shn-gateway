@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -267,7 +268,7 @@ func wrapValidateResource(body []byte) []byte {
 // ClassifyFHIRForTest is classifyFHIR for the real-validator lane tests
 // (the platform's conformance suite), which read what the validator actually reports and must
 // see the gateway's own reading of it: "valid" for a valid result, else
-// "structural", "deeper" or "unavailable". Test-only introspection, like
+// "structural", "deeper", "unchecked" or "unavailable". Test-only introspection, like
 // ConformanceLevelForTest.
 func ClassifyFHIRForTest(res shnsdk.Result, body []byte, line, profile string) string {
 	if res.Valid {
@@ -276,10 +277,70 @@ func ClassifyFHIRForTest(res shnsdk.Result, body []byte, line, profile string) s
 	switch classifyFHIR(res, body, line, profile) {
 	case VerdictDeeper:
 		return "deeper"
+	case VerdictUnchecked:
+		return "unchecked"
 	case VerdictUnavailable:
 		return "unavailable"
 	}
 	return "structural"
+}
+
+// embeddedValidationOutcome names a lane's reading of an invalid result for an
+// observation that only records it: "unavailable" when the check could not
+// run, "unchecked" when every error is a code the lane could not check (no
+// verdict that the payload is invalid), else "invalid".
+func embeddedValidationOutcome(res shnsdk.Result, body []byte, line, profile string) string {
+	switch classifyFHIR(res, body, line, profile) {
+	case VerdictUnavailable:
+		return "unavailable"
+	case VerdictUnchecked:
+		return "unchecked"
+	}
+	return "invalid"
+}
+
+// answeredRank orders the readings of a line that judged a payload, from a
+// structural defect (0) to a terminology gap (2): judgeLines decides by the
+// line closest to valid.
+func answeredRank(v Verdict) int {
+	switch v {
+	case VerdictUnchecked:
+		return 2
+	case VerdictDeeper:
+		return 1
+	}
+	return 0
+}
+
+// uncheckedVerdict is a finding's verdict for a line's reading: "unchecked"
+// for a terminology gap, else none (an invalid verdict carries none).
+func uncheckedVerdict(v Verdict) string {
+	if v == VerdictUnchecked {
+		return findingVerdict(v)
+	}
+	return ""
+}
+
+// uncheckedSystemsOf names the code systems a terminology gap's line could
+// not check (certificationUnchecked), as certification names them
+// (namedCodeSystem: an X12 canonical as written, any other by its size and
+// digest, since the name quotes the payload's coding), sorted, at most
+// unresolvedProfilesNamed named and the rest counted; nil for any other
+// reading.
+func uncheckedSystemsOf(v Verdict, res shnsdk.Result, body []byte, line, profile string, excuse func(string) bool) []string {
+	if v != VerdictUnchecked {
+		return nil
+	}
+	c, _ := certificationUncheckedExcusing(res, body, line, profile, excuse)
+	var out []string
+	for i, system := range c.systems {
+		if i == unresolvedProfilesNamed {
+			out = append(out, fmt.Sprintf("and %d more", len(c.systems)-i))
+			break
+		}
+		out = append(out, namedCodeSystem(system))
+	}
+	return out
 }
 
 // validateRequest is the request a check of body against profile sends this
@@ -369,3 +430,11 @@ func validatedBody(req []byte) []byte {
 
 // WrapValidateResourceForTest is wrapValidateResource, for the same tests.
 func WrapValidateResourceForTest(body []byte) []byte { return wrapValidateResource(body) }
+
+// UncheckedCodeSystemsForTest is the code systems a result the reading finds
+// unchecked names (uncheckedSystemsOf, as a finding names them), for the same
+// real-validator lane tests; nil for any other reading.
+func UncheckedCodeSystemsForTest(res shnsdk.Result, body []byte, line, profile string) []string {
+	v, _ := classifyFHIRUnchecked(res, body, line, profile)
+	return uncheckedSystemsOf(v, res, body, line, profile, anyProfile)
+}

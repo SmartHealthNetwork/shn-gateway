@@ -35,6 +35,7 @@ var outboundSites = map[string]outboundSite{
 	"app/app.go payerDavinciHTTPClient smartauth.NewHTTPClient":            {1, "payerDavinciSmartConfig tags it with the payer Router / payer-token"},
 	"app/app.go providerDTRPopulateHTTPClient smartauth.NewHTTPClient":     {1, "providerDTRPopulateSmartBase tags it populate / populate-token"},
 	"app/app.go providerCDexHTTPClient smartauth.NewHTTPClient":            {1, "providerCDexSmartConfig tags it cdex-task / cdex-task-token"},
+	"app/app.go providerCDexReadHTTPClient smartauth.NewHTTPClient":        {1, "providerCDexSmartConfig tags it cdex-task / cdex-task-token: the read goes to the Task forward's endpoint and token server"},
 	"app/attachmentinflight.go taskMetadataClient http.Client{}":           {1, "the task's own ECS metadata endpoint, read once at boot: the platform's, no peer and no endpoint kind"},
 	"app/attachmentinflight.go taskMetadataClient http.Transport{}":        {1, "that read's transport: no proxy, since the endpoint is on the task's own link"},
 	"app/bootfetch.go bootClient http.DefaultTransport":                    {1, "a nil transport's meaning; resolveDiscovery passes tagged clients"},

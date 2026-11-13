@@ -108,6 +108,10 @@ var paIngressRoutes = map[string]ingressHandler{
 	// The same Task at the payer's plain Task endpoint, routed by the
 	// organization its Task.owner names.
 	RouteCDexRequest: {"cdex-request-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexRequestByOwner }},
+	// The payer's read and vread of its Task at a provider's base.
+	RouteCDexReadBase: {"cdex-read-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexReadIngress }},
+	// The same read at the plain Task endpoint, which names no provider.
+	RouteCDexRead: {"cdex-read-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexReadPlain }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -155,6 +159,13 @@ var paLegs = map[string]legDetail{
 	// The provider takes it only once its gateway is configured with its own
 	// system's Task endpoint, so no gateway declares it until then.
 	"cdex-attachment-request": {Physics: paMutating, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderCDexTaskURL},
+	// A payer's read of the attachment-request Task it created, at the
+	// provider's own Task endpoint: a FHIR read or vread, which changes
+	// nothing. Its contract is the attachment request's, carried whatever
+	// the two sides' PA lines. Its address is its request frame's readPath,
+	// and the provider takes it only once its gateway is configured with the
+	// scope it reads its own Tasks with.
+	"cdex-task-status": {Physics: paReadOnly, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true},
 }
 
 // paSeamPayer is the seam a payer's inbound PA request is judged at.
@@ -250,9 +261,23 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("POST /cdex/provider/{provider}/Task", noCredential, g.ingressRoute(RouteCDexRequestBase))
 		route("POST /Task", noCredential, g.ingressRoute(RouteCDexRequest))
 		route("GET /cdex/providers", noCredential, g.withIngressCorrelation(g.handleCDexProviders))
+		// The payer's own system reads the Task it created, and vreads it, at
+		// the provider's base it created it at; a read at the plain endpoint
+		// names no provider, and is answered 404 (workstream_pa_cdex_read_ingress.go).
+		route("GET /cdex/provider/{provider}/Task/{id}", noCredential, g.ingressRoute(RouteCDexReadBase))
+		route("GET /cdex/provider/{provider}/Task/{id}/_history/{vid}", noCredential, g.ingressRoute(RouteCDexReadBase))
+		route("GET /Task/{id}", noCredential, g.ingressRoute(RouteCDexRead))
+		route("GET /Task/{id}/_history/{vid}", noCredential, g.ingressRoute(RouteCDexRead))
+		// FHIR's capabilities interaction at each base: Task create at the
+		// plain base; create, and read and vread where that provider serves
+		// them, at a provider's.
+		route("GET /metadata", noCredential, g.handleCDexMetadata)
+		route("GET /cdex/provider/{provider}/metadata", noCredential, g.handleCDexBaseMetadata)
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
 			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)
+			// SMART App Launch has every FHIR base serve its configuration.
+			route("GET /cdex/provider/{provider}/.well-known/smart-configuration", noCredential, g.handleCDexBaseSmartConfig)
 		}
 	}
 	return out

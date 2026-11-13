@@ -281,6 +281,7 @@ func TestCDexIngress_RelaysThePayersAnswer(t *testing.T) {
 				t.Fatalf("answer %d %s, want 502 and the payer's bytes not relayed", rec.Code, rec.Body)
 			}
 			wantRefusal(t, x, http.StatusBadGateway, RefusedByProviderGateway, RefusalIntegrity)
+			wantAnsweredRefusalYes(t, rec)
 		})
 	}
 }

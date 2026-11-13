@@ -85,10 +85,12 @@ func TestAuthzUnreachable_Answers503NothingSent(t *testing.T) {
 		"EOF after the write":    transportFault(io.EOF, true),
 		"reset after the write":  transportFault(connReset(), true),
 		"some other no-response": transportFault(errors.New("tls: handshake failure"), false),
-		// The Framework never answers these itself: a proxy in front of it had
-		// no Framework to reach.
+		// A proxy in front of the Framework had no Framework to reach.
 		"a proxy's 503": answer(http.StatusServiceUnavailable, "no healthy upstream"),
 		"a proxy's 504": answer(http.StatusGatewayTimeout, "upstream request timeout"),
+		// The Framework's only 503 of its own: an instance that has not yet
+		// read the network's membership refuses before any decision.
+		"a Framework instance not yet ready": answer(http.StatusServiceUnavailable, `{"error":"registry not yet loaded"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			// Every attempt fails the same way.

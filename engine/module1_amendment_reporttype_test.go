@@ -140,7 +140,8 @@ func serveAmendment(t *testing.T, gw *Gateway, path string, serve func(*Gateway,
 	x := &exchangeRecorder{}
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(editBody(t, testRouteBody(gw, path, ""), edit)))
 	rec := httptest.NewRecorder()
-	serve(gw, rec, withOriginationClaimInput(withLegsTracked(req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x)))))
+	w, r := mounted(rec, withOriginationClaimInput(withLegsTracked(req.WithContext(context.WithValue(req.Context(), exchangeRecorderKey{}, x)))))
+	serve(gw, w, r)
 	return rec, x
 }
 
@@ -298,7 +299,8 @@ func TestAmendmentRoute_MalformedReportTypeRefusedAtTheAmendment(t *testing.T) {
 				before := len(stub.legTypes)
 				body := editBody(t, testRouteBody(gw, path+"/complete", `"resumeToken":"`+started.ResumeToken+`"`), bad)
 				rec := httptest.NewRecorder()
-				resume.complete(gw, rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path+"/complete", strings.NewReader(body)))))
+				w, r := mounted(rec, withOriginationClaimInput(withLegsTracked(httptest.NewRequest(http.MethodPost, path+"/complete", strings.NewReader(body)))))
+				resume.complete(gw, w, r)
 				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ReportType") {
 					t.Fatalf("%d %s, want 422 naming ReportType", rec.Code, rec.Body.String())
 				}

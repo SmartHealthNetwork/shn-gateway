@@ -270,10 +270,17 @@ func (v observingValidator) Validate(ctx context.Context, resourceJSON []byte, p
 	case err != nil:
 		detail = "validator unavailable"
 	case res.Valid:
-	case classifyDeclaredVerdict(findingContextFrom(ctx), res, validatedBody(resourceJSON), askedProfile(ctx, profile)) == VerdictUnavailable:
-		detail = "validator unavailable"
 	default:
-		detail = "invalid"
+		// A check that could not run, or could not check a code, is no
+		// verdict that the payload is invalid.
+		switch classifyDeclaredVerdict(findingContextFrom(ctx), res, validatedBody(resourceJSON), askedProfile(ctx, profile)) {
+		case VerdictUnavailable:
+			detail = "validator unavailable"
+		case VerdictUnchecked:
+			detail = "unchecked"
+		default:
+			detail = "invalid"
+		}
 	}
 	v.g.observe(ObserverEvent{Kind: "validate.result", Direction: "validate", Payload: json.RawMessage(resourceJSON), Detail: detail})
 	return res, err
@@ -374,6 +381,10 @@ type observingSoR struct {
 	observer func(ObserverEvent)
 	clock    func() time.Time
 }
+
+// observingSoR reads through every contextual read, so a failed read stays an
+// error and is never answered as absence by the legacy reader's fallback.
+var _ ContextSystemOfRecord = observingSoR{}
 
 func (o observingSoR) emit(op, detail string, payload []byte) {
 	e := ObserverEvent{Time: o.clock(), Kind: "sor.read", Direction: "sor", Op: op, Detail: detail}

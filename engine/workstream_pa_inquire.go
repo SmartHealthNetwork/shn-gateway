@@ -7,8 +7,8 @@
 // Nothing here polls and nothing here assembles. The requester asks explicitly,
 // the payer's own system answers, and the payer's bytes reach the requester
 // exactly as the payer wrote them — with the payer's own media type. The only
-// change the leg may make is the registered payer-identity restamp on the request
-// it sends its own system, the same edit the submit and update legs make.
+// change the leg may make is restoring the adaptive addresses this payer issued
+// (E-13) on the request it sends its own system, as the submit and update legs do.
 //
 // The one thing the payer gateway DERIVES from the answer is its own pend
 // ledger: an inquiry that comes back decided is how a payer gateway learns the
@@ -489,17 +489,14 @@ func claimResponseLookup(requesterHolder string, raw []byte) inquiryAnswerRespon
 // `Claim/$inquire`, using the per-line endpoint evidence exactly as the submit
 // leg does, and relays whatever comes back with the payer's own media type.
 //
-// The only change it may make to the request is the registered payer-identity
-// restamp; the answer is never edited, never re-shaped and never certified by
-// this gateway.
+// The only change it may make to the request is restoring the adaptive
+// addresses this payer issued (E-13); the answer is never edited, never
+// re-shaped and never certified by this gateway.
 func (n *nativeResponder) handlePASInquireNative(ctx context.Context, contract string, in relay.Body, requestFHIR []byte) (LegResult, error) {
 	const fhirJSON = "application/fhir+json"
-	forward, refused, err := n.payorEdgeRequest(ctx, in, payorEdgeInquiryBundle, fhirJSON, n.refusesRequest(ctx, RuleInsurer, requestFHIR), n.adaptiveRestore(ctx, in))
+	forward, err := restoredRequest(in, fhirJSON, n.adaptiveRestore(ctx, in))
 	if err != nil {
 		return LegResult{}, err
-	}
-	if refused.Status != 0 {
-		return refused, nil
 	}
 	// The PAS base, not the shared one: $inquire is a PAS operation, and a payer
 	// that serves its PAS operations from their own base serves this one there

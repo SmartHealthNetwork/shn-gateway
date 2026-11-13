@@ -53,7 +53,11 @@ func levelPASRow(t *testing.T, level ConformanceEnforcement, body string, answer
 	env.payerReturns(LegResult{Response: testResponse(answer)})
 	ev := observeLevelEvents(env.originator)
 	rec := httptest.NewRecorder()
-	env.originator.handlePASIngress(rec, httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(body)))
+	// Through the route as it is mounted (ingressRoute), so the call has its
+	// delivery mark.
+	req := httptest.NewRequest(http.MethodPost, "/Claim/$submit", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/fhir+json")
+	env.originator.ingressRoute(RoutePAS)(rec, req)
 	return env, rec, ev
 }
 
@@ -104,11 +108,14 @@ func wantAnswerLevelOutcome(t *testing.T, leg string, level ConformanceEnforceme
 		if len(ev.skipped) != 0 {
 			t.Fatalf("a refused answer skips nothing, got %+v", ev.skipped)
 		}
+		// Refused after the payer's answer was handed back: delivered yes.
+		wantAnsweredRefusalYes(t, rec)
 		return
 	}
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), relayedPASAnswer(t, answer)) {
 		t.Fatalf("at %s the payer's answer must be relayed exactly: %d %s", level, rec.Code, rec.Body.String())
 	}
+	wantNoDeliveryStated(t, rec)
 	switch level {
 	case EnforcementNone:
 		if len(ev.findings) != 0 {
@@ -325,6 +332,9 @@ func wantAnswerRefusedAtEveryLevel(t *testing.T, env *inProcessExchange, rec *ht
 	if len(ev.findings) != 0 || len(ev.skipped) != 0 {
 		t.Fatalf("a network rule records no finding and skips nothing: %+v %+v", ev.findings, ev.skipped)
 	}
+	// Refused after the payer's answer was handed back, at every level, none
+	// included: delivered yes.
+	wantAnsweredRefusalYes(t, rec)
 }
 
 // A payer answer that repeats a member name is read one way only: refused at

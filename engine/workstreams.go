@@ -652,6 +652,23 @@ func answerCandidateGroups(contract string, payload []byte) [][]string {
 	return nil
 }
 
+// answerLineProfile is the compiled-in workstream's profile for a payer's
+// answer of contract that declares none (certificationAdapter.
+// undeclaredAnswerProfile), without a version; "" when no workstream names
+// one.
+func answerLineProfile(contract string, payload []byte, line, leg string) string {
+	for _, w := range workstreams {
+		a := w.certification()
+		if a == nil || !declaresContract(w, contract) {
+			continue
+		}
+		if p, ok := a.undeclaredAnswerProfile(contract, payload, line, leg); ok {
+			return p
+		}
+	}
+	return ""
+}
+
 // declaresContract reports whether w builds a line of contract natively.
 func declaresContract(w workstream, contract string) bool {
 	native, _ := w.contractVersions()
@@ -805,6 +822,11 @@ type legSpec struct {
 	// leg its role takes unconditionally. The adapter sets it, to the setting
 	// the root leg taxonomy names (legtaxonomy.TakenWhenSet).
 	TakenWhenSet string
+	// ReadPath says the leg's request frame carries the read's path below
+	// the recipient's base (shnsdk.FrameHeaderReadPath): the header is
+	// defined on such a leg alone, and a frame naming it on any other is
+	// refused (inboundFrameReadPath). The adapter sets it.
+	ReadPath bool
 	// AnswerEnvelope is the envelope of this gateway's own refusal on the leg,
 	// the taxonomy's (legtaxonomy.AnswerEnvelopeFHIR or AnswerEnvelopeJSON):
 	// an OperationOutcome on a leg its client reaches through a FHIR
@@ -822,6 +844,8 @@ type legDetail struct {
 	Seam     string
 	// TakenWhenSet is legSpec.TakenWhenSet.
 	TakenWhenSet string
+	// ReadPath is legSpec.ReadPath.
+	ReadPath bool
 }
 
 // catalogFromTaxonomy derives a workstream's leg catalog from its leg
@@ -863,7 +887,7 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
-			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet,
+			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet, ReadPath: d.ReadPath,
 			AnswerEnvelope: l.AnswerEnvelope,
 		}
 	}

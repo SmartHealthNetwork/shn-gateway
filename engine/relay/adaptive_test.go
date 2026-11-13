@@ -248,7 +248,9 @@ func TestAdaptiveAddressValueIsClosedToEveryOtherEdit(t *testing.T) {
 	body := NewBody([]byte(`{"resourceType":"QuestionnaireResponse","contained":[{"resourceType":"Questionnaire","id":"q","extension":[`+
 		`{"url":"`+sdcAdaptiveExtension+`","valueUrl":`+payerAddress+`},{"url":"`+sdcAdaptiveExtension+`","valueBoolean":true}]}],"status":"completed"}`), OriginPeerFrame)
 	for _, id := range EditIDs() {
-		if adaptiveEdits[id] || slices.Contains(TransformEditIDs(), id) {
+		// A transform and a header edit are never made by Apply (each has its
+		// own refusal rows).
+		if adaptiveEdits[id] || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) {
 			continue
 		}
 		for name, ops := range map[string]func(d *Document) []Op{

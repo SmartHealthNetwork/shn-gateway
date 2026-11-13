@@ -201,8 +201,7 @@ func TestSupplierLinkageAnswer(t *testing.T) {
 				if !strings.Contains(msg, "cannot be carried as read: it is not UTF-8") {
 					t.Fatalf("message %q", msg)
 				}
-				body, _ := json.Marshal(map[string]string{"error": msg})
-				wantCarried(t, string(body), "crd-order-dispatch", "dtr-questionnaire-fetch")
+				wantCarriedText(t, msg, "crd-order-dispatch", "dtr-questionnaire-fetch")
 				return
 			}
 			if err == nil || msg != "PAS supplier linkage failed" || x.outcome == ExchangeRefused {

@@ -146,6 +146,9 @@ func (g *Gateway) startCertification() {
 // Observer callbacks are cooperative: they must return promptly. Owners stop
 // serving requests before closing and release callback barriers before joining.
 func (g *Gateway) Close() error {
+	// A requester-side binding record already under way is given a bounded
+	// wait, then cut, and its exchange record written.
+	g.stopAfterAnswers()
 	g.conformance().close()
 	for _, l := range g.explicitLanes {
 		l.close()
@@ -330,7 +333,7 @@ func (g *Gateway) collectCertification(w *certificationWorker, job certification
 			// from the collection's (the caller gave up).
 			candidate, cancel := context.WithTimeout(context.WithValue(ctx, certificationCollectionKey{}, ctx), certificationCandidateTimeout)
 			start := g.exchangeClock()
-			result, err := w.validators[line].Validate(candidate, job.payload, profile)
+			result, err := validateAt(candidate, w.validators[line], job.payload, line, profile)
 			took := g.exchangeClock().Sub(start)
 			contextErr := candidate.Err()
 			cancel()
@@ -636,10 +639,12 @@ func terminologyReasonNaming(systems []string, maxNamed int) string {
 	return reason
 }
 
-// x12CodeSystem is the shape of an X12 code system canonical: X12's host and
-// two numeric segments (a version and a code list). Such a name identifies
-// public, licensed terminology and has room for nothing else.
-var x12CodeSystem = regexp.MustCompile(`^https://codesystem\.x12\.org/[0-9]{1,8}/[0-9]{1,8}$`)
+// x12CodeSystem is the shape of an X12 code system canonical: X12's host, a
+// version segment (numeric, or "external" for the external code lists X12
+// publishes, such as 886, the review decision reasons PAS binds) and a numeric
+// code list. Such a name identifies public, licensed terminology and has room
+// for nothing else.
+var x12CodeSystem = regexp.MustCompile(`^https://codesystem\.x12\.org/(?:[0-9]{1,8}|external)/[0-9]{1,8}$`)
 
 // namedCodeSystem is how an unavailable verdict names a code system. The name
 // comes from a validator's diagnostics, quoting the payload's own coding, so

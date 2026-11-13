@@ -301,6 +301,18 @@ type Config struct {
 	// authorized to the provider's own system (PROVIDER_CDEX_CLIENT_*, SMART
 	// Backend Services). Required with ProviderCDexTaskURL.
 	ProviderCDexTaskClient *http.Client
+	// ProviderCDexReadScope is the scope the provider's gateway asks its own
+	// token endpoint for to read a Task there (PROVIDER_CDEX_READ_SCOPE, read
+	// trimmed). Set, a provider's gateway takes the payer's read of its Task
+	// (cdex-task-status: TakenLegs, the leg's TakenWhenSet) and reads it at
+	// ProviderCDexTaskURL, which must then be one a read is made below
+	// (cdexroute.TaskReadURL). Provider role only; requires
+	// ProviderCDexTaskURL and ProviderCDexReadClient.
+	ProviderCDexReadScope string
+	// ProviderCDexReadClient is the client a Task is read with: the Task
+	// forward's token endpoint and client credentials, its token asked for
+	// ProviderCDexReadScope. Required with ProviderCDexReadScope.
+	ProviderCDexReadClient *http.Client
 	// IngressEnabled mounts the Da Vinci ingress routes: a provider's, or on a
 	// payer the attachment-request Task routes. Set from PROVIDER_DAVINCI_INGRESS
 	// or PAYER_DAVINCI_INGRESS by app.go. The routes fail-closed without
@@ -569,6 +581,17 @@ type Gateway struct {
 	edgeCapture   atomic.Pointer[edgeCaptureStore]
 	certification *certificationWorker
 	operations    operationTracker
+	// afterAnswers is the work a call does once its answer is written (a
+	// requester-side binding record, requesterbinding.go); afterStopping how
+	// a stop cuts it and writes the exchange records that wait for it. Close
+	// joins them (stopAfterAnswers).
+	afterAnswers  sync.WaitGroup
+	afterStopping afterStopper
+	// bindingBudgetForTest, when set, replaces requesterBindingBudget, and
+	// resendWaitForTest, when set, replaces the wait before a binding
+	// record's resend (waitToResend).
+	bindingBudgetForTest time.Duration
+	resendWaitForTest    func(ctx context.Context, d time.Duration) bool
 	// explicitLanes are the explicitly configured lanes whose reachability
 	// module 2 reads (lanehealth.go), stopped by Close.
 	explicitLanes []*explicitLane
@@ -730,6 +753,24 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 			return nil, errors.New("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) requires the Da Vinci ingress (IngressEnabled, PROVIDER_DAVINCI_INGRESS) and its IngressBaseURL (PROVIDER_DAVINCI_INGRESS_BASE_URL), under which the Task's documentation return path is built and served")
 		}
 	}
+	// The payer's read of its Task is taken exactly when the read scope is
+	// set (the leg's TakenWhenSet), so a gateway that could not deliver the
+	// read refuses to boot rather than declare it: a read scope on another
+	// role, without the Task endpoint the read is made below, or without the
+	// client it is read with.
+	if strings.TrimSpace(cfg.ProviderCDexReadScope) != "" {
+		if cfg.Role != "provider" {
+			return nil, fmt.Errorf("gateway: ProviderCDexReadScope (PROVIDER_CDEX_READ_SCOPE) is the scope a provider's gateway reads its own Tasks with; this gateway's role is %q", cfg.Role)
+		}
+		if strings.TrimSpace(cfg.ProviderCDexTaskURL) == "" {
+			return nil, errors.New("gateway: ProviderCDexReadScope (PROVIDER_CDEX_READ_SCOPE) requires ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL), the provider's own Task endpoint the payer's Task is read below")
+		}
+		if cfg.ProviderCDexReadClient == nil {
+			return nil, errors.New("gateway: ProviderCDexReadScope (PROVIDER_CDEX_READ_SCOPE) requires ProviderCDexReadClient, the client authorized to read the provider's own Tasks")
+		}
+		// The Task endpoint's shape is the workstream's rule, checked where
+		// its state is built (paWorkstream.newGatewayState).
+	}
 	if cfg.CDSClientJWKS != nil {
 		if cfg.Role != "payer" {
 			return nil, fmt.Errorf("gateway: CDSClientJWKS is the payer's CDS client key set; this gateway's role is %q", cfg.Role)
@@ -831,7 +872,7 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 			return nil, fmt.Errorf("gateway: ingress auth: %w", err)
 		}
 		ia.storeErr = g.noteStoreError
-		ia.scopes = ingressScopes(cfg.Role)
+		ia.scopes = ingressScopes(cfg.Role, cfg.IngressClients)
 		g.ingressAuth = ia
 	}
 	// A responder that can take the finding emitter gets it now: it could not
@@ -1082,7 +1123,9 @@ func codedRoute(limit int64, credential routeCredential, h http.HandlerFunc) htt
 // profile, and declares them once, as New builds its state. It is the only
 // place a route is mounted, the only place an operator route is put behind
 // requireScenarioCaller, and the only place a declared exchange route is put
-// behind the exchange record.
+// behind the exchange record. An operator route (the /scenario routes, test
+// tooling outside the full promise) writes through a problemDetailsWriter, so
+// a delivered answer on one is application/problem+json (writeDeliveredMaybe).
 func (g *Gateway) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	var patterns []string
@@ -1091,7 +1134,7 @@ func (g *Gateway) routes() *http.ServeMux {
 		for _, rt := range declared {
 			h := rt.handler
 			if rt.operator {
-				h = g.requireScenarioCaller(h)
+				h = g.requireScenarioCaller(withProblemDetails(h))
 			}
 			if rt.exchangeRoute != "" {
 				h = g.recordExchange(rt.exchangeRoute, DirectionIngress, tracksLegsCarried(h))
@@ -1122,7 +1165,7 @@ func (g *Gateway) RoutePatternsForTest() []string {
 // participant configures where the payer's attachment request goes, mounts
 // no inbound route and needs no Hub transport key.
 func (g *Gateway) coreRoutes(role string) []mountedRoute {
-	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL))) == 0 {
+	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL, g.cfg.ProviderCDexReadScope))) == 0 {
 		return nil
 	}
 	return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
@@ -1146,20 +1189,27 @@ func (cfg Config) TakenLegs() []string {
 // payer's attachment request (legtaxonomy.TakenWhenSet).
 const settingProviderCDexTaskURL = "PROVIDER_CDEX_TASK_URL"
 
+// settingProviderCDexReadScope is the setting that makes a provider take the
+// payer's read of its Task (legtaxonomy.TakenWhenSet), one setting per leg.
+const settingProviderCDexReadScope = "PROVIDER_CDEX_READ_SCOPE"
+
 // settingSet reports whether the participant set the named setting, for a
 // leg taken only when configured (legSpec.TakenWhenSet). A setting this
 // engine does not hold reads as unset: unknown is never taken.
 func (cfg Config) settingSet(setting string) bool {
-	return settingsSet(cfg.ProviderCDexTaskURL)(setting)
+	return settingsSet(cfg.ProviderCDexTaskURL, cfg.ProviderCDexReadScope)(setting)
 }
 
 // settingsSet is settingSet over the settings it reads, each passed as its
-// value, so a route declaration reads only those (coreRoutes).
-func settingsSet(providerCDexTaskURL string) func(setting string) bool {
+// value, so a route declaration reads only those (coreRoutes). Each is read
+// trimmed: a blank value is unset.
+func settingsSet(providerCDexTaskURL, providerCDexReadScope string) func(setting string) bool {
 	return func(setting string) bool {
 		switch setting {
 		case settingProviderCDexTaskURL:
 			return strings.TrimSpace(providerCDexTaskURL) != ""
+		case settingProviderCDexReadScope:
+			return strings.TrimSpace(providerCDexReadScope) != ""
 		}
 		return false
 	}
@@ -1190,11 +1240,11 @@ func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, un
 // bearer carries (space-delimited): the one the token endpoint granted an
 // issued bearer, or the one a registered client's direct bearer states and
 // its registration allows; "" when it carries none. The test bypass verifies
-// no client and grants TaskWriteScope, so a route that checks scope is
-// reached as with a granted one.
+// no client and grants TaskWriteScope and TaskReadScope, so a route that
+// checks scope is reached as with a granted one.
 func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return "", TaskWriteScope, true, false
+		return "", TaskWriteScope + " " + TaskReadScope, true, false
 	}
 	if g.ingressAuth == nil {
 		return "", "", false, false // fail-closed: no inbound auth configured
@@ -1218,12 +1268,30 @@ func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bo
 // ingressScopes are the scopes a gateway of role's SMART configuration
 // advertises: a payer's, the one its attachment-request Task routes are asked
 // for with (TaskWriteScope; each route takes any scope that permits create,
-// ingressScopeRefused), a provider's the Da Vinci routes'.
-func ingressScopes(role string) []string {
-	if role == "payer" {
-		return []string{TaskWriteScope}
+// ingressScopeRefused), and each scope one of clients, the participant's own
+// systems, is registered for exactly that permits reading a Task with no
+// query (TaskReadScope, system/Task.*, a v2 scope with r), sorted: the token
+// endpoint grants only a scope a client registered, string for string
+// (grantScope), so a read scope is named only as one some client can be
+// granted, and none when no client can be granted a bearer the read routes
+// take; a provider's the Da Vinci routes'.
+func ingressScopes(role string, clients map[string]IngressClientRegistration) []string {
+	if role != "payer" {
+		return []string{ingressScope}
 	}
-	return []string{ingressScope}
+	var reads []string
+	for _, c := range clients {
+		if c.Module != "" {
+			continue
+		}
+		for _, scope := range c.Scopes {
+			if scopesPermit([]string{scope}, taskRead) && !slices.Contains(reads, scope) {
+				reads = append(reads, scope)
+			}
+		}
+	}
+	slices.Sort(reads)
+	return append([]string{TaskWriteScope}, reads...)
 }
 
 // ingressScopeRefused is ingressAuthRefused for a route that admits only a
@@ -1348,6 +1416,13 @@ type authorizeReq struct {
 	// (shnsdk.Involvement*), carried in the envelope's involved list. Empty for
 	// the leg's own token.
 	Involvement string `json:"involvement,omitempty"`
+	// ResponseToken is the answer's own token, JSON-encoded as the answer
+	// envelope carried it, presented with a requester-side involvement
+	// (shnsdk.InvolvementRequesterHeld, InvolvementRequesterDerived) and
+	// only with one: on a leg whose request names no patient, the
+	// Authorization Framework mints the requester's binding of the patient
+	// the answer disclosed only against that answer (requesterbinding.go).
+	ResponseToken string `json:"responseToken,omitempty"`
 }
 
 type authorizeResp struct {
@@ -1430,8 +1505,10 @@ func answerAuthorizationRefusal(err error) (reason, by string) {
 // errAuthzUnreachable marks an authorize call the Authorization Framework
 // never answered: the connection was refused, reset or closed, or failed some
 // other way before any response, including no answer within the client's
-// timeout; or a 503 or 504, which the Framework never answers itself, so it
-// came from a proxy or load balancer in front of it with no Framework behind.
+// timeout; or a 503 or 504, which came from a proxy or load balancer in front
+// of it with no Framework behind, or is a Framework instance's 503 "registry
+// not yet loaded", refused before any decision because it has not yet read the
+// network's membership since it started (the only 503 the Framework answers).
 // It is the network being unavailable, not an authority verdict, so the
 // provider's route answers its own 503 and the leg is not sent to the Hub; a
 // denial (errAuthorizationDenied) and any other answer keep their own
@@ -1628,11 +1705,20 @@ func (e *envelopeTooLargeError) Is(target error) bool { return target == errEnve
 // connection failed after the request was sent, or it did not answer in time).
 // An error without it did not come from the Hub's route handler, and a 5xx of
 // that kind is read as "unknown". The platform's Hub service sets it; the root module's
-// tests pin the two names equal. A gateway sets it itself, always "yes", only
-// where its system or its counterpart's answered: on its refusal to send its
-// system's answer (attestAnswerRefused), which the Hub relays, and on its
-// answer to its caller when an answer was refused after the recipient
-// answered (relayOriginationError).
+// tests pin the two names equal. A gateway sets it itself in two places only.
+// On its refusal to send its system's answer (attestAnswerRefused), which the
+// Hub relays, it is always "yes": its system answered. On an error answer to
+// its own caller (writeRefusal, and deliveryWriter's floor), it is "yes" once
+// a leg of the call has handed back an answer verified as its recipient's own
+// (deliveryMark), whatever refused after it: a recipient may have acted.
+// Before that, it is what the leg's own failure says (writeDeliveredMaybe,
+// from relayOriginationError): "yes" when the recipient answered (the Hub
+// marked yes, or its answer was refused for size or refused once verified as
+// the recipient's own) and "unknown" when it may have received it (the Hub
+// marked unknown, an unmarked Hub 5xx, a connection lost or a wait ended after
+// the request was sent, a Hub answer that could not be read, decoded or
+// verified, or that names another sender or correlation). Every other error
+// answer to its caller, one before any leg was sent or answered, carries none.
 const HubDeliveredHeader = "X-SHN-Delivered"
 
 // hubRefusalError is the Hub's own non-2xx answer to POST /route: its status,
@@ -1650,8 +1736,8 @@ type hubRefusalError struct {
 	// its 503 (NotActedHeader), that it refused the leg before acting, because
 	// it does not know this gateway yet or has no room for the envelope;
 	// retryAfter is the Retry-After the Hub
-	// relayed with it, or stated with its own large envelope refusal
-	// (withEnvelopeBudgetWait), in seconds.
+	// relayed with it, or stated with its own large envelope or not-yet-loaded
+	// refusal (withHubWait), in seconds.
 	notActed   bool
 	retryAfter int
 	// leg is the transaction type the refused POST sent: its row's recipient
@@ -1679,21 +1765,32 @@ func (e *hubRefusalError) legNotTaken() bool {
 	return e.fromHub && e.status == http.StatusUnprocessableEntity && e.delivered == ""
 }
 
-// answerLostError is a leg the recipient answered whose answer this gateway
-// could not accept: a response leg that failed verification or decryption, a
-// frame it could not decode, or a frame declaring another contract line than
-// the leg was routed at. The recipient received the request and may have
-// acted on it, so it is reported as such — never as a routing
-// failure the caller might blindly resend.
+// answerLostError is a Hub answer to a sent leg that this gateway could not
+// accept: one it could not read or decode as an envelope, a response leg that
+// failed verification or decryption, a frame it could not decode, or a frame
+// declaring another contract line than the leg was routed at. The recipient
+// may have received the request and acted on it (verified says whether it
+// answered), so it is reported as such — never as a routing failure the
+// caller might blindly resend.
 //
 // rule is the network rule the refusal is recorded under; empty is integrity.
 //
 // tooLarge is the Hub's answer over the limit this gateway reads: the
 // recipient answered, and its answer is refused for size, never read cut
 // short (writeAnswerTooLarge).
+//
+// verified says the answer was refused after its envelope decoded, its
+// response token passed verification (VerifyBound, against the envelope's
+// stated sender), and that sender is the recipient on the leg's correlation:
+// it is the recipient's own answer, so the recipient answered. Without it
+// (the Hub's answer could not be read, was not an envelope, its token failed,
+// or it names another sender or correlation), something in front of the
+// recipient may have written it, so the recipient may have received the
+// request, no more (relayOriginationError).
 type answerLostError struct {
 	cause, rule string
 	tooLarge    bool
+	verified    bool
 }
 
 func (e *answerLostError) Error() string { return e.cause }
@@ -1857,9 +1954,11 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	if resp.StatusCode == http.StatusForbidden {
 		return shnsdk.Token{}, false, TokenDenied, errAuthorizationDenied
 	}
-	// The Framework never answers 503 or 504 itself: the proxy in front of it
-	// (a service mesh sidecar, a load balancer) had no Framework to reach. Not
-	// retried: the request reached that proxy.
+	// A 503 or 504 is no decision: the proxy in front of the Framework (a
+	// service mesh sidecar, a load balancer) had no Framework to reach, or a
+	// Framework instance that has not yet read the network's membership
+	// refused before deciding (503 "registry not yet loaded", its only 503).
+	// Not retried: the request reached that proxy or instance.
 	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
 		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
 	}
@@ -1938,7 +2037,7 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		g.diagnosticHubRefusal(ctx, resp, respBody)
-		return shnsdk.Envelope{}, withEnvelopeBudgetWait(withNotActed(hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader)), resp.Header), resp.Header)
+		return shnsdk.Envelope{}, withHubWait(withNotActed(hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader)), resp.Header), resp.Header)
 	}
 	env, err := shnsdk.DecodeEnvelope(respBody)
 	if err != nil {
@@ -1953,6 +2052,15 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 const (
 	hubReasonEnvelopeBudget  = "large envelope budget exhausted"
 	envelopeBudgetRetryAfter = 5
+)
+
+// hubReasonNotYetLoaded is the Hub's refusal of every leg while an instance
+// has not yet read the network's membership once since it started, and
+// notYetLoadedRetryAfter the wait, in seconds, when its Retry-After cannot be
+// read: the Hub's own (the registrar poll interval).
+const (
+	hubReasonNotYetLoaded  = "registry not yet loaded"
+	notYetLoadedRetryAfter = 3
 )
 
 // hubRedirectError is a POST the Hub answered with a redirect, which is not
@@ -1993,14 +2101,20 @@ func withNotActed(e *hubRefusalError, h http.Header) *hubRefusalError {
 	return e
 }
 
-// withEnvelopeBudgetWait carries the wait the Hub states when its budget for
-// large envelopes refused this one: nothing was recorded or forwarded, so the
-// caller is told when to send it again.
-func withEnvelopeBudgetWait(e *hubRefusalError, h http.Header) *hubRefusalError {
-	if !e.fromHub || e.status != http.StatusServiceUnavailable || e.delivered != "" || e.reason != hubReasonEnvelopeBudget {
+// withHubWait carries the wait the Hub states when it refused a leg for a
+// reason that passes, before recording or forwarding anything, so the caller
+// is told when to send it again: its budget for large envelopes had no room
+// for this one, or the instance has not yet read the network's membership.
+func withHubWait(e *hubRefusalError, h http.Header) *hubRefusalError {
+	if !e.fromHub || e.status != http.StatusServiceUnavailable || e.delivered != "" {
 		return e
 	}
-	e.retryAfter = hubRetryAfter(h, envelopeBudgetRetryAfter)
+	switch e.reason {
+	case hubReasonEnvelopeBudget:
+		e.retryAfter = hubRetryAfter(h, envelopeBudgetRetryAfter)
+	case hubReasonNotYetLoaded:
+		e.retryAfter = hubRetryAfter(h, notYetLoadedRetryAfter)
+	}
 	return e
 }
 
@@ -2145,6 +2259,10 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 	g.diagnosticStage(ctx, "leg.response", txType, respPayload, 200, "")
 	g.legMetric(LegOutcomeAnswered)
 	carriedLeg(ctx, txType)
+	// The one point a verified answer is handed back (roundTripInner verified
+	// it): a recipient may have acted, so the call's errors from here are
+	// delivered yes.
+	legAnswered(ctx)
 	return respPayload, nil
 }
 
@@ -2152,6 +2270,11 @@ func (g *Gateway) roundTrip(ctx context.Context, r *http.Request, recipient, req
 // has not declared shnsdk.RequestFrameV1Op: such a recipient drops the
 // operation header and would misread the body.
 var errFramedDTRUnsupported = shnsdk.ErrFramedDTRUnsupported
+
+// errReadPathUndefined refuses a request naming a read's path on a leg whose
+// row defines none, before anything is sent: the recipient would refuse the
+// frame (inboundFrameReadPath).
+var errReadPathUndefined = errors.New("a read path is not defined for this transaction type")
 
 // errRoundAddressUnsupported refuses a next-question round naming its address
 // to a recipient that does not declare v1opsub, before anything is sent.
@@ -2216,7 +2339,23 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if content.Subpath != "" && (content.Operation == "" || !shnsdk.SupportsRequestFrameV1OpSub(recipientHolder.RequestFrames)) {
 		return nil, errRoundAddressUnsupported
 	}
-	if content.Operation != "" || (content.ProfileID != "" && shnsdk.SupportsRequestFrameV1(recipientHolder.RequestFrames)) {
+	// A read's path rides only on the leg that defines it, and always in a
+	// frame of its own: the read has no body, so the frame carries the path
+	// and, when the leg was routed at a line, that line, and nothing else.
+	if content.ReadPath != "" {
+		if spec, _ := legSpecFor(txType); !spec.ReadPath {
+			return nil, errReadPathUndefined
+		}
+		headers := map[string]string{shnsdk.FrameHeaderReadPath: content.ReadPath}
+		if content.ProfileID != "" {
+			headers[shnsdk.FrameHeaderContractVersion] = content.ProfileID
+		}
+		framed, ferr := shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, headers, payload)
+		if ferr != nil {
+			return nil, fmt.Errorf("request frame encode failed")
+		}
+		payload = framed
+	} else if content.Operation != "" || (content.ProfileID != "" && shnsdk.SupportsRequestFrameV1(recipientHolder.RequestFrames)) {
 		// The body's own media type (a CDS Hooks request is application/json),
 		// or the participant's declared FHIR media type when one was carried.
 		frameType := content.Payload.ContentType()
@@ -2419,16 +2558,23 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		respFrame, respOp, correlationID, respEnv.Metadata.Sender, pci, sha256hex(respEnv.Ciphertext)); err != nil {
 		return nil, &answerLostError{cause: "response leg authorization failed"}
 	}
+	// VerifyBound bound the token to the envelope's own stated sender: until
+	// the sender is the recipient and the correlation the leg's, nothing says
+	// the recipient answered, so neither refusal is verified.
 	if respEnv.Metadata.CorrelationID != correlationID {
 		return nil, &answerLostError{cause: "response correlation mismatch"}
 	}
 	if respEnv.Metadata.Sender != recipient {
 		return nil, &answerLostError{cause: "response sender mismatch"}
 	}
+	// The leg's two tokens, as the envelopes carried them, for a caller that
+	// reports its own binding of the patient the answer disclosed
+	// (requesterbinding.go).
+	noteLegTokens(ctx, legTokens{request: tokStr, response: respEnv.Metadata.AuthzToken, responseToken: respTok})
 
 	respPayload, err := shnsdk.Open(respEnv, g.cfg.Identity.EncPub, g.cfg.Identity.EncPriv)
 	if err != nil {
-		return nil, &answerLostError{cause: "response decryption failed"}
+		return nil, &answerLostError{cause: "response decryption failed", verified: true}
 	}
 	// A frame-negotiated recipient (registry messageFrames) seals
 	// EVERY application answer — any status — as a v1 message frame; surface non-2xx
@@ -2447,7 +2593,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if shnsdk.IsFramed(respPayload) {
 		hdr, body, ferr := shnsdk.DecodeHTTPFrame(respPayload)
 		if ferr != nil {
-			return nil, &answerLostError{cause: "response frame decode failed"}
+			return nil, &answerLostError{cause: "response frame decode failed", verified: true}
 		}
 		if hdr.Status/100 != 2 {
 			return nil, &RelayError{Status: hdr.Status, Body: body, ContentType: hdr.Headers["Content-Type"], leg: txType}
@@ -2455,7 +2601,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		// A 204 answer has no body to write, so a frame stating 204 with
 		// one says two things and is not read.
 		if hdr.Status == http.StatusNoContent && len(body) > 0 {
-			return nil, &answerLostError{cause: "response frame states 204 No Content and carries a body"}
+			return nil, &answerLostError{cause: "response frame states 204 No Content and carries a body", verified: true}
 		}
 		// Version-stamp verification: a 2xx framed answer
 		// declaring a DIFFERENT contract line than this leg routed is rejected
@@ -2474,7 +2620,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		if expected := content.ProfileID; expected != "" {
 			if stamped := hdr.Headers[shnsdk.FrameHeaderContractVersion]; stamped != "" && stamped != expected {
 				if g.cfg.RequireSharedLine {
-					return nil, &answerLostError{cause: fmt.Sprintf("response contract version mismatch: frame declares %s, leg routed %s", stamped, expected), rule: RefusalRouting}
+					return nil, &answerLostError{cause: fmt.Sprintf("response contract version mismatch: frame declares %s, leg routed %s", stamped, expected), rule: RefusalRouting, verified: true}
 				}
 				g.noteLineCarried(ctx, LineCarriedAnswer, ObserverEvent{
 					Direction: "originate", LegType: txType, CorrelationID: correlationID, Counterpart: recipient,
@@ -2938,7 +3084,7 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		}
 		callStart := g.exchangeClock()
 		askCtx, req, reqProfile := validateRequestAsking(callCtx, resourceJSON, profile)
-		res, err := lane.V.Validate(askCtx, req, reqProfile)
+		res, err := validateAt(askCtx, lane.V, req, lane.Line, reqProfile)
 		took := g.exchangeClock().Sub(callStart)
 		g.validatorMetric(lane.Line, ValidatorLaneRouting, took)
 		spent += took
@@ -3009,7 +3155,9 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 			}
 			continue
 		}
-		if !answered || r.verdict == VerdictDeeper && bestVerdict != VerdictDeeper {
+		// The line that decides is the one whose reading is closest to valid:
+		// a terminology gap, then a deeper rule, then a structural defect.
+		if !answered || answeredRank(r.verdict) > answeredRank(bestVerdict) {
 			best, bestLine, bestVerdict, bestUnresolved, answered = r.res, r.lane.Line, r.verdict, r.unresolved, true
 		}
 	}
@@ -3106,6 +3254,9 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 		ValidatorMs:   spent.Milliseconds(),
 		// The profiles the line that decided could not check.
 		UnresolvedProfiles: unresolvedProfileNames(bestUnresolved),
+		Verdict:            uncheckedVerdict(bestVerdict),
+		// The code systems it could not check, for a terminology gap.
+		UncheckedCodeSystems: uncheckedSystemsOf(bestVerdict, best, resourceJSON, bestLine, profile, verdictExcuse(fc, excuse)),
 	})
 	if decision == Record {
 		return govResult{}
@@ -3179,6 +3330,9 @@ func (g *Gateway) validateFHIRPayerIngress(ctx context.Context, resourceJSON []b
 // a line whose profile leaves a part unconstrained does not judge that part.
 func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJSON []byte, line, contract, profile string, payers []shnsdk.PayerIdentifier) (int, string) {
 	mod := g.conformanceFor(payers)
+	if profile == "" {
+		profile = undeclaredAnswerProfile(mod, contract, resourceJSON, line, findingContextFrom(ctx).LegType)
+	}
 	groups := answerCandidateGroups(contract, resourceJSON)
 	if groups == nil {
 		groups = [][]string{nil}
@@ -3205,6 +3359,27 @@ func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJ
 		}
 	}
 	return 0, ""
+}
+
+// undeclaredAnswerProfile is the profile a payer's answer that declares none
+// is judged against (owner decision D47): at structural and strict, its line's
+// own profile for what it is (answerLineProfile), which every candidate line's
+// lane resolves at its own version. "" at none and observe, for an answer that
+// declares a profile, and where its workstream names none: the answer is then
+// judged as before, against what it declares or its base definition.
+func undeclaredAnswerProfile(mod conformanceModule, contract string, payload []byte, line, leg string) string {
+	if level := mod.Level(); level != EnforcementStructural && level != EnforcementStrict {
+		return ""
+	}
+	var head struct {
+		Meta struct {
+			Profile []string `json:"profile"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(payload, &head) != nil || len(head.Meta.Profile) > 0 {
+		return ""
+	}
+	return answerLineProfile(contract, payload, line, leg)
 }
 
 // candidateLanes is the ordered set of lines a payer's answer is certified against:
@@ -3954,7 +4129,44 @@ type (
 	declaredSetKey    struct{}
 	frameOperationKey struct{}
 	frameSubpathKey   struct{}
+	frameReadPathKey  struct{}
 )
+
+// withRequestFrameReadPath tags ctx with the readPath value an inbound
+// request frame carries, as it came. The leg that defines the header
+// (legSpec.ReadPath) reads and parses it; nothing else does.
+func withRequestFrameReadPath(ctx context.Context, v string) context.Context {
+	return context.WithValue(ctx, frameReadPathKey{}, v)
+}
+
+// requestFrameReadPath returns the readPath value the inbound request frame
+// carries, and whether it carries one.
+func requestFrameReadPath(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(frameReadPathKey{}).(string)
+	return v, ok
+}
+
+// inboundFrameReadPath reads the readPath header of an inbound request frame,
+// as it came, and whether the frame carries one. The header is defined only
+// for a leg whose catalog row says its request frame carries a read's path
+// (legSpec.ReadPath): a frame that names one on any other leg is refused
+// (400), as a frame naming an operation on a leg that defines none is
+// (inboundFrameOperation). Whether the path is one the leg reads is the leg's
+// decision. A payload that is not a frame carries none.
+func inboundFrameReadPath(legType string, payload []byte) (string, bool, int, string) {
+	if !shnsdk.IsFramed(payload) {
+		return "", false, 0, ""
+	}
+	hdr, _, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		return "", false, http.StatusBadRequest, "request frame decode failed"
+	}
+	v, ok := hdr.Headers[shnsdk.FrameHeaderReadPath]
+	if spec, _ := legSpecFor(legType); ok && !spec.ReadPath {
+		return "", false, http.StatusBadRequest, "readPath header is not defined for this transaction type"
+	}
+	return v, ok, 0, ""
+}
 
 // withRequestFrameSubpath tags ctx with the operationSubpath value an inbound
 // request frame carries, as it came. The leg that defines the header reads and

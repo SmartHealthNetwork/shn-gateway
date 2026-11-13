@@ -61,6 +61,11 @@ type paGatewayState struct {
 	// provider whose participant sets one (Config.ProviderCDexTaskURL); nil
 	// otherwise, when the payer's attachment request is refused as routing.
 	cdexTask *nativeResponder
+	// cdexRead is how the provider's gateway reads a Task below that
+	// endpoint for a payer, on a provider whose participant sets the read
+	// scope (Config.ProviderCDexReadScope); nil otherwise, when the payer's
+	// read is refused as routing.
+	cdexRead *cdexReadState
 	// addressKey is a payer gateway's DTR adaptive-address tag key, derived
 	// from its identity signing key (dtraddress.DeriveKey); zero on any other
 	// role, when no address is tagged and none verifies. Its bytes never
@@ -89,6 +94,11 @@ func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
 	if url := strings.TrimSpace(g.cfg.ProviderCDexTaskURL); url != "" && g.cfg.Role == "provider" {
 		st.cdexTask = NewNativeResponder(g.cfg.ProviderCDexTaskClient, url, g.cfg.Clock, WithUpstreamParty("provider"),
 			WithBackendDeadline(cdexTaskDeadline))
+		read, err := newCDexReadState(g.cfg)
+		if err != nil {
+			return nil, err
+		}
+		st.cdexRead = read
 	}
 	if err := g.installEnrichment(st); err != nil {
 		return nil, err

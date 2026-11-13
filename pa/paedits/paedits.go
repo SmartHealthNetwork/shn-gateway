@@ -1,7 +1,8 @@
 // Package paedits holds the Prior Authorization workstream's registered relay
-// edits (E-01 … E-14): the only changes a gateway may make to a participant's
-// message it relays on a PA leg, and the transform it makes to a PAS message
-// it built itself. The gateway gathers them into its registry through the PA
+// edits (E-01 … E-14 and E-16, apart from the retired E-03; E-15 is not
+// used): the only changes a gateway may make to a participant's message it
+// relays on a PA leg, and the transform it makes to a PAS message it built
+// itself. The gateway gathers them into its registry through the PA
 // workstream; a reader of recorded exchanges names an edit by them
 // (relay.EditName) without importing the gateway engine.
 package paedits
@@ -45,39 +46,6 @@ func Rows() []relay.Edit {
 			Disclosure: "When the provider has opted in to enrichment and a CDS Hooks request leaves out a prefetch value the " +
 				"payer's service asks for, the provider's gateway adds it from the provider's own system: the records exactly as that system holds them, in a " +
 				"searchset the gateway writes, never an address in that system; values the request carries are sent unchanged.",
-		},
-		{
-			ID:   relay.EditPayorEdgeRestamp,
-			Name: "payor-edge-restamp",
-			Legs: []string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch",
-				"pas-claim", "pas-claim-inquire", "pas-claim-update"},
-			Role:      relay.RoleRecipient,
-			Direction: relay.DirectionRequest,
-			Paths: []string{
-				"Coverage.payor[i].identifier.system",
-				"Coverage.payor[i].identifier.value",
-				"Organization.identifier[j].system",
-				"Organization.identifier[j].value",
-				"Claim.insurer (resolved the same way as Coverage.payor)",
-			},
-			Kind: relay.EditKindReplaceValue,
-			Precondition: "Only when the payer gateway's identity mapping is configured (it is off by default), " +
-				"and only string tokens that differ from the mapped identity. Every payor of a Coverage counts " +
-				"(Coverage.payor carries no ordering meaning): each payor element naming one of the payer's own " +
-				"identities is mapped, and no other; a Coverage none of whose payors names one is refused as " +
-				"another payer's, never skipped (judged by payor[0], as is a reference that resolves to no " +
-				"resource or to several); Coverages naming different payers are refused. The referenced Organization, found in the Coverage's contained resources, the Bundle, or " +
-				"the sibling resources of the Parameters or prefetch, is named by the first of its identifiers, in " +
-				"document order, that is one of the payer's own network identities, wherever it sits among them " +
-				"(only that identifier is mapped); when none is, by its first identifier with a non-empty system " +
-				"and value, which is refused as another payer's. A claim's insurer is resolved the same way (an unresolved or " +
-				"ambiguous reference is refused) and is mapped only when it names this payer; an insurer naming " +
-				"another identity is left as sent.",
-			Authority: "The payer gateway's configured mapping from its network identity to the identity " +
-				"its payer's system expects.",
-			Disclosure: "When a payer maps its network identity to the identity its own system expects, the payer's " +
-				"gateway replaces the matching payer identifier values in each Coverage (and a claim's insurer) " +
-				"and changes nothing else.",
 		},
 		{
 			ID:        relay.EditDTRCoverageObtain,
@@ -339,6 +307,30 @@ func Rows() []relay.Edit {
 				"own Patient, or the member in another form), the gateway changes only that reference, to the Claim's " +
 				"patient, after checking the report is about that patient. Every other " +
 				"byte of the report is the facility's, the display, identifier and type of its subject included.",
+		},
+		{
+			ID:           relay.EditCDexTaskLocationRekey,
+			Name:         "cdex-task-location-rekey",
+			Legs:         []string{"cdex-attachment-request"},
+			Role:         relay.RoleRequester,
+			Direction:    relay.DirectionResponse,
+			Kind:         relay.EditKindSetHeader,
+			Header:       "Location",
+			HeaderInputs: []string{relay.TaskLocationInputBase, relay.TaskLocationInputTail},
+			Precondition: "Always (not an opt-in), on a 2xx answer to a payer's attachment-request Task that the payer's " +
+				"gateway relays to its own system, when the provider's gateway declares that it frames the Task's location " +
+				"(the cdexloc request frame) and framed it for this answer: the tail of the Location the provider's system " +
+				"answered, Task/{id} or Task/{id}/_history/{vid}, framed only when that Location lies under the provider " +
+				"gateway's own Task endpoint by the segment-boundary match. A provider whose gateway does not declare it, " +
+				"an answer with no tail framed, or a tail that cannot be read as a Task id with an optional version, is " +
+				"carried without a Location and the exchange records why.",
+			Authority: "The payer gateway's own base for the provider the Task was routed to, rebuilt from its ingress base " +
+				"and that provider's network identity, then the tail the provider's gateway framed from its own system's " +
+				"Location, read as a Task id and an optional version id. Nothing is stored per request.",
+			Disclosure: "When a payer's system creates an attachment-request Task, the payer's gateway answers it with a " +
+				"Location naming the Task at the gateway's base for the provider the Task went to, as a FHIR create's " +
+				"answer names the created resource. The answer names the edit in a header. The body is the provider's, " +
+				"unchanged, so its ETag is kept.",
 		},
 	}
 }

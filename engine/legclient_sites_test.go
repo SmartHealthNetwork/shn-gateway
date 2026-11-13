@@ -89,6 +89,12 @@ func post(gw *Gateway, path, extra string) *http.Request {
 	return withLegsTracked(httptest.NewRequest(http.MethodPost, path, strings.NewReader(testRouteBody(gw, path, extra))))
 }
 
+// markedPost is post's request with the delivery mark, and w with it, as the
+// mounted route gives both (mounted).
+func markedPost(w http.ResponseWriter, gw *Gateway, path, extra string) (http.ResponseWriter, *http.Request) {
+	return mounted(w, post(gw, path, extra))
+}
+
 // legSiteRow is one module 1 send site with its leg refused by the Hub: how to
 // reach it, and what the participant's caller is then told.
 type legSiteRow struct {
@@ -105,14 +111,14 @@ var legSiteRows = []legSiteRow{
 	{"module1_originate.go:handleScenario", "coverage-eligibility", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		env := newInProcessExchange(t)
 		f := fail(env.originator)
-		env.originator.handleScenario(rec, post(env.originator, "/scenario/uc01", `"branch":"covered"`))
+		env.originator.handleScenario(markedPost(rec, env.originator, "/scenario/uc01", `"branch":"covered"`))
 		return f
 	}},
 	{"module1_originate.go:handleUC03Bridge", "pas-claim", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-BRIDGE-DEMO", birthDate: "1983-03-11", familyName: "Solberg-BridgeDemo", pendedItem: "operative-diagnostic-report"})
 		routeIdentityTo(t, &gw.cfg, BridgeDemoPayerID)
 		f := fail(gw)
-		gw.handleUC03(rec, post(gw, "/scenario/uc03", `"branch":"bridge-demo"`))
+		gw.handleUC03(markedPost(rec, gw, "/scenario/uc03", `"branch":"bridge-demo"`))
 		return f
 	}},
 	uc04Row("module1_originate.go:runCRDThenDTROrder", "crd-order-select"),
@@ -125,7 +131,7 @@ var legSiteRows = []legSiteRow{
 	{"module1_originate.go:handleUC07HCPCS", "pas-claim", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-UC07HCPCS", birthDate: "1977-01-30", familyName: "Nakamura", pendedItem: "operative-diagnostic-report"})
 		f := fail(gw)
-		gw.handleUC07HCPCS(rec, post(gw, "/scenario/uc07hcpcs", ""))
+		gw.handleUC07HCPCS(markedPost(rec, gw, "/scenario/uc07hcpcs", ""))
 		return f
 	}},
 	{"module1_originate.go:handleUC08", "pas-claim", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
@@ -135,14 +141,14 @@ var legSiteRows = []legSiteRow{
 		stub.pasDenialRationale = "not medically necessary"
 		stub.pasLine = highestLine(contractLineSet(gw.declaredContractVersions(), "pa.pas"))
 		f := fail(gw)
-		gw.handleUC08(rec, post(gw, "/scenario/uc08", ""))
+		gw.handleUC08(markedPost(rec, gw, "/scenario/uc08", ""))
 		return f
 	}},
 	{"module1_originate.go:originateNoPACRD", "crd-order-select", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		env := newInProcessExchange(t)
 		declareOriginationProfile(env.originator, "demo")
 		f := fail(env.originator)
-		env.originator.handleUC02(rec, post(env.originator, "/scenario/uc02", ""))
+		env.originator.handleUC02(markedPost(rec, env.originator, "/scenario/uc02", ""))
 		return f
 	}},
 	homeOxygenRow("module1_originate_homeoxygen.go:runCRDDispatch", "crd-order-dispatch"),
@@ -151,7 +157,8 @@ var legSiteRows = []legSiteRow{
 	{"module1_originate_resume.go:scenarioToPend", "pas-claim", func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		gw, _ := uc06Fixture(t)
 		f := fail(gw)
-		if _, ok := gw.scenarioToPend(rec, post(gw, "/scenario/uc06", ""), "uc06", "MBR-UC06"); ok {
+		mw, mr := markedPost(rec, gw, "/scenario/uc06", "")
+		if _, ok := gw.scenarioToPend(mw, mr, "uc06", "MBR-UC06"); ok {
 			t.Fatal("the pend completed with its pas-claim leg refused")
 		}
 		return f
@@ -160,7 +167,8 @@ var legSiteRows = []legSiteRow{
 		gw, _ := uc06Fixture(t)
 		st := pendFor(t, gw, "uc06", "MBR-UC06")
 		f := fail(gw)
-		if gw.completeClinician(rec, post(gw, "/scenario/uc06/complete", ""), st, "42") {
+		mw, mr := markedPost(rec, gw, "/scenario/uc06/complete", "")
+		if gw.completeClinician(mw, mr, st, "42") {
 			t.Fatal("the resume completed with its pas-claim-update leg refused")
 		}
 		return f
@@ -212,7 +220,7 @@ func uc04Row(site, leg string) legSiteRow {
 	return legSiteRow{site, leg, func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-UC04", birthDate: "1982-11-03", familyName: "Chen", pendedItem: "operative-diagnostic-report"})
 		f := fail(gw)
-		gw.handleUC04(rec, post(gw, "/scenario/uc04", ""))
+		gw.handleUC04(markedPost(rec, gw, "/scenario/uc04", ""))
 		return f
 	}}
 }
@@ -222,7 +230,7 @@ func uc05Row(leg string) legSiteRow {
 		gw, _ := newPendResumeFixture(t, pendFixtureOpts{member: "MBR-UC05", birthDate: "1968-03-12", familyName: "Johansson",
 			pendedItem: "operative-diagnostic-report", extraRoles: map[string]string{"facility": "metro-spine"}})
 		f := fail(gw)
-		gw.handleUC05(rec, post(gw, "/scenario/uc05", ""))
+		gw.handleUC05(markedPost(rec, gw, "/scenario/uc05", ""))
 		return f
 	}}
 }
@@ -233,7 +241,8 @@ func uc07Row(leg string) legSiteRow {
 			pendedItem: "patient-reported-functional-status", extraRoles: map[string]string{"phg": "phg"}})
 		st := pendFor(t, gw, "uc07", "MBR-UC07")
 		f := fail(gw)
-		if gw.completePatient(rec, post(gw, "/scenario/uc07/complete", ""), st, "42") {
+		mw, mr := markedPost(rec, gw, "/scenario/uc07/complete", "")
+		if gw.completePatient(mw, mr, st, "42") {
 			t.Fatalf("the resume completed with its %s leg refused", leg)
 		}
 		return f
@@ -244,7 +253,7 @@ func homeOxygenRow(site, leg string) legSiteRow {
 	return legSiteRow{site, leg, func(t *testing.T, rec *httptest.ResponseRecorder, fail func(*Gateway) *legFault) *legFault {
 		fix := newMBROXDispatchFixture(t)
 		f := fail(fix.gw)
-		fix.gw.handleHomeOxygen(rec, post(fix.gw, "/scenario/homeoxygen", ""))
+		fix.gw.handleHomeOxygen(markedPost(rec, fix.gw, "/scenario/homeoxygen", ""))
 		return f
 	}}
 }
@@ -253,7 +262,8 @@ func homeOxygenRow(site, leg string) legSiteRow {
 func pendFor(t *testing.T, gw *Gateway, scenario, member string) pendState {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	st, ok := gw.scenarioToPend(rec, post(gw, "/scenario/"+scenario, ""), scenario, member)
+	mw, mr := markedPost(rec, gw, "/scenario/"+scenario, "")
+	st, ok := gw.scenarioToPend(mw, mr, scenario, member)
 	if !ok {
 		t.Fatalf("scenarioToPend(%s): %d %s", scenario, rec.Code, rec.Body)
 	}

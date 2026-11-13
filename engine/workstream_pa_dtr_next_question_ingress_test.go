@@ -921,8 +921,11 @@ func TestDTRNextQuestionIngress_TheRoundsAnswerIsJudgedAndTolerated(t *testing.T
 				if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "forms/a") || x.Rule != RefusalConformance {
 					t.Fatalf("answer %d %s recorded %q, want the 502 conformance refusal and no answer", rec.Code, rec.Body, x.Rule)
 				}
-			} else if x.Outcome == ExchangeRefused {
-				t.Fatalf("a relayed answer recorded as refused: %+v", x)
+				// The payer answered the round, with an answer verified as its own:
+				// delivered yes.
+				wantDeliveredOutcome(t, rec, http.StatusBadGateway, deliveredYes, "ingress validation failed")
+			} else if x.Outcome == ExchangeRefused || len(rec.Header().Values(HubDeliveredHeader)) > 0 {
+				t.Fatalf("a relayed answer recorded as refused or stating delivery (%q): %+v", rec.Header().Get(HubDeliveredHeader), x)
 			}
 		})
 	}

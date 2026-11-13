@@ -51,7 +51,8 @@ func configuredForTest() http.Header {
 }
 
 // sendConfigured sends a GET to url through c carrying the configured headers,
-// a bearer, and one header nobody configured.
+// a bearer, and one header nobody configured, which a hop to another origin
+// drops too (crossOriginHeaders).
 func sendConfigured(t *testing.T, c *http.Client, url string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
@@ -59,7 +60,7 @@ func sendConfigured(t *testing.T, c *http.Client, url string) {
 		req.Header[k] = append([]string(nil), v...)
 	}
 	req.Header.Set("Authorization", "Bearer AT-CONFIGURED")
-	req.Header.Set("X-Not-Configured", "kept")
+	req.Header.Set("X-Not-Configured", "set-for-the-origin")
 	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -89,8 +90,9 @@ func configuredClients() map[string]func() *http.Client {
 // A hop to another origin carries none of the headers the deployment
 // configured for the participant's system, and no Authorization, whatever the
 // configured names are: the configured set decides, not a list of known
-// credential names. A header nobody configured is net/http's to carry, as
-// before. The other origin's answer is the answer.
+// credential names. A header nobody configured is not carried either: only
+// the headers crossOriginHeaders names are. The other origin's answer is the
+// answer.
 func TestParticipantClientWith_ACrossOriginHopCarriesNoConfiguredHeader(t *testing.T) {
 	for name, mk := range configuredClients() {
 		t.Run(name, func(t *testing.T) {
@@ -106,8 +108,8 @@ func TestParticipantClientWith_ACrossOriginHopCarriesNoConfiguredHeader(t *testi
 					t.Errorf("the other origin received %s %q, want none", k, v)
 				}
 			}
-			if got[0].Get("X-Not-Configured") != "kept" {
-				t.Errorf("a header nobody configured was dropped: %q", got[0].Get("X-Not-Configured"))
+			if v, ok := got[0]["X-Not-Configured"]; ok {
+				t.Errorf("the other origin received a header nobody configured, %q", v)
 			}
 			first := home.requests()[0]
 			if first.Get("X-Partner-Key") != "OPAQUE-PARTNER-KEY" || first.Get("X-Route-Tenant") != "tenant-7" || first.Get("Authorization") != "Bearer AT-CONFIGURED" {
@@ -118,7 +120,8 @@ func TestParticipantClientWith_ACrossOriginHopCarriesNoConfiguredHeader(t *testi
 }
 
 // A chain that stays within the origin (A to A to A) keeps every configured
-// header and the bearer on every hop: they were configured for that origin.
+// header, the bearer and every other header on every hop: they were set for
+// that origin.
 func TestParticipantClientWith_AChainWithinTheOriginKeepsTheConfiguredHeaders(t *testing.T) {
 	for name, mk := range configuredClients() {
 		t.Run(name, func(t *testing.T) {
@@ -139,8 +142,8 @@ func TestParticipantClientWith_AChainWithinTheOriginKeepsTheConfiguredHeaders(t 
 				t.Fatalf("the participant's origin received %d requests, want 3", len(got))
 			}
 			for i, h := range got {
-				if h.Get("X-Partner-Key") != "OPAQUE-PARTNER-KEY" || h.Get("X-Route-Tenant") != "tenant-7" || h.Get("Authorization") != "Bearer AT-CONFIGURED" {
-					t.Errorf("hop %d carried %v, want every configured header and the bearer", i, h)
+				if h.Get("X-Partner-Key") != "OPAQUE-PARTNER-KEY" || h.Get("X-Route-Tenant") != "tenant-7" || h.Get("Authorization") != "Bearer AT-CONFIGURED" || h.Get("X-Not-Configured") != "set-for-the-origin" {
+					t.Errorf("hop %d carried %v, want every configured header, the bearer and the header nobody configured", i, h)
 				}
 			}
 		})
@@ -171,7 +174,7 @@ func TestParticipantClientWith_AChainBackToTheOriginCarriesNoConfiguredHeader(t 
 			if len(got) != 2 || len(away) != 1 {
 				t.Fatalf("requests: origin %d, other %d; want 2 and 1", len(got), len(away))
 			}
-			if got[0].Get("X-Partner-Key") != "OPAQUE-PARTNER-KEY" || got[0].Get("Authorization") != "Bearer AT-CONFIGURED" {
+			if got[0].Get("X-Partner-Key") != "OPAQUE-PARTNER-KEY" || got[0].Get("Authorization") != "Bearer AT-CONFIGURED" || got[0].Get("X-Not-Configured") == "" {
 				t.Errorf("the first request carried %v, want every configured header and the bearer", got[0])
 			}
 			for who, h := range map[string]http.Header{"the other origin": away[0], "the hop back to the origin": got[1]} {
@@ -180,8 +183,8 @@ func TestParticipantClientWith_AChainBackToTheOriginCarriesNoConfiguredHeader(t 
 						t.Errorf("%s received %s %q, want none", who, k, v)
 					}
 				}
-				if h.Get("X-Not-Configured") != "kept" {
-					t.Errorf("%s lost a header nobody configured", who)
+				if v, ok := h["X-Not-Configured"]; ok {
+					t.Errorf("%s received a header nobody configured, %q", who, v)
 				}
 			}
 		})

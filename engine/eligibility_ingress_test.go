@@ -389,6 +389,7 @@ func TestEligibilityIngress_AnswerRepeatingAMemberIsRefused(t *testing.T) {
 				t.Fatalf("answer %d %s, want 502 naming the repeated member", rec.Code, rec.Body)
 			}
 			wantRefusal(t, x, http.StatusBadGateway, RefusedByProviderGateway, RefusalIntegrity)
+			wantAnsweredRefusalYes(t, rec)
 		})
 	}
 }
@@ -519,11 +520,13 @@ func TestEligibilityIngress_AnswerValidatorOutageIsTheGatewaysOwn(t *testing.T) 
 				if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "validator unavailable") {
 					t.Fatalf("answer %d %s, want 500 validator unavailable", rec.Code, rec.Body)
 				}
+				wantAnsweredRefusalYes(t, rec)
 				return
 			}
 			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) {
 				t.Fatalf("answer %d %s, want the payer's answer relayed", rec.Code, rec.Body)
 			}
+			wantNoDeliveryStated(t, rec)
 		})
 	}
 }

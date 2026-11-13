@@ -15,7 +15,7 @@ import (
 // (it resolves to a pci through the payer's own system, the unknown-member setting applying), a
 // body read one way only (a repeated member name), a request whose subject
 // cannot be read, and routing to the participant's own system (the operation,
-// the version route, the payer identity mapping). Each refuses at none,
+// the version route). Each refuses at none,
 // observe and strict with the same status and body, records no content
 // finding, and sends nothing to the participant's system.
 
@@ -93,8 +93,6 @@ func TestLevelPayerDTR_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 			status: http.StatusBadRequest, msg: "parse questionnaire-package parameters failed"},
 		"duplicate key": {leg: "dtr-questionnaire-fetch", operation: pkg, body: dtrPackage(resourceParam("coverage", strings.Replace(dtrCoverage("cov-1", dtrFrameMember), `"status":"active"`, `"status":"active","status":"active"`, 1))),
 			status: http.StatusBadRequest, msg: "parse questionnaire-package parameters failed"},
-		"coverage parameter not a Coverage, with payer identity mapping": {leg: "dtr-questionnaire-fetch", operation: pkg, body: dtrPackage(own, resourceParam("coverage", `{"resourceType":"Patient","id":"`+dtrFrameMember+`"}`)),
-			opts: withIdentityMapping(), status: http.StatusBadRequest, msg: "questionnaire-package coverage parameter is not a Coverage"},
 		"coverage parameter that cannot be read": {leg: "dtr-questionnaire-fetch", operation: pkg, body: dtrPackage(own, `{"name":"coverage","resource":5}`),
 			status: http.StatusBadRequest, msg: "questionnaire-package coverage parameter is not a Coverage"},
 		"no patient named at all": {leg: "dtr-questionnaire-fetch", operation: pkg, body: dtrPackage(resourceParam("coverage", `{"resourceType":"Coverage","id":"cov-2","status":"active"}`)),
@@ -116,8 +114,6 @@ func TestLevelPayerPAS_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 	// wrong type elsewhere in its entries is its own shape:
 	// TestLevelPayerPASUpdate_WrongTypedContent.)
 	updateUnreadable := updateBundleSetting(t, "Claim", "related", 5)
-	cms := shnsdk.PayerIdentifier{System: "urn:oid:2.16.840.1.113883.6.300", Value: "00001"}
-	backend := shnsdk.PayerIdentifier{System: "urn:example:payer-backend", Value: "BACKEND-7"}
 	runPayerNetworkRows(t, map[string]payerNetworkRow{
 		"submit: unreadable": {leg: "pas-claim", body: []byte(`{`),
 			status: http.StatusBadRequest, msg: "parse claim bundle failed"},
@@ -131,8 +127,6 @@ func TestLevelPayerPAS_NetworkRulesRefuseAtEveryLevel(t *testing.T) {
 			status: http.StatusBadRequest, msg: "unknown member"},
 		"update Claim.related unreadable": {leg: "pas-claim-update", body: updateUnreadable,
 			status: http.StatusBadRequest, msg: "parse update Claim entry failed"},
-		"submit: foreign payer": {leg: "pas-claim", body: []byte(pasIngressBundle("99999", "")), opts: []NativeOption{WithPayorEdgeIdentity(cms, backend)},
-			status: http.StatusBadRequest, msg: "does not match this gateway's own payer identit"},
 		"submit: version route": {leg: "pas-claim", body: []byte(base), opts: []NativeOption{WithDeclaredContractVersions([]string{"pa.crd@2.0"}), WithRequireSharedLine(true)},
 			status: http.StatusUnprocessableEntity, msg: "no shared contract line for pa.pas"},
 		"inquiry Claim naming no patient": {leg: "pas-claim-inquire", body: bytes.Replace(inquiryBundle("MBR-COVERED", "", "TRN-1", "72148"), []byte(`"patient":{"reference":"Patient/MBR-COVERED"},`), nil, 1),

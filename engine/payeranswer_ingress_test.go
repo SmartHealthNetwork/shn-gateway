@@ -34,6 +34,7 @@ const (
 	scriptNoResource // the validator answered without reading the payload
 	scriptHang       // the validator answers only when its context ends
 	scriptNoVerdict  // the validator stopped without a verdict
+	scriptUnchecked  // only a code the lane could not check (reasonCodeGap)
 )
 
 // laneCall is one call a scripted lane received.
@@ -98,6 +99,9 @@ func scriptedResult(v scriptedVerdict) (shnsdk.Result, error) {
 		return invalid(errIssue("", nil, hapi0992)), nil
 	case scriptNoVerdict:
 		return invalid(errIssue("", nil, hapi0389)), nil
+	case scriptUnchecked:
+		gap := reasonCodeGap("Bundle.entry[0].resource.code")
+		return shnsdk.Result{Issues: []string{gap[0].Diagnostics, gap[1].Diagnostics}, Details: gap}, nil
 	}
 	return shnsdk.Result{Valid: true}, nil
 }

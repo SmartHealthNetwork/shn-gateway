@@ -41,16 +41,6 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 			[]string{"$.fhirServer", "$.fhirAuthorization"}, "remove-member"},
 		{"E-02", "cds-prefetch-obtain", crd, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.prefetch", "$.prefetch.<key>"}, "insert-member"},
-		{"E-03", "payor-edge-restamp",
-			[]string{"crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"},
-			relay.RoleRecipient, relay.DirectionRequest,
-			[]string{
-				"Coverage.payor[i].identifier.system",
-				"Coverage.payor[i].identifier.value",
-				"Organization.identifier[j].system",
-				"Organization.identifier[j].value",
-				"Claim.insurer (resolved the same way as Coverage.payor)",
-			}, "replace-value"},
 		{"E-04", "dtr-coverage-obtain", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"$.parameter"}, "array-append"},
 		{"E-05", "dtr-patient-obtain", []string{"dtr-questionnaire-fetch"}, relay.RoleRequester, relay.DirectionRequest,
@@ -78,6 +68,9 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 				"or its valueBoolean true written back, on any Questionnaire the request carries"}, "replace-value"},
 		{"E-14", "facility-report-subject-rekey", []string{"pas-claim-update"}, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"DiagnosticReport.subject.reference"}, "replace-value"},
+		// A header edit: no path, the header its row names.
+		{"E-16", "cdex-task-location-rekey", []string{"cdex-attachment-request"}, relay.RoleRequester, relay.DirectionResponse,
+			nil, "set-header"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))
@@ -91,6 +84,9 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 		}
 		if e.Precondition == "" || e.Authority == "" || e.Disclosure == "" {
 			t.Errorf("%s: precondition, authority and disclosure are all required", e.ID)
+		}
+		if (e.Kind == relay.EditKindSetHeader) != (e.Header != "" && len(e.HeaderInputs) != 0) {
+			t.Errorf("%s: a header edit names its header and inputs, and only a header edit does", e.ID)
 		}
 		if byID, ok := relayEditByID(e.ID); !ok || byID.Name != e.Name {
 			t.Errorf("%s: lookup failed", e.ID)

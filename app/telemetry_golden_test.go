@@ -289,11 +289,11 @@ func TestEMFMetricCombinations_MON_R47(t *testing.T) {
 	}
 	// The most the exchange record's, conformance and in-flight metrics can
 	// write for one gateway, at today's lists in a release build: the
-	// exchange record's 373 series before the additions, and the additions'
-	// 593 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
+	// exchange record's 404 series before the additions, and the additions'
+	// 609 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
 	// The gateway's other EMF metrics have series of their own.
-	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 373+593 {
-		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 373+593)
+	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 404+609 {
+		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 404+609)
 	}
 }
 

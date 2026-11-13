@@ -504,6 +504,9 @@ func TestLevelCRDIngress_AnswerDuplicateKeyNamesTheMember(t *testing.T) {
 			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), want) {
 				t.Fatalf("answer %d %s, want 502 %q", rec.Code, rec.Body.String(), want)
 			}
+			// Refused after the payer's answer was handed back: delivered yes, on
+			// the CDS Hooks route as problem members after error.
+			wantAnsweredRefusalYes(t, rec)
 		})
 	}
 }

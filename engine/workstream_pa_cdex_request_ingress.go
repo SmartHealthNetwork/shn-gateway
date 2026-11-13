@@ -31,7 +31,10 @@ import (
 //     for Task.for, or two that differ (the leg's authority, D121).
 //
 // The provider's answer is relayed exactly, its headers as on the other
-// carried legs. No Location is added: the base's Task read is a later leg's.
+// carried legs. A 2xx answer gains a Location naming the created Task at this
+// gateway's base for the provider the Task was routed to, at either route,
+// from the tail the provider's gateway framed (E-16, cdexTaskLocated); its body
+// and ETag are the provider's, unchanged.
 //
 // A Task created at a provider's base goes to that provider whatever its
 // Task.owner names; an owner naming an organization the network attests for
@@ -207,11 +210,17 @@ func (g *Gateway) serveCDexRequest(w http.ResponseWriter, r *http.Request, recip
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "the provider's answer can be read two ways: it repeats a member name"})
 		return
 	}
-	g.recordLeg(ex.ID, legProj.Project(child, "answered"))
-	// The provider's own media type, whatever it is, as on the other carried legs.
+	// The provider's own media type, whatever it is, as on the other carried
+	// legs, with the Task's Location at this gateway's base (E-16).
 	ct := writableAnswerMediaType(answerType)
-	g.writeRelayedAnswer(w, stated, ct,
-		relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct),
+	located, err := g.cdexTaskLocated(r.Context(), relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), ct), stated, recipient)
+	if err != nil {
+		g.recordLeg(ex.ID, legProj.Project(child, "error"))
+		refuseCDexTaskLocation(w, r, err)
+		return
+	}
+	g.recordLeg(ex.ID, legProj.Project(child, "answered"))
+	g.writeRelayedAnswer(w, stated, ct, located,
 		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
 }
 
@@ -263,6 +272,10 @@ type cdexProvider struct {
 	Participant string                      `json:"participant"`
 	Base        string                      `json:"base"`
 	Identifiers []shnsdk.ProviderIdentifier `json:"identifiers,omitempty"`
+	// Reads says the provider serves a payer's read and vread of its Task at
+	// this base: its gateway declares the read's leg. Always stated, so an
+	// entry without it is from a gateway that predates the read.
+	Reads bool `json:"reads"`
 }
 
 // cdexProviders lists every registered provider that declares it takes the
@@ -282,7 +295,7 @@ func (g *Gateway) cdexProviders() ([]cdexProvider, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, cdexProvider{Participant: id, Base: base, Identifiers: e.ProviderIDs})
+		out = append(out, cdexProvider{Participant: id, Base: base, Identifiers: e.ProviderIDs, Reads: slices.Contains(e.Legs, legCDexTaskStatus)})
 	}
 	return out, nil
 }
