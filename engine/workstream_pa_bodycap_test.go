@@ -42,6 +42,9 @@ func ingressLimitBody(route string) []byte {
 func TestIngress_ABodyOverTheLimitIs413(t *testing.T) {
 	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
+		if credentialBeforeBody[route] {
+			continue // TestCDexNotify_TheCredentialComesBeforeTheBody
+		}
 		overTheCap := ingressLimitBody(route)
 		atTheCap := overTheCap[:len(overTheCap)-1]
 		for _, level := range allLevels {

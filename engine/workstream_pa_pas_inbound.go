@@ -567,6 +567,11 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// authorization under the same id shares nothing with this one, so the claim
 	// is carried to the payer like any other.
 	g.noteSubjectBinding(r.Context(), "pas-claim", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	// The carried request, judged at the payer's own level before its system
+	// sees it (D47(2)); none and observe carry it unchecked.
+	if !g.carriedRequestAccepted(w, r, legPASClaim, env, tok, answerTok, bundleJSON) {
+		return
+	}
 	capture := &nativeCertificationCapture{}
 	defer func() {
 		if capture.attempted {
@@ -695,10 +700,10 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // build-response-BEFORE-Commit ordering — the update responder DOES carry a
 // Rollback (it acquires a claim via BeginClaimUpdate, like the minimized pas-claim-update leg).
 //
-// F-PB-R8 — NO ingress-$validate of the REQUEST bundle: the conformant Da Vinci amended re-POST is
-// foreign-shaped and preserved unchanged, so
-// SHN preserves bytes + enforces authority/FR-32 here, exactly as handlePASNativeInbound and the DTR
-// near-relay do — NOT a place to "restore parity" with an ingress-$validate.
+// The REQUEST bundle is preserved unchanged: SHN enforces authority/FR-32 here, and judges the
+// carried update at the payer's own conformance level before the payer's system sees it (owner
+// decision D47(2), carriedRequestAccepted), as handlePASNativeInbound does the submission:
+// nothing at none and observe, a refusal at structural and strict only for what that level refuses.
 //
 // Response member-fence (R-7) is NAMESPACE-AWARE, mirror of the conformant submit leg: it runs BY
 // DEFAULT and stands DOWN only when the result is declared foreign by its per-result flag (a real RI
@@ -713,6 +718,10 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 	g.noteSubjectBinding(r.Context(), "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	// The carried update, judged at the payer's own level (D47(2)).
+	if !g.carriedRequestAccepted(w, r, legPASClaimUpdate, env, tok, answerTok, bundleJSON) {
+		return
+	}
 	capture := &nativeCertificationCapture{}
 	defer func() {
 		if capture.attempted {

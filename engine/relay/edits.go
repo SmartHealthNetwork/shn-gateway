@@ -23,6 +23,11 @@ const (
 	// (Edit.HeaderInputs), the core checks the value by the edit's id
 	// (headerVerifiers), and the edit is made only by HeaderEdited.
 	EditKindSetHeader EditKind = "set-header"
+	// EditKindRewriteQuery rewrites one parameter of the query of a request
+	// the gateway forwards to its own participant's system, and changes no
+	// byte of the body: the core checks the rewrite by the edit's id
+	// (queryVerifiers), and the edit is made only by QueryEdited.
+	EditKindRewriteQuery EditKind = "rewrite-query"
 )
 
 // Edit declares one registered edit: the only changes a gateway may make to
@@ -114,6 +119,15 @@ func ValidateEdits(rows []Edit) error {
 		}
 		if e.Kind == EditKindSetHeader {
 			if err := validateHeaderEdit(e); err != nil {
+				return err
+			}
+			continue
+		}
+		if (e.Kind == EditKindRewriteQuery) != slices.Contains(queryEdits, e.ID) {
+			return fmt.Errorf("edit %s: a query edit's row, and only one, is of kind %s", e.ID, EditKindRewriteQuery)
+		}
+		if e.Kind == EditKindRewriteQuery {
+			if err := validateQueryEdit(e); err != nil {
 				return err
 			}
 			continue

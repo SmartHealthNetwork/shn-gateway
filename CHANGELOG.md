@@ -4,6 +4,278 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A provider's CDex Task notifications reach the payer's own endpoint (v1.13.0)
+
+- **Added (provider):** with `PROVIDER_CDEX_SUBSCRIPTION_SCOPE` set, your gateway mounts the
+  notification route your system posts each notification of the HRex Task topic to: `POST
+  [PROVIDER_DAVINCI_INGRESS_BASE_URL]/notify/cdex-task/<payer>/<key id>/<sealed>`, the address
+  your gateway wrote into the payer's Subscription, with the two `channel.header` values it wrote
+  there (`Authorization` and `X-SHN-Channel`). Each handshake, heartbeat and `id-only` event
+  notification is sent to that payer on the leg `cdex-task-signal` (in the evolving tier,
+  naming no patient on either side), as your system posted it, with your FHIR base stated beside
+  it. Your system gets the payer endpoint's own answer, or a refusal. A retry is a new
+  notification, never refused as a replay. Each refusal is a network rule at every conformance
+  level, nothing sent: a missing, repeated or unverified credential or `X-SHN-Channel`, or an
+  address your gateway never writes, a query on it included (`401`, authentication, checked
+  before the body is read, so an unauthenticated body is never read up to the limit); a body that, judged by its
+  structure, is not a notification of the HRex Task topic (`400`, routing); a notification that
+  carries a resource at any place, any object in it but the Bundle and its SubscriptionStatus
+  being a resource (`403`, authority); a `notification-event` part named `additional-context`,
+  which the topic does not declare (`403`, authority); an `http` or `https` address, or a
+  network-path reference (`//`), at one of E-17's places below that is not an absolute URL naming
+  its server plainly, the same server to every URL reader (no userinfo, a plain ASCII host or a
+  canonical IP address, no trailing dot, no port with a leading zero, no backslash, tab, line
+  break or surrounding space), which the payer's gateway could not re-key one way only (`422`,
+  routing).
+- **Added (payer):** your gateway takes `cdex-task-signal` with no setting, and delivers each
+  notification by `POST` to the `channel.endpoint` your system wrote into its Subscription, with
+  the `channel.header` values your system wrote and no credential of the network's, by the rules
+  of every forward to your own system. Before delivering, it refuses, at every conformance
+  level: sealed values that do not open for the provider that sent them (`403`, authority); an
+  endpoint that fails the delivery rule (`422`); a message that carries content or an
+  `additional-context` part (`403`, authority); an address at one of E-17's places that no URL
+  reader reads one way only (`422`, routing); a header value that is not an HTTP field (`422`, never naming the value). Your
+  endpoint's answer is carried back at every status, once it holds no resource but an
+  OperationOutcome's own (`502`, authority, otherwise).
+- **Added (payer):** registered edit `cdex-task-notification-address-rekey` (E-17) writes each
+  address into the provider's FHIR server that a notification names (the Bundle's `link` `url`s,
+  the `subscription` and `focus` references, each entry's `request.url` and `response.location`
+  (an entry carries no `link`), and each `fullUrl` that is not a `urn:uuid`; identity members
+  such as `meta.profile`, `implicitRules`, `meta.source` and a coding's `system` name rather than
+  locate, and are carried as sent),
+  under the base the provider's gateway states, at your base for that provider, where your
+  system reads the Task: your base, then the address's path below the provider's base as written,
+  percent-encoding kept, then its query. It is named in `X-SHN-Edited`. An address on another
+  server is carried as sent, and the access line's `editsNotMade` says why (`E-17:no-stated-base`,
+  `E-17:not-under-base`, `E-17:no-provider-base`). A notification it cannot read one way only at
+  those places is refused, on the fidelity of its own edit: `400` by the provider's gateway,
+  `502` by the payer's, nothing sent or delivered.
+- **Added (both roles): the closed notification shape.** Both gateways hold a notification to
+  the closed shape an instance `$status` answer is held to, as a `history` Bundle: the
+  SubscriptionStatus first, each later entry carrying no resource, no extension and no signature
+  anywhere, each `focus` a Task, no `additional-context`, and no reference but the subscription's
+  and each focus's. Outside it, `403` by the provider's gateway and `502` by the payer's, on
+  authority. A provider that signs its notifications cannot use this leg yet. E-17 is in the
+  signed-content exempt set (`STABILITY.md`), but is never made on signed content here.
+- **Added (both roles):** an address into the provider's own server, at one of E-17's places,
+  that is not under its FHIR base (a fragment, a dot segment, or a path outside the base, escaped
+  or not) is refused `422` on routing at both gateways: the payer's gateway could not write it at
+  its own base. An address on another server is carried and recorded.
+- **Added (every role):** `statedBase` is a request-frame header on a signal leg's
+  request, and your gateway refuses `400` a request on any other leg whose frame names it, as it
+  refuses a topic Subscription's other frame headers there.
+- **Added (Go API):** `engine.Config.SubscriptionNotificationClient`, the client a payer's
+  gateway delivers notifications with; nil is a client with the default transport.
+- **Added (payer):** your gateway refuses a Subscription create or update whose `channel.header`
+  holds a value it could never present to your endpoint as an HTTP field (`name: value`): `422`,
+  the fidelity of its own edit (`E-18:not-sealable`), before anything is sealed or sent, the
+  value never named.
+- **Added (payer):** the restore of a provider's answer to your Subscription interactions
+  (`subscription-endpoint-restore`, E-20) re-keys a search entry's `fullUrl` or a paging link only
+  when its path below the provider's base holds no `.` or `..` segment, raw or percent-encoded,
+  and no segment that decodes to one holding `/` or `\`; such an address could resolve above your
+  base for the provider, and is carried as sent.
+- **Not yet proven live:** a CDex Task notification end to end against a provider system that
+  serves the HRex Task topic; none is available to run it against yet.
+
+## A gateway checks the edits it makes to a peer's message in time near linear in its size (v1.13.0)
+
+- **Fixed (every role, all legs):** a gateway's checks of the edits it makes to a peer's message
+  now take time roughly proportional to the message's size.
+
+## A payer's system subscribes to a provider's Tasks' changes through its gateway (v1.13.0)
+
+- **Before you upgrade (payer, to subscribe):** register a Subscription scope for your
+  ingress client beside its Task scopes (for example `system/Subscription.cruds`), and ask for
+  it in the token. A client registered only for Task scopes is refused `403
+  insufficient_scope` at the Subscription routes and admitted at its Task routes.
+- **Added (payer):** your gateway serves your system's topic Subscription to the changes of the
+  Tasks it created at a provider (`cdex-task-subscribe`, in the evolving tier) at that
+  provider's base on the gateway, `{PAYER_DAVINCI_INGRESS_BASE_URL}/cdex/provider/{provider}`:
+  the create (`POST Subscription`), the read (`GET Subscription/{id}`), the vread, the update
+  (`PUT Subscription/{id}`), the delete (`DELETE Subscription/{id}`), the instance `$status`, a
+  search by `url` (`GET Subscription?url=…`) and the search's pages at the links its answer names,
+  each admitted on a bearer whose `system/Subscription` scope permits the interaction (create,
+  read, update, delete or search, in SMART's spellings; a scope with a query permits nothing). A
+  misspelled Subscription scope stops the gateway at start. Each provider's base's SMART
+  configuration advertises each Subscription scope a registered client lists, and its
+  CapabilityStatement declares `Subscription` (exactly the search parameters `url`, `status` and
+  `_id`, and `$status`) only when that provider takes the leg.
+- **Added (payer):** three registered edits on that leg. `subscription-header-seal` (E-18)
+  seals a create's or update's channel: `channel.endpoint` and `channel.header` are removed from
+  the body sent and travel only sealed, under a key only your gateway holds, so neither your
+  endpoint nor your header values cross the network in clear. `subscription-endpoint-restore`
+  (E-20) writes your own endpoint and headers back into each Subscription of yours the answer
+  carries (one whose address ends in a notification address for you and the topic, and whose
+  seals open for the provider that answered), and the provider's search entries and paging links
+  at your base, a paging link's `url` restored to your own endpoint, when each address it names
+  was one of the answer's Subscriptions it restored, so that following it repeats your search. `subscription-location-rekey` (E-23) answers a create or an update with a
+  `Location` at your base. E-20 and E-23 are named in `X-SHN-Edited`; the provider's gateway
+  names E-18 on its forward. A search's endpoint is sealed too, under both keys during a key
+  rotation's overlap, so it finds exactly the Subscriptions you made with it; one sealed under a
+  key past the overlap reads back with the provider gateway's address, recorded
+  `E-20:key-retired`, and your search does not find it.
+- **Added (payer): signed content.** E-18 and E-20 are made even where a signature covers what
+  they change, and the answer says so (`subscription-endpoint-restore; signed="<signatures>"`);
+  that signature does not verify at the recipient of the edited copy. This is a recorded
+  exception to signed content travelling untouched (`STABILITY.md`), for these edits only, each
+  at its own place.
+- **Added (payer): the subscriber's rules,** each a network rule at every conformance level,
+  named in the access line's `rule`, nothing sent: a `PATCH` (`405`, the fidelity of the
+  gateway's own edit); an instance `_history`, a type-level `$status`, or a search without `url`
+  or with a parameter outside `url`, `status`, `_id`, `_count` and `_elements` (`403`,
+  authority); a search whose `url` names more than one endpoint, an interaction or id outside the
+  closed set, or a base naming no registered provider (`400`, `404` or `422`, routing); a body on
+  an interaction that carries none (`400`, integrity); a `channel.endpoint` that is not an
+  absolute `https` URL with no userinfo or fragment (`422`, integrity) or that is itself a
+  notification address (`422`, routing), as is a search whose `url` is one; a body that is FHIR
+  JSON or XML of another resource
+  type, or a Subscription holding a resource (`403`, authority), the body judged by its structure
+  and never its `Content-Type`, as the provider's gateway judges it; and a Subscription the gateway
+  cannot read or seal, FHIR XML among them (`415` or `400`, the fidelity of its own edit, with why
+  E-18 was not made in `editsNotMade`).
+  At the plain base, `POST /Subscription` is refused `422` and `GET /Subscription[/…]` `404`,
+  each naming `/cdex/providers`, on routing.
+- **Changed (Go API):** `relay.HeaderEdited` takes a payload with registered body edits as well
+  as one relayed exactly, keeping its edits and the signatures they changed, so one answer can
+  carry a body edit and a header edit; a payload with a header edit, a query edit or a builder is
+  refused.
+- **Added (Go API):** in package `pa/subscription`, `Restore` and `RestoreEdits`, which recognize
+  a notification address by its tail (`ParseAddressTail`) and restore it only when its seals open
+  for the binding naming the notifier that answered.
+
+## A provider's gateway serves a payer's Subscription to its Tasks' changes (v1.13.0)
+
+- **Added (provider, optional):** `PROVIDER_CDEX_SUBSCRIPTION_SCOPE`. Set beside
+  `PROVIDER_CDEX_TASK_URL`, your gateway takes a payer's topic Subscription to the changes of
+  the Tasks it created at your system (`cdex-task-subscribe`, in the evolving tier), declares
+  it, and serves its create, read, vread, update, delete, search by `url`, the search's pages
+  and the instance `$status` at your Subscription endpoint, at the FHIR base your Task endpoint
+  is under, with its own token asked for that scope. Unset, the gateway takes no Subscription and declares none. The gateway does
+  not start when the scope is set on another role, without the Task endpoint, with a Task
+  endpoint whose path does not end in the segment `Task` (or with a query, fragment or dot
+  segment), or without `PROVIDER_DAVINCI_INGRESS` and `PROVIDER_DAVINCI_INGRESS_BASE_URL`
+  (`docs/CONFIGURATION.md`, "Take a payer's Subscription to its Tasks' changes"). The payer's gateway
+  serves the leg's other half, and both gateways carry the notifications.
+- **Added (provider):** two registered edits on that leg's forward to your system.
+  `subscription-endpoint-rekey` (E-19) writes your gateway's notification address into a
+  Subscription's `channel.endpoint` (added when the body states none, as the payer's gateway
+  sends the endpoint only sealed; written over one it states), and its credential and the payer's sealed header values
+  into `channel.header`, on a create or update; `subscription-url-search-rekey` (E-21) writes
+  a search's `url`, that address, from the endpoint the payer's gateway sealed: a search reaches
+  your gateway with no `url`. Each is named in `X-SHN-Edited`.
+- **Added (provider):** a read's and a vread's `_elements` and `_summary`, and a page's trailing
+  `_elements`, are carried to your system as sent. The ownership test reads only
+  `channel.endpoint` and its credential, so only an answer whose subset hides the channel is the
+  network's `404`; one that hides the criteria or the filter is delivered. An update's and a delete's `If-Match` is carried as the HTTP `If-Match`
+  of that request, and refused (`400`) on any other interaction.
+- **Added (provider): signed content.** E-19 is made even where a signature covers the
+  channel, and the forward says so (`subscription-endpoint-rekey; signed="<signatures>"`); the
+  signature then does not verify in your copy. This is a recorded exception to signed
+  content travelling untouched (`STABILITY.md`), for this edit only, at the channel only.
+- **Added (provider): the leg's rules,** each a network rule at every conformance level: the
+  closed Subscription shape and the HRex Task topic's filter, its requester identifiers each
+  written `system|value` (`403`), a Subscription that holds
+  a resource, contained or as a member's value (`403`: the leg names no patient), an instance's
+  `_history` or the type-level `$status` (`403`), a `PATCH` (`405`), any other interaction or
+  id outside the closed set (`400`), a Subscription not the payer's (the network's `404`), a
+  `2xx` answer that is not the shape of the interaction it answers (`502`: a read is answered
+  with a Subscription; a create or update with one, no body or an OperationOutcome; a delete
+  with an OperationOutcome or no body; a search or page with a searchset; an instance `$status`
+  with a searchset or history Bundle of exactly one SubscriptionStatus naming that
+  Subscription, its notification-event's focus a Task and with no additional-context, nothing else in it pointing anywhere; FHIR XML, and a body that is not FHIR, are refused too; a create's or an
+  update's that carries another payer's Subscription is the network's `404`), a create or
+  update whose body is FHIR JSON of another resource (`403`), and an unreadable Subscription
+  (`415` for FHIR XML or another body that is not JSON, `400` otherwise), each named in the access
+  line's `rule`, and why E-19 or E-21 was not made in its `editsNotMade`. Your system's own
+  answers that are not a `2xx` are carried as sent, except FHIR other than an OperationOutcome
+  holding no resource (in XML, one with no `contained` child) (`502`); a proxy's HTML page or
+  plain text (a status line such as `404 Not Found` included), and a JSON value holding no
+  resource followed by text (`[404] Not Found`, an error object followed by a server's warning in
+  HTML), is carried, and a body in UTF-16 or UTF-32 (by its byte order mark, or any NUL
+  byte), XML whose DOCTYPE holds an internal subset, XML whose root is named, case-exact, as a
+  FHIR R4 resource type outside the FHIR namespace (`<Patient>` in no namespace, another one, or
+  under an unbound prefix; not `<html>` or `<patient>`), XML outside the FHIR namespace that holds an element in it (a FHIR `<Patient>` wrapped in an
+  `<error>` or a SOAP Body) or declares it where it cannot be read one way only, XML naming one
+  attribute twice, with an element named `xmlns`, naming a DTD a reader would fetch other than the
+  W3C's HTML and XHTML ones while declaring the FHIR namespace, or declaring an encoding that does
+  not read ASCII as ASCII (UTF-7, EBCDIC, ISO-2022-JP; UTF-8, the WHATWG single-byte encodings,
+  Shift_JIS, EUC-JP, EUC-KR, GBK, GB18030 and Big5 are read), a JSON object or array that holds a resource, a JSON object or array
+  nested past the depth bound, and FHIR JSON after a first JSON value
+  (`[{}] [{"resourceType":"Patient"}]`, `1 {"resourceType":"Patient"}`), never are: each is refused wherever a body is judged (a request body holding a
+  resource, or FHIR XML of another type, `403`). An XML OperationOutcome passes only with no
+  element named `contained`, or as a FHIR resource type, at any depth. Every body is judged by its structure, never the media
+  type it is labelled with, so a JSON Subscription labelled otherwise is carried, and a JSON Patient
+  labelled `text/plain` is not.
+  The network carries no `Prefer` header, so your system answers a create or an update by its
+  own default.
+- **Added (provider):** on a create's or an update's `2xx`, your gateway frames
+  `subscriptionLocation`, the tail of your system's `Location` (`Subscription/<id>` or
+  `Subscription/<id>/_history/<vid>`), only when exactly one `Location` lies under your base by
+  the segment-boundary match the created Task's `Location` uses, with no query or fragment and
+  a FHIR id; otherwise nothing is framed and the answer is delivered. It is framed for
+  the payer's gateway alone, and one not carried is named in the access line's
+  `answerHeadersNotCarried` (`subscriptionLocation:<why>`). A create's or an update's `2xx`
+  that frames none names why in `editsNotMade`: `subscriptionLocation:no-location` (no
+  `Location`, or a blank one) or `subscriptionLocation:not-under-base`.
+- **Fixed (provider):** the created Task's `Location` with an empty fragment (`…/Task/<id>#`)
+  is not under your Task endpoint, as one with any other fragment is not: no `taskLocation` is
+  framed for it, and why is recorded (`E-16:location-not-under-base`).
+- **Added (every role):** a request frame naming `subscriptionRequest`, `subscriptionEndpoint`,
+  `subscriptionChannel` or `If-Match` on any leg but a subscribe leg is refused `400`, on
+  message integrity, before the leg's handler runs.
+- **Added (every role, optional):** a predecessor directory whose `sign.key` holds a public
+  half that is not its seed's is refused at start, as a key that is not one.
+- **Added (Go API):** `engine.New` refuses a `Config` whose `Identity.HolderID` differs from
+  `HolderID` when `ProviderCDexSubscriptionScope` is set: the notification keys are derived
+  under one holder. Without the scope the two are not compared. The gateway app sets both from
+  its registered bundle.
+- **Added (Go API):** in package `pa/subscription`, `ClassifyBody`, the one structural reading
+  of a body every topic's lane shares (`BodyKind`: `BodyEmpty`, `BodyNotFHIR`, `BodyFHIRJSON`,
+  `BodyFHIRXML`; `ErrBodyUnreadable`; `FHIRNamespace`), and on it `ReadSubscription`,
+  `CheckErrorAnswer` and `Refusal.Unreadable`.
+
+## The gateway builds on shn-sdk v1.12.0 (v1.13.0)
+
+- **Changed:** the gateway pins shn-sdk v1.12.0.
+
+## A payer's gateway checks the PAS request it receives at its own level (v1.13.0)
+
+- **Changed (payer, `structural` and `strict` only; at `none` and `observe` the request is carried unchecked):** your
+  gateway checks a carried PAS request, a `$submit`, an update or an `$inquire`, before
+  your system sees it, and never changes a byte of it.
+  - A request that declares a profile is checked against what it declares.
+  - One that declares none is checked against its line's own request Bundle profile,
+    without a version: `profile-pas-request-bundle` on a `$submit` or an update, and
+    `profile-pas-inquiry-request-bundle` on an `$inquire`. At PAS 2.1 and 2.2 a `$submit`'s
+    or update's request Bundle is read per entry.
+
+  The request is valid when any of its candidate lines accepts it, so a request is never
+  refused for the line it was built at. Otherwise a structural defect is refused at both
+  levels and a deeper one at `strict`, as `422 {"error":"ingress validation failed"}` with
+  the issues (an OperationOutcome on these legs), and your system receives nothing. A
+  check that cannot run is refused `500` at `strict` and recorded at `structural`. A code
+  the validator cannot check is never refused. Because the profile is unversioned, run a validator lane per line, each
+  loading its line's PAS package: a lane that does not hold the profile reads every
+  undeclared request as a structural issue. A refusal is your conformance choice at your
+  level, never a network rule.
+- **Changed (payer, `structural` and `strict` only):** a payer gateway at `structural` or
+  `strict` refuses a PAS 2.0 update that carries its prior Claim. shn-sdk's deprecated
+  `BuildConformantClaimUpdateBundle` builds that shape at 2.0, so use
+  `BuildConformantClaimUpdateBundleExact`.
+
+## A rotation's overlap keeps the replaced signing key (v1.13.0)
+
+- **Added (every role, optional):** `IDENTITY_PREDECESSOR_DIR`, the directory `shn rotate`
+  kept your holder's replaced signing key in (`<out>/predecessor`). The gateway reads and checks
+  it at start, and derives from it the keys the topic Subscription legs open and verify what
+  was made under the replaced key with, never seal or issue with: a payer's gateway its own
+  Subscriptions' seals, a provider's gateway its notification credentials. Unset, the gateway
+  reads no replaced key.
+  The gateway does not start when the directory holds no readable manifest naming a holder and
+  ed25519 `sign.key`, holds another holder's key, or holds the current signing key
+  (`docs/CONFIGURATION.md`, "Rotating your holder's keys"). It reads no `enc.key`.
+
 ## A translated message is checked at its target line's profile (v1.12.0)
 
 - **Changed (provider, `TRANSLATE_IG_LINES`):** a message the gateway translates between IG

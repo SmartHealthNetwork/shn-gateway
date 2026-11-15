@@ -62,6 +62,7 @@ func TestCDexTaskLocation_TheProvidersGatewayFramesTheTail(t *testing.T) {
 		"a relative id beside the endpoint": {func(string) []string { return []string{"t-1"} }, "", EditNotMadeTaskLocationNotUnderBase},
 		"a query":                           {func(b string) []string { return []string{b + "/fhir/Task/t-1?_format=json"} }, "", EditNotMadeTaskLocationNotUnderBase},
 		"a fragment":                        {func(b string) []string { return []string{b + "/fhir/Task/t-1#x"} }, "", EditNotMadeTaskLocationNotUnderBase},
+		"an empty fragment":                 {func(b string) []string { return []string{b + "/fhir/Task/t-1#"} }, "", EditNotMadeTaskLocationNotUnderBase},
 		"user information": {func(b string) []string { return []string{strings.Replace(b, "://", "://user@", 1) + "/fhir/Task/t-1"} },
 			"", EditNotMadeTaskLocationNotUnderBase},
 		"a non-Task tail":             {func(b string) []string { return []string{b + "/fhir/Task/t-1/extra"} }, "", EditNotMadeTaskLocationNotUnderBase},

@@ -70,7 +70,8 @@ type Leg struct {
 	// (the root module's legtaxonomy.Leg.AnswerEnvelope).
 	AnswerEnvelope string `json:"answerEnvelope,omitempty"`
 	// Subject is SubjectFromAnswer on a leg whose request names no patient
-	// and whose patient is bound from its answer, and empty on every other
+	// and whose patient is bound from its answer, SubjectNone on a leg whose
+	// request and response both name no patient, and empty on every other
 	// leg (the root module's legtaxonomy.Leg.Subject).
 	Subject string `json:"subject,omitempty"`
 }
@@ -79,9 +80,16 @@ type Leg struct {
 // is bound from the answer that discloses it.
 const SubjectFromAnswer = "from-answer"
 
+// SubjectNone marks a leg whose request and response both name no patient
+// and disclose none, such as a notification's signal.
+const SubjectNone = "none"
+
 // FromAnswer reports whether the leg's patient is bound from its answer
 // rather than named by its request.
 func (l Leg) FromAnswer() bool { return l.Subject == SubjectFromAnswer }
+
+// NamesNoPatient reports whether neither side of the leg names a patient.
+func (l Leg) NamesNoPatient() bool { return l.Subject == SubjectNone }
 
 // Side is one side of a leg.
 type Side struct {
@@ -175,8 +183,8 @@ func Parse(b []byte) (Taxonomy, error) {
 		if l.Routable() && l.Scope == "" {
 			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: empty scope", l.TransactionType))
 		}
-		if l.Subject != "" && (l.Subject != SubjectFromAnswer || l.Physics != PhysicsRequestResponse) {
-			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: subject %q: only %q is defined, and only on a request-response leg", l.TransactionType, l.Subject, SubjectFromAnswer))
+		if l.Subject != "" && ((l.Subject != SubjectFromAnswer && l.Subject != SubjectNone) || l.Physics != PhysicsRequestResponse || l.Consent != nil) {
+			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: subject %q: only %q and %q are defined, and only on a request-response leg with no consent", l.TransactionType, l.Subject, SubjectFromAnswer, SubjectNone))
 		}
 		if l.Routable() && l.AnswerEnvelope != AnswerEnvelopeFHIR && l.AnswerEnvelope != AnswerEnvelopeJSON {
 			errs = append(errs, fmt.Errorf("legtaxonomy: leg %q: answerEnvelope %q is neither %q nor %q", l.TransactionType, l.AnswerEnvelope, AnswerEnvelopeFHIR, AnswerEnvelopeJSON))

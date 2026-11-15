@@ -23,6 +23,8 @@ func TestPACatalog_Ops(t *testing.T) {
 		"cdex-attachment-submit":  "cdex-attachment-submit",
 		"cdex-attachment-request": "cdex-attachment-request",
 		"cdex-task-status":        "cdex-task-read",
+		"cdex-task-subscribe":     "cdex-task-subscribe",
+		"cdex-task-signal":        "cdex-task-signal",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))
@@ -40,16 +42,20 @@ func TestPACatalog_Ops(t *testing.T) {
 }
 
 // TestPACatalog_ReqFrames pins each PA leg's request frame: every leg a
-// provider originates is framed provider-tpo, and the payer's attachment
-// request and its read of that Task, the two legs a payer originates,
-// payer-payment. The inbound
+// provider originates is framed provider-tpo, but its notification of a
+// payer's Tasks' changes, provider-disclosure, and the payer's attachment
+// request, its read of that Task and its Subscription, the legs a payer
+// originates, payer-payment. The inbound
 // side binds the token to the catalog row's frame (handleInbound), so a frame
 // changes only here and in the taxonomy together.
 func TestPACatalog_ReqFrames(t *testing.T) {
 	for legType, spec := range paCatalog {
 		want := "provider-tpo"
-		if legType == legCDexRequest || legType == legCDexTaskStatus {
+		switch legType {
+		case legCDexRequest, legCDexTaskStatus, legCDexTaskSubscribe:
 			want = "payer-payment"
+		case legCDexTaskSignal:
+			want = "provider-disclosure"
 		}
 		if spec.ReqFrame != want {
 			t.Errorf("paCatalog[%q].ReqFrame = %q, want %s", legType, spec.ReqFrame, want)
@@ -139,6 +145,8 @@ func TestPACatalog_Pinned(t *testing.T) {
 		"cdex-attachment-submit":  {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "cdex-attachment-submit", RespOp: "cdex-attachment-submit-response", Scope: "attachment-only", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-attachment-submit", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
 		"cdex-attachment-request": {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-attachment-request", RespOp: "cdex-attachment-request-response", Scope: "attachment-request-only", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-attachment-request", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexTaskURL, AnswerEnvelope: "fhir"},
 		"cdex-task-status":        {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-read", RespOp: "cdex-task-read-response", Scope: "task-status-only", Physics: readOnly, Seam: "provider-native", WireName: "pa.cdex-task-status", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true, AnswerEnvelope: "fhir"},
+		"cdex-task-subscribe":     {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-subscribe", RespOp: "cdex-task-subscribe-response", Scope: "task-subscription", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-task-subscribe", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexSubscriptionScope, Subscribe: true, AnswerEnvelope: "fhir"},
+		"cdex-task-signal":        {ReqFrame: "provider-disclosure", RespFrame: "payer-payment", Op: "cdex-task-signal", RespOp: "cdex-task-signal-response", Scope: "task-notification", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-task-signal", RecipientRoles: []string{"payer"}, Signal: true, AnswerEnvelope: "fhir"},
 	}
 	if !reflect.DeepEqual(paCatalog, want) {
 		for tx := range want {
@@ -178,6 +186,8 @@ func TestAnsweredLegs_AttachmentRequestNotDeclared(t *testing.T) {
 				want = settingProviderCDexTaskURL
 			case legCDexTaskStatus:
 				want = settingProviderCDexReadScope
+			case legCDexTaskSubscribe:
+				want = settingProviderCDexSubscriptionScope
 			}
 			if spec.TakenWhenSet != want {
 				t.Errorf("%s: TakenWhenSet = %q, want %q", leg, spec.TakenWhenSet, want)
@@ -185,7 +195,9 @@ func TestAnsweredLegs_AttachmentRequestNotDeclared(t *testing.T) {
 		}
 	}
 	before := map[string][]string{
-		"payer": {"cdex-attachment-submit", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
+		// From v1.13.0 a payer also takes a provider's CDex Task
+		// notification, unconditionally.
+		"payer": {"cdex-attachment-submit", "cdex-task-signal", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
 			"dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"},
 		"provider": {},
 		"facility": {"federated-query"},

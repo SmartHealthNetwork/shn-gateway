@@ -2,6 +2,7 @@ package legtaxonomy
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,7 @@ func TestParse_RejectsMalformedFiles(t *testing.T) {
 		{"request-response leg without a response", strings.Replace(string(valid), `"response":{"frame":"payer-coverage","roles":["payer"],"operation":"pas-response"}`, `"response":null`, 1), "needs a response side"},
 		{"routable leg with no answer envelope", strings.Replace(string(valid), `,"answerEnvelope":"fhir"`, ``, 1), `answerEnvelope "" is neither "fhir" nor "json"`},
 		{"answer envelope outside the closed set", strings.Replace(string(valid), `"answerEnvelope":"json"`, `"answerEnvelope":"xml"`, 1), `answerEnvelope "xml" is neither "fhir" nor "json"`},
-		{"subject outside the closed set", strings.Replace(string(valid), `"answerEnvelope":"fhir"`, `"answerEnvelope":"fhir","subject":"from-request"`, 1), `subject "from-request": only "from-answer" is defined`},
+		{"subject outside the closed set", strings.Replace(string(valid), `"answerEnvelope":"fhir"`, `"answerEnvelope":"fhir","subject":"from-request"`, 1), `subject "from-request": only "from-answer" and "none" are defined`},
 	} {
 		if _, err := Parse([]byte(c.body)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Parse = %v, want an error containing %q", c.name, err, c.want)
@@ -59,13 +60,20 @@ func TestParse_RejectsMalformedFiles(t *testing.T) {
 	}
 }
 
-// TestParse_RefusesASubjectFromTheAnswerOffARequestResponseLeg: the flag is
-// valid only on a request-response leg, spelled exactly.
-func TestParse_RefusesASubjectFromTheAnswerOffARequestResponseLeg(t *testing.T) {
+// TestParse_RefusesASubjectFlagOffARequestResponseLeg: each flag is valid
+// only on a request-response leg with no consent, spelled exactly.
+func TestParse_RefusesASubjectFlagOffARequestResponseLeg(t *testing.T) {
+	consent := &Consent{Purpose: "treatment", CustodianFrom: "request"}
 	for name, mutate := range map[string]func(*Leg){
-		"in another case":       func(l *Leg) { l.Subject = "From-Answer" },
-		"on another physics":    func(l *Leg) { l.Subject = SubjectFromAnswer; l.Physics = "direct-read" },
-		"on an unknown physics": func(l *Leg) { l.Subject = SubjectFromAnswer; l.Physics = "" },
+		"from-answer in another case":       func(l *Leg) { l.Subject = "From-Answer" },
+		"from-answer on another physics":    func(l *Leg) { l.Subject = SubjectFromAnswer; l.Physics = "direct-read" },
+		"from-answer on an unknown physics": func(l *Leg) { l.Subject = SubjectFromAnswer; l.Physics = "" },
+		"from-answer with consent":          func(l *Leg) { l.Subject = SubjectFromAnswer; l.Consent = consent },
+		"none in another case":              func(l *Leg) { l.Subject = "None" },
+		"none on another physics":           func(l *Leg) { l.Subject = SubjectNone; l.Physics = "direct-read" },
+		"none on an unknown physics":        func(l *Leg) { l.Subject = SubjectNone; l.Physics = "" },
+		"none with consent":                 func(l *Leg) { l.Subject = SubjectNone; l.Consent = consent },
+		"a value outside the closed set":    func(l *Leg) { l.Subject = "nobody" },
 	} {
 		tx := PA()
 		mutate(&tx.Legs[0])
@@ -73,7 +81,7 @@ func TestParse_RefusesASubjectFromTheAnswerOffARequestResponseLeg(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := `subject "` + tx.Legs[0].Subject + `": only "from-answer" is defined, and only on a request-response leg`
+		want := `subject "` + tx.Legs[0].Subject + `": only "from-answer" and "none" are defined, and only on a request-response leg with no consent`
 		if _, err := Parse(b); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: Parse = %v, want an error containing %q", name, err, want)
 		}
@@ -108,5 +116,42 @@ func TestParse_ReadsASubjectFromTheAnswer(t *testing.T) {
 	}
 	if got := flaggedIn(tx); len(got) != 2 {
 		t.Fatalf("%v report a subject from the answer, want the shipped leg and the 1 flagged", got)
+	}
+}
+
+// TestParse_ReadsASubjectOfNone: a leg flagged subject none parses, and only
+// that leg reports it; it does not read as a leg whose patient comes from the
+// answer. The shipped taxonomy flags the payer's subscription to its CDex
+// Tasks' changes and the provider's notification of them alone (D132).
+func TestParse_ReadsASubjectOfNone(t *testing.T) {
+	var shipped []string
+	for _, l := range PA().Legs {
+		if l.NamesNoPatient() {
+			shipped = append(shipped, l.TransactionType)
+		}
+	}
+	if !slices.Equal(shipped, []string{"cdex-task-subscribe", "cdex-task-signal"}) {
+		t.Fatalf("the shipped taxonomy flags %v subject none, want [cdex-task-subscribe cdex-task-signal]", shipped)
+	}
+	valid, err := json.Marshal(PA())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(string(valid), `"answerEnvelope":"fhir"`, `"answerEnvelope":"fhir","subject":"none"`, 1)
+	tx, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("a leg flagged none is refused: %v", err)
+	}
+	var flagged []string
+	for _, l := range tx.Legs {
+		if l.NamesNoPatient() {
+			if l.FromAnswer() {
+				t.Fatalf("%s reads as both none and from-answer", l.TransactionType)
+			}
+			flagged = append(flagged, l.TransactionType)
+		}
+	}
+	if len(flagged) != len(shipped)+1 {
+		t.Fatalf("%v report a subject of none, want the shipped legs and the 1 flagged", flagged)
 	}
 }

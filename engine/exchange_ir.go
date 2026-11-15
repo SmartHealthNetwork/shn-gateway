@@ -63,6 +63,12 @@ type Content struct {
 	// request frame carrying it: a recipient that does not declare the leg is
 	// never routed it, so no request-frame token gates it.
 	ReadPath string
+	// SubscribeFrame are the request-frame headers of a topic Subscription's
+	// subscribe leg (legSpec.Subscribe) or a topic's signal leg
+	// (legSpec.Signal), which its workstream sets: a request that names them
+	// is always sent in a request frame carrying them, and only on such a leg
+	// (errSubscribeUndefined). nil for every other request.
+	SubscribeFrame map[string]string
 	// MediaType is the participant's declared FHIR JSON media type for a
 	// carried request (mediatype.go), stamped as the request frame's
 	// Content-Type whenever the request is framed; "" keeps

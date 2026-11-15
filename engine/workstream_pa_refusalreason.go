@@ -67,5 +67,53 @@ func paRefusalReasons() []refusalReason {
 		reasonAttachmentBudget, reasonAttachmentOverDeclared,
 		reasonEligibilityBatchLimit,
 		reasonCDexReadPlainBase, reasonCDexReadPath, reasonCDexReadBody,
+		reasonSubscriberHistory, reasonSubscriberTypeStatus, reasonSubscriberInteraction,
+		reasonSubscriberSearch, reasonSubscriberOneEndpoint, reasonSubscriberBody, reasonSubscriberIfMatch,
+		reasonSubscriberEndpoint, reasonSubscriberEndpointLoop, reasonSubscriberSearchLoop, reasonSubscriberNotASubscription, reasonSubscriberHoldsResource,
+		reasonCDexSubscriptionPlainCreate, reasonCDexSubscriptionPlainRead,
+		reasonScopeSubscriptionCreate, reasonScopeSubscriptionRead, reasonScopeSubscriptionUpdate,
+		reasonScopeSubscriptionDelete, reasonScopeSubscriptionSearch,
+		reasonNotifyNotANotification, reasonNotifyContent, reasonNotifyShape, reasonNotifyContext, reasonNotifyAddress, reasonNotifyNotRekeyable,
 	}
 }
+
+// The subscriber's refusals of its system's Subscription interaction
+// (workstream_pa_subscriber.go).
+const (
+	reasonSubscriberHistory      refusalReason = errSubscriberHistory
+	reasonSubscriberTypeStatus   refusalReason = errSubscriberTypeStatus
+	reasonSubscriberInteraction  refusalReason = errSubscriberInteraction
+	reasonSubscriberSearch       refusalReason = errSubscriberSearch
+	reasonSubscriberOneEndpoint  refusalReason = errSubscriberOneEndpoint
+	reasonSubscriberBody         refusalReason = errSubscriberBody
+	reasonSubscriberIfMatch      refusalReason = errSubscriberIfMatch
+	reasonSubscriberEndpoint     refusalReason = "channel.endpoint must be an absolute https URL with no userinfo, fragment, space or backslash, where notifications are delivered with the network's integrity; nothing was sent"
+	reasonSubscriberEndpointLoop refusalReason = "channel.endpoint is a notification address of this network, which would deliver each notification back into the network; nothing was sent"
+	reasonSubscriberSearchLoop   refusalReason = "the search's url is a notification address of this network, under which no Subscription of this system is registered (the channel.endpoint its Subscriptions name is its own endpoint); nothing was sent"
+	// The body judged by its structure (subscription.ReadSubscription,
+	// subscription.CheckNoResource): the leg carries a Subscription alone, and
+	// one that holds no resource.
+	reasonSubscriberNotASubscription refusalReason = "the body is a resource other than a Subscription, which this leg never carries (per-leg authority); nothing was sent"
+	reasonSubscriberHoldsResource    refusalReason = "the Subscription holds a resource, which this leg, naming no patient on either side, never carries (per-leg authority); nothing was sent"
+)
+
+// The refusal reasons of the Subscription routes (refusalReasons).
+const (
+	reasonCDexSubscriptionPlainCreate refusalReason = errCDexSubscriptionPlainCreate
+	reasonCDexSubscriptionPlainRead   refusalReason = errCDexSubscriptionPlainRead
+	reasonScopeSubscriptionCreate     refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits creating a Subscription, such as " + SubscriptionWriteScope + ", system/Subscription.c or system/Subscription.*, with no query"
+	reasonScopeSubscriptionRead       refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits reading a Subscription, such as " + SubscriptionReadScope + ", system/Subscription.r or system/Subscription.*, with no query"
+	reasonScopeSubscriptionUpdate     refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits updating a Subscription, such as " + SubscriptionWriteScope + ", system/Subscription.u or system/Subscription.*, with no query"
+	reasonScopeSubscriptionDelete     refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits deleting a Subscription, such as " + SubscriptionWriteScope + ", system/Subscription.d or system/Subscription.*, with no query"
+	reasonScopeSubscriptionSearch     refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits searching Subscriptions, such as " + SubscriptionReadScope + ", system/Subscription.s or system/Subscription.*, with no query"
+)
+
+// The notification route's refusals (workstream_pa_cdex_notify.go).
+const (
+	reasonNotifyNotANotification refusalReason = errNotifyNotANotification
+	reasonNotifyContent          refusalReason = errNotifyContent
+	reasonNotifyContext          refusalReason = errNotifyContext
+	reasonNotifyAddress          refusalReason = errNotifyAddress
+	reasonNotifyNotRekeyable     refusalReason = errNotifyNotRekeyable
+	reasonNotifyShape            refusalReason = errNotifyShape
+)

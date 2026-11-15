@@ -228,6 +228,9 @@ func cdexReadMember(answer []byte) (member string, readable bool) {
 type cdexBase struct {
 	provider bool
 	reads    bool
+	// subscribes says the provider's gateway takes the payer's Subscription
+	// to its Tasks' changes (cdex-task-subscribe).
+	subscribes bool
 }
 
 // cdexBaseOf is the base the request's provider segment names: a registered
@@ -238,7 +241,7 @@ func (g *Gateway) cdexBaseOf(r *http.Request) (cdexBase, bool) {
 	if !ok || e.Role != "provider" || !slices.Contains(e.Legs, legCDexRequest) {
 		return cdexBase{}, false
 	}
-	return cdexBase{provider: true, reads: slices.Contains(e.Legs, legCDexTaskStatus)}, true
+	return cdexBase{provider: true, reads: slices.Contains(e.Legs, legCDexTaskStatus), subscribes: takesCDexSubscribe(e.Legs)}, true
 }
 
 // errCDexBaseUnknown is the discovery routes' answer at a base that names no
@@ -251,9 +254,11 @@ func (g *Gateway) handleCDexMetadata(w http.ResponseWriter, _ *http.Request) {
 	g.writeCDexMetadata(w, cdexBase{})
 }
 
-// handleCDexBaseMetadata is GET <provider's base>/metadata: Task create, and
-// read and vread when that provider serves them (its registry entry declares
-// the read's leg), so no base advertises a read the Hub would refuse.
+// handleCDexBaseMetadata is GET <provider's base>/metadata: Task create, read
+// and vread when that provider serves them (its registry entry declares the
+// read's leg), and Subscription when it takes the payer's Subscription
+// (cdex-task-subscribe), so no base advertises an interaction the Hub would
+// refuse.
 func (g *Gateway) handleCDexBaseMetadata(w http.ResponseWriter, r *http.Request) {
 	base, ok := g.cdexBaseOf(r)
 	if !ok {
@@ -265,6 +270,10 @@ func (g *Gateway) handleCDexBaseMetadata(w http.ResponseWriter, r *http.Request)
 
 func (g *Gateway) writeCDexMetadata(w http.ResponseWriter, base cdexBase) {
 	b, err := shnsdk.BuildPayerCDexIngressCapabilityStatement(g.cfg.Clock(), shnsdk.PayerCDexBase{Provider: base.provider, Reads: base.reads})
+	if err == nil && base.subscribes {
+		// Subscription, only where that provider's gateway takes it.
+		b, err = withCDexSubscription(b)
+	}
 	if err != nil {
 		// The gateway's own failure, before anything was sent: an ordinary
 		// refusal, through the one writer of error answers.

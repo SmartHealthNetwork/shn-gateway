@@ -192,10 +192,20 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 		if id == relay.EditDTRAdaptiveAddressRekey {
 			raw = `{"resourceType":"Questionnaire","extension":[{"url":"` + sdcQuestionnaireAdaptiveExt + `","valueUrl":"b"}]}`
 		}
+		// E-20 is held to its own places (the relay's check of it): a
+		// Subscription's channel.endpoint.
+		if id == relay.EditSubscriptionEndpointRestore {
+			raw = `{"resourceType":"Subscription","channel":{"endpoint":"b"}}`
+		}
 		body := relay.NewBody([]byte(raw), relay.OriginUpstreamResponse)
 		doc, err := relay.Doc(body)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if id == relay.EditSubscriptionEndpointRestore {
+			ch, _ := doc.Member(doc.Root(), "channel")
+			member, _ := doc.Member(ch, "endpoint")
+			return body, doc, member
 		}
 		if id != relay.EditDTRAdaptiveAddressRekey {
 			member, _ := doc.Member(doc.Root(), "a")
@@ -217,8 +227,15 @@ func TestStatedAnswer_EveryAnswerEditDropsTheETag(t *testing.T) {
 			if dropped := relay.EditDropsAnswerHeaders(relayEdits, e.ID); len(dropped) != 0 {
 				t.Errorf("%s drops %v, but changes no byte of the body", e.ID, dropped)
 			}
-			edited, err := headerEdited(relayedResponse([]byte(`{}`)), e.ID, e.Header, "https://payer.example/cdex/provider/p/Task/t-1",
-				relay.HeaderInputs{relay.TaskLocationInputBase: "https://payer.example/cdex/provider/p", relay.TaskLocationInputTail: "Task/t-1"})
+			// Each header edit's own inputs: a Task's location (E-16), a
+			// Subscription's (E-23).
+			value, in := "https://payer.example/cdex/provider/p/Task/t-1",
+				relay.HeaderInputs{relay.TaskLocationInputBase: "https://payer.example/cdex/provider/p", relay.TaskLocationInputTail: "Task/t-1"}
+			if e.ID == relay.EditSubscriptionLocationRekey {
+				value, in = "https://payer.example/cdex/provider/p/Subscription/s-1",
+					relay.HeaderInputs{relay.SubscriptionLocationInputBase: "https://payer.example/cdex/provider/p", relay.SubscriptionLocationInputTail: "Subscription/s-1"}
+			}
+			edited, err := headerEdited(relayedResponse([]byte(`{}`)), e.ID, e.Header, value, in)
 			if err != nil {
 				t.Fatalf("%s: %v", e.ID, err)
 			}
@@ -297,8 +314,10 @@ func TestNoteStatedAnswer(t *testing.T) {
 func TestAnswerHeaderNotCarriedValues_Closed(t *testing.T) {
 	// The answer's own headers, and the address headers a recipient's gateway
 	// states for the requester's gateway alone: a payer's on a DTR answer, a
-	// provider's on its answer to a payer's Task (E-16).
-	names := append(slices.Clone(answerHeaderNames), shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation)
+	// provider's on its answer to a payer's Task (E-16), and a notifier's on
+	// its answer on a subscribe leg (E-20, and a create's or an update's
+	// subscriptionLocation).
+	names := append(slices.Clone(answerHeaderNames), shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation, shnsdk.FrameHeaderStatedBase, shnsdk.FrameHeaderSubscriptionLocation)
 	for _, reason := range []string{AnswerHeaderValueNotCarriable, AnswerHeaderOverFrameLimit, AnswerHeaderOverAnswerLimit} {
 		for _, name := range names {
 			if !slices.Contains(AnswerHeaderNotCarriedValues, name+":"+reason) {

@@ -144,6 +144,25 @@ func (c paCertification) undeclaredAnswerProfile(contract string, payload []byte
 	return canonicalOf(p), true
 }
 
+// undeclaredRequestProfile is the line profile a carried PAS request that
+// declares no profile is judged against by the payer's gateway (owner
+// decision D47(2)): its request Bundle against the PAS request Bundle profile
+// on a $submit or an update, and against the inquiry request Bundle profile on
+// an $inquire, each without a version, so each candidate line's lane resolves
+// its own. At 2.1 and 2.2 the submit and update profile is read per entry
+// (reading), the inquiry one whole. Nothing else: a request that is not a
+// request Bundle is judged against what it is.
+func (c paCertification) undeclaredRequestProfile(contract string, payload []byte, line, leg string) (string, bool) {
+	if contract != "pa.pas" || c.species(payload) != "PASRequestBundle" {
+		return "", false
+	}
+	p, ok := c.profile("PASRequestBundle", line, leg)
+	if !ok {
+		return "", false
+	}
+	return canonicalOf(p), true
+}
+
 // candidateGroups: a DTR $questionnaire-package answer names its line by its
 // parameters. The output Parameters profile slices parameter.name open at
 // every line, so a line of the other name family leaves those parameters

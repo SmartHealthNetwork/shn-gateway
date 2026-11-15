@@ -52,6 +52,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/serviceclient"
 	observer "github.com/SmartHealthNetwork/shn-gateway/observer"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
 	"github.com/SmartHealthNetwork/shn-gateway/scenarioauth"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry"
 	"github.com/SmartHealthNetwork/shn-gateway/telemetry/otelsetup"
@@ -86,6 +87,15 @@ type config struct {
 	Addr         string
 	SecretsDir   string
 	DiscoveryURL string
+
+	// IdentityPredecessorDir (IDENTITY_PREDECESSOR_DIR) is the key directory
+	// shn rotate kept for this holder's previous identity (<out>/predecessor),
+	// set for a rotation's overlap window so the topic Subscriptions sealed
+	// under the replaced key still open. Empty (the default) configures no
+	// predecessor: a rotation then orphans the Subscriptions sealed before it,
+	// fail-closed and recorded. Read only into the subscription keys
+	// (subscriptionKeys).
+	IdentityPredecessorDir string
 
 	// ObserverAddr is the loopback-only bind address for the observer SSE stream:
 	// opt-in structured edge events for local inspection tooling (see STABILITY.md).
@@ -365,6 +375,16 @@ type config struct {
 	// it requires PROVIDER_CDEX_TASK_URL ending in a Task segment, with no
 	// query or fragment. Read trimmed: a blank value is unset.
 	ProviderCDexReadScope string
+	// PROVIDER_CDEX_SUBSCRIPTION_SCOPE is the scope the gateway asks the same
+	// token endpoint, with the same client, for to reach the provider's own
+	// Subscription endpoint, at the FHIR base PROVIDER_CDEX_TASK_URL is under
+	// (as the provider's authorization server registers it). Set, the
+	// provider takes the payer's topic Subscription to its Tasks' changes
+	// (cdex-task-subscribe), from shn-gateway v1.13.0; it requires
+	// PROVIDER_CDEX_TASK_URL of the read's shape and
+	// PROVIDER_DAVINCI_INGRESS_BASE_URL, under which each Subscription's
+	// notification address is written. Read trimmed: a blank value is unset.
+	ProviderCDexSubscriptionScope string
 
 	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
 	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
@@ -528,6 +548,7 @@ func providerCDexSettings(cfg config) []struct {
 		{"PROVIDER_CDEX_CLIENT_KID", cfg.ProviderCDexClientKID != ""},
 		{"PROVIDER_CDEX_CLIENT_SECRET", cfg.ProviderCDexClientSecret != ""},
 		{"PROVIDER_CDEX_READ_SCOPE", cfg.ProviderCDexReadScope != ""},
+		{"PROVIDER_CDEX_SUBSCRIPTION_SCOPE", cfg.ProviderCDexSubscriptionScope != ""},
 	}
 }
 
@@ -546,10 +567,13 @@ func checkProviderCDex(role string, cfg config) error {
 		return nil
 	}
 	if role != "provider" {
-		return fmt.Errorf("gateway: %s is provider-only (role=%q): only a provider takes the payer's attachment request and its read of that Task", strings.Join(set, ", "), role)
+		return fmt.Errorf("gateway: %s is provider-only (role=%q): only a provider takes the payer's attachment request, its read of that Task and its Subscription to that Task's changes", strings.Join(set, ", "), role)
 	}
 	if cfg.ProviderCDexTaskURL == "" {
 		return fmt.Errorf("gateway: %s set requires PROVIDER_CDEX_TASK_URL, the provider's own Task endpoint", strings.Join(set, ", "))
+	}
+	if cfg.ProviderCDexSubscriptionScope != "" && (!cfg.ProviderDavinciIngress || cfg.ProviderDavinciIngressBaseURL == "") {
+		return fmt.Errorf("gateway: PROVIDER_CDEX_SUBSCRIPTION_SCOPE set requires PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL: each Subscription's notification address is written under that base, where the provider's system delivers its notifications")
 	}
 	if !cfg.ProviderDavinciIngress || cfg.ProviderDavinciIngressBaseURL == "" {
 		return fmt.Errorf("gateway: PROVIDER_CDEX_TASK_URL requires PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL: the Task's payer-url is re-keyed to the documentation return path under that base")
@@ -566,7 +590,34 @@ func checkProviderCDex(role string, cfg config) error {
 	if err := checkClientAuthModeAlgs("PROVIDER_CDEX", cfg.ProviderCDexClientKey, cfg.ProviderCDexClientAlg, cfg.ProviderCDexClientKID, cfg.ProviderCDexClientSecret, providerCDexAlgs); err != nil {
 		return err
 	}
-	return checkProviderCDexRead(cfg)
+	if err := checkProviderCDexRead(cfg); err != nil {
+		return err
+	}
+	return checkProviderCDexSubscription(cfg)
+}
+
+// checkProviderCDexSubscription is the payer's Subscription to its Tasks'
+// changes' admission: with PROVIDER_CDEX_SUBSCRIPTION_SCOPE set, the gateway
+// reaches the provider's Subscription endpoint at the FHIR base
+// PROVIDER_CDEX_TASK_URL is under, which must then be a Task endpoint of the
+// read's shape (cdexroute.TaskReadURL): the base is that endpoint less its
+// Task segment. The gateway declares the leg exactly when the scope is set, so
+// it refuses to start rather than declare a leg it cannot serve.
+func checkProviderCDexSubscription(cfg config) error {
+	if cfg.ProviderCDexSubscriptionScope == "" {
+		return nil
+	}
+	const fix = ": set it to the provider's Task endpoint, e.g. https://ehr.example/fhir/Task, whose base (https://ehr.example/fhir) serves its Subscription endpoint"
+	_, err := cdexroute.TaskReadURL(cfg.ProviderCDexTaskURL)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, cdexroute.ErrTaskURLDotSegment):
+		return fmt.Errorf(`gateway: PROVIDER_CDEX_SUBSCRIPTION_SCOPE set requires PROVIDER_CDEX_TASK_URL with no "." or ".." path segment (%q): remove the dot segments`, cfg.ProviderCDexTaskURL)
+	case errors.Is(err, cdexroute.ErrTaskURLNotAbsolute):
+		return fmt.Errorf("gateway: PROVIDER_CDEX_SUBSCRIPTION_SCOPE set requires PROVIDER_CDEX_TASK_URL to be an absolute http or https URL with a host (%q)"+fix, cfg.ProviderCDexTaskURL)
+	}
+	return fmt.Errorf("gateway: PROVIDER_CDEX_SUBSCRIPTION_SCOPE set requires PROVIDER_CDEX_TASK_URL to end in a Task segment, with no query or fragment (%q)"+fix, cfg.ProviderCDexTaskURL)
 }
 
 // checkProviderCDexRead is the payer's read of its Task's admission: with
@@ -847,6 +898,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ProviderCDexClientSecret: getenv("PROVIDER_CDEX_CLIENT_SECRET"),
 		ProviderCDexReadScope:    strings.TrimSpace(getenv("PROVIDER_CDEX_READ_SCOPE")),
 
+		ProviderCDexSubscriptionScope: strings.TrimSpace(getenv("PROVIDER_CDEX_SUBSCRIPTION_SCOPE")),
+
 		ProviderDavinciIngress: getenv("PROVIDER_DAVINCI_INGRESS") != "",
 
 		ProviderDavinciIngressBaseURL:     getenv("PROVIDER_DAVINCI_INGRESS_BASE_URL"),
@@ -860,6 +913,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		AuthzPubkeyURL:     getenv("AUTHZ_PUBKEY_URL"),
 		HubTransportKeyURL: getenv("HUB_TRANSPORT_KEY_URL"),
 	}
+	cfg.IdentityPredecessorDir = getenv("IDENTITY_PREDECESSOR_DIR")
 
 	// ORIGINATION_PROFILE is the participant's declaration that its system cannot
 	// speak Da Vinci itself, so this gateway runs module 1 for it. Unset, module 1
@@ -1974,6 +2028,19 @@ type built struct {
 	// is read with, recorded for the same reason.
 	cdexReadScope  string
 	cdexReadClient bool
+	// cdexSubscriptionScope is the subscription scope exactly as build()
+	// handed it to engine.New, cdexSubscriptionClient whether it handed it
+	// the client the Subscription endpoint is reached with, and
+	// subscriptionPredecessor whether it handed it a predecessor key,
+	// recorded for the same reason.
+	cdexSubscriptionScope   string
+	cdexSubscriptionClient  bool
+	subscriptionPredecessor bool
+	// subscriptionKeys are the topic Subscription keys build() derived from
+	// the identity and, when IDENTITY_PREDECESSOR_DIR is set, its
+	// predecessor; the subscription legs take them from here once they are
+	// served. Recorded so this package's tests prove the setting reaches them.
+	subscriptionKeys subscription.Keys
 
 	diagnostic *diagnosticSource
 	gateway    *engine.Gateway
@@ -2173,6 +2240,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	// (pre-role-stamp bundle) is tolerated.
 	if r := bundle.Manifest.Role; r != "" && r != cfg.Role {
 		return b, fmt.Errorf("gateway: ROLE=%s but this bundle registered as %s — mount the matching bundle or fix ROLE", cfg.Role, r)
+	}
+
+	// The subscription keys, the predecessor's among them when
+	// IDENTITY_PREDECESSOR_DIR is set: refused here, before anything is
+	// fetched, when the predecessor cannot be used.
+	subKeys, err := subscriptionKeys(cfg, bundle)
+	if err != nil {
+		return b, err
+	}
+	subPred, err := subscriptionPredecessor(cfg, bundle)
+	if err != nil {
+		return b, err
 	}
 
 	// template is what every network client below is a tagged copy of
@@ -2617,7 +2696,21 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			gwCfg.ProviderCDexReadScope = cfg.ProviderCDexReadScope
 			gwCfg.ProviderCDexReadClient = rc
 		}
+		// The payer's Subscription to its Tasks' changes: a third token,
+		// asked for the subscription scope, from the same token endpoint and
+		// client (loadConfig requires the endpoint, of the read's shape, and
+		// the ingress base with the scope). The engine derives the
+		// notifier's keys from the identity and the predecessor.
+		if cfg.ProviderCDexSubscriptionScope != "" {
+			sc, err := providerCDexSubscriptionHTTPClient(cfg)
+			if err != nil {
+				return b, fmt.Errorf("gateway: PROVIDER_CDEX_SUBSCRIPTION_SCOPE: %w", err)
+			}
+			gwCfg.ProviderCDexSubscriptionScope = cfg.ProviderCDexSubscriptionScope
+			gwCfg.ProviderCDexSubscriptionClient = sc
+		}
 	}
+	gwCfg.SubscriptionPredecessorKey = subPred
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress || cfg.PayerDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
@@ -2937,7 +3030,12 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		operatedPopulate:     operatedPopulate,
 		cdexReadScope:        gwCfg.ProviderCDexReadScope,
 		cdexReadClient:       gwCfg.ProviderCDexReadClient != nil,
-		responder:            gwCfg.Responder,
+
+		cdexSubscriptionScope:   gwCfg.ProviderCDexSubscriptionScope,
+		cdexSubscriptionClient:  gwCfg.ProviderCDexSubscriptionClient != nil,
+		subscriptionPredecessor: gwCfg.SubscriptionPredecessorKey != nil,
+		responder:               gwCfg.Responder,
+		subscriptionKeys:        subKeys,
 
 		diagnostic:      cfg.diagnostic,
 		gateway:         gw,
@@ -3481,12 +3579,14 @@ const (
 // capabilityDeclaration is what this gateway's system takes as a recipient: the
 // network's legs it compiles for its role, and each one its role takes only
 // once its participant configures it whose setting is set (engine.TakenLegs:
-// the payer's attachment request, with PROVIDER_CDEX_TASK_URL, and the payer's
-// read of its Task, with PROVIDER_CDEX_READ_SCOPE); and the request frames it
+// the payer's attachment request, with PROVIDER_CDEX_TASK_URL, the payer's
+// read of its Task, with PROVIDER_CDEX_READ_SCOPE, and the payer's Subscription
+// to its Tasks' changes, with PROVIDER_CDEX_SUBSCRIPTION_SCOPE); and the
+// request frames it
 // serves of its own (declaredRequestFrames).
 func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
 	return shnsdk.CapabilityDeclaration{
-		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL, ProviderCDexReadScope: cfg.ProviderCDexReadScope}.TakenLegs()),
+		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL, ProviderCDexReadScope: cfg.ProviderCDexReadScope, ProviderCDexSubscriptionScope: cfg.ProviderCDexSubscriptionScope}.TakenLegs()),
 		AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes,
 		RequestFrames:      declaredRequestFrames(cfg.Role, cfg.ProviderCDexTaskURL != ""),
 	}
@@ -3819,6 +3919,26 @@ func providerCDexReadHTTPClient(cfg config) (*http.Client, error) {
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("Task read smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
+// providerCDexSubscriptionHTTPClient is the client the provider's gateway
+// reaches the provider's own Subscription endpoint with: the Task forward's
+// SMART config (its token endpoint, client and credential, tagged as the
+// forward is: the Subscription endpoint is at the same FHIR base), its token
+// asked for PROVIDER_CDEX_SUBSCRIPTION_SCOPE. It holds its own token, so no
+// other scope's token is sent for its calls.
+func providerCDexSubscriptionHTTPClient(cfg config) (*http.Client, error) {
+	sc, err := providerCDexSmartConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sc.Scope = cfg.ProviderCDexSubscriptionScope
+	cfg.diagnostic.smart(&sc)
+	hc, err := smartauth.NewHTTPClient(sc)
+	if err != nil {
+		return nil, fmt.Errorf("Subscription smartauth client: %w", err)
 	}
 	return hc, nil
 }

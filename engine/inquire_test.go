@@ -1450,17 +1450,12 @@ func assertJSONObject(t *testing.T, raw []byte) {
 	}
 }
 
-// TestPASInquire_NotProfileValidatedButObserved pins WHAT LOOKS AT an inbound
-// peer's inquiry, because the answer is "no enforcing $validate does" and that is
-// a fact worth being executable rather than assumed.
-//
-// Nothing on this path refuses an inquiry, or a payer's answer, for failing its
-// profile: the gateway preserves a peer's bytes and does not certify content it
-// did not produce, the same posture the submit and update legs take. The payer's
-// own system is what certifies an inquiry it receives, and the certification lane
-// records an observation of both directions — at the inquiry's OWN profiles, at
-// every candidate line, which is what makes a line-specific defect (a 2.0.1
-// inquiry naming no item, say) visible as evidence without refusing the peer.
+// TestPASInquire_NotProfileValidatedButObserved pins the profiles the
+// certification lane observes an inbound peer's inquiry and its answer at: the
+// inquiry's OWN profiles, at every candidate line, which makes a line-specific
+// defect (a 2.0.1 inquiry naming no item, say) visible as evidence. Whether the
+// payer's gateway refuses the inquiry is its conformance level's, at structural
+// and strict only (owner decision D47(2); TestCarriedPASRequest_JudgedAtThePayersLevel).
 func TestPASInquire_NotProfileValidatedButObserved(t *testing.T) {
 	request := inquiryFixture(t, "pas-inquiry-request-2.0.json")
 	answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")

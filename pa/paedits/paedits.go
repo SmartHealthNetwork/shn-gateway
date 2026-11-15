@@ -1,6 +1,6 @@
 // Package paedits holds the Prior Authorization workstream's registered relay
-// edits (E-01 … E-14 and E-16, apart from the retired E-03; E-15 is not
-// used): the only changes a gateway may make to a participant's message it
+// edits (E-01 … E-14, E-16 … E-21 and E-23, apart from the retired E-03;
+// E-15 is not used): the only changes a gateway may make to a participant's message it
 // relays on a PA leg, and the transform it makes to a PAS message it built
 // itself. The gateway gathers them into its registry through the PA
 // workstream; a reader of recorded exchanges names an edit by them
@@ -331,6 +331,171 @@ func Rows() []relay.Edit {
 				"Location naming the Task at the gateway's base for the provider the Task went to, as a FHIR create's " +
 				"answer names the created resource. The answer names the edit in a header. The body is the provider's, " +
 				"unchanged, so its ETag is kept.",
+		},
+		{
+			ID:        relay.EditCDexTaskNotificationAddressRekey,
+			Name:      "cdex-task-notification-address-rekey",
+			Legs:      []string{"cdex-task-signal"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths: []string{"Bundle.link[i].url", "Bundle.entry[i].fullUrl (not a urn:uuid)", "Bundle.entry[i].request.url",
+				"Bundle.entry[i].response.location", "Bundle.entry[i].link[j].url",
+				"Bundle.entry[0].resource.parameter[i].valueReference.reference (the parameter named subscription)",
+				"Bundle.entry[0].resource.parameter[i].part[j].valueReference.reference (the part named focus of the parameter named notification-event)"},
+			Kind: relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a provider's CDex Task notification the payer's gateway delivers to its " +
+				"own system's notification endpoint, for each absolute http or https address in those places that lies under " +
+				"the base the provider's gateway stated in the sealed request by the segment-boundary match (scheme, host and " +
+				"port, then path segment by segment). The value written is the payer gateway's base for the provider, then the " +
+				"address's path below the stated base in its escaped form, percent-encoding kept, then its query as sent. An " +
+				"address whose path below the base holds a dot segment, raw or percent-encoded, or a segment that decodes to " +
+				"one holding a slash or a backslash, is not under it. Both gateways refuse a notification outside the closed SubscriptionStatus " +
+				"Bundle shape (a signed one among them, so the edit is never made on signed content on this leg), and one holding an " +
+				"address into the provider's own server (the stated base's scheme, host and port) that is not under the stated base. " +
+				"A relative reference is carried as sent: it already " +
+				"resolves against the payer gateway's base for the provider, where the payer subscribed. An address on another " +
+				"server, every address of a notification whose request states no base, and every address when the " +
+				"payer's gateway has no base for the provider, are carried as sent, and the exchange records why. Both gateways refuse, " +
+				"on routing, a notification holding an http or https address in those places that is not an absolute URL naming " +
+				"its server plainly, the same server to every URL reader, which could not be re-keyed one way only.",
+			Authority: "The payer gateway's own base for the provider that sent the notification, rebuilt from its ingress base " +
+				"and that provider's network identity, and the provider's FHIR base its gateway stated. Nothing is stored " +
+				"per Subscription or notification.",
+			Disclosure: "When a provider's system notifies a payer of a change to its CDex Tasks, the payer's gateway writes " +
+				"each address into the provider's FHIR server that the notification names (the Task it is about, the " +
+				"Subscription, the Bundle's links, and each entry's addresses) at the gateway's own base for that provider, where the payer's " +
+				"system reads the Task and its Subscription through the network. The delivery names the edit in a header.",
+		},
+		{
+			ID:        relay.EditSubscriptionHeaderSeal,
+			Name:      "subscription-header-seal",
+			Legs:      []string{"cdex-task-subscribe"},
+			Role:      relay.RoleRequester,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"Subscription.channel.endpoint", "Subscription.channel.header"},
+			Kind:      relay.EditKindRemoveMember,
+			Precondition: "Always (not an opt-in), on a Subscription create or update the subscriber's system makes at its " +
+				"gateway's per-counterpart base, once the gateway has read it and checked its channel.endpoint: the whole " +
+				"channel is sealed. channel.endpoint and channel.header are removed from the body the gateway sends, and " +
+				"travel only sealed, in the request frame, under a key only the subscriber's gateway holds; an absent header " +
+				"is sealed as an empty set. Made even where an in-payload signature covers the channel; that signature then " +
+				"no longer verifies at the notifier, whose gateway says so on its forward. A Subscription the gateway cannot " +
+				"read or seal is refused, never sent, and the exchange records why the edit was not made.",
+			Authority: "The Subscription's own channel.endpoint and channel.header, as the subscriber's system wrote them, " +
+				"sealed under the subscriber gateway's own key with the subscriber, the notifier and the topic bound to the " +
+				"seal. Nothing is stored per Subscription.",
+			Disclosure: "When a subscriber's system creates or updates a Subscription, its gateway removes the Subscription's " +
+				"channel.endpoint and channel.header before the Subscription crosses the network, and sends both sealed so " +
+				"that only that gateway can read them: neither the subscriber's endpoint nor its header values reach the " +
+				"notifier's system in clear. The notifier's gateway writes its own notification address there, and its " +
+				"forward names this edit.",
+		},
+		{
+			ID:        relay.EditSubscriptionEndpointRekey,
+			Name:      "subscription-endpoint-rekey",
+			Legs:      []string{"cdex-task-subscribe"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"Subscription.channel.endpoint", "Subscription.channel.header"},
+			Kind:      relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a payer's Subscription create or update the provider's gateway forwards " +
+				"to its own system, once the Subscription is within the shape the network carries, when the payer's gateway " +
+				"framed the Subscription's sealed endpoint and sealed headers. The endpoint is written, added when the body " +
+				"states none (the payer's gateway sends it only sealed) and written over one it states, and the header set " +
+				"replaced, or added when the Subscription has none. Made even where an in-payload signature covers the " +
+				"channel; that signature then no longer verifies in the provider's copy, and the forward says so. A " +
+				"Subscription the gateway cannot read, or a request without the sealed values or with values that are not " +
+				"sealed values, is refused, never carried, and the exchange records why the edit was not made.",
+			Authority: "The provider gateway's own notification address for the authenticated payer and the topic, under its " +
+				"Da Vinci ingress base, naming the endpoint the payer's gateway sealed; a credential for that address the " +
+				"provider gateway makes under its own key; and the payer's sealed headers as its gateway framed them. Nothing " +
+				"is read from the Subscription and nothing is stored per Subscription.",
+			Disclosure: "When a payer's system creates or updates a Subscription to the changes of its Tasks at a provider, " +
+				"the provider's gateway writes its own notification address into channel.endpoint and two values into " +
+				"channel.header: its credential for that address, and the payer's own header values sealed so that only the " +
+				"payer's gateway can read them. The provider's system then delivers its notifications to the provider's " +
+				"gateway, which carries them to the payer. The forward names the edit in a header, and names any signature " +
+				"that covered the channel.",
+		},
+		{
+			ID:        relay.EditSubscriptionEndpointRestore,
+			Name:      "subscription-endpoint-restore",
+			Legs:      []string{"cdex-task-subscribe"},
+			Role:      relay.RoleRequester,
+			Direction: relay.DirectionResponse,
+			Paths: []string{"Subscription.channel.endpoint", "Subscription.channel.header",
+				"Bundle.entry[i].resource.channel.endpoint (a Subscription)", "Bundle.entry[i].resource.channel.header (a Subscription)",
+				"Bundle.entry[i].fullUrl", "Bundle.link[i].url"},
+			Kind: relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a notifier's 2xx answer the subscriber's gateway relays to its own " +
+				"system: a Subscription, or a searchset or page of them. A Subscription's channel is restored when its " +
+				"channel.endpoint ends in a notification address for this subscriber and the topic, and its sealed endpoint " +
+				"and sealed headers open under the subscriber gateway's key for the notifier that answered; channel.header " +
+				"is then removed when the subscriber wrote none. Each fullUrl and paging link under the base the notifier's " +
+				"gateway stated is re-keyed to the per-counterpart base, and a paging link's url search parameter, which the " +
+				"notifier's server echoes as the notification addresses E-21 wrote, is restored to the subscriber's own " +
+				"endpoint when each of those addresses is the channel.endpoint of a Subscription in the same answer that this " +
+				"edit restored, all to that one endpoint; every other parameter keeps its bytes, and the core checks it. " +
+				"Made even where an in-payload signature covers " +
+				"them; that signature then no longer verifies in the subscriber's copy, and the answer says so. A " +
+				"Subscription whose address does not end so, or whose seals do not open (another notifier's, tampered, or " +
+				"made under a key past its rotation's overlap), is carried as the notifier sent it, and the exchange " +
+				"records why.",
+			Authority: "The sealed values the subscriber's own gateway made, opened under its own key with the subscriber, the " +
+				"notifier the Hub authenticated and the topic bound to the seal; and the per-counterpart base, rebuilt from " +
+				"the gateway's ingress base and the counterpart's network identity. Nothing is stored per Subscription.",
+			Disclosure: "When a notifier answers a subscriber's Subscription interaction with Subscriptions, the subscriber's " +
+				"gateway puts back the channel.endpoint and channel.header the subscriber wrote in place of the notifier " +
+				"gateway's notification address and credential, so the subscriber reads back its own Subscription as it " +
+				"would directly, and writes the notifier's addresses in a search's entries and paging links at the base the " +
+				"subscriber addresses, a paging link's url back to the subscriber's own endpoint, so following the link " +
+				"repeats the subscriber's search. The answer names the edit in a header, and names any signature that covered what " +
+				"changed. The notifier's ETag is left out, since it named the notifier's bytes.",
+			DropsAnswerHeaders: []string{relay.ETagHeader},
+		},
+		{
+			ID:        relay.EditSubscriptionURLSearchRekey,
+			Name:      "subscription-url-search-rekey",
+			Legs:      []string{"cdex-task-subscribe"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"the url search parameter of GET [base]/Subscription"},
+			Kind:      relay.EditKindRewriteQuery,
+			Precondition: "Always (not an opt-in), on a payer's Subscription search the provider's gateway forwards to " +
+				"its own system, which the payer's gateway frames with no url and the searched endpoint sealed (two sealed " +
+				"values during the payer's key rotation), once the search with its url is within the parameters the network " +
+				"carries. The url parameter is written first; every other parameter is carried byte for byte as framed. A " +
+				"search without the sealed values, or with values that are not sealed values, is refused, never carried, " +
+				"and the exchange records why the edit was not made.",
+			Authority: "The notification address the subscription-endpoint-rekey edit would write for the authenticated " +
+				"payer, the topic and each sealed endpoint, rebuilt from the provider gateway's ingress base. Nothing is " +
+				"stored per search.",
+			Disclosure: "When a payer's system searches a provider's Subscriptions by url, the provider's gateway writes " +
+				"the url its system is searched by: its own notification address for the same endpoint, which reaches it " +
+				"only sealed, so the search finds the Subscriptions that payer made, and only those. The forward names " +
+				"the edit in a header.",
+		},
+		{
+			ID:           relay.EditSubscriptionLocationRekey,
+			Name:         "subscription-location-rekey",
+			Legs:         []string{"cdex-task-subscribe"},
+			Role:         relay.RoleRequester,
+			Direction:    relay.DirectionResponse,
+			Kind:         relay.EditKindSetHeader,
+			Header:       "Location",
+			HeaderInputs: []string{relay.SubscriptionLocationInputBase, relay.SubscriptionLocationInputTail},
+			Precondition: "Always (not an opt-in), on a 2xx answer to a subscriber's Subscription create or update that the " +
+				"subscriber's gateway relays to its own system, when the notifier's gateway framed the Subscription's " +
+				"location (subscriptionLocation): the tail of the Location the notifier's system answered, " +
+				"Subscription/{id} or Subscription/{id}/_history/{vid}, framed only when that Location lies under the " +
+				"notifier's own base by the segment-boundary match. An answer with no location framed is carried without a " +
+				"Location; one whose framed value cannot be read as a Subscription location is carried without one too, and " +
+				"the exchange records why.",
+			Authority: "The subscriber gateway's own per-counterpart base, rebuilt from its ingress base and the counterpart's " +
+				"network identity, then the tail the notifier's gateway framed. Nothing is stored per request.",
+			Disclosure: "When a subscriber's system creates or updates a Subscription, its gateway answers with a Location " +
+				"naming the Subscription at the gateway's base for the counterpart, as a FHIR create's or update's answer " +
+				"names the resource, never at the notifier's own server. The answer names the edit in a header.",
 		},
 	}
 }

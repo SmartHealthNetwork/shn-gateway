@@ -278,6 +278,15 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if hasReadPath {
 		r = r.WithContext(withRequestFrameReadPath(r.Context(), readPath))
 	}
+	// A request frame may carry a topic Subscription's interaction and sealed
+	// channel (legSpec.Subscribe), on a subscribe leg alone.
+	subscribe, status, msg := inboundFrameSubscription(env.Metadata.TransactionType, payload)
+	if status != 0 {
+		x.refusing(frameRefusalRule(status))
+		g.refuseInboundRequest(w, r, env, tok, status, msg)
+		return
+	}
+	r = r.WithContext(withRequestFrameSubscribe(r.Context(), subscribe))
 
 	g.diagnosticStage(r.Context(), "recipient.request", env.Metadata.TransactionType, body, 0, "")
 	// The leg is verified and open: what follows is its answer.

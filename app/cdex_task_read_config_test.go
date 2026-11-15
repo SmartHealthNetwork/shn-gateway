@@ -78,7 +78,7 @@ func TestLoadConfig_ProviderCDexReadScopeRefusals(t *testing.T) {
 			}
 			e["ROLE"] = "payer"
 			e["PROVIDER_CDEX_READ_SCOPE"] = "system/Task.r"
-		}, `gateway: PROVIDER_CDEX_READ_SCOPE is provider-only (role="payer"): only a provider takes the payer's attachment request and its read of that Task`},
+		}, `gateway: PROVIDER_CDEX_READ_SCOPE is provider-only (role="payer"): only a provider takes the payer's attachment request, its read of that Task and its Subscription to that Task's changes`},
 		"without the Task endpoint": {func(e map[string]string) {
 			for k := range e {
 				if strings.HasPrefix(k, "PROVIDER_CDEX_") && k != "PROVIDER_CDEX_READ_SCOPE" {

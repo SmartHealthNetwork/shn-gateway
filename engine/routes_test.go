@@ -49,8 +49,9 @@ var (
 	// payerIngressRoutePatterns are mounted on a payer when its Da Vinci
 	// ingress is enabled: the attachment-request Task routes, at a
 	// provider's base and at the plain Task endpoint; the Task's read and
-	// vread at both (the plain endpoint's answered 404); and each base's
-	// CapabilityStatement.
+	// vread at both (the plain endpoint's answered 404); each base's
+	// CapabilityStatement; and the Subscription routes at a provider's base
+	// (at the plain base, refused).
 	payerIngressRoutePatterns = []string{
 		"POST /cdex/provider/{provider}/Task",
 		"POST /Task",
@@ -61,6 +62,15 @@ var (
 		"GET /Task/{id}/_history/{vid}",
 		"GET /metadata",
 		"GET /cdex/provider/{provider}/metadata",
+		"POST /cdex/provider/{provider}/Subscription",
+		"GET /cdex/provider/{provider}/Subscription",
+		"GET /cdex/provider/{provider}/Subscription/{rest...}",
+		"PUT /cdex/provider/{provider}/Subscription/{rest...}",
+		"DELETE /cdex/provider/{provider}/Subscription/{rest...}",
+		"PATCH /cdex/provider/{provider}/Subscription/{rest...}",
+		"POST /Subscription",
+		"GET /Subscription",
+		"GET /Subscription/{rest...}",
 	}
 	// payerIngressAuthRoutePatterns are mounted on a payer whose ingress
 	// authenticates its callers: a provider's base's SMART configuration.
@@ -68,6 +78,10 @@ var (
 	// cdexTaskRoutePatterns are mounted on a provider that sets its own Task
 	// endpoint: it takes the payer's attachment request.
 	cdexTaskRoutePatterns = []string{"POST /substrate/inbound"}
+	// notifyRoutePatterns are mounted on a provider whose ingress is enabled
+	// and that sets its subscription scope: its own system's notifications of
+	// a payer's Tasks' changes, at the addresses its gateway writes.
+	notifyRoutePatterns = []string{"POST /notify/cdex-task/{subscriber}/{kid}/{sealed}"}
 	// cdsClientJWKSRoutePatterns are mounted on a payer whose CDS calls carry
 	// a CDS Hooks client JWT: the public JWK Set of its key, with or without
 	// the ingress.
@@ -78,12 +92,12 @@ var (
 // module1 is a declared origination profile: without one, module 1 mounts no
 // /scenario route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL, module1, cdexTask, cdsClientJWKS, cdexRead bool
+	ingress, ingressAuth, baseURL, module1, cdexTask, cdsClientJWKS, cdexRead, cdexSubscription bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask, "cdsClientJWKS": c.cdsClientJWKS, "cdexRead": c.cdexRead} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask, "cdsClientJWKS": c.cdsClientJWKS, "cdexRead": c.cdexRead, "cdexSubscription": c.cdexSubscription} {
 		if set {
 			on = append(on, name)
 		}
@@ -95,11 +109,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the seven conditions.
+// everyRouteCondition is every combination of the eight conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 128 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0, bits&32 != 0, bits&64 != 0})
+	for bits := range 256 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0, bits&32 != 0, bits&64 != 0, bits&128 != 0})
 	}
 	return out
 }
@@ -125,8 +139,13 @@ func wantRoutes(role string, c routeConditions) []string {
 		// A provider whose participant sets its own Task endpoint takes
 		// the payer's attachment request, and one that sets the read scope
 		// the payer's read of its Task, each delivered on the inbound route.
-		if c.cdexTask || c.cdexRead {
+		if c.cdexTask || c.cdexRead || c.cdexSubscription {
 			want = append(want, cdexTaskRoutePatterns...)
+		}
+		// One that sets the subscription scope, with its ingress, takes its
+		// own system's notifications at the addresses it writes.
+		if c.ingress && c.cdexSubscription {
+			want = append(want, notifyRoutePatterns...)
 		}
 	case "payer":
 		want = append(want, "POST /substrate/inbound")
@@ -182,6 +201,9 @@ func routeGateway(role string, c routeConditions) *Gateway {
 	if c.cdexRead {
 		g.cfg.ProviderCDexReadScope = "system/Task.r"
 	}
+	if c.cdexSubscription {
+		g.cfg.ProviderCDexSubscriptionScope = "system/Subscription.cruds"
+	}
 	return withModuleOne(g)
 }
 
@@ -219,7 +241,7 @@ func TestRoutes_EachRoleMountsItsPinnedSet(t *testing.T) {
 // The split above is the classified lists, and every condition's set is a
 // subset of what the classification says the role registers.
 func TestRoutes_PinnedSetsAreTheClassifiedRoutes(t *testing.T) {
-	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns)
+	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns, notifyRoutePatterns)
 	slices.Sort(split)
 	other := slices.Clone(providerOtherRoutes)
 	slices.Sort(other)

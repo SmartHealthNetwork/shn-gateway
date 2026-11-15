@@ -235,3 +235,21 @@ func TestIssuedURL(t *testing.T) {
 		}
 	}
 }
+
+// DotFree refuses a remainder a client would resolve above its base: a "."
+// or ".." segment, raw or percent-encoded in any case, and a segment whose
+// decoded form holds a "/" or a "\", or that does not decode; every other
+// character, percent-encoded or not, is the participant's and passes.
+func TestDotFree(t *testing.T) {
+	for _, r := range []string{"", "/Task/t1", "/Subscription/s1/$status", "/Task/t1/_history/2", "/a%20b", "/a.b", "/...", "/.a", "/%41"} {
+		if !DotFree(r) {
+			t.Errorf("%q: refused", r)
+		}
+	}
+	for _, r := range []string{"/../provider-y/Task/t1", "/./Task/t1", "/Task/..", "/%2e%2e/provider-y/Task/t1", "/%2E%2E/x", "/%2e%2E/x", "/.%2E/x", "/%2e./x", "/%2e/x", "/%2E/x",
+		"/a%2Fb", "/a%2fb", "/a%5Cb", "/a%5cb", "/%zz", "/%2"} {
+		if DotFree(r) {
+			t.Errorf("%q: passed", r)
+		}
+	}
+}

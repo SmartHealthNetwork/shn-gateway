@@ -1,0 +1,4 @@
+go test fuzz v1
+string("ocurkBVBmv4.EBESExQVFhcYGRobXsyp4Mqp9HNmneptlgmMhGlAdNQ\rutRnYH2PFI78eGqRJLiPUfPrcuFmmPt4l4v51w4QJmAFCKAoN8sjPibtbiJz6jg")
+uint16(55)
+byte('\u0083')

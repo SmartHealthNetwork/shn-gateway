@@ -71,6 +71,25 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 		// A header edit: no path, the header its row names.
 		{"E-16", "cdex-task-location-rekey", []string{"cdex-attachment-request"}, relay.RoleRequester, relay.DirectionResponse,
 			nil, "set-header"},
+		{"E-17", "cdex-task-notification-address-rekey", []string{"cdex-task-signal"}, relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"Bundle.link[i].url", "Bundle.entry[i].fullUrl (not a urn:uuid)", "Bundle.entry[i].request.url",
+				"Bundle.entry[i].response.location", "Bundle.entry[i].link[j].url",
+				"Bundle.entry[0].resource.parameter[i].valueReference.reference (the parameter named subscription)",
+				"Bundle.entry[0].resource.parameter[i].part[j].valueReference.reference (the part named focus of the parameter named notification-event)"}, "replace-value"},
+		{"E-18", "subscription-header-seal", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionRequest,
+			[]string{"Subscription.channel.endpoint", "Subscription.channel.header"}, "remove-member"},
+		{"E-19", "subscription-endpoint-rekey", []string{"cdex-task-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"Subscription.channel.endpoint", "Subscription.channel.header"}, "replace-value"},
+		{"E-20", "subscription-endpoint-restore", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
+			[]string{"Subscription.channel.endpoint", "Subscription.channel.header",
+				"Bundle.entry[i].resource.channel.endpoint (a Subscription)", "Bundle.entry[i].resource.channel.header (a Subscription)",
+				"Bundle.entry[i].fullUrl", "Bundle.link[i].url"}, "replace-value"},
+		// A query edit: the request's url search parameter, no body path.
+		{"E-21", "subscription-url-search-rekey", []string{"cdex-task-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"the url search parameter of GET [base]/Subscription"}, "rewrite-query"},
+		// A header edit: no path, the header its row names.
+		{"E-23", "subscription-location-rekey", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
+			nil, "set-header"},
 	}
 	if len(relayEdits) != len(want) {
 		t.Fatalf("registry has %d edits, want %d", len(relayEdits), len(want))

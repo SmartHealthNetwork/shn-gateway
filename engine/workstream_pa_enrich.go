@@ -9,12 +9,14 @@ package engine
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 
 	"github.com/SmartHealthNetwork/shn-gateway/pa/dtraddress"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
 )
 
 // nativeEnrichment is the one hook through which a participant's own
@@ -66,6 +68,23 @@ type paGatewayState struct {
 	// scope (Config.ProviderCDexReadScope); nil otherwise, when the payer's
 	// read is refused as routing.
 	cdexRead *cdexReadState
+	// cdexSubscription is how the provider's gateway reaches its own
+	// Subscription endpoint for a payer, on a provider whose participant sets
+	// the subscription scope (Config.ProviderCDexSubscriptionScope); nil
+	// otherwise, when the payer's Subscription interaction is refused as
+	// routing.
+	cdexSubscription *cdexSubscriptionState
+	// notifyDelivery is how a payer's gateway delivers a provider's
+	// notification to the endpoint its own system wrote into its
+	// Subscription (workstream_pa_cdex_signal.go): the forward, with the
+	// checks every forward to the participant's own system takes, over
+	// Config.SubscriptionNotificationClient, with no credential of the
+	// gateway's own; nil on any other role.
+	notifyDelivery *nativeResponder
+	// subscriberKeys are the keys this gateway seals and restores its own
+	// participant's topic Subscriptions with (workstream_pa_subscriber.go):
+	// zero on a gateway whose identity names another holder.
+	subscriberKeys subscription.Keys
 	// addressKey is a payer gateway's DTR adaptive-address tag key, derived
 	// from its identity signing key (dtraddress.DeriveKey); zero on any other
 	// role, when no address is tagged and none verifies. Its bytes never
@@ -83,13 +102,18 @@ var cdexTaskDeadline = shnsdk.NewClient().Timeout - 5*time.Second
 // installed (or not) as the participant's opt-in says, and its populator the
 // managed one over the system of record New has decorated.
 func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
-	st := &paGatewayState{populator: newManagedPopulator(g.cfg.SoR)}
+	st := &paGatewayState{populator: newManagedPopulator(g.cfg.SoR), subscriberKeys: newSubscriberKeys(g.cfg)}
 	if g.cfg.Role == "payer" {
 		k, err := dtraddress.DeriveKey(g.cfg.Identity.SignPriv)
 		if err != nil {
 			return nil, err
 		}
 		st.addressKey = k
+		client := g.cfg.SubscriptionNotificationClient
+		if client == nil {
+			client = &http.Client{}
+		}
+		st.notifyDelivery = NewNativeResponder(client, "", g.cfg.Clock, WithUpstreamParty("payer"), WithBackendDeadline(cdexTaskDeadline))
 	}
 	if url := strings.TrimSpace(g.cfg.ProviderCDexTaskURL); url != "" && g.cfg.Role == "provider" {
 		st.cdexTask = NewNativeResponder(g.cfg.ProviderCDexTaskClient, url, g.cfg.Clock, WithUpstreamParty("provider"),
@@ -99,6 +123,11 @@ func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
 			return nil, err
 		}
 		st.cdexRead = read
+		subscribe, err := newCDexSubscriptionState(g.cfg)
+		if err != nil {
+			return nil, err
+		}
+		st.cdexSubscription = subscribe
 	}
 	if err := g.installEnrichment(st); err != nil {
 		return nil, err

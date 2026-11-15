@@ -12,6 +12,7 @@ package engine
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/legtaxonomy"
@@ -112,6 +113,14 @@ var paIngressRoutes = map[string]ingressHandler{
 	RouteCDexReadBase: {"cdex-read-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexReadIngress }},
 	// The same read at the plain Task endpoint, which names no provider.
 	RouteCDexRead: {"cdex-read-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexReadPlain }},
+	// The payer's Subscription to its Tasks' changes at a provider's base.
+	RouteCDexSubscriptionBase: {"cdex-subscription-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexSubscriptionIngress }},
+	// The same at the plain base, which names no provider.
+	RouteCDexSubscription: {"cdex-subscription-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexSubscriptionPlain }},
+	// A provider system's notification of a change to a payer's Tasks, at
+	// the notification address its gateway wrote into the payer's
+	// Subscription.
+	RouteCDexNotify: {"cdex-notify-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexNotifyIngress }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -166,6 +175,22 @@ var paLegs = map[string]legDetail{
 	// and the provider takes it only once its gateway is configured with the
 	// scope it reads its own Tasks with.
 	"cdex-task-status": {Physics: paReadOnly, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true},
+	// A payer's topic Subscription to the changes of its Tasks, at the
+	// provider's own Subscription endpoint: its create, update and delete
+	// change the provider's store. Carried whatever the two sides' PA lines,
+	// as the Task's legs are. The interaction is its request frame's
+	// subscriptionRequest, and the provider takes it only once its gateway is
+	// configured with the scope it reaches its own Subscription endpoint with.
+	"cdex-task-subscribe": {Physics: paMutating, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderCDexSubscriptionScope, Subscribe: true},
+	// A provider's notification of a change to a payer's CDex Tasks, which
+	// its system posts to the notification address its gateway wrote into
+	// the payer's Subscription, delivered to the payer's own endpoint: a
+	// handshake, a heartbeat or an id-only event, each disclosing no
+	// patient's data. The payer's endpoint acts on it as it chooses. Carried
+	// whatever the two sides' PA lines; a payer takes it unconditionally
+	// from the release that brings it. Its request frame carries the sealed
+	// endpoint and headers and the provider's FHIR base.
+	"cdex-task-signal": {Physics: paMutating, Contract: "", Seam: paSeamPayer, Signal: true},
 }
 
 // paSeamPayer is the seam a payer's inbound PA request is judged at.
@@ -235,6 +260,14 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("GET /cdex/payers", noCredential, g.withIngressCorrelation(g.handleCDexPayers))
 		// FR-37: the ingress edge's own CapabilityStatement.
 		route("GET /metadata", noCredential, g.handleIngressMetadata)
+		// The provider's own system posts each notification of a change to a
+		// payer's Tasks to the notification address this gateway wrote into
+		// the payer's Subscription (E-19): mounted only where the gateway
+		// takes the payer's Subscription (its participant sets the
+		// subscription scope), and so writes such addresses.
+		if strings.TrimSpace(g.cfg.ProviderCDexSubscriptionScope) != "" {
+			route("POST /notify/cdex-task/{subscriber}/{kid}/{sealed}", noCredential, g.ingressRoute(RouteCDexNotify))
+		}
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
 			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)
@@ -268,6 +301,18 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("GET /cdex/provider/{provider}/Task/{id}/_history/{vid}", noCredential, g.ingressRoute(RouteCDexReadBase))
 		route("GET /Task/{id}", noCredential, g.ingressRoute(RouteCDexRead))
 		route("GET /Task/{id}/_history/{vid}", noCredential, g.ingressRoute(RouteCDexRead))
+		// The payer's own system manages its Subscription to a provider's
+		// Tasks' changes at that provider's base; the plain base names no
+		// provider, and refuses (workstream_pa_cdex_subscriber.go).
+		route("POST /cdex/provider/{provider}/Subscription", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("GET /cdex/provider/{provider}/Subscription", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("GET /cdex/provider/{provider}/Subscription/{rest...}", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("PUT /cdex/provider/{provider}/Subscription/{rest...}", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("DELETE /cdex/provider/{provider}/Subscription/{rest...}", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("PATCH /cdex/provider/{provider}/Subscription/{rest...}", noCredential, g.ingressRoute(RouteCDexSubscriptionBase))
+		route("POST /Subscription", noCredential, g.ingressRoute(RouteCDexSubscription))
+		route("GET /Subscription", noCredential, g.ingressRoute(RouteCDexSubscription))
+		route("GET /Subscription/{rest...}", noCredential, g.ingressRoute(RouteCDexSubscription))
 		// FHIR's capabilities interaction at each base: Task create at the
 		// plain base; create, and read and vread where that provider serves
 		// them, at a provider's.

@@ -298,7 +298,10 @@ func TestExchangeRecord_IngressHubOutcomes(t *testing.T) {
 		{"large envelope budget", hubAnswers{status: 503, reason: "large envelope budget exhausted", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"a Hub instance not yet ready", hubAnswers{status: 503, reason: "registry not yet loaded", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"authority", hubAnswers{status: 403, reason: "authz token verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
+		// The Hub answers this one alike from its check of the token's patient
+		// and from its payload-hash check, before anything is recorded.
 		{"authority, the token's patient", hubAnswers{status: 403, reason: "authz token's patient does not fit the leg", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
+		{"authority, the answer token's patient", hubAnswers{status: 502, reason: "authz token's patient does not fit the leg", delivered: "yes"}, ExchangeRefused, RefusedByHub, RefusalAuthority},
 		{"authentication", hubAnswers{status: 401, reason: "assertion verification failed", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalAuthentication},
 		{"routing", hubAnswers{status: 502, reason: "unknown recipient", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
 		{"unknown leg", hubAnswers{status: 400, reason: "unknown transaction type", delivered: "no"}, ExchangeRefused, RefusedByHub, RefusalRouting},
@@ -2595,12 +2598,12 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 		return out
 	}
 	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", "cdex-task-status", ExchangeOther}
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", "cdex-task-status", "cdex-task-subscribe", "cdex-task-signal", ExchangeOther}
 	wantKinds = append(wantKinds, profileLegs()...)
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteCDexSubscriptionBase, RouteCDexSubscription, RouteCDexNotify, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

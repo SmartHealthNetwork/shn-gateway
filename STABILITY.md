@@ -208,6 +208,87 @@ evolving.
     `E-03:no-coverage` leaves the access line's `editsNotMade`.
 
   This decision removes no other full item early.
+- **A sixth recorded exception, v1.13.0:** signed content travelling untouched
+  is full, and v1.13.0, a minor release, makes a fifth edit to signed content.
+  On the payer's topic Subscription to the changes of its Tasks
+  (`cdex-task-subscribe`, evolving), the provider's gateway writes the
+  Subscription's `channel.endpoint` as its own notification address for that
+  payer (added when the body states none, written over one it states), and its `channel.header` to exactly two values, its credential for
+  that address and the payer's sealed header values (E-19,
+  `subscription-endpoint-rekey`), on the leg's create and update forwarded to
+  the provider's system only.
+  - **Signed content:** the edit is made even where a signature covers the
+    channel, so that signature no longer verifies in the copy the provider's
+    system gets. The forward names it in `X-SHN-Edited`, with the signature
+    added when one covered the channel.
+  - **Why it was granted:** the provider's system must deliver every
+    notification to its own gateway, never straight to an address off the
+    network, and the payer's credential must never reach it in clear (routing
+    and addressing, and the confidentiality of the subscriber's credential;
+    the owner's decision on the notifications design, D132). No participant
+    used the leg when it shipped.
+  - **What it does not cover:** the leg's url search re-key (E-21,
+    `subscription-url-search-rekey`) rewrites a search's query, never signed
+    content, and is not an exception.
+
+  The exception is this edit only, at the channel only, on this leg's request
+  only.
+- **A seventh recorded exception, v1.13.0:** on the same leg, the payer's own
+  gateway, as the subscriber's, makes two more edits to signed content, each
+  only at its own place:
+  - **The channel seal (E-18, `subscription-header-seal`):** on the payer
+    system's Subscription create or update it sends, the gateway removes
+    `channel.endpoint` and `channel.header`, which travel only sealed. The
+    provider's gateway names it beside E-19 on its forward.
+  - **The restore (E-20, `subscription-endpoint-restore`):** on the provider's
+    answer it relays to the payer's system, the gateway writes back each
+    Subscription's `channel.endpoint` and `channel.header` as the payer wrote
+    them, removing `channel.header` when it wrote none, and re-keys each
+    search entry's `fullUrl` and paging link to the payer's base for the
+    provider. The answer names it in `X-SHN-Edited`, with the signature added
+    when one covered what changed.
+  - **Signed content:** each is made even where a signature covers the
+    channel (and, for E-20, a searchset's addresses), so that signature no
+    longer verifies at the recipient of the edited copy.
+  - **Why it was granted:** the payer's endpoint and its credential must never
+    cross the network in clear, and the payer reads back its own Subscription
+    as it would directly (routing and addressing, and the confidentiality of
+    the subscriber's credential; D132).
+  - **What it does not cover:** the created or updated Subscription's
+    `Location` (E-23, `subscription-location-rekey`) is a header the payer's
+    gateway writes, never signed content, and is not an exception.
+
+  With these, E-10, E-11, E-12, E-13, E-18, E-19 and E-20 are the only edits
+  the gateway makes to signed content, each only at its own place, and the
+  exempt set is pinned by test to exactly those seven.
+- **An eighth recorded exception, v1.13.0:** on a provider's CDex Task
+  notification (`cdex-task-signal`, evolving), the payer's gateway, delivering
+  it to the endpoint the payer's own system wrote into its Subscription,
+  re-keys each absolute address into the provider's FHIR server that lies
+  under the base the provider's gateway states to the payer gateway's own base
+  for that provider (E-17, `cdex-task-notification-address-rekey`): the
+  Bundle's `link` `url`s, the SubscriptionStatus's `subscription` reference
+  and each `notification-event` `focus` reference, each entry's
+  `request.url` and `response.location` (an entry carries no `link`), each entry's
+  `fullUrl` that is not a `urn:uuid`. Identity members (`meta.profile`,
+  `implicitRules`, `meta.source`, a coding's `system`) name rather than
+  locate, and are carried as sent.
+  - **Signed content:** a signed notification is refused on this leg (its
+    signature's `who` and `onBehalfOf` could name a patient, or an address
+    the edit does not re-key), so the exception never applies on it today.
+    The edit stays in the exempt set, at its own places, for the relay's
+    rule; a provider that signs its notifications cannot use this leg yet.
+  - **Why it was granted:** the payer's system reads the Task and its
+    Subscription through the network, at its gateway's base for the provider;
+    an address into the provider's own server would leave the network
+    (routing and addressing, applied as E-12's re-key is).
+  - **What it does not cover:** a relative reference, which already resolves
+    against the payer's base for the provider, and every other byte of the
+    notification are carried as sent.
+
+  With it, E-10, E-11, E-12, E-13, E-17, E-18, E-19 and E-20 are the only
+  edits the gateway makes to signed content, each only at its own place, and
+  the exempt set is pinned by test to exactly those eight.
 - A full item is deprecated before it is removed: [`CHANGELOG.md`](CHANGELOG.md)
   announces it, and the gateway warns at boot for at least one minor release
   before a major release removes it. An evolving item's removal or change is
@@ -273,8 +354,9 @@ The classes are:
 - `PA workstream, evolving`: the Prior Authorization workstream's eligibility,
   patient-authored DTR and CDex documentation exchange items (the CDex legs,
   from v1.1.0 `cdex-attachment-submit`, from v1.5.0
-  `cdex-attachment-request` and from v1.12.0 `cdex-task-status`, and their
-  ingress, return paths and size limits),
+  `cdex-attachment-request`, from v1.12.0 `cdex-task-status` and from v1.13.0
+  `cdex-task-subscribe` and `cdex-task-signal`, and their ingress, return
+  paths, notification route and size limits),
   owned by `PA workstream`, which are evolving while its CRD, DTR
   and PAS items are full.
 - `module 1` (building messages on a participant's behalf), `module 2`
@@ -469,6 +551,8 @@ export (the gateway's table of these settings is `noEffectSettings` in
 | `PROVIDER_CDEX_CLIENT_KID` | PA workstream, evolving | PA workstream |
 | `PROVIDER_CDEX_CLIENT_SECRET` | PA workstream, evolving | PA workstream |
 | `PROVIDER_CDEX_READ_SCOPE` | PA workstream, evolving | PA workstream |
+| `PROVIDER_CDEX_SUBSCRIPTION_SCOPE` | PA workstream, evolving | PA workstream |
+| `IDENTITY_PREDECESSOR_DIR` | PA workstream, evolving | PA workstream |
 | `PROVIDER_DAVINCI_INGRESS` | core | core |
 | `PROVIDER_DAVINCI_INGRESS_BASE_URL` | core | core |
 | `INGRESS_CLIENTS_FILE` | core | core |
@@ -588,6 +672,18 @@ members the system of record does not hold on the CRD, DTR and PAS legs
 `CONFORMANCE_ENFORCEMENT` takes `none` (the default when unset, from v1.0.0),
 `observe` (the default when unset before v1.0.0), `structural` or `strict` (see
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
+
+**Behavior change in v1.13.0: a payer's gateway checks the PAS request it receives at its own level.**
+
+- **What changes.** At `structural` and `strict`, a payer's gateway checks a carried PAS request (`$submit`, the update and `$inquire`) before its system sees it, and never changes a byte of it. A request that declares a profile is checked against what it declares. One that declares none is checked against its line's own request Bundle profile, without a version: `profile-pas-request-bundle` on a `$submit` or an update, `profile-pas-inquiry-request-bundle` on an `$inquire`. Earlier releases did not check it at all.
+- **How it is read.** At PAS 2.1 and 2.2, a `$submit`'s or update's request Bundle is read per entry, as every other check of that profile at those lines is read. `$inquire` and PAS 2.0 are read whole. The profile is asked for explicitly, so each line's validator lane must load that line's PAS package: a lane that does not hold the profile reads every undeclared request as a structural issue.
+- **The verdict.** The request is valid when any candidate line accepts it: the line it was sent at, then the lines it names, then 2.2, 2.1 and 2.0.
+  - A structural defect is refused at both levels, and a deeper one at `strict`, as `422 {"error":"ingress validation failed"}` with the issues (an OperationOutcome on these FHIR legs). The payer's system receives nothing.
+  - A check that cannot run is refused `500` at `strict` and recorded at `structural`.
+  - A code the validator cannot check is never refused (below).
+- **A PAS 2.0 update that carries its prior Claim.** PAS 2.0.1's request Bundle allows exactly one Claim, so a 2.0 update that carries the prior Claim it names as a second Claim entry is a structural defect at 2.0, and is refused at both levels unless another candidate line accepts it. shn-sdk's deprecated `BuildConformantClaimUpdateBundle` builds that shape; `BuildConformantClaimUpdateBundleExact` and the other current update builders name the prior through `Claim.related` and do not carry it at 2.0.
+- **What is unchanged.** `none` and `observe` check nothing here and carry the request as sent. The requester's gateway does not check a request its participant's system sends.
+- **The refusal** is the payer's own conformance choice at its level, never a network rule. A payer cannot tolerate one requester's known defects; it sets a lower level.
 
 **Behavior change in v1.12.0: a translated message is checked at its target line's profile.**
 A message your gateway translates between IG lines (`TRANSLATE_IG_LINES`) is checked against the profile the target line certifies it at for its resource and leg, where it was checked against its base FHIR definition only; one that is not valid there is refused `422` at every level, a `fidelity` refusal at stage `verify`. At PAS 2.1 and 2.2 a request Bundle read against its request Bundle profile, asked for or declared, is read per entry, in one `$validate` call (the validator can stop without a verdict reading it whole), so a participant's request Bundle that declares that profile gets a verdict where it was recorded `unavailable` ([docs/CONFIGURATION.md](docs/CONFIGURATION.md), `TRANSLATE_IG_LINES`).
@@ -1022,6 +1118,16 @@ The main listener, on `HOST` and `PORT`:
 | `GET /cdex/provider/{provider}/Task/{id}/_history/{vid}` | PA workstream, evolving | PA workstream |
 | `GET /Task/{id}` | PA workstream, evolving | PA workstream |
 | `GET /Task/{id}/_history/{vid}` | PA workstream, evolving | PA workstream |
+| `POST /cdex/provider/{provider}/Subscription` | PA workstream, evolving | PA workstream |
+| `GET /cdex/provider/{provider}/Subscription` | PA workstream, evolving | PA workstream |
+| `GET /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `PUT /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `DELETE /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `PATCH /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `POST /Subscription` | PA workstream, evolving | PA workstream |
+| `GET /Subscription` | PA workstream, evolving | PA workstream |
+| `GET /Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `POST /notify/cdex-task/{subscriber}/{kid}/{sealed}` | PA workstream, evolving | PA workstream |
 | `GET /cdex/provider/{provider}/metadata` | core | core |
 | `GET /cdex/provider/{provider}/.well-known/smart-configuration` | core | core |
 | `GET /cds-client/jwks.json` | PA workstream | PA workstream |
@@ -1887,6 +1993,8 @@ table.
 | `cdex-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-request-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-read-ingress` | PA workstream, evolving | PA workstream |
+| `cdex-subscription-ingress` | PA workstream, evolving | PA workstream |
+| `cdex-notify-ingress` | PA workstream, evolving | PA workstream |
 | `federated-query-ingress` | FQS workstream | FQS workstream |
 
 | Item | Class | Owner |
@@ -2633,7 +2741,7 @@ coding), and the headers and endpoints of optional diagnostic collection.
 Of the leg types, `coverage-eligibility` and `patient-dtr` (`PA workstream,
 evolving`) and `federated-query` (`FQS workstream`) are evolving at v1.0, and
 the CDex legs (`PA workstream, evolving`, from v1.1.0 `cdex-attachment-submit`,
-from v1.5.0 `cdex-attachment-request` and from v1.12.0 `cdex-task-status`) are evolving when they ship: a minor gateway release may change how the gateway
+from v1.5.0 `cdex-attachment-request`, from v1.12.0 `cdex-task-status` and from v1.13.0 `cdex-task-subscribe` and `cdex-task-signal`) are evolving when they ship: a minor gateway release may change how the gateway
 carries them. The wire protocol's own versioning still governs their names.
 
 | Item | Class | Owner |
@@ -2663,6 +2771,8 @@ carries them. The wire protocol's own versioning still governs their names.
 | `transactionType=cdex-attachment-submit` | PA workstream, evolving | PA workstream |
 | `transactionType=cdex-attachment-request` | PA workstream, evolving | PA workstream |
 | `transactionType=cdex-task-status` | PA workstream, evolving | PA workstream |
+| `transactionType=cdex-task-subscribe` | PA workstream, evolving | PA workstream |
+| `transactionType=cdex-task-signal` | PA workstream, evolving | PA workstream |
 | `transactionType=federated-query` | FQS workstream | FQS workstream |
 | `POST <authz>/authorize` | core | core |
 | `X-Hub-Assertion` | core | core |
@@ -2929,7 +3039,9 @@ whose keys it rotates, as its first argument, before the flags.
 
 Exit code 0 is success. For `keygen`, `register`, `login`, `clients`, `revoke`
 and `rotate`, 1 is a failure and 2 a usage error: a flag unknown, missing or
-malformed, or the id argument missing. `doctor`'s codes name the phase that
+malformed, or the id argument missing. From `shn-sdk` v1.12.0, `rotate` exits 3
+when the registrar accepted the new keys and they are written, but the replaced
+signing key could not be kept in the `predecessor` subdirectory. `doctor`'s codes name the phase that
 failed, so a script can tell whose problem it is: 2 usage (a flag unknown,
 missing or malformed, or `--persona` naming no persona the network
 advertises); 10 the network's health,
@@ -2964,6 +3076,7 @@ output and exit 0.
 | `shn rotate exit 0` | core | core |
 | `shn rotate exit 1` | core | core |
 | `shn rotate exit 2` | core | core |
+| `shn rotate exit 3` | core | core |
 | `shn doctor exit 0` | core | core |
 | `shn doctor exit 2` | core | core |
 | `shn doctor exit 10` | core | core |
@@ -2977,7 +3090,11 @@ directory a command's `--out` names (`doctor`'s `--keys`, else its `--out`).
 `keygen` writes all three. Both forms of `register` write all three when the
 directory holds no `sign.key`, and otherwise read the two keys; `register --accounts`
 writes all three again once the Accounts service accepts the registration.
-`rotate` reads all three and replaces them. `doctor` reads the two keys.
+`rotate` reads all three and replaces them; from `shn-sdk` v1.12.0, once the
+registrar accepts the new keys, it keeps the `sign.key` and `manifest.json` it
+replaces, never `enc.key`, readable and writable by the owner alone, in the
+directory's `predecessor` subdirectory, replacing what an earlier rotation kept
+there. `doctor` reads the two keys.
 
 | Item | Class | Owner |
 |---|---|---|

@@ -313,6 +313,39 @@ type Config struct {
 	// forward's token endpoint and client credentials, its token asked for
 	// ProviderCDexReadScope. Required with ProviderCDexReadScope.
 	ProviderCDexReadClient *http.Client
+	// ProviderCDexSubscriptionScope is the scope the provider's gateway asks
+	// its own token endpoint for to reach its system's Subscription endpoint
+	// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE, read trimmed). Set, a provider's
+	// gateway takes the payer's topic Subscription to its Tasks' changes
+	// (cdex-task-subscribe: TakenLegs, the leg's TakenWhenSet), at the FHIR
+	// base its ProviderCDexTaskURL is under, which must then be one a read is
+	// made below (cdexroute.TaskReadURL); the notification address it writes
+	// into each Subscription is under IngressBaseURL. Provider role only;
+	// requires ProviderCDexTaskURL, ProviderCDexSubscriptionClient and
+	// IngressBaseURL.
+	ProviderCDexSubscriptionScope string
+	// ProviderCDexSubscriptionClient is the client the provider's
+	// Subscription endpoint is reached with: the Task forward's token
+	// endpoint and client credentials, its token asked for
+	// ProviderCDexSubscriptionScope. Required with
+	// ProviderCDexSubscriptionScope.
+	ProviderCDexSubscriptionClient *http.Client
+	// SubscriptionPredecessorKey is the signing key a rotation replaced, read
+	// from IDENTITY_PREDECESSOR_DIR for the rotation's overlap; nil when unset.
+	// It reaches only the topic Subscription keys, which the PA workstream
+	// derives from Identity.SignPriv and it (subscription.DeriveKeys): the
+	// notifier gateway's credential (E-19) and ownership test (the
+	// notifications design §6.3, §7.2) are made with them, and the
+	// predecessor's only verify.
+	SubscriptionPredecessorKey ed25519.PrivateKey
+	// SubscriptionNotificationClient is the client a payer's gateway delivers
+	// each notification with, to the endpoint its own system wrote into its
+	// Subscription (cdex-task-signal), presenting the header values that
+	// system wrote and no credential of the gateway's own. The gateway sends
+	// through a copy that follows the rules of every forward to the
+	// participant's own system (smartauth.ParticipantClient). nil: a client
+	// with the default transport, trusting the system's roots.
+	SubscriptionNotificationClient *http.Client
 	// IngressEnabled mounts the Da Vinci ingress routes: a provider's, or on a
 	// payer the attachment-request Task routes. Set from PROVIDER_DAVINCI_INGRESS
 	// or PAYER_DAVINCI_INGRESS by app.go. The routes fail-closed without
@@ -738,6 +771,13 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 	// The provider's own Task endpoint is a provider's setting, and its
 	// forward is authorized: a Task URL on another role, or without its
 	// client, refuses to boot rather than declare a leg it cannot deliver.
+	// The notification address a payer's Subscription is re-keyed to (E-19)
+	// is under the ingress base: checked first, so the refusal names the
+	// setting that needs it.
+	if strings.TrimSpace(cfg.ProviderCDexSubscriptionScope) != "" && cfg.Role == "provider" && strings.TrimSpace(cfg.ProviderCDexTaskURL) != "" &&
+		(!cfg.IngressEnabled || strings.TrimSpace(cfg.IngressBaseURL) == "") {
+		return nil, errors.New("gateway: ProviderCDexSubscriptionScope (PROVIDER_CDEX_SUBSCRIPTION_SCOPE) requires the Da Vinci ingress (IngressEnabled, PROVIDER_DAVINCI_INGRESS) and its IngressBaseURL (PROVIDER_DAVINCI_INGRESS_BASE_URL), the base the notification address each Subscription names is written under")
+	}
 	if strings.TrimSpace(cfg.ProviderCDexTaskURL) != "" {
 		if cfg.Role != "provider" {
 			return nil, fmt.Errorf("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) is a provider's own Task endpoint; this gateway's role is %q", cfg.Role)
@@ -770,6 +810,27 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 		}
 		// The Task endpoint's shape is the workstream's rule, checked where
 		// its state is built (paWorkstream.newGatewayState).
+	}
+	// The payer's Subscription to its Tasks' changes is taken exactly when
+	// the subscription scope is set (the leg's TakenWhenSet), so a gateway
+	// that could not serve it refuses to boot rather than declare it: a scope
+	// on another role, without the Task endpoint whose base the Subscription
+	// endpoint is at, without the client it is reached with, without the
+	// ingress base the notification address is written under.
+	if strings.TrimSpace(cfg.ProviderCDexSubscriptionScope) != "" {
+		if cfg.Role != "provider" {
+			return nil, fmt.Errorf("gateway: ProviderCDexSubscriptionScope (PROVIDER_CDEX_SUBSCRIPTION_SCOPE) is the scope a provider's gateway reaches its own Subscription endpoint with; this gateway's role is %q", cfg.Role)
+		}
+		if strings.TrimSpace(cfg.ProviderCDexTaskURL) == "" {
+			return nil, errors.New("gateway: ProviderCDexSubscriptionScope (PROVIDER_CDEX_SUBSCRIPTION_SCOPE) requires ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL), the provider's own Task endpoint, whose FHIR base its Subscription endpoint is at")
+		}
+		if cfg.ProviderCDexSubscriptionClient == nil {
+			return nil, errors.New("gateway: ProviderCDexSubscriptionScope (PROVIDER_CDEX_SUBSCRIPTION_SCOPE) requires ProviderCDexSubscriptionClient, the client authorized to reach the provider's own Subscription endpoint")
+		}
+		// The keys the notification address's credential is made with are
+		// derived where the workstream's state is built
+		// (paWorkstream.newGatewayState), which refuses a gateway whose
+		// identity yields none.
 	}
 	if cfg.CDSClientJWKS != nil {
 		if cfg.Role != "payer" {
@@ -1165,7 +1226,7 @@ func (g *Gateway) RoutePatternsForTest() []string {
 // participant configures where the payer's attachment request goes, mounts
 // no inbound route and needs no Hub transport key.
 func (g *Gateway) coreRoutes(role string) []mountedRoute {
-	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL, g.cfg.ProviderCDexReadScope))) == 0 {
+	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL, g.cfg.ProviderCDexReadScope, g.cfg.ProviderCDexSubscriptionScope))) == 0 {
 		return nil
 	}
 	return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
@@ -1193,23 +1254,30 @@ const settingProviderCDexTaskURL = "PROVIDER_CDEX_TASK_URL"
 // payer's read of its Task (legtaxonomy.TakenWhenSet), one setting per leg.
 const settingProviderCDexReadScope = "PROVIDER_CDEX_READ_SCOPE"
 
+// settingProviderCDexSubscriptionScope is the setting that makes a provider
+// take the payer's topic Subscription to its Tasks' changes
+// (legtaxonomy.TakenWhenSet), one setting per leg.
+const settingProviderCDexSubscriptionScope = "PROVIDER_CDEX_SUBSCRIPTION_SCOPE"
+
 // settingSet reports whether the participant set the named setting, for a
 // leg taken only when configured (legSpec.TakenWhenSet). A setting this
 // engine does not hold reads as unset: unknown is never taken.
 func (cfg Config) settingSet(setting string) bool {
-	return settingsSet(cfg.ProviderCDexTaskURL, cfg.ProviderCDexReadScope)(setting)
+	return settingsSet(cfg.ProviderCDexTaskURL, cfg.ProviderCDexReadScope, cfg.ProviderCDexSubscriptionScope)(setting)
 }
 
 // settingsSet is settingSet over the settings it reads, each passed as its
 // value, so a route declaration reads only those (coreRoutes). Each is read
 // trimmed: a blank value is unset.
-func settingsSet(providerCDexTaskURL, providerCDexReadScope string) func(setting string) bool {
+func settingsSet(providerCDexTaskURL, providerCDexReadScope, providerCDexSubscriptionScope string) func(setting string) bool {
 	return func(setting string) bool {
 		switch setting {
 		case settingProviderCDexTaskURL:
 			return strings.TrimSpace(providerCDexTaskURL) != ""
 		case settingProviderCDexReadScope:
 			return strings.TrimSpace(providerCDexReadScope) != ""
+		case settingProviderCDexSubscriptionScope:
+			return strings.TrimSpace(providerCDexSubscriptionScope) != ""
 		}
 		return false
 	}
@@ -1244,7 +1312,7 @@ func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, un
 // checks scope is reached as with a granted one.
 func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return "", TaskWriteScope + " " + TaskReadScope, true, false
+		return "", TaskWriteScope + " " + TaskReadScope + " " + ingressBypassSubscriptionScope, true, false
 	}
 	if g.ingressAuth == nil {
 		return "", "", false, false // fail-closed: no inbound auth configured
@@ -1274,7 +1342,10 @@ func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bo
 // endpoint grants only a scope a client registered, string for string
 // (grantScope), so a read scope is named only as one some client can be
 // granted, and none when no client can be granted a bearer the read routes
-// take; a provider's the Da Vinci routes'.
+// take; then, appended and sorted, each Subscription scope with no query a
+// client is registered for, exactly as listed (listedSubscriptionScopes),
+// which the Subscription routes take (subscriptionScopeRefused); a
+// provider's the Da Vinci routes'.
 func ingressScopes(role string, clients map[string]IngressClientRegistration) []string {
 	if role != "payer" {
 		return []string{ingressScope}
@@ -1291,7 +1362,7 @@ func ingressScopes(role string, clients map[string]IngressClientRegistration) []
 		}
 	}
 	slices.Sort(reads)
-	return append([]string{TaskWriteScope}, reads...)
+	return append(append([]string{TaskWriteScope}, reads...), listedSubscriptionScopes(clients)...)
 }
 
 // ingressScopeRefused is ingressAuthRefused for a route that admits only a
@@ -1319,6 +1390,33 @@ func (g *Gateway) ingressScopeRefused(w http.ResponseWriter, r *http.Request, ne
 		return true
 	}
 	return false
+}
+
+// subscriptionScopeRefused is ingressScopeRefused for a Subscription route: it
+// admits only a bearer granted a Subscription scope that permits need
+// (subscriptionScopesPermit), as the Task routes admit theirs. One that
+// authenticates but whose scopes permit no such thing is refused 403
+// insufficient_scope (RFC 6750 §3.1) with reason, the route's fixed sentence,
+// recorded as authority. It reports whether it wrote a refusal.
+func (g *Gateway) subscriptionScopeRefused(w http.ResponseWriter, r *http.Request, need taskPermission, reason refusalReason) bool {
+	client, granted, ok, unavailable := g.ingressAuthGrant(r)
+	switch {
+	case unavailable:
+		writeStoreUnavailable(w, "ingress key store unavailable")
+		return true
+	case !ok:
+		exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonIngressAuthentication)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msgIngressAuthentication})
+		return true
+	}
+	noteIngressCaller(r.Context(), client)
+	if subscriptionScopesPermit(granted, need) {
+		return false
+	}
+	exchangeOf(r.Context()).refusedFor(RefusalAuthority, reason)
+	w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+subscriptionChallengeScope(need)+`"`)
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": string(reason)})
+	return true
 }
 
 // ingressAuthRefused writes the refusal an ingress route owes when the caller is not
@@ -2276,6 +2374,11 @@ var errFramedDTRUnsupported = shnsdk.ErrFramedDTRUnsupported
 // frame (inboundFrameReadPath).
 var errReadPathUndefined = errors.New("a read path is not defined for this transaction type")
 
+// errSubscribeUndefined refuses a topic Subscription's frame headers on a leg
+// that is not a subscribe leg, before anything is sent: the recipient would
+// refuse the frame (inboundFrameSubscription).
+var errSubscribeUndefined = errors.New("a topic Subscription's frame headers are not defined for this transaction type")
+
 // errRoundAddressUnsupported refuses a next-question round naming its address
 // to a recipient that does not declare v1opsub, before anything is sent.
 var errRoundAddressUnsupported = errors.New("payer gateway does not read a round's address (operationSubpath); fetch the package again")
@@ -2342,7 +2445,19 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// A read's path rides only on the leg that defines it, and always in a
 	// frame of its own: the read has no body, so the frame carries the path
 	// and, when the leg was routed at a line, that line, and nothing else.
-	if content.ReadPath != "" {
+	if content.SubscribeFrame != nil {
+		// A topic Subscription's interaction rides only on its subscribe
+		// leg, and a notification's sealed channel and stated base only on
+		// its signal leg, always in a frame of their own.
+		if spec, _ := legSpecFor(txType); !spec.Subscribe && !spec.Signal {
+			return nil, errSubscribeUndefined
+		}
+		framed, ferr := shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, content.SubscribeFrame, payload)
+		if ferr != nil {
+			return nil, fmt.Errorf("request frame encode failed")
+		}
+		payload = framed
+	} else if content.ReadPath != "" {
 		if spec, _ := legSpecFor(txType); !spec.ReadPath {
 			return nil, errReadPathUndefined
 		}
@@ -4130,7 +4245,65 @@ type (
 	frameOperationKey struct{}
 	frameSubpathKey   struct{}
 	frameReadPathKey  struct{}
+	frameSubscribeKey struct{}
 )
+
+// subscribeFrame is what an inbound request frame on a topic Subscription's
+// subscribe leg (legSpec.Subscribe) or signal leg (legSpec.Signal) carries,
+// each value as it came, and whether the frame carries it.
+type subscribeFrame struct {
+	request, endpoint, channel, ifMatch, statedBase                string
+	hasRequest, hasEndpoint, hasChannel, hasIfMatch, hasStatedBase bool
+}
+
+// withRequestFrameSubscribe tags ctx with the subscribe leg's frame headers.
+// The leg that defines them (legSpec.Subscribe) reads and parses them;
+// nothing else does.
+func withRequestFrameSubscribe(ctx context.Context, f subscribeFrame) context.Context {
+	return context.WithValue(ctx, frameSubscribeKey{}, f)
+}
+
+// requestFrameSubscribe returns the subscribe leg's frame headers the inbound
+// request frame carries.
+func requestFrameSubscribe(ctx context.Context) subscribeFrame {
+	f, _ := ctx.Value(frameSubscribeKey{}).(subscribeFrame)
+	return f
+}
+
+// inboundFrameSubscription reads the topic Subscription headers of an inbound
+// request frame (shnsdk.FrameHeaderSubscriptionRequest,
+// FrameHeaderSubscriptionEndpoint, FrameHeaderSubscriptionChannel,
+// FrameHeaderIfMatch and FrameHeaderStatedBase), as they came. The
+// interaction and If-Match are defined only for a subscribe leg
+// (legSpec.Subscribe), the sealed endpoint and headers for a subscribe or a
+// signal leg (legSpec.Signal), and the stated base, on a request, for a
+// signal leg alone: a frame that names one on any other leg is refused (400),
+// as a readPath on a leg that defines none is (inboundFrameReadPath). Whether
+// each is one the leg carries is the leg's decision. A payload that is not a
+// frame carries none.
+func inboundFrameSubscription(legType string, payload []byte) (subscribeFrame, int, string) {
+	if !shnsdk.IsFramed(payload) {
+		return subscribeFrame{}, 0, ""
+	}
+	hdr, _, err := shnsdk.DecodeHTTPFrame(payload)
+	if err != nil {
+		return subscribeFrame{}, http.StatusBadRequest, "request frame decode failed"
+	}
+	var f subscribeFrame
+	f.request, f.hasRequest = hdr.Headers[shnsdk.FrameHeaderSubscriptionRequest]
+	f.endpoint, f.hasEndpoint = hdr.Headers[shnsdk.FrameHeaderSubscriptionEndpoint]
+	f.channel, f.hasChannel = hdr.Headers[shnsdk.FrameHeaderSubscriptionChannel]
+	f.ifMatch, f.hasIfMatch = hdr.Headers[shnsdk.FrameHeaderIfMatch]
+	f.statedBase, f.hasStatedBase = hdr.Headers[shnsdk.FrameHeaderStatedBase]
+	spec, _ := legSpecFor(legType)
+	subscribeOnly := f.hasRequest || f.hasIfMatch
+	either := f.hasEndpoint || f.hasChannel
+	switch {
+	case subscribeOnly && !spec.Subscribe, either && !spec.Subscribe && !spec.Signal, f.hasStatedBase && !spec.Signal:
+		return subscribeFrame{}, http.StatusBadRequest, "a topic Subscription's frame headers are not defined for this transaction type"
+	}
+	return f, 0, ""
+}
 
 // withRequestFrameReadPath tags ctx with the readPath value an inbound
 // request frame carries, as it came. The leg that defines the header

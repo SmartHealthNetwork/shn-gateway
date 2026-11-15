@@ -50,6 +50,10 @@ func (paWorkstream) answer(leg string) answerHandler {
 		return (*Gateway).handleCDexRequestInbound
 	case "cdex-task-status":
 		return (*Gateway).handleCDexTaskReadInbound
+	case "cdex-task-subscribe":
+		return (*Gateway).handleCDexSubscribeInbound
+	case "cdex-task-signal":
+		return (*Gateway).handleCDexSignalInbound
 	}
 	return nil
 }

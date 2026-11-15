@@ -57,7 +57,12 @@ func mustDoc(t *testing.T, b Body) *Document {
 // at resolves a path of member names and array indices ("3") from the root.
 func at(t *testing.T, d *Document, path ...string) NodeID {
 	t.Helper()
-	n := d.Root()
+	return atFrom(t, d, d.Root(), path...)
+}
+
+// atFrom resolves a path from n.
+func atFrom(t *testing.T, d *Document, n NodeID, path ...string) NodeID {
+	t.Helper()
 	for _, p := range path {
 		switch d.Kind(n) {
 		case KindObject:
@@ -910,7 +915,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 			t.Errorf("Ownership(%d) = %q, want %q", o, o.String(), want)
 		}
 	}
-	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14", "E-16"}) {
+	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14", "E-16", "E-17", "E-18", "E-19", "E-20", "E-21", "E-23"}) {
 		t.Fatalf("EditIDs = %v", got)
 	}
 	ids := EditIDs()

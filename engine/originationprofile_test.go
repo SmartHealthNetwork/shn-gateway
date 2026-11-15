@@ -266,6 +266,10 @@ var providerOtherRoutes = []string{
 	// The payer's attachment request, delivered by the Hub, once the
 	// provider sets its own Task endpoint (PROVIDER_CDEX_TASK_URL).
 	"POST /substrate/inbound",
+	// The provider system's notification of a payer's Tasks' changes, once
+	// the provider sets its subscription scope
+	// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE).
+	"POST /notify/cdex-task/{subscriber}/{kid}/{sealed}",
 }
 
 // otherRoleRoutes are the routes of the roles that originate nothing.
@@ -275,13 +279,18 @@ var otherRoleRoutes = map[string][]string{
 	// the bases, behind its own token endpoint; its system reads and vreads a
 	// Task at a provider's base (at the plain endpoint, answered 404), and
 	// each base serves its CapabilityStatement, a provider's base its SMART
-	// configuration too.
+	// configuration too; its system manages its Subscription to a provider's
+	// Tasks' changes at that provider's base (at the plain base, refused).
 	// The payer's gateway serves the public JWK Set of its CDS Hooks client
 	// key, with or without the ingress.
 	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
 		"GET /cdex/provider/{provider}/Task/{id}", "GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
 		"GET /Task/{id}", "GET /Task/{id}/_history/{vid}", "GET /metadata", "GET /cdex/provider/{provider}/metadata",
 		"GET /cdex/provider/{provider}/.well-known/smart-configuration",
+		"POST /cdex/provider/{provider}/Subscription", "GET /cdex/provider/{provider}/Subscription",
+		"GET /cdex/provider/{provider}/Subscription/{rest...}", "PUT /cdex/provider/{provider}/Subscription/{rest...}",
+		"DELETE /cdex/provider/{provider}/Subscription/{rest...}", "PATCH /cdex/provider/{provider}/Subscription/{rest...}",
+		"POST /Subscription", "GET /Subscription", "GET /Subscription/{rest...}",
 		"POST /oauth/token", "GET /.well-known/smart-configuration", "GET /cds-client/jwks.json"},
 	"facility": {"POST /substrate/inbound"},
 	"phg":      {"POST /substrate/inbound"},
@@ -780,7 +789,7 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.ProviderCDexReadScope": true, "cfg.CDSClientJWKS": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.ProviderCDexReadScope": true, "cfg.ProviderCDexSubscriptionScope": true, "cfg.CDSClientJWKS": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 

@@ -434,11 +434,11 @@ func (n *nativeResponder) sendVia(ctx context.Context, client *http.Client, meth
 		(*Gateway)(nil).ownershipRefused(k, err)
 		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: %w", label, err)
 	}
-	read := method == http.MethodGet
+	// A read, and a delete, carry no body: one handed a body would send a
+	// request other than the network's.
+	read := method == http.MethodGet || method == http.MethodDelete
 	if read && len(body) != 0 {
-		// A read carries no body: one handed a body would send a request
-		// other than the network's.
-		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: a read carries no body", label)
+		return upstreamReply{}, LegResult{}, fmt.Errorf("upstream %s request not sent: a %s carries no body", label, method)
 	}
 	// The call runs under the responder's own deadline, when it has one;
 	// the request's end still cuts it short (callEndedClass reads which).
@@ -481,8 +481,9 @@ func (n *nativeResponder) sendVia(ctx context.Context, client *http.Client, meth
 		req.URL, req.Host = &u, u.Host
 	}
 	if read {
-		// A FHIR read, as a direct client makes it: no body, no media type,
-		// and the answer asked for as FHIR JSON, which the network reads.
+		// A FHIR read or delete, as a direct client makes it: no body, no
+		// media type, and the answer asked for as FHIR JSON, which the
+		// network reads.
 		req.Header.Set("Accept", "application/fhir+json")
 	} else {
 		// Each leg's own media type (or the sender's declared FHIR media

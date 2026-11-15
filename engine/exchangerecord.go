@@ -881,6 +881,98 @@ const (
 	// Location (E-16) because the Task location the provider's gateway framed
 	// is not a Task id with an optional version.
 	EditNotMadeTaskLocationUnreadableTail = "E-16:unreadable-tail"
+	// EditNotMadeSubscriptionUnreadable: the provider's gateway made no
+	// channel re-key (E-19) because it cannot read the payer's Subscription
+	// (not FHIR JSON, or not one unambiguous Subscription); it is refused.
+	EditNotMadeSubscriptionUnreadable = "E-19:unreadable-subscription"
+	// EditNotMadeSubscriptionNoSealedEndpoint: the provider's gateway made
+	// no channel re-key (E-19) because the payer's gateway framed no sealed
+	// endpoint (subscriptionEndpoint) on a create or update, or framed more
+	// than the one a create or update names; it is refused.
+	EditNotMadeSubscriptionNoSealedEndpoint = "E-19:no-sealed-endpoint"
+	// EditNotMadeSubscriptionNoSealedHeaders: the provider's gateway made no
+	// channel re-key (E-19) because the payer's gateway framed no sealed
+	// headers (subscriptionChannel); it is refused.
+	EditNotMadeSubscriptionNoSealedHeaders = "E-19:no-sealed-headers"
+	// EditNotMadeSubscriptionNotSealedValues: the provider's gateway made no
+	// channel re-key (E-19) because the framed values are not a sealed
+	// endpoint and sealed headers it can write a notification address and a
+	// credential for; it is refused.
+	EditNotMadeSubscriptionNotSealedValues = "E-19:not-sealed-values"
+	// EditNotMadeSearchNoSealedEndpoint: the provider's gateway made no url
+	// search re-key (E-21) because the payer's gateway framed no sealed
+	// endpoint for the search, or more than its overlap allows; it is
+	// refused.
+	EditNotMadeSearchNoSealedEndpoint = "E-21:no-sealed-endpoint"
+	// EditNotMadeSearchNotSealedValue: the provider's gateway made no url
+	// search re-key (E-21) because a framed value is not a sealed endpoint;
+	// it is refused.
+	EditNotMadeSearchNotSealedValue = "E-21:not-a-sealed-value"
+	// EditNotMadeSubscriptionLocationNotUnderBase: the provider's gateway
+	// framed no subscriptionLocation on its system's 2xx answer to a payer's
+	// Subscription create or update, because the answer's Location is not one
+	// it could tell to be the Subscription's under its own base (more than
+	// one, not under the base, or a tail the SDK does not read), as E-16's
+	// taskLocation is decided; the answer is delivered without it, and the
+	// payer's gateway writes no Location from it.
+	EditNotMadeSubscriptionLocationNotUnderBase = "subscriptionLocation:not-under-base"
+	// EditNotMadeSubscriptionLocationNoLocation: the provider's gateway
+	// framed no subscriptionLocation on such an answer because it gave no
+	// Location at all (none, or a blank one); the answer is delivered
+	// without it.
+	EditNotMadeSubscriptionLocationNoLocation = "subscriptionLocation:no-location"
+	// EditNotMadeSealUnreadable: the subscriber's gateway made no channel
+	// seal (E-18) because it cannot read the Subscription (not FHIR JSON, or
+	// not one unambiguous Subscription); it is refused.
+	EditNotMadeSealUnreadable = "E-18:unreadable-subscription"
+	// EditNotMadeSealNotSealable: the subscriber's gateway made no channel
+	// seal (E-18) because the channel cannot be sealed and restored (a header
+	// that is not an array of strings, a _header, an _endpoint in any case, a
+	// header named in another case, or an endpoint too long to seal); it is
+	// refused.
+	EditNotMadeSealNotSealable = "E-18:not-sealable"
+	// EditNotMadeRestoreUnreadableAnswer: the subscriber's gateway made no
+	// restore (E-20) because the notifier's 2xx answer is not one
+	// unambiguous JSON value; it is carried as sent.
+	EditNotMadeRestoreUnreadableAnswer = "E-20:unreadable-answer"
+	// The subscriber's gateway restored (E-20) a Subscription in the
+	// notifier's answer no further, and carried it as sent, because it
+	// states no channel.endpoint (no-endpoint); its endpoint does not end in
+	// a notification address (not-a-notification-address); that address
+	// names another subscriber or topic (another-subscriber-or-topic); its
+	// channel.header holds no one X-SHN-Channel value (no-sealed-headers);
+	// its seals are under a key past its rotation's overlap (key-retired);
+	// or they do not open for the notifier that answered (seal-invalid). An
+	// answer's address under no stated base (no-stated-base), and a Bundle
+	// whose entry or link list cannot be read (unreadable-bundle), are not
+	// re-keyed.
+	EditNotMadeRestoreNoEndpoint       = "E-20:no-endpoint"
+	EditNotMadeRestoreNotAnAddress     = "E-20:not-a-notification-address"
+	EditNotMadeRestoreAnotherBinding   = "E-20:another-subscriber-or-topic"
+	EditNotMadeRestoreNoSealedHeaders  = "E-20:no-sealed-headers"
+	EditNotMadeRestoreKeyRetired       = "E-20:key-retired"
+	EditNotMadeRestoreSealInvalid      = "E-20:seal-invalid"
+	EditNotMadeRestoreNoStatedBase     = "E-20:no-stated-base"
+	EditNotMadeRestoreUnreadableBundle = "E-20:unreadable-bundle"
+	// EditNotMadeLocationNoTail: the subscriber's gateway wrote no Location
+	// (E-23) because the notifier's gateway framed no subscriptionLocation.
+	EditNotMadeLocationNoTail = "E-23:no-tail"
+	// EditNotMadeLocationUnreadableTail: the subscriber's gateway wrote no
+	// Location (E-23) because the framed subscriptionLocation is not a
+	// Subscription location.
+	EditNotMadeLocationUnreadableTail = "E-23:unreadable-tail"
+	// The payer's gateway re-keyed (E-17) an address into the provider's
+	// server in a CDex Task notification it delivers no further, and carried
+	// it as sent, because the provider's gateway stated no base in the
+	// request frame (no-stated-base: recorded for every such notification),
+	// because the address does not lie under the stated base
+	// (not-under-base), because the payer's gateway has no base of its own
+	// for that provider (no-provider-base). A notification E-17 cannot read
+	// one way only is refused, never carried (the fidelity of SHN's own
+	// edit).
+	EditNotMadeNotificationNoStatedBase = "E-17:no-stated-base"
+	EditNotMadeNotificationNotUnderBase = "E-17:not-under-base"
+	EditNotMadeNotificationNoBase       = "E-17:no-provider-base"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
@@ -888,7 +980,15 @@ var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnr
 	EditNotMadeTaskNoStructuralPayerURL, EditNotMadeTaskUnreadablePayerURL, EditNotMadeTaskUnreadable, EditNotMadeTaskPayerDoesNotTake,
 	EditNotMadeAddressNotVerified, EditNotMadeAddressUncleanRemainder, EditNotMadeAddressUnreadableRequest,
 	EditNotMadeRekeyPayerGatewayOlder, EditNotMadeRekeyNotTheRoundsAddress, EditNotMadeRekeyContainedInPackageResponse, EditNotMadeRekeyRequestCarriedAQuestionnaire, EditNotMadeRekeyNotUnderBase, EditNotMadeRekeyEscapedAddress, EditNotMadeRekeyBaseSpelledDifferently, EditNotMadeRekeyUnreadableTag, EditNotMadeRekeyUncleanRemainder, EditNotMadeRekeyUnreadableAddress, EditNotMadeRekeyUnreadableAnswer, EditNotMadeRekeyAddressNotWritable,
-	EditNotMadeTaskLocationNotUnderBase, EditNotMadeTaskLocationNoLocation, EditNotMadeTaskLocationProviderGatewayOlder, EditNotMadeTaskLocationNoTail, EditNotMadeTaskLocationUnreadableTail}
+	EditNotMadeTaskLocationNotUnderBase, EditNotMadeTaskLocationNoLocation, EditNotMadeTaskLocationProviderGatewayOlder, EditNotMadeTaskLocationNoTail, EditNotMadeTaskLocationUnreadableTail,
+	EditNotMadeSubscriptionUnreadable, EditNotMadeSubscriptionNoSealedEndpoint, EditNotMadeSubscriptionNoSealedHeaders, EditNotMadeSubscriptionNotSealedValues,
+	EditNotMadeSearchNoSealedEndpoint, EditNotMadeSearchNotSealedValue,
+	EditNotMadeSealUnreadable, EditNotMadeSealNotSealable,
+	EditNotMadeRestoreUnreadableAnswer, EditNotMadeRestoreNoEndpoint, EditNotMadeRestoreNotAnAddress, EditNotMadeRestoreAnotherBinding,
+	EditNotMadeRestoreNoSealedHeaders, EditNotMadeRestoreKeyRetired, EditNotMadeRestoreSealInvalid, EditNotMadeRestoreNoStatedBase,
+	EditNotMadeRestoreUnreadableBundle, EditNotMadeLocationNoTail, EditNotMadeLocationUnreadableTail,
+	EditNotMadeSubscriptionLocationNotUnderBase, EditNotMadeSubscriptionLocationNoLocation,
+	EditNotMadeNotificationNoStatedBase, EditNotMadeNotificationNotUnderBase, EditNotMadeNotificationNoBase}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).

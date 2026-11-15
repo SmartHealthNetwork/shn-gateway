@@ -669,6 +669,23 @@ func answerLineProfile(contract string, payload []byte, line, leg string) string
 	return ""
 }
 
+// requestLineProfile is the compiled-in workstream's profile for a carried
+// request of contract that declares none (certificationAdapter.
+// undeclaredRequestProfile), without a version; "" when no workstream names
+// one.
+func requestLineProfile(contract string, payload []byte, line, leg string) string {
+	for _, w := range workstreams {
+		a := w.certification()
+		if a == nil || !declaresContract(w, contract) {
+			continue
+		}
+		if p, ok := a.undeclaredRequestProfile(contract, payload, line, leg); ok {
+			return p
+		}
+	}
+	return ""
+}
+
 // declaresContract reports whether w builds a line of contract natively.
 func declaresContract(w workstream, contract string) bool {
 	native, _ := w.contractVersions()
@@ -827,6 +844,24 @@ type legSpec struct {
 	// defined on such a leg alone, and a frame naming it on any other is
 	// refused (inboundFrameReadPath). The adapter sets it.
 	ReadPath bool
+	// Subscribe says the leg is a topic Subscription's subscribe leg, whose
+	// request frame carries the interaction (shnsdk.FrameHeaderSubscriptionRequest)
+	// and the subscriber's sealed channel (shnsdk.FrameHeaderSubscriptionEndpoint,
+	// shnsdk.FrameHeaderSubscriptionChannel): the headers are defined on such a
+	// leg alone, and a frame naming one on any other is refused
+	// (inboundFrameSubscription). The adapter sets it.
+	Subscribe bool
+	// Signal says the leg is a topic's signal leg, which carries a
+	// notification that discloses no patient's data from the notifier's
+	// gateway to the subscriber's: its request frame carries the sealed
+	// endpoint and headers the notification address and the notifier's
+	// system named (shnsdk.FrameHeaderSubscriptionEndpoint,
+	// shnsdk.FrameHeaderSubscriptionChannel) and the notifier's FHIR base
+	// (shnsdk.FrameHeaderStatedBase). Those headers are defined on a subscribe
+	// or signal leg alone, statedBase on a signal leg's request alone, and a
+	// frame naming one on any other is refused (inboundFrameSubscription).
+	// The adapter sets it.
+	Signal bool
 	// AnswerEnvelope is the envelope of this gateway's own refusal on the leg,
 	// the taxonomy's (legtaxonomy.AnswerEnvelopeFHIR or AnswerEnvelopeJSON):
 	// an OperationOutcome on a leg its client reaches through a FHIR
@@ -846,6 +881,10 @@ type legDetail struct {
 	TakenWhenSet string
 	// ReadPath is legSpec.ReadPath.
 	ReadPath bool
+	// Subscribe is legSpec.Subscribe.
+	Subscribe bool
+	// Signal is legSpec.Signal.
+	Signal bool
 }
 
 // catalogFromTaxonomy derives a workstream's leg catalog from its leg
@@ -887,7 +926,7 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 			Op: l.Request.Operation, RespOp: l.Response.Operation, Scope: l.Scope,
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
-			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet, ReadPath: d.ReadPath,
+			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet, ReadPath: d.ReadPath, Subscribe: d.Subscribe, Signal: d.Signal,
 			AnswerEnvelope: l.AnswerEnvelope,
 		}
 	}

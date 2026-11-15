@@ -101,6 +101,9 @@ func codedIngressPost(env *inProcessExchange, route, coding string, body []byte)
 func TestIngress_AnUnsupportedCodingIs415(t *testing.T) {
 	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
+		if credentialBeforeBody[route] {
+			continue // TestCDexNotify_TheCredentialComesBeforeTheBody
+		}
 		for _, level := range allLevels {
 			for _, coding := range []string{"br", "gzip, gzip"} {
 				t.Run(route+"/"+coding+"/"+level.String(), func(t *testing.T) {
@@ -172,6 +175,9 @@ var codedLimitBodies = func() func(*testing.T, []byte) ([]byte, []byte) {
 func TestIngress_AGzipBodyIsReadDecodedUpToTheLimit(t *testing.T) {
 	t.Parallel()
 	for _, route := range workstreamIngressRouteNames() {
+		if credentialBeforeBody[route] {
+			continue // TestCDexNotify_TheCredentialComesBeforeTheBody
+		}
 		t.Run(route, func(t *testing.T) {
 			body := ingressLimitBody(route)
 			over, at := codedLimitBodies(t, body)

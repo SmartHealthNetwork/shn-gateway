@@ -115,6 +115,10 @@ func nosniffGateways(t *testing.T, net *noNetwork) map[string]*Gateway {
 			c.OriginationProfile = "demo"
 			c.ProviderCDexTaskURL = "https://provider.test/fhir/Task"
 			c.ProviderCDexTaskClient = client
+			// and its subscription scope, so it takes its system's
+			// notifications too
+			c.ProviderCDexSubscriptionScope = "system/Subscription.cruds"
+			c.ProviderCDexSubscriptionClient = client
 		}),
 		"payer": build("payer", false, nil),
 		"payer with ingress": build("payer", true, func(cfg *Config) {

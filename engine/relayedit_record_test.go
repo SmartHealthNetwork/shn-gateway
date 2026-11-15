@@ -451,6 +451,20 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		// E-16 is made on the answer to the payer's own system: no other
 		// party receives it.
 		relay.EditCDexTaskLocationRekey: {"cdex-task-location-rekey", 0},
+		// E-17 is made on the delivery to the payer's own notification
+		// endpoint: no other party receives it.
+		relay.EditCDexTaskNotificationAddressRekey: {"cdex-task-notification-address-rekey", 0},
+		// E-19 and E-21 are made on the forward to the provider's own
+		// system: no other party receives either.
+		relay.EditSubscriptionEndpointRekey:  {"subscription-endpoint-rekey", 0},
+		relay.EditSubscriptionURLSearchRekey: {"subscription-url-search-rekey", 0},
+		// E-18 is made to the Subscription the subscriber's gateway sends:
+		// the notifier's gateway receives it. E-20 and E-23 are made on the
+		// answer to the subscriber's own system: no other party receives
+		// either.
+		relay.EditSubscriptionHeaderSeal:      {"subscription-header-seal", relay.RoleRecipient},
+		relay.EditSubscriptionEndpointRestore: {"subscription-endpoint-restore", 0},
+		relay.EditSubscriptionLocationRekey:   {"subscription-location-rekey", 0},
 	}
 	ids := relay.EditIDs()
 	if len(ids) != len(want) {

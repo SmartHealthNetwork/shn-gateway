@@ -15,7 +15,8 @@ import (
 // providerIngressSurfaceFile is the public surface a provider gateway with
 // its Da Vinci ingress serves to the participant's own system: every route it
 // mounts but the operator's, with ingress authentication and the ingress
-// base URL both set. A hosted edge in front of the gateway forwards exactly
+// base URL both set, and the payer's Subscription to its Tasks' changes taken
+// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE), which mounts the notification route. A hosted edge in front of the gateway forwards exactly
 // this surface; the hosted control plane's listener rules are checked against
 // this file, so a route added here reaches the hosted edge or fails that
 // check.
@@ -28,9 +29,16 @@ var providerIngressSurfaceFile = filepath.Join("testdata", "provider-ingress-sur
 var payerIngressSurfaceFile = filepath.Join("testdata", "payer-ingress-surface.json")
 
 // ingressSurface is every route a gateway of role mounts with its ingress on,
-// its authentication and base set, but the operator's, sorted.
+// its authentication and base set, and every setting that mounts a route of
+// its own set, but the operator's, sorted.
 func ingressSurface(role string) []string {
-	g := &Gateway{cfg: Config{Role: role, IngressEnabled: true, IngressBaseURL: "https://" + role + ".example.test"}, ingressAuth: &ingressAuthServer{}}
+	cfg := Config{Role: role, IngressEnabled: true, IngressBaseURL: "https://" + role + ".example.test"}
+	if role == "provider" {
+		// The notification route is mounted only where the gateway takes the
+		// payer's Subscription.
+		cfg.ProviderCDexTaskURL, cfg.ProviderCDexSubscriptionScope = "https://ehr.example.test/fhir/Task", "system/Subscription.cruds"
+	}
+	g := &Gateway{cfg: cfg, ingressAuth: &ingressAuthServer{}}
 	var out []string
 	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 		for _, rt := range declared {

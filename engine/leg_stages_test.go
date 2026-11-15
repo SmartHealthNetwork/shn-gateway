@@ -188,11 +188,11 @@ func TestExchangeRecord_FramedRefusalBeforeDispatch(t *testing.T) {
 }
 
 // A PAS inquiry at structural spends time in the pend ledger's lookup and
-// writes, as well as the reads, the forward and the seal. It runs no
-// synchronous check: the payer's answer is relayed, not certified, and the
-// gateway builds nothing from it (a check's own time is
-// TestExchangeRecord_LegStagesValidateExactly). The stages never add up to
-// more than the call.
+// writes, as well as the reads, the check of the carried inquiry at the
+// payer's own level (owner decision D47(2)), the forward and the seal. The
+// payer's answer is relayed, not certified, and the gateway builds nothing
+// from it (a check's own time is TestExchangeRecord_LegStagesValidateExactly).
+// The stages never add up to more than the call.
 func TestExchangeRecord_LegStagesLedger(t *testing.T) {
 	p, got := steppingPayer(t, EnforcementStructural)
 	p.seedInquiryPend(t, "corr-submit-1")
@@ -203,7 +203,7 @@ func TestExchangeRecord_LegStagesLedger(t *testing.T) {
 	}
 	rec := got.only(t)
 	st := rec.Stages
-	if st == nil || st.Unwrap <= 0 || st.Forward <= 0 || st.Validate != 0 || st.Seal <= 0 || st.Ledger <= 0 || st.Write <= 0 {
+	if st == nil || st.Unwrap <= 0 || st.Forward <= 0 || st.Validate <= 0 || st.Seal <= 0 || st.Ledger <= 0 || st.Write <= 0 {
 		t.Fatalf("stages %+v", st)
 	}
 	if sum := stagesSum(st); sum > rec.Latency {

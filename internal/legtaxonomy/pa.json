@@ -164,6 +164,38 @@
       "since": "1.12.0",
       "answerEnvelope": "fhir",
       "subject": "from-answer"
+    },
+    {
+      "transactionType": "cdex-task-subscribe",
+      "stagedName": "pa.cdex-task-subscribe",
+      "physics": "request-response",
+      "request": {"frame": "payer-payment", "roles": ["payer"], "operation": "cdex-task-subscribe"},
+      "response": {"frame": "provider-disclosure", "roles": ["provider"], "operation": "cdex-task-subscribe-response"},
+      "scope": "task-subscription",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.13.0",
+      "answerEnvelope": "fhir",
+      "subject": "none"
+    },
+    {
+      "transactionType": "cdex-task-signal",
+      "stagedName": "pa.cdex-task-signal",
+      "physics": "request-response",
+      "request": {"frame": "provider-disclosure", "roles": ["provider"], "operation": "cdex-task-signal"},
+      "response": {"frame": "payer-payment", "roles": ["payer"], "operation": "cdex-task-signal-response"},
+      "scope": "task-notification",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.13.0",
+      "answerEnvelope": "fhir",
+      "subject": "none"
     }
   ]
 }

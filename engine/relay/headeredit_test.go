@@ -160,6 +160,14 @@ func TestHeaderEdited_Refuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	queryEdited, err := QueryEdited(Exact(NewBody(nil, OriginPeerFrame), ""), EditSubscriptionURLSearchRekey, "", "url="+addr, e21In)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transformed, err := Transformed(authored, EditRegisteredTransform, []byte(`{"a":2}`), func([]byte) ([]byte, error) { return []byte(`{"a":2}`), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := Edit{ID: EditPASPendReturnRekey, Direction: DirectionResponse, Kind: EditKindReplaceValue, DropsAnswerHeaders: []string{ETagHeader}}
 	row := func(mutate func(*Edit)) []Edit { e := headerRow(); mutate(&e); return []Edit{e} }
 	headerEditedSrc, err := HeaderEdited([]Edit{headerRow()}, src, EditCDexTaskLocationRekey, "Location", "https://payer.example/Task/1", toyInputs)
@@ -193,7 +201,8 @@ func TestHeaderEdited_Refuses(t *testing.T) {
 		"no inputs":                          {H, src, EditCDexTaskLocationRekey, "Location", ok, nil, ErrInvalidEdit},
 		"another input":                      {H, src, EditCDexTaskLocationRekey, "Location", ok, HeaderInputs{TaskLocationInputBase: "https://payer.example", "other": "Task/1"}, ErrInvalidEdit},
 		"an extra input":                     {H, src, EditCDexTaskLocationRekey, "Location", ok, HeaderInputs{TaskLocationInputBase: "https://payer.example", TaskLocationInputTail: "Task/1", "x": ""}, ErrInvalidEdit},
-		"an edited source":                   {H, edited, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},
+		"a query-edited source":              {H, queryEdited, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},
+		"a transformed source":               {H, transformed, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},
 		"a header-edited source":             {H, headerEditedSrc, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},
 		"the gateway's own message":          {H, authored, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},
 		"no payload":                         {H, Payload{}, EditCDexTaskLocationRekey, "Location", ok, toyInputs, ErrInvalidEdit},

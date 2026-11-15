@@ -2,11 +2,13 @@ package relay
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
@@ -105,6 +107,18 @@ type effect struct {
 	// replaced is the value a replace changes, for the signed-content
 	// exemption (signedExempt); -1 for every other operation.
 	replaced splice.NodeID
+	// inserted says the operation inserted a member into the document's own
+	// object insertedIn (not into an object the change creates), named
+	// insertedKey, with insertedValue, for the signed-content exemption.
+	inserted      bool
+	insertedIn    splice.NodeID
+	insertedKey   string
+	insertedValue []byte
+	// removed says the operation removed the member removedKey of the
+	// document's own object removedIn, for the signed-content exemption.
+	removed    bool
+	removedIn  splice.NodeID
+	removedKey string
 }
 
 // model is the expected result of a change set, derived from the
@@ -124,6 +138,19 @@ type model struct {
 	removedSpans  []span
 	replacedSpans []span
 	effects       []*effect // one per operation; nil when it changes nothing
+	// restored is E-20's restored channel.endpoints by their original
+	// string (restoredEndpoints), built once, on first need.
+	restored map[string]string
+	// rootLists is a root Bundle's array members by folded name
+	// (rootBundleLists), built once, on first need.
+	rootLists map[string][]splice.NodeID
+	// statusLists, eventParts and entryLinks memoize E-17's structural
+	// reads of a notification's SubscriptionStatus and of its entries' link
+	// arrays (statusParams, eventFocusParts, entryLink) by the array they
+	// read, so each is decided once whatever many edits share it.
+	statusLists map[splice.NodeID]bool
+	eventParts  map[splice.NodeID]bool
+	entryLinks  map[splice.NodeID]bool
 }
 
 func buildModel(doc *splice.Doc, src []byte, ops []splice.Op) (*model, error) {
@@ -232,7 +259,7 @@ func (m *model) add(op splice.OpInfo) (*effect, error) {
 			m.touch(t.real)
 			_, ve := m.doc.Span(mem.Value)
 			m.removedSpans = append(m.removedSpans, span{mem.KeyStart, ve})
-			return &effect{start: mem.KeyStart, end: ve, replaced: -1}, nil
+			return &effect{start: mem.KeyStart, end: ve, replaced: -1, removed: true, removedIn: t.real, removedKey: op.Key}, nil
 		}
 		return nil, fmt.Errorf("no member %q to remove", op.Key)
 
@@ -253,7 +280,11 @@ func (m *model) add(op splice.OpInfo) (*effect, error) {
 		}
 		dst.members = append(dst.members, newMember{key: op.Key, value: op.Value})
 		m.touch(t.home())
-		return m.inside(t.home()), nil
+		eff := m.inside(t.home())
+		if t.obj == nil {
+			eff.inserted, eff.insertedIn, eff.insertedKey, eff.insertedValue = true, t.real, op.Key, op.Value
+		}
+		return eff, nil
 
 	case splice.OpEnsureObjectMember:
 		t, err := m.resolve(op.Target)
@@ -391,20 +422,169 @@ func layoutOutside(b []byte, s, e int, covered []span) bool {
 	return true
 }
 
+// checkSpans checks each reported span (check's second check) in time near
+// linear in the spans and the declared content: the model's replaced and
+// removed spans and the output's anchors are each sorted once (spanIndex),
+// and each span finds the ones it meets by binary search, so a change of
+// many edits, which a peer's message can set the number of, costs no more
+// than the edits it makes. When a list holds an empty span, or spans that
+// overlap each other, it falls back to comparing each span with every one
+// (checkSpanEach); both reach the same verdict on the same input.
 func (m *model) checkSpans(out []byte, spans []splice.Edit, a *outAnchors) error {
+	ix, indexed := newSpanIndexes(m, a)
 	delta := 0
 	for _, e := range spans {
 		os := e.Start + delta
 		oe := os + len(e.New)
 		delta += len(e.New) - (e.End - e.Start)
-		if err := m.checkSpan(e, out, os, oe, a); err != nil {
+		var err error
+		if indexed {
+			err = m.checkSpanIndexed(e, out, os, oe, ix)
+		} else {
+			err = m.checkSpanEach(e, out, os, oe, a)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (m *model) checkSpan(e splice.Edit, out []byte, os, oe int, a *outAnchors) error {
+// spanIndex is a span list sorted by start, each span with its place in the
+// list it came from. It is built only when every span is non-empty and none
+// overlaps another: then starts and ends both rise, and the spans any range
+// overlaps are one run of it.
+type spanIndex struct {
+	spans []span
+	order []int
+}
+
+// newSpanIndex sorts list, and reports false when a span in it is empty or
+// overlaps another.
+func newSpanIndex(list []span) (spanIndex, bool) {
+	order := make([]int, len(list))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortFunc(order, func(i, j int) int { return cmp.Compare(list[i].start, list[j].start) })
+	ix := spanIndex{spans: make([]span, len(list)), order: order}
+	for k, i := range order {
+		r := list[i]
+		if r.start >= r.end || (k > 0 && r.start < ix.spans[k-1].end) {
+			return spanIndex{}, false
+		}
+		ix.spans[k] = r
+	}
+	return ix, true
+}
+
+// overlapping is the run [lo, hi) of the spans r with r.overlaps(s, e): those
+// ending after s and starting before e (for an empty [s, s), strictly before
+// s, which is the same bound).
+func (ix spanIndex) overlapping(s, e int) (lo, hi int) {
+	lo = sort.Search(len(ix.spans), func(k int) bool { return ix.spans[k].end > s })
+	hi = sort.Search(len(ix.spans), func(k int) bool { return ix.spans[k].start >= e })
+	return lo, max(lo, hi)
+}
+
+// has reports whether the list holds exactly [s, e).
+func (ix spanIndex) has(s, e int) bool {
+	k := sort.Search(len(ix.spans), func(k int) bool { return ix.spans[k].start >= s })
+	return k < len(ix.spans) && ix.spans[k] == span{s, e}
+}
+
+// spanIndexes are checkSpanEach's four lists, indexed.
+type spanIndexes struct {
+	replaced, removed, outReplaced, outAdded spanIndex
+}
+
+func newSpanIndexes(m *model, a *outAnchors) (spanIndexes, bool) {
+	var ix spanIndexes
+	for _, l := range []struct {
+		to   *spanIndex
+		from []span
+	}{{&ix.replaced, m.replacedSpans}, {&ix.removed, m.removedSpans}, {&ix.outReplaced, a.replaced}, {&ix.outAdded, a.added}} {
+		var ok bool
+		if *l.to, ok = newSpanIndex(l.from); !ok {
+			return spanIndexes{}, false
+		}
+	}
+	return ix, true
+}
+
+// layoutOutsideSorted is layoutOutside for covered sorted by start, none
+// overlapping another: one pass over b[s:e].
+func layoutOutsideSorted(b []byte, s, e int, covered []span) bool {
+	i := s
+	for _, r := range covered {
+		for ; i < r.start; i++ {
+			if !isLayout(b[i]) {
+				return false
+			}
+		}
+		i = max(i, r.end)
+	}
+	for ; i < e; i++ {
+		if !isLayout(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkSpanIndexed is checkSpanEach over indexed lists: the same checks, in
+// the same order, with the same refusals. Of the replaced values a span
+// meets, the one the model lists first decides, as checkSpanEach's loop
+// finds it.
+func (m *model) checkSpanIndexed(e splice.Edit, out []byte, os, oe int, ix spanIndexes) error {
+	lo, hi := ix.replaced.overlapping(e.Start, e.End)
+	if lo < hi {
+		first := ix.replaced.order[lo]
+		for k := lo + 1; k < hi; k++ {
+			first = min(first, ix.replaced.order[k])
+		}
+		r := m.replacedSpans[first]
+		if r.start != e.Start || r.end != e.End {
+			return mismatch("span [%d,%d) is not exactly the replaced value [%d,%d)", e.Start, e.End, r.start, r.end)
+		}
+		if ix.outReplaced.has(os, oe) {
+			return nil
+		}
+		return mismatch("span [%d,%d) does not write exactly the replaced value", e.Start, e.End)
+	}
+	lo, hi = ix.removed.overlapping(e.Start, e.End)
+	for _, r := range ix.removed.spans[lo:hi] {
+		if e.Start > r.start || r.end > e.End {
+			return mismatch("span [%d,%d) cuts through a removed member", e.Start, e.End)
+		}
+	}
+	anchored := lo < hi
+	if !layoutOutsideSorted(m.src, e.Start, e.End, ix.removed.spans[lo:hi]) {
+		return mismatch("span [%d,%d) removes bytes no operation removes", e.Start, e.End)
+	}
+	if lo, hi := ix.outReplaced.overlapping(os, oe); lo < hi {
+		return mismatch("span [%d,%d) writes into a replaced value", e.Start, e.End)
+	}
+	lo, hi = ix.outAdded.overlapping(os, oe)
+	for _, r := range ix.outAdded.spans[lo:hi] {
+		if os > r.start || r.end > oe {
+			return mismatch("span [%d,%d) cuts through an added value", e.Start, e.End)
+		}
+	}
+	anchored = anchored || lo < hi
+	if !layoutOutsideSorted(out, os, oe, ix.outAdded.spans[lo:hi]) {
+		return mismatch("span [%d,%d) writes bytes no operation adds", e.Start, e.End)
+	}
+	if !anchored {
+		return mismatch("span [%d,%d) holds no declared removal or addition", e.Start, e.End)
+	}
+	return nil
+}
+
+// checkSpanEach checks one reported span against every replaced, removed and
+// anchored span in turn: checkSpans's fallback for lists it cannot index,
+// and the reference its indexed check is held to.
+func (m *model) checkSpanEach(e splice.Edit, out []byte, os, oe int, a *outAnchors) error {
 	for _, r := range m.replacedSpans {
 		if !r.overlaps(e.Start, e.End) && !(r.start == e.Start && r.end == e.End) {
 			continue
@@ -578,20 +758,105 @@ type coveredRegion struct {
 	carrier    string
 }
 
-type coverageMap []coveredRegion
+// coverageMap is what a document's signatures cover: its regions in the
+// order coverage found them, each span with each carrier once, indexed so an
+// effect finds the regions it touches without reading the others. A region
+// is a value's span, so any two either nest or lie apart: sorted by start,
+// the outer first, each region's nearest enclosing one (up) makes the
+// regions containing a point one chain, no longer than the document's
+// nesting, and the regions starting inside a range one run.
+type coverageMap struct {
+	regions []coveredRegion
+	sorted  []int // region indices by start, the outer first
+	up      []int // for each sorted position, the nearest enclosing region's position, or -1
+	// nested says every two regions nest or lie apart; when they do not,
+	// hits reads every region in turn.
+	nested bool
+}
+
+func newCoverageMap(regions []coveredRegion) coverageMap {
+	c := coverageMap{regions: regions, sorted: make([]int, len(regions)), up: make([]int, len(regions)), nested: true}
+	for i := range c.sorted {
+		c.sorted[i] = i
+	}
+	slices.SortFunc(c.sorted, func(i, j int) int {
+		a, b := regions[i], regions[j]
+		return cmp.Or(cmp.Compare(a.start, b.start), cmp.Compare(b.end, a.end), cmp.Compare(i, j))
+	})
+	var stack []int
+	for k, i := range c.sorted {
+		r := regions[i]
+		for len(stack) > 0 && regions[c.sorted[stack[len(stack)-1]]].end <= r.start {
+			stack = stack[:len(stack)-1]
+		}
+		c.up[k] = -1
+		if len(stack) > 0 {
+			top := stack[len(stack)-1]
+			if regions[c.sorted[top]].end < r.end {
+				c.nested = false
+			}
+			c.up[k] = top
+		}
+		stack = append(stack, k)
+	}
+	return c
+}
 
 // hits reports the carriers of every covered region an effect touches, in
-// coverage order, each once. A byte range touches a region when they
-// overlap; an insertion inside a container touches a region that contains
-// the whole container.
+// coverage order (by the first region of each it touches), each once. A byte
+// range touches a region when they overlap: the regions containing its
+// start, which begin before it, and those beginning inside it. An insertion
+// inside a container touches a region that contains the whole container:
+// one of those containing its start.
 func (c coverageMap) hits(e effect) []string {
+	// An empty insertion range (no container has one) is contained by a
+	// region ending where it stands, which the chain has left behind: it,
+	// and regions that do not nest, are read in turn.
+	if !c.nested || (e.inside && e.start >= e.end) {
+		return c.hitsEach(e)
+	}
+	start := func(k int) int { return c.regions[c.sorted[k]].start }
+	var touched []int
+	if e.inside {
+		for k := sort.Search(len(c.sorted), func(k int) bool { return start(k) > e.start }) - 1; k >= 0; k = c.up[k] {
+			if r := c.regions[c.sorted[k]]; r.start <= e.start && e.end <= r.end {
+				touched = append(touched, c.sorted[k])
+			}
+		}
+	} else {
+		for k := sort.Search(len(c.sorted), func(k int) bool { return start(k) >= e.start }) - 1; k >= 0; k = c.up[k] {
+			if c.regions[c.sorted[k]].end > e.start {
+				touched = append(touched, c.sorted[k])
+			}
+		}
+		lo := sort.Search(len(c.sorted), func(k int) bool { return start(k) >= e.start })
+		hi := sort.Search(len(c.sorted), func(k int) bool { return start(k) >= e.end })
+		touched = append(touched, c.sorted[lo:max(lo, hi)]...)
+	}
+	slices.Sort(touched)
 	var out []string
-	for _, r := range c {
+	seen := map[string]bool{}
+	for _, i := range touched {
+		if carrier := c.regions[i].carrier; !seen[carrier] {
+			seen[carrier] = true
+			out = append(out, carrier)
+		}
+	}
+	return out
+}
+
+// hitsEach is hits read from every region in turn, for regions that do not
+// nest and for an empty insertion range.
+func (c coverageMap) hitsEach(e effect) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range c.regions {
 		touched := e.start < r.end && r.start < e.end
 		if e.inside {
 			touched = r.start <= e.start && e.end <= r.end
 		}
-		if touched && !slices.Contains(out, r.carrier) {
+		if touched && !seen[r.carrier] {
+			seen[r.carrier] = true
 			out = append(out, r.carrier)
 		}
 	}
@@ -599,41 +864,128 @@ func (c coverageMap) hits(e effect) []string {
 }
 
 // signedExempt are the registered edits made even where an in-payload
-// signature covers what they change, each with the one place it may change
-// there: a replace of the value that place names. Any other change an
-// exempt edit makes to signed content is refused, as every other edit's is.
-var signedExempt = map[EditID]func(m *model, n splice.NodeID) bool{
+// signature covers what they change, each with the places it may change
+// there: for most, a replace of the value one place names, with a string
+// (stringAt). Any other change an exempt edit makes to signed content is
+// refused, as every other edit's is.
+var signedExempt = map[EditID]func(m *model, eff effect) bool{
 	// D127: the return address of a pended PAS answer's Task is re-keyed
 	// to the network even when signed, and the forward discloses it.
-	EditPASPendReturnRekey: (*model).payerURLValue,
+	EditPASPendReturnRekey: stringAt((*model).payerURLValue),
 	// D127: so is the return address of a payer's attachment-request Task.
-	EditCDexTaskReturnRekey: (*model).payerURLValue,
+	EditCDexTaskReturnRekey: stringAt((*model).payerURLValue),
 	// D128: the questionnaireAdaptive address is re-keyed even where the
 	// payer's signature covers it, and restored even where the provider's
 	// does; each place may also take the one form change adaptivePair allows.
-	EditDTRAdaptiveAddressRekey:   (*model).adaptiveAddressValue,
-	EditDTRAdaptiveAddressRestore: (*model).adaptiveAddressValue,
+	EditDTRAdaptiveAddressRekey:   stringAt((*model).adaptiveAddressValue),
+	EditDTRAdaptiveAddressRestore: stringAt((*model).adaptiveAddressValue),
+	// D132 (N2): a topic Subscription's channel.endpoint and channel.header
+	// are re-keyed to the notifier gateway's notification address and
+	// credential even where a signature covers them, and the forward
+	// discloses it.
+	EditSubscriptionEndpointRekey: (*model).subscriptionChannelChange,
+	// D132 (N2): the subscriber's gateway seals a topic Subscription's
+	// channel (E-18) and restores it on the answers (E-20) even where a
+	// signature covers it, and each is disclosed.
+	EditSubscriptionHeaderSeal:      (*model).subscriptionChannelSeal,
+	EditSubscriptionEndpointRestore: (*model).subscriptionChannelRestore,
+	// The CDex design §15.7, applied by the lead as E-12 is (D128): a CDex
+	// Task notification's addresses into the provider's server are re-keyed
+	// to the payer gateway's base for that provider even where a signature
+	// covers them, and the delivery discloses it.
+	EditCDexTaskNotificationAddressRekey: stringAt((*model).notificationAddressValue),
+}
+
+// bodyEditChecks are the registered body edits the core holds to a check of
+// their own on every change, whether a signature covers it or not: a closed
+// map, as signedExempt is. E-20 (subscription-endpoint-restore) changes only
+// its places, a link's query only as its restore of the url parameter allows
+// (subscriptionLinkURLRestored).
+var bodyEditChecks = map[EditID]func(m *model, eff effect) bool{
+	EditSubscriptionEndpointRestore: (*model).subscriptionChannelRestore,
+}
+
+// stringAt is the exemption of an edit whose one change to signed content is
+// a replace, with a JSON string, of the string value place names.
+func stringAt(place func(m *model, n splice.NodeID) bool) func(m *model, eff effect) bool {
+	return func(m *model, eff effect) bool {
+		if eff.replaced < 0 {
+			return false
+		}
+		v := m.replaced[eff.replaced]
+		if len(v) < 2 || v[0] != '"' || !json.Valid(v) || m.doc.Kind(eff.replaced) != splice.KindString {
+			return false
+		}
+		return place(m, eff.replaced)
+	}
+}
+
+// subscriptionChannelChange is E-19's exemption (D132, N2): a change of the
+// root Subscription's channel that is a replace, with a JSON string, of its
+// endpoint string; a replace, with a JSON array of strings, of its header
+// array; the insert of an endpoint member that is a JSON string, into a
+// channel that has none (the subscriber's gateway seals the channel, so the
+// body may state none); or the insert of a header member that is a JSON
+// array of strings, into a channel that has none. Nothing else, decided by structure: the
+// channel is the "channel" member of the document's root object, whose
+// resourceType is Subscription.
+func (m *model) subscriptionChannelChange(eff effect) bool {
+	d := m.doc
+	channel, ok := d.Member(d.Root(), "channel")
+	if !ok || d.Kind(channel) != splice.KindObject || stringMember(d, d.Root(), "resourceType") != "Subscription" {
+		return false
+	}
+	if eff.inserted {
+		if eff.insertedIn != channel {
+			return false
+		}
+		_, has := d.Member(channel, eff.insertedKey)
+		switch eff.insertedKey {
+		case "header":
+			return !has && stringArray(eff.insertedValue)
+		case "endpoint":
+			v := bytes.TrimSpace(eff.insertedValue)
+			var str string
+			return !has && len(v) >= 2 && v[0] == '"' && json.Unmarshal(v, &str) == nil
+		}
+		return false
+	}
+	if eff.replaced < 0 {
+		return false
+	}
+	v := m.replaced[eff.replaced]
+	if ep, ok := d.Member(channel, "endpoint"); ok && ep == eff.replaced {
+		return d.Kind(ep) == splice.KindString && len(v) >= 2 && v[0] == '"' && json.Valid(v)
+	}
+	if h, ok := d.Member(channel, "header"); ok && h == eff.replaced {
+		return d.Kind(h) == splice.KindArray && stringArray(v)
+	}
+	return false
+}
+
+// stringArray reports whether v is a JSON array whose every element is a
+// string.
+func stringArray(v []byte) bool {
+	var ss []string
+	t := bytes.TrimSpace(v)
+	return len(t) > 0 && t[0] == '[' && json.Unmarshal(t, &ss) == nil
 }
 
 // pasTempCodes is the PAS code system that names a Task's payer-url input.
 const pasTempCodes = "http://hl7.org/fhir/us/davinci-pas/CodeSystem/PASTempCodes"
 
 // signedExemption reports whether the change eff of edit id may be made to
-// signed content: id is exempt, eff replaces the one place id may change, and
-// the new value is a JSON string.
+// signed content: id is exempt, and eff is a change its exemption allows
+// (signedExempt), or an adaptive edit's form change (adaptivePair).
 func (m *model) signedExemption(id EditID, eff effect) bool {
 	place, ok := signedExempt[id]
-	if !ok || eff.replaced < 0 {
+	if !ok {
 		return false
 	}
-	if adaptiveEdits[id] && m.adaptivePair(id, eff.replaced, m.replaced[eff.replaced]) {
+	if adaptiveEdits[id] && eff.replaced >= 0 && m.adaptivePair(id, eff.replaced, m.replaced[eff.replaced]) {
 		return true
 	}
-	v := m.replaced[eff.replaced]
-	if len(v) < 2 || v[0] != '"' || !json.Valid(v) || m.doc.Kind(eff.replaced) != splice.KindString {
-		return false
-	}
-	return place(m, eff.replaced)
+	return place(m, eff)
 }
 
 // payerURLValue reports whether n is the valueUrl of a Task input whose type
@@ -736,11 +1088,18 @@ func coverage(d *splice.Doc) coverageMap {
 		byNode[n] = r
 		all = append(all, r)
 	}
-	var c coverageMap
+	// Each span with each carrier is kept once: a later copy of a region
+	// is touched exactly when the first is, so it changes no hit.
+	var c []coveredRegion
+	seen := map[coveredRegion]bool{}
 	add := func(n splice.NodeID, carrier string) {
 		s, e := d.Span(n)
-		c = append(c, coveredRegion{start: s, end: e, carrier: carrier})
+		if r := (coveredRegion{start: s, end: e, carrier: carrier}); !seen[r] {
+			seen[r] = true
+			c = append(c, r)
+		}
 	}
+	var targets *targetIndex
 	for i := 0; i < d.Len(); i++ {
 		n := splice.NodeID(i)
 		if d.Kind(n) != splice.KindObject {
@@ -752,16 +1111,17 @@ func coverage(d *splice.Doc) coverageMap {
 				add(n, "Bundle.signature")
 			case "Provenance":
 				add(n, "Provenance.signature")
-				targets, _ := d.Member(n, "target")
-				for _, t := range d.Elems(targets) {
+				if targets == nil {
+					targets = newTargetIndex(all)
+				}
+				refs, _ := d.Member(n, "target")
+				for _, t := range d.Elems(refs) {
 					ref := stringMember(d, t, "reference")
 					if ref == "" {
 						continue
 					}
-					for _, cand := range all {
-						if refersTo(ref, cand) {
-							add(cand.node, "Provenance.signature")
-						}
+					for _, i := range targets.resolve(ref) {
+						add(all[i].node, "Provenance.signature")
 					}
 				}
 			}
@@ -782,7 +1142,91 @@ func coverage(d *splice.Doc) coverageMap {
 			}
 		}
 	}
-	return c
+	return newCoverageMap(c)
+}
+
+// targetIndex finds the resources a Provenance target's reference may name
+// (by #id, by fullUrl, or by type and id; it errs toward a match, since a
+// wider match only refuses more edits) through indexes of the document's
+// resources, so each target
+// costs the resources it names, not every resource: by #id among contained
+// resources, by fullUrl (its version dropped), and by type with the
+// resource's own id or the id its fullUrl ends in.
+type targetIndex struct {
+	contained, fullURL map[string][]int
+	typeID             map[[2]string][]int
+	// done are the index entries already resolved by an earlier target:
+	// every resource in one is already covered, so a later target naming it
+	// adds nothing and need not read it again.
+	done map[targetKey]bool
+}
+
+type targetKey struct {
+	by  int // 0 contained, 1 fullUrl, 2 type and id
+	key [2]string
+}
+
+func newTargetIndex(all []*resource) *targetIndex {
+	ix := &targetIndex{contained: map[string][]int{}, fullURL: map[string][]int{}, typeID: map[[2]string][]int{}, done: map[targetKey]bool{}}
+	for i, r := range all {
+		if r.contained && r.id != "" {
+			ix.contained[r.id] = append(ix.contained[r.id], i)
+		}
+		if r.fullURL == "" {
+			if r.id != "" {
+				ix.typeID[[2]string{r.typ, r.id}] = append(ix.typeID[[2]string{r.typ, r.id}], i)
+			}
+			continue
+		}
+		f := stripHistory(r.fullURL)
+		ix.fullURL[f] = append(ix.fullURL[f], i)
+		if r.id != "" {
+			ix.typeID[[2]string{r.typ, r.id}] = append(ix.typeID[[2]string{r.typ, r.id}], i)
+		}
+		// A reference by type and id also names a resource with no id of
+		// its own whose fullUrl ends in "/<type>/<id>".
+		if slash := strings.LastIndex(f, "/"); slash >= 0 {
+			if tail := f[slash+1:]; tail != "" && tail != r.id && strings.HasSuffix(f[:slash], "/"+r.typ) {
+				ix.typeID[[2]string{r.typ, tail}] = append(ix.typeID[[2]string{r.typ, tail}], i)
+			}
+		}
+	}
+	return ix
+}
+
+// resolve is the resources ref may name, by their place in all, in that
+// order, leaving out those an earlier target already named: exactly the
+// resources the reference may name, less ones already covered.
+func (ix *targetIndex) resolve(ref string) []int {
+	var keys []targetKey
+	if strings.HasPrefix(ref, "#") {
+		if len(ref) > 1 {
+			keys = append(keys, targetKey{0, [2]string{ref[1:]}})
+		}
+	} else {
+		ref = stripHistory(ref)
+		keys = append(keys, targetKey{1, [2]string{ref}})
+		if segs := strings.Split(ref, "/"); len(segs) >= 2 && segs[len(segs)-1] != "" {
+			keys = append(keys, targetKey{2, [2]string{segs[len(segs)-2], segs[len(segs)-1]}})
+		}
+	}
+	var out []int
+	for _, k := range keys {
+		if ix.done[k] {
+			continue
+		}
+		ix.done[k] = true
+		switch k.by {
+		case 0:
+			out = append(out, ix.contained[k.key[0]]...)
+		case 1:
+			out = append(out, ix.fullURL[k.key[0]]...)
+		case 2:
+			out = append(out, ix.typeID[k.key]...)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // fhirTypeName reports whether typ reads as a FHIR resource type name (an
@@ -816,27 +1260,4 @@ func stripHistory(ref string) string {
 		return ref[:i]
 	}
 	return ref
-}
-
-// refersTo reports whether a reference may name r. It errs toward a match:
-// a wider match only refuses more edits.
-func refersTo(ref string, r *resource) bool {
-	if strings.HasPrefix(ref, "#") {
-		return r.contained && len(ref) > 1 && r.id == ref[1:]
-	}
-	ref = stripHistory(ref)
-	if r.fullURL != "" && stripHistory(r.fullURL) == ref {
-		return true
-	}
-	segs := strings.Split(ref, "/")
-	if len(segs) < 2 {
-		return false
-	}
-	typ, id := segs[len(segs)-2], segs[len(segs)-1]
-	if r.typ != typ || id == "" {
-		return false
-	}
-	// By type and id: the resource's own id, or, for a resource that
-	// carries none, the tail of its fullUrl.
-	return r.id == id || strings.HasSuffix(stripHistory(r.fullURL), "/"+typ+"/"+id)
 }

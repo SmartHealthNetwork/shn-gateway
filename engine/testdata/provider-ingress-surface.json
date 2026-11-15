@@ -16,5 +16,7 @@
   "POST /cds-services/{id}",
   "POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question",
   "POST /dtr/payer/{payer}/{rest...}",
-  "POST /oauth/token"
+  "POST /notify/cdex-task/{subscriber}/{kid}/{sealed}",
+  "POST /oauth/token",
+  "POST /substrate/inbound"
 ]

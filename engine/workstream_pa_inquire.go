@@ -22,25 +22,23 @@
 // response Bundles, one ClaimResponse each. Every ClaimResponse in either shape
 // is read, because an answer that carries several authorizations decides several.
 //
-// WHAT PROFILE-VALIDATES AN INBOUND PEER'S INQUIRY: nothing on this path, by
-// design, and the same is true of the payer's answer. Neither hop runs an
-// enforcing `$validate` over either one — a peer's bytes are preserved and this
-// gateway does not certify content it did not produce, the posture the submit and
-// update legs already take. Concretely, on the payer hop the response check
-// stands down for a relayed answer (and an inquiry's answer is always relayed);
-// on the provider hop the inquiry is carried as sent.
+// WHAT PROFILE-VALIDATES AN INBOUND PEER'S INQUIRY: on the payer hop, the
+// payer's own conformance level (owner decision D47(2), carriedRequestAccepted).
+// At structural and strict the inquiry is judged before the payer's system sees
+// it, against what it declares or, declaring nothing, its line's inquiry request
+// Bundle profile, at its candidate lines: valid when any line accepts it, so a
+// line-specific defect (an inquiry naming no item, which the earliest
+// prior-authorization line requires and the later ones do not) is carried when a
+// later line accepts it. At none and observe it is carried unchecked. The bytes
+// are never changed. On the payer hop the response check stands down for a
+// relayed answer (and an inquiry's answer is always relayed); on the provider hop
+// the inquiry is carried as sent.
 //
-// Two consequences worth stating rather than discovering. First, a line-specific
-// defect in a peer's inquiry — an inquiry naming no item, which the earliest
-// prior-authorization line requires and the later ones do not — is not refused
-// here; the payer's own system is what certifies an inquiry it receives, which is
-// where that judgement belongs. Second, the certification lane still OBSERVES
-// both directions, at the inquiry's own profiles and at every candidate line
-// (TestPASInquire_NotProfileValidatedButObserved pins the profile resolution), so
-// such a defect is visible as evidence. That evidence is observational: no
-// decision on this path reads it. The 2.2.1 `Parameters` wrapper is not observed
-// either, because the IG governs it by its operation definition and declares no
-// profile for it.
+// The certification lane still OBSERVES both directions, at the inquiry's own
+// profiles and at every candidate line (TestPASInquire_NotProfileValidatedButObserved
+// pins the profile resolution), as evidence that no decision on this path reads.
+// The 2.2.1 `Parameters` wrapper is not observed, because the IG governs it by its
+// operation definition and declares no profile for it.
 package engine
 
 import (
@@ -562,6 +560,10 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	}
 	boundPatientRef := "Patient/" + facts.member
 	g.noteSubjectBinding(r.Context(), "pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
+	// The carried inquiry, judged at the payer's own level (D47(2)).
+	if !g.carriedRequestAccepted(w, r, legPASClaimInquire, env, tok, answerTok, bundleJSON) {
+		return
+	}
 
 	capture := &nativeCertificationCapture{}
 	// The payer's own departures from the operation it answered, reported with the

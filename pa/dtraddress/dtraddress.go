@@ -137,6 +137,24 @@ func CleanRemainder(r string) bool {
 	return true
 }
 
+// DotFree reports whether r, an escaped path remainder (Under's), holds no
+// dot segment a client would remove before it follows the address: no
+// segment that is "." or "..", raw or percent-encoded in any case ("%2e",
+// ".%2E" and the like), and none whose decoded form holds a "/" or a "\",
+// which a server that decodes first would read as more segments. A segment
+// that does not decode is not dot-free either. Unlike CleanRemainder, it
+// admits every other character, percent-encoded or not: the rest of the
+// address is the participant's, kept as it was written.
+func DotFree(r string) bool {
+	for _, seg := range strings.Split(r, "/") {
+		d, err := url.PathUnescape(seg)
+		if err != nil || d == "." || d == ".." || strings.ContainsAny(d, "/\\") {
+			return false
+		}
+	}
+	return true
+}
+
 // Under reports whether value is under base by the structural match both
 // gateways use, and its remainder: both parse as absolute URLs; the scheme
 // and host are equal case-folded and the effective port is equal; value has

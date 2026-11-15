@@ -171,7 +171,8 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		"crd-order-select": "payer-native", "crd-order-dispatch": "payer-native",
 		"pas-claim": "payer-native", "pas-claim-update": "payer-native", "pas-claim-inquire": "payer-native",
 		"patient-dtr": "phg-inbound", "cdex-attachment-submit": "payer-native",
-		"cdex-attachment-request": "provider-native", "cdex-task-status": "provider-native",
+		"cdex-attachment-request": "provider-native", "cdex-task-status": "provider-native", "cdex-task-subscribe": "provider-native",
+		"cdex-task-signal": "payer-native",
 	}
 	if len(paCatalog) != len(wantSeam) {
 		t.Fatalf("%d catalog legs, %d pinned", len(paCatalog), len(wantSeam))
@@ -186,6 +187,15 @@ func TestPACatalog_SeamsAndOperationHeaders(t *testing.T) {
 		// The one leg whose request frame carries a read's path.
 		if spec.ReadPath != (tx == "cdex-task-status") {
 			t.Errorf("%s: ReadPath %v, want it only on cdex-task-status", tx, spec.ReadPath)
+		}
+		// The one leg whose request frame carries a Subscription interaction.
+		if spec.Subscribe != (tx == "cdex-task-subscribe") {
+			t.Errorf("%s: Subscribe %v, want it only on cdex-task-subscribe", tx, spec.Subscribe)
+		}
+		// The one leg whose request frame carries a notification's sealed
+		// channel and the notifier's stated base.
+		if spec.Signal != (tx == "cdex-task-signal") {
+			t.Errorf("%s: Signal %v, want it only on cdex-task-signal", tx, spec.Signal)
 		}
 	}
 	// Rejection row: an adapter row that names no seam is refused.

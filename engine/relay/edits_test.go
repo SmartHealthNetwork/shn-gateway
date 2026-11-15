@@ -16,6 +16,9 @@ func editRows() []Edit {
 		if slices.Contains(headerEdits, id) {
 			row.Direction, row.Kind, row.Header, row.HeaderInputs = DirectionResponse, EditKindSetHeader, "Location", headerVerifiers[id].names()
 		}
+		if slices.Contains(queryEdits, id) {
+			row.Role, row.Kind = RoleRecipient, EditKindRewriteQuery
+		}
 		rows = append(rows, row)
 	}
 	return rows

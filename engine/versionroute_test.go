@@ -115,6 +115,8 @@ func TestPACatalog_Contracts(t *testing.T) {
 		"cdex-attachment-submit":  "",
 		"cdex-attachment-request": "",
 		"cdex-task-status":        "",
+		"cdex-task-subscribe":     "",
+		"cdex-task-signal":        "",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("catalog has %d legs, pin has %d — update BOTH", len(paCatalog), len(want))

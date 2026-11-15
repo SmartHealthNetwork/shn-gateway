@@ -38,7 +38,8 @@ func (v headerVerifier) names() []string { return strings.Fields(v.inputs) }
 // closed map, as adaptiveEdits is. A header edit is made only with its check
 // here (ValidateEdits, HeaderEdited); no row and no caller supplies one.
 var headerVerifiers = map[EditID]headerVerifier{
-	EditCDexTaskLocationRekey: {inputs: TaskLocationInputBase + " " + TaskLocationInputTail, verify: verifyTaskLocation},
+	EditCDexTaskLocationRekey:     {inputs: TaskLocationInputBase + " " + TaskLocationInputTail, verify: verifyTaskLocation},
+	EditSubscriptionLocationRekey: {inputs: SubscriptionLocationInputBase + " " + SubscriptionLocationInputTail, verify: verifySubscriptionLocation},
 }
 
 // verifyTaskLocation is E-16's check: value is exactly the base input, "/",

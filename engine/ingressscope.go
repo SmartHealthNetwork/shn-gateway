@@ -43,7 +43,14 @@ const taskScopePrefix = "system/Task."
 // query) and whether it is a Task scope at all. v1's read is v2's rs, its
 // write cud, and * all five (SMART App Launch 2, scopes).
 func parseTaskScope(scope string) (perms taskPermission, granular bool, ok bool) {
-	rest, found := strings.CutPrefix(scope, taskScopePrefix)
+	return parseResourceScope(scope, taskScopePrefix)
+}
+
+// parseResourceScope reads scope as a SMART system-level scope on the
+// resource prefix names ("system/<Resource>."), as parseTaskScope reads a
+// Task scope.
+func parseResourceScope(scope, prefix string) (perms taskPermission, granular bool, ok bool) {
+	rest, found := strings.CutPrefix(scope, prefix)
 	if !found {
 		return 0, false, false
 	}
@@ -145,6 +152,15 @@ func namesTask(scope string) bool {
 func CheckPayerIngressScopes(scopes []string) error {
 	usable := 0
 	for _, scope := range scopes {
+		// A Subscription scope, which the Subscription routes take (from
+		// v1.13.0), is one of SMART's spellings too: a misspelled one would
+		// be granted and permit nothing.
+		if namesSubscription(scope) {
+			if _, _, ok := parseResourceScope(scope, SubscriptionScopePrefix); !ok {
+				return fmt.Errorf("scope %q is not a SMART system/Subscription scope (system/Subscription.read, system/Subscription.write, system/Subscription.*, or system/Subscription. followed by some of c, r, u, d, s in that order)", scope)
+			}
+			continue
+		}
 		if !namesTask(scope) {
 			continue
 		}
@@ -185,3 +201,78 @@ func challengeScope(need taskPermission) string {
 	}
 	return ""
 }
+
+// The scopes a payer gateway's Subscription routes take (the notifications
+// design §6.1): a system-level Subscription scope that permits the
+// interaction, as SMART defines one, read as a Task scope is: create (c) for a
+// create; read (r) for a read, a vread and an instance $status; update (u)
+// for an update; delete (d) for a delete; search (s) for a search and its
+// pages. v1's read is rs, its write cud, and * all five. A granular scope (a
+// v2 scope with a query) permits nothing here, as on the Task routes.
+const (
+	// SubscriptionScopePrefix is the context and resource of every scope the
+	// Subscription routes take.
+	SubscriptionScopePrefix = "system/Subscription."
+	// SubscriptionWriteScope is the v1 scope a route that creates, updates or
+	// deletes a Subscription names in its challenge.
+	SubscriptionWriteScope = "system/Subscription.write"
+	// SubscriptionReadScope is the v1 scope a route that reads or searches
+	// Subscriptions names in its challenge.
+	SubscriptionReadScope = "system/Subscription.read"
+)
+
+// subscriptionScopesPermit reports whether granted, a scope set as the token
+// endpoint grants it, holds a Subscription scope with no query that permits
+// need.
+func subscriptionScopesPermit(granted string, need taskPermission) bool {
+	for _, scope := range strings.Split(granted, " ") {
+		if perms, granular, ok := parseResourceScope(scope, SubscriptionScopePrefix); ok && !granular && perms&need == need {
+			return true
+		}
+	}
+	return false
+}
+
+// subscriptionChallengeScope is the v1 scope a Subscription route that takes
+// need names in its 403's challenge.
+func subscriptionChallengeScope(need taskPermission) string {
+	if need == taskRead || need == taskSearch {
+		return SubscriptionReadScope
+	}
+	return SubscriptionWriteScope
+}
+
+// namesSubscription reports whether scope names the system-level
+// Subscription resource, well spelled or not, as namesTask does Task.
+func namesSubscription(scope string) bool {
+	context, rest, _ := strings.Cut(scope, "/")
+	resource, _, _ := strings.Cut(rest, ".")
+	return strings.EqualFold(context, "system") && strings.EqualFold(resource, "Subscription")
+}
+
+// listedSubscriptionScopes are the Subscription scopes, each with no query
+// permitting something, that one of clients is registered for, exactly as
+// listed, sorted: what a payer's SMART configuration advertises beside its
+// Task scopes, as it does a read scope, so a scope is named only as one some
+// client can be granted.
+func listedSubscriptionScopes(clients map[string]IngressClientRegistration) []string {
+	var out []string
+	for _, c := range clients {
+		if c.Module != "" {
+			continue
+		}
+		for _, scope := range c.Scopes {
+			if perms, granular, ok := parseResourceScope(scope, SubscriptionScopePrefix); ok && !granular && perms != 0 && !slices.Contains(out, scope) {
+				out = append(out, scope)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ingressBypassSubscriptionScope is the Subscription scope the test-only auth
+// bypass grants beside the Task scopes (EnableIngressForTest): every
+// Subscription interaction, as a client registered for system/Subscription.*
+// is granted.
+const ingressBypassSubscriptionScope = "system/Subscription.*"

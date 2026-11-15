@@ -31,6 +31,8 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-submit", rq, req, OutcomeCarried}:  relayOnly,
 		{"cdex-attachment-request", rq, req, OutcomeCarried}: relayOnly,
 		{"cdex-task-status", rq, req, OutcomeCarried}:        relayOnly,
+		{"cdex-task-subscribe", rq, req, OutcomeCarried}:     {Allowed: own(R, E), Edits: []EditID{"E-18"}},
+		{"cdex-task-signal", rq, req, OutcomeCarried}:        relayOnly,
 
 		{"coverage-eligibility", rq, req, OutcomeOriginated}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rq, req, OutcomeOriginated}:      {Allowed: own(A), Builders: b("sdk-crd-request")},
@@ -53,6 +55,8 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-submit", rq, resp, OutcomeAnswered}:  relayOnly,
 		{"cdex-attachment-request", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-16"}},
 		{"cdex-task-status", rq, resp, OutcomeAnswered}:        relayOnly,
+		{"cdex-task-subscribe", rq, resp, OutcomeAnswered}:     {Allowed: own(R, E), Edits: []EditID{"E-20", "E-23"}},
+		{"cdex-task-signal", rq, resp, OutcomeAnswered}:        relayOnly,
 
 		{"coverage-eligibility", rq, resp, OutcomeUpstreamError}:    relayOnly,
 		{"crd-order-dispatch", rq, resp, OutcomeUpstreamError}:      relayOnly,
@@ -77,6 +81,8 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-submit", rc, req, OutcomeCarried}:  {Allowed: own(R, E), Edits: []EditID{"E-13"}},
 		{"cdex-attachment-request", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-11"}},
 		{"cdex-task-status", rc, req, OutcomeCarried}:        relayOnly,
+		{"cdex-task-subscribe", rc, req, OutcomeCarried}:     {Allowed: own(R, E), Edits: []EditID{"E-19", "E-21"}},
+		{"cdex-task-signal", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-17"}},
 
 		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A, R), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rc, resp, OutcomeAnswered}:      relayOnly,
@@ -90,6 +96,8 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-submit", rc, resp, OutcomeAnswered}:  relayOnly,
 		{"cdex-attachment-request", rc, resp, OutcomeAnswered}: relayOnly,
 		{"cdex-task-status", rc, resp, OutcomeAnswered}:        relayOnly,
+		{"cdex-task-subscribe", rc, resp, OutcomeAnswered}:     relayOnly,
+		{"cdex-task-signal", rc, resp, OutcomeAnswered}:        relayOnly,
 
 		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    relayOnly,
 		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      relayOnly,
@@ -101,8 +109,12 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-submit", rc, resp, OutcomeUpstreamError}:  relayOnly,
 		{"cdex-attachment-request", rc, resp, OutcomeUpstreamError}: relayOnly,
 		{"cdex-task-status", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-task-subscribe", rc, resp, OutcomeUpstreamError}:     relayOnly,
+		{"cdex-task-subscribe", rq, resp, OutcomeUpstreamError}:     relayOnly,
+		{"cdex-task-signal", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-task-signal", rq, resp, OutcomeUpstreamError}:        relayOnly,
 	}
-	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-status", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
+	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
 		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
 		m[Key{leg, rq, resp, OutcomeRefused}] = refusal
 		m[Key{leg, rc, resp, OutcomeRefused}] = refusal

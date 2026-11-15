@@ -522,6 +522,135 @@ names why, `E-11:…`). `X-SHN-Requester`, which names your payer on the provide
 information only: no provider's system is required to read it, and nothing the network decides
 depends on it.
 
+### Subscribing to a provider's Tasks' changes (payer)
+
+From shn-gateway v1.13.0 your system subscribes to the changes of the Tasks it created at a
+provider, on the HRex Task topic, as it would at that provider's own server, at the provider's
+base on your gateway (`{PAYER_DAVINCI_INGRESS_BASE_URL}/cdex/provider/{provider}`, which
+`/cdex/providers` lists): configure that base as the provider's FHIR base for `Subscription`, the
+same base your Tasks are created and read at, and change nothing else. Your ingress client needs
+a Subscription scope beside its Task scopes (`docs/CONFIGURATION.md`, "Subscribe to the
+provider's Tasks' changes").
+
+**What you read back is your own.** Your Subscription's `channel.endpoint` and `channel.header`
+cross the network only sealed, under a key only your gateway holds: neither the provider nor the
+network reads your endpoint or your secret. The provider's system stores its gateway's
+notification address in their place, and delivers each notification there. Every answer your
+system receives carries your own endpoint and headers back in each Subscription that is yours,
+and the provider's search entries and paging links at your base, as a directly integrated
+server's answer would; the provider's own normalisations (its `status`, its stored filter) come
+back as it stored them. A create's or update's answer names the Subscription at your base in its
+`Location`. Each answer names these edits in `X-SHN-Edited`. A restored answer carries no `ETag`,
+since the provider's named the provider's bytes: for an update's or a delete's `If-Match`, send
+`W/"<meta.versionId>"` of the Subscription you read back. A Subscription made before your
+gateway's key rotation reads back with the provider gateway's address once the rotation's overlap
+is over, and your next search does not find it: create it again.
+
+**The closed shape.** The provider's gateway carries a Subscription only in the shape the network
+closes (a topic Subscription on the HRex Task topic, `rest-hook`, `application/fhir+json`,
+`id-only`, the Backport IG's extensions only, a `requester:identifier` filter naming only the
+payer identifiers the network attests for you), and refuses any other `403`, as the
+participant protocol (the shn-sdk module's `docs/PARTICIPANT_PROTOCOL.md`, §6.3) lists. Your
+`channel.endpoint` must be an absolute `https` URL with no userinfo or fragment, where your gateway
+will deliver your notifications.
+
+**Searching.** A search names its endpoint in exactly one `url`, which your gateway seals, so it
+finds only the Subscriptions you made with that endpoint, whatever headers you set: the dedupe
+search a subscriber makes before it creates one works as it would directly. One `url` names one
+endpoint: a value naming several, FHIR search's comma-separated alternatives, is refused (search
+for each on its own). The search may also carry `status`, `_id`, `_count` and `_elements`
+(keeping `channel`), and nothing else, no modifier among them. A read's `_elements` or `_summary`
+that hides `channel` cannot be shown to be yours, and is answered the network's `404`.
+
+**Receiving notifications.** From shn-gateway v1.13.0 your endpoint receives the provider's
+notifications through your gateway: each handshake, heartbeat and `id-only` event notification is
+posted to the `channel.endpoint` your system wrote, with the `channel.header` values it wrote, as a
+provider's server posting it directly would, and with no credential of the network's. An `id-only`
+notification names the Task and carries none: its addresses into the provider's server (the
+Bundle's links, the SubscriptionStatus's `subscription` and `focus` references, each entry's
+`request.url`, `response.location` and `fullUrl` but a `urn:uuid`) arrive at your base
+for that provider, so your system then reads the
+Task there (`GET {base}/Task/{id}`), as it reads any Task it created. The delivery names that edit
+in `X-SHN-Edited` (`cdex-task-notification-address-rekey`). Whatever your endpoint answers goes back
+to the provider's system as answered, once it holds no resource but an OperationOutcome's own: the
+leg names no patient. The provider's system may post the same notification again after a timeout;
+each arrives, and you de-duplicate by its event number, as you would directly. No provider's
+system serving the HRex Task topic has been run with it live yet.
+
+**Not carried.** `PATCH`, an instance `_history`, a type-level `$status` and a search at the plain
+base are refused; the network carries no `Prefer` header on any leg, so the provider's system
+answers a create or an update by its own default. A Subscription names no provider, so one at the
+plain base is never sent to every provider: create it at the provider's base.
+
+### A payer subscribes to its CDex Task
+
+From shn-gateway v1.13.0, a payer's system can follow the attachment-request Tasks it created at a
+provider, end to end, as it would at that provider's own server. This is the whole path in one
+place; the settings and the full refusal tables are in CONFIGURATION, [for the
+payer](CONFIGURATION.md#subscribe-to-the-providers-tasks-changes-payer-from-shn-gateway-v1130)
+and [for the provider](CONFIGURATION.md#take-a-payers-subscription-to-its-tasks-changes-provider-optional).
+
+**Setup, the payer.** Register a SMART `system/Subscription` scope for your ingress client at your
+gateway, beside its Task scopes, and ask for it in the token: each interaction needs its own
+permission, create (`c`), read (`r`, for a read, a vread and `$status`), update (`u`), delete
+(`d`) and search (`s`), so `system/Subscription.cruds` covers them all. Configure
+`{PAYER_DAVINCI_INGRESS_BASE_URL}/cdex/provider/{provider}` as that provider's FHIR base for
+`Subscription`: the same base your Tasks are created and read at (`/cdex/providers` lists them).
+
+**Setup, the provider.** Set `PROVIDER_CDEX_SUBSCRIPTION_SCOPE` beside `PROVIDER_CDEX_TASK_URL`.
+Your system's FHIR server, at the base of your Task endpoint, must accept topic Subscriptions
+(the Subscriptions Backport IG) on the HRex Task topic and send REST-hook notifications.
+
+**What the payer's system sends and gets back.**
+- A Subscription to the HRex Task topic
+  (`http://hl7.org/fhir/us/davinci-hrex/SubscriptionTopic/Task`), with content `id-only`, a
+  `rest-hook` channel with payload `application/fhir+json`, and a `requester:identifier` filter
+  naming only your own payer identifiers, as the network attests them.
+- Your `channel.endpoint` and `channel.header` cross the network only sealed, under a key only
+  your gateway holds, and every answer reads them back exactly as you wrote them.
+- A create or an update is answered with a `Location` at your base for the provider.
+- Every address into the provider's server, in an answer (a search's entries and paging links)
+  and in a notification, arrives written at your base for that provider.
+- A search names exactly one endpoint in `url`, and may add `status`, `_id`, `_count` and
+  `_elements`. A read back carries no `ETag`: for an update's or a delete's `If-Match`, send
+  `W/"<meta.versionId>"` of the Subscription you read.
+- After a notification, read the Task it names at your base for the provider
+  (`GET {base}/Task/{id}`).
+
+**What a notification looks like.** Only notifications that carry no content: an `id-only`
+event naming the Task, a handshake and a heartbeat. No notification ever carries a resource, and
+none names anything beside its Task (an `additional-context`); one holding, where your gateway
+writes addresses at your base, an address that URL readers could take for different servers, or
+one into the provider's own server outside its base, is refused before it reaches you. A
+notification is held to the closed shape a `$status` answer is: no extension and no signature, so
+a provider that signs its notifications cannot reach you on this leg yet. Each
+is delivered to the endpoint your system wrote, with the header values it wrote. The provider's
+system may send the same notification again after a timeout, and each one arrives: de-duplicate
+by its event number.
+
+**What is refused, and why.** Each refusal is the network's own, the same at every conformance
+level, and nothing is sent:
+
+| Refusal | Status | Why |
+|---|---|---|
+| A Subscription outside the closed shape, or a filter naming an identifier not yours | `403` | authority |
+| A read, update, delete or `$status` of a Subscription that is not yours | `404` | authority |
+| A `channel.endpoint` that is not an absolute `https` URL with no userinfo or fragment | `422` | integrity |
+| A `channel.endpoint` that is itself a notification address of the network | `422` | routing |
+| A `channel.header` value that is not an HTTP field (`name: value`); the value is never named | `422` | the fidelity of the gateway's own edit |
+| A search whose `url` names more than one endpoint | `400` | routing |
+| A body holding a resource (a `contained` member, or another resource type) | `403` | authority |
+| A `PATCH` | `405` | the fidelity of the gateway's own edit |
+| An instance `_history`, or a type-level `$status` | `403` | authority |
+| A Subscription at the plain base, which names no provider | `422` create, `404` read or search | routing |
+| A bearer whose scopes do not permit the interaction | `403` `insufficient_scope` | authority |
+
+**The limit.** A provider's base on your gateway declares `Subscription` in its
+CapabilityStatement only when that provider's gateway takes your Subscriptions, and names the HRex
+Task topic only once the provider's own statement advertises it; until then it names no topic.
+Until a provider's system serves the Task topic, delivery end to end depends on that system: the
+network carries the notifications it sends, and has nothing to carry until it does.
+
 ## A non-FHIR backend (custom connector)
 
 For a legacy or non-FHIR system of record (HL7v2, X12, SQL, SOAP), implement the
@@ -789,8 +918,15 @@ request). What the FHIR check covers, per leg:
   is checked against the CDS Hooks response rules at your gateway's level, as an
   answer it relays through its Da Vinci ingress already is.
 - A PAS request carried from your own system (the `$submit` ingress) is not
-  `$validate`d by either gateway; only the content checks and the network rules
-  apply to it. A PAS submit or update the gateway builds from your records is
+  `$validate`d by your gateway; only the content checks and the network rules
+  apply to it there. From v1.13.0, the release planned to carry it (no published
+  release carries it yet), a payer's gateway at `structural` or `strict` checks
+  the request it receives, at its own level, before its system sees it: against
+  what the request declares, or its line's request Bundle profile when it
+  declares none, valid when any candidate line accepts it. A refusal reaches
+  you as a `422` OperationOutcome naming `ingress validation failed` with the
+  issues, or a `500` when its check cannot run at `strict`; your request is never
+  changed. A PAS submit or update the gateway builds from your records is
   validated: the Bundle for base R4 shape, and its QuestionnaireResponse
   attachments against the DTR profile.
 - From shn-gateway v0.55.0, a payer's answer to a leg your provider gateway sends — the DTR

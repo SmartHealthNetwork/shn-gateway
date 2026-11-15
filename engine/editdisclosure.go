@@ -22,22 +22,41 @@ const EditedHeader = "X-SHN-Edited"
 // adaptive address's re-key and restore, made even on signed content, so a
 // failed signature check on the participant's side has an explanation; and
 // the attachment-request Task's Location (E-16), a header the provider's
-// system did not write.
-var headerDisclosedEdits = []relay.EditID{relay.EditPASPendReturnRekey, relay.EditCDexTaskReturnRekey, relay.EditDTRAdaptiveAddressRekey, relay.EditDTRAdaptiveAddressRestore, relay.EditCDexTaskLocationRekey}
+// system did not write; and a topic Subscription's channel re-key (E-19), made
+// even on signed content, and its url search re-key (E-21), each a change of a
+// payer's request the provider's system did not see sent; and on the
+// subscriber's answer, the restore of its Subscriptions (E-20), made even on
+// signed content, and a create's or update's Location (E-23), a header the
+// notifier's system did not write; and on a CDex Task notification the payer's
+// gateway delivers, the re-key of its addresses into the provider's server
+// (E-17), made even on signed content.
+var headerDisclosedEdits = []relay.EditID{relay.EditPASPendReturnRekey, relay.EditCDexTaskReturnRekey, relay.EditDTRAdaptiveAddressRekey, relay.EditDTRAdaptiveAddressRestore, relay.EditCDexTaskLocationRekey,
+	relay.EditSubscriptionEndpointRekey, relay.EditSubscriptionURLSearchRekey, relay.EditSubscriptionEndpointRestore, relay.EditSubscriptionLocationRekey,
+	relay.EditCDexTaskNotificationAddressRekey}
 
-// setEditedHeader adds EditedHeader for each disclosed edit p carries.
+// setEditedHeader adds EditedHeader for each disclosed edit p carries, in the
+// order headerDisclosedEdits lists them, whatever order they were made in. The
+// signatures p names (SignedEdited) are its body edits': a header edit
+// changes no byte of the body, so it names none.
 func setEditedHeader(h http.Header, p relay.Payload) {
-	for _, id := range p.Edits() {
-		if !slices.Contains(headerDisclosedEdits, id) {
+	made := p.Edits()
+	for _, id := range headerDisclosedEdits {
+		if !slices.Contains(made, id) {
 			continue
 		}
 		name, ok := relay.EditName(relayEdits, id)
 		if !ok {
 			name = string(id)
 		}
-		if signed := p.SignedEdited(); len(signed) > 0 {
+		if signed := p.SignedEdited(); len(signed) > 0 && !headerEdit(id) {
 			name += `; signed="` + strings.Join(signed, ", ") + `"`
 		}
 		h.Add(EditedHeader, name)
 	}
+}
+
+// headerEdit reports whether the registry's row for id is a header edit
+// (relay.EditKindSetHeader).
+func headerEdit(id relay.EditID) bool {
+	return slices.ContainsFunc(relayEdits, func(e relay.Edit) bool { return e.ID == id && e.Kind == relay.EditKindSetHeader })
 }

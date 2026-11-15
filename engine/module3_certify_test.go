@@ -277,28 +277,38 @@ func TestCertificationCalledLaneIsTimed_MONR24(t *testing.T) {
 	}
 }
 
+// certificationSpeciesProfiles is each species certification recognises, a
+// payload of it, and the canonical of the profile it is certified against on
+// a submit leg and with no leg named, at every line in its IG's package at
+// that line's version. The offline lane that validates each transform golden
+// at its target line keeps its own table of the same profiles
+// (test/conformance), and reads this literal to stay equal to it, so keep it
+// a literal of string literals.
+var certificationSpeciesProfiles = []struct{ raw, species, profile string }{
+	{`{"resourceType":"Claim"}`, "Claim", "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim"},
+	{`{"resourceType":"ClaimResponse"}`, "ClaimResponse", "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"},
+	{`{"resourceType":"QuestionnaireResponse"}`, "QuestionnaireResponse", "http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse"},
+	{`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`, "PASRequestBundle", "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"},
+	{`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}}]}`, "PASResponseBundle", "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle"},
+}
+
 func TestCertificationSpeciesProfiles(t *testing.T) {
-	for _, row := range []struct{ raw, species, profile string }{
-		{`{"resourceType":"Claim"}`, "Claim", "profile-claim"},
-		{`{"resourceType":"ClaimResponse"}`, "ClaimResponse", "profile-claimresponse"},
-		{`{"resourceType":"QuestionnaireResponse"}`, "QuestionnaireResponse", "dtr-questionnaireresponse"},
-		{`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Claim"}}]}`, "PASRequestBundle", "profile-pas-request-bundle"},
-		{`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"ClaimResponse"}}]}`, "PASResponseBundle", "profile-pas-response-bundle"},
-	} {
+	for _, row := range certificationSpeciesProfiles {
 		t.Run(row.species, func(t *testing.T) {
 			if got := detectSpecies([]byte(row.raw)); got != row.species {
 				t.Fatalf("species %q", got)
 			}
 			for _, line := range []string{"2.0", "2.1", "2.2"} {
-				p, ok := profileFor(row.species, line, "pas-claim")
 				d, _ := shnsdk.PASLineDef(line)
-				version := d.PackageVersion
+				want := row.profile + "|" + d.PackageVersion
 				if row.species == "QuestionnaireResponse" {
 					d, _ := shnsdk.DTRLineDef(line)
-					version = d.PackageVersion
+					want = row.profile + "|" + d.PackageVersion
 				}
-				if !ok || !strings.HasSuffix(p, "/"+row.profile+"|"+version) {
-					t.Fatalf("profile %q %v", p, ok)
+				for _, leg := range []string{"pas-claim", ""} {
+					if p, ok := profileFor(row.species, line, leg); !ok || p != want {
+						t.Fatalf("%s at %s on leg %q: profile %q %v, want %q", row.species, line, leg, p, ok, want)
+					}
 				}
 			}
 		})

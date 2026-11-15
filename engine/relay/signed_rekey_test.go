@@ -37,12 +37,18 @@ const rekeyed = `"https://provider-gw.example/cdex/payer/payer-1"`
 // the attachment-request Task's (E-11) are made even where a signature covers
 // the payer-url they change (D127). With the questionnaireAdaptive address's
 // re-key and restore (E-12, E-13, D128; their rows are in
-// adaptive_test.go), they are the only edits that are: every other edit of
+// adaptive_test.go) and a topic Subscription's channel seal, re-key and
+// restore (E-18, E-19 and E-20, D132; their rows are in
+// signed_subscription_test.go and signed_subscriber_test.go) and a CDex Task
+// notification's address re-key (E-17, as E-12; its rows are in
+// signed_notification_test.go), they are the only edits that
+// are: every other edit of
 // signed content is still refused, and each of the two is refused on any other
 // signed value.
 func TestSignedContentRekeyExemption(t *testing.T) {
-	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore}) {
-		t.Fatalf("signed-content exempt edits %v, want exactly E-10, E-11, E-12 and E-13", got)
+	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore,
+		EditCDexTaskNotificationAddressRekey, EditSubscriptionHeaderSeal, EditSubscriptionEndpointRekey, EditSubscriptionEndpointRestore}) {
+		t.Fatalf("signed-content exempt edits %v, want exactly E-10, E-11, E-12, E-13, E-17, E-18, E-19 and E-20", got)
 	}
 	bundleSigned := NewBody(pendBundle(`,"signature":{`+signatureElement+`}`, "", ""), OriginPeerFrame)
 	provSigned := NewBody(pendBundle("", "", `,{"resource":{"resourceType":"Provenance","target":[{"reference":"Task/t1"}],`+
@@ -107,7 +113,7 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 	// Every other edit made by ApplyChanges, on exactly the value the exempt
 	// edits may change, is still refused (D127's row).
 	for _, id := range EditIDs() {
-		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) {
+		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) || slices.Contains(queryEdits, id) {
 			continue
 		}
 		rows = append(rows, row{"other edit " + string(id) + " on the signed payer-url", bundleSigned, id, replace(payerURL, rekeyed), "Bundle.signature", nil})

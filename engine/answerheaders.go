@@ -40,9 +40,11 @@ const (
 // a 2xx answer for the requester's gateway alone (LegResult.AddressHeaders,
 // statedAnswer.address): a payer's on a framed DTR operation's answer
 // (operationBase, operationAddressTags, read by E-12), and a provider's on its
-// answer to a payer's attachment-request Task (taskLocation, read by E-16).
-// None is ever written to a participant.
-var addressHeaderNames = []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation}
+// answer to a payer's attachment-request Task (taskLocation, read by E-16),
+// and a notifier's on its answer on a subscribe leg (statedBase, read by
+// E-20, and a create's or an update's subscriptionLocation). None is ever
+// written to a participant.
+var addressHeaderNames = []string{shnsdk.FrameHeaderOperationBase, shnsdk.FrameHeaderOperationAddressTags, shnsdk.FrameHeaderTaskLocation, shnsdk.FrameHeaderStatedBase, shnsdk.FrameHeaderSubscriptionLocation}
 
 // AnswerHeaderNotCarriedValues is the closed list
 // ExchangeRecord.AnswerHeadersNotCarried draws from.

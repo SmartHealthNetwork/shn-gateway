@@ -1,15 +1,24 @@
 [
+  "DELETE /cdex/provider/{provider}/Subscription/{rest...}",
   "GET /.well-known/smart-configuration",
+  "GET /Subscription",
+  "GET /Subscription/{rest...}",
   "GET /Task/{id}",
   "GET /Task/{id}/_history/{vid}",
   "GET /cdex/provider/{provider}/.well-known/smart-configuration",
+  "GET /cdex/provider/{provider}/Subscription",
+  "GET /cdex/provider/{provider}/Subscription/{rest...}",
   "GET /cdex/provider/{provider}/Task/{id}",
   "GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
   "GET /cdex/provider/{provider}/metadata",
   "GET /cdex/providers",
   "GET /metadata",
+  "PATCH /cdex/provider/{provider}/Subscription/{rest...}",
+  "POST /Subscription",
   "POST /Task",
+  "POST /cdex/provider/{provider}/Subscription",
   "POST /cdex/provider/{provider}/Task",
   "POST /oauth/token",
-  "POST /substrate/inbound"
+  "POST /substrate/inbound",
+  "PUT /cdex/provider/{provider}/Subscription/{rest...}"
 ]

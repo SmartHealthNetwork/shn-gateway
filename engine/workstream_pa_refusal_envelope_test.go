@@ -48,7 +48,7 @@ func legsByAnswerEnvelope(t *testing.T, envelope string) map[string]legSpec {
 func TestRefusalEnvelope_LegsSplitAsTheTaxonomySays(t *testing.T) {
 	keys := func(m map[string]legSpec) []string { return slices.Sorted(maps.Keys(m)) }
 	if got, want := keys(legsByAnswerEnvelope(t, legtaxonomy.AnswerEnvelopeFHIR)), []string{
-		"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-status", "coverage-eligibility", "dtr-questionnaire-fetch",
+		"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "dtr-questionnaire-fetch",
 		"federated-query", "pas-claim", "pas-claim-inquire", "pas-claim-update",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("FHIR legs = %v, want %v", got, want)
@@ -310,18 +310,21 @@ func gatewayRefusal(t *testing.T, tx, contentType string, body []byte) (string, 
 // participant's own system calls is the leg's client surface, so the leg's
 // answer envelope must be the route's.
 var ingressRouteLegs = map[string][]string{
-	RouteCRD:              {"crd-order-select", "crd-order-dispatch"},
-	RouteDTR:              {"dtr-questionnaire-fetch"},
-	RoutePAS:              {"pas-claim", "pas-claim-update"},
-	RoutePASInquire:       {"pas-claim-inquire"},
-	RouteEligibility:      {"coverage-eligibility"},
-	RouteCDexSubmit:       {"cdex-attachment-submit"},
-	RouteCDexReturnSubmit: {"cdex-attachment-submit"},
-	RouteCDexRequestBase:  {"cdex-attachment-request"},
-	RouteCDexRequest:      {"cdex-attachment-request"},
-	RouteCDexReadBase:     {"cdex-task-status"},
-	RouteCDexRead:         {"cdex-task-status"},
-	RouteFederatedQuery:   {"federated-query"},
+	RouteCRD:                  {"crd-order-select", "crd-order-dispatch"},
+	RouteDTR:                  {"dtr-questionnaire-fetch"},
+	RoutePAS:                  {"pas-claim", "pas-claim-update"},
+	RoutePASInquire:           {"pas-claim-inquire"},
+	RouteEligibility:          {"coverage-eligibility"},
+	RouteCDexSubmit:           {"cdex-attachment-submit"},
+	RouteCDexReturnSubmit:     {"cdex-attachment-submit"},
+	RouteCDexRequestBase:      {"cdex-attachment-request"},
+	RouteCDexRequest:          {"cdex-attachment-request"},
+	RouteCDexReadBase:         {"cdex-task-status"},
+	RouteCDexRead:             {"cdex-task-status"},
+	RouteCDexSubscriptionBase: {"cdex-task-subscribe"},
+	RouteCDexSubscription:     {"cdex-task-subscribe"},
+	RouteCDexNotify:           {"cdex-task-signal"},
+	RouteFederatedQuery:       {"federated-query"},
 }
 
 // noIngressRouteYet are the legs with an answer envelope that no ingress

@@ -250,7 +250,7 @@ func TestAdaptiveAddressValueIsClosedToEveryOtherEdit(t *testing.T) {
 	for _, id := range EditIDs() {
 		// A transform and a header edit are never made by Apply (each has its
 		// own refusal rows).
-		if adaptiveEdits[id] || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) {
+		if adaptiveEdits[id] || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) || slices.Contains(queryEdits, id) {
 			continue
 		}
 		for name, ops := range map[string]func(d *Document) []Op{

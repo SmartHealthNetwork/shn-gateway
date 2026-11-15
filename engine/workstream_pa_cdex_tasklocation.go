@@ -53,16 +53,10 @@ func cdexTaskLocationFrame(ctx context.Context, up upstreamReply, taskURL string
 		return nil
 	}
 	switch {
-	case len(up.locations) == 0 || (len(up.locations) == 1 && strings.TrimSpace(up.locations[0]) == ""):
+	case noLocation(up):
 		return notMade(EditNotMadeTaskLocationNoLocation)
-	case len(up.locations) > 1 || up.answeredAt == nil:
-		return notMade(EditNotMadeTaskLocationNotUnderBase)
 	}
-	ref, err := url.Parse(up.locations[0])
-	if err != nil {
-		return notMade(EditNotMadeTaskLocationNotUnderBase)
-	}
-	remainder, ok := dtraddress.Under(up.answeredAt.ResolveReference(ref).String(), taskURL)
+	remainder, ok := locationUnder(up, taskURL)
 	if !ok {
 		return notMade(EditNotMadeTaskLocationNotUnderBase)
 	}
@@ -71,6 +65,32 @@ func cdexTaskLocationFrame(ctx context.Context, up upstreamReply, taskURL string
 		return notMade(EditNotMadeTaskLocationNotUnderBase)
 	}
 	return map[string]string{shnsdk.FrameHeaderTaskLocation: tail}
+}
+
+// noLocation reports whether a 2xx answer gave no Location at all: none, or
+// one that is empty or blank.
+func noLocation(up upstreamReply) bool {
+	return len(up.locations) == 0 || (len(up.locations) == 1 && strings.TrimSpace(up.locations[0]) == "")
+}
+
+// locationUnder is the remainder of a 2xx answer's Location under base, the
+// match a recipient's gateway frames a created resource's location by
+// (taskLocation, subscriptionLocation): exactly one Location, resolved against
+// the URL the answer came from (upstreamReply.answeredAt) as HTTP defines,
+// lying under base by the segment-boundary match E-12 uses (dtraddress.Under),
+// never a string prefix. Several Locations, or one with no URL to resolve it
+// against, are not under base: none can be told to be the resource's. A
+// Location with a fragment, an empty one ("…#") included, is not either:
+// resolving it drops an empty fragment, so it is refused as written.
+func locationUnder(up upstreamReply, base string) (string, bool) {
+	if len(up.locations) != 1 || up.answeredAt == nil || strings.Contains(up.locations[0], "#") {
+		return "", false
+	}
+	ref, err := url.Parse(up.locations[0])
+	if err != nil {
+		return "", false
+	}
+	return dtraddress.Under(up.answeredAt.ResolveReference(ref).String(), base)
 }
 
 // errNoProviderBase: the payer's gateway has no base for the provider to write

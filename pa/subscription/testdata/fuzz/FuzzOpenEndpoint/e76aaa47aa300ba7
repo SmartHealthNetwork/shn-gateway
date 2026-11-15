@@ -1,0 +1,4 @@
+go test fuzz v1
+string("BSbP4XLp-HK.8K1q4rqFkJLQ7r-jL76o6JVB51dLUUhV6sh9Kppo8Z9-KuaGvnFEiVdbKgNt0knk_dobIq8TL1PK80dvjzDe_0htMLf\n09lFVWmhshCxyz5AUEe5ipMhb0mNrT9SJ")
+uint16(73)
+byte('\x1f')
