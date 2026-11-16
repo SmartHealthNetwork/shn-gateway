@@ -112,6 +112,7 @@ var restoreNotMade = map[string]string{
 	subscription.NotMadeSealInvalid:     EditNotMadeRestoreSealInvalid,
 	subscription.NotMadeNoStatedBase:    EditNotMadeRestoreNoStatedBase,
 	subscription.NotMadeUnreadable:      EditNotMadeRestoreUnreadableBundle,
+	subscription.NotMadeLinkURL:         EditNotMadeRestoreLinkURL,
 }
 
 // subscribeRequest is what a subscribe leg's request frame carries beside the
@@ -224,6 +225,9 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 	frame := &subscribeRequest{}
 	rawQuery, hasQuery := r.URL.RawQuery, r.URL.RawQuery != "" || r.URL.ForceQuery
 	var req shnsdk.SubscriptionRequest
+	// search is the search by url framed for the system, if this is one: its
+	// answer's links are restored from it (E-20).
+	var search subscription.Search
 	switch {
 	case method == http.MethodGet && rest == "Subscription" && pageQuery(rawQuery):
 		// A page, at the link E-20 wrote: framed in its page form.
@@ -262,7 +266,8 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 		// The endpoint travels only sealed: under the current key, and the
 		// predecessor's during its overlap, so a Subscription made under
 		// either is found (§6.2 step 4).
-		frame.endpoint = strings.Join(keys.SealEndpointForSearch(binding, q.Endpoint), " ")
+		search = subscription.Search{Endpoint: q.Endpoint, Sealed: keys.SealEndpointForSearch(binding, q.Endpoint)}
+		frame.endpoint = strings.Join(search.Sealed, " ")
 		req = q.Request
 	default:
 		target := method + " " + rest
@@ -348,7 +353,7 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 		return
 	}
 	ct := writableAnswerMediaType(answerType)
-	p, err := g.restoredAnswer(r, answer, ct, keys, binding, stated, base, writes)
+	p, err := g.restoredAnswer(r, answer, ct, keys, binding, search, stated, base, writes)
 	if err != nil {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		exchangeOf(r.Context()).refusingFidelity(vocab.RefusalStageVerify)
@@ -463,18 +468,21 @@ func (g *Gateway) sealSubscription(r *http.Request, keys subscription.Keys, b su
 // restoredAnswer is the notifier's 2xx answer (every answer OriginateLeg
 // hands back; any other is its error) as this gateway writes it to its own
 // system, with media type ct: when it has a body, each Subscription in it
-// restored and each
-// address under the notifier's stated base re-keyed to base (E-20: the
-// library decides and names each change, subscription.RestoreEdits; relay
-// makes and verifies them, even on signed content); and, on a create's or an
+// restored, each address under the notifier's stated base re-keyed to base,
+// and a link's url restored from the search this gateway framed (search, the
+// zero Search on any other interaction) or the answer's restored
+// Subscriptions (E-20: the library decides and names each change,
+// subscription.RestoreSearchEdits; relay makes and verifies them, the core
+// holding a restored link to the same search, even on signed content); and,
+// on a create's or an
 // update's 2xx, a Location at base for the Subscription location the
 // notifier's gateway framed (E-23). Why an edit was not made is recorded. err
 // is the edit failing its own verification: nothing is written.
-func (g *Gateway) restoredAnswer(r *http.Request, raw []byte, ct string, keys subscription.Keys, b subscription.Binding, stated statedAnswer, base string, writes bool) (relay.Payload, error) {
+func (g *Gateway) restoredAnswer(r *http.Request, raw []byte, ct string, keys subscription.Keys, b subscription.Binding, search subscription.Search, stated statedAnswer, base string, writes bool) (relay.Payload, error) {
 	x := exchangeOf(r.Context())
 	p := relay.Exact(relay.NewBody(raw, relay.OriginPeerFrame), ct)
 	if len(raw) != 0 {
-		edits, _, notMade, err := subscription.RestoreEdits(keys, b, stated.address[shnsdk.FrameHeaderStatedBase], base, raw)
+		edits, _, notMade, err := subscription.RestoreSearchEdits(keys, b, stated.address[shnsdk.FrameHeaderStatedBase], base, search, raw)
 		switch {
 		case err != nil:
 			x.editNotMade(EditNotMadeRestoreUnreadableAnswer)
@@ -485,7 +493,11 @@ func (g *Gateway) restoredAnswer(r *http.Request, raw []byte, ct string, keys su
 				}
 			}
 			if len(edits) > 0 {
-				restored, err := applyRestore(raw, ct, edits)
+				var in *relay.SubscriptionRestoreInputs
+				if search.Endpoint != "" {
+					in = &relay.SubscriptionRestoreInputs{Subscriber: b.Subscriber, Topic: b.Topic, Sealed: search.Sealed, Endpoint: search.Endpoint}
+				}
+				restored, err := applyRestore(raw, ct, edits, in)
 				if err != nil {
 					return noSubscriberPayload, err
 				}
@@ -517,8 +529,9 @@ var subscriptionLocationValue = func(base, tail string) string { return base + "
 // applyRestore makes E-20's changes, named by the byte span of the value each
 // changes (subscription.RestoreEdit), through relay over raw, the answer as
 // relayed: a replace of that value, or the removal of the member whose value
-// it is.
-func applyRestore(raw []byte, contentType string, edits []subscription.RestoreEdit) (relay.Payload, error) {
+// it is. in is the search the restore was made from, which the core's check
+// of a restored link reads (nil for none).
+func applyRestore(raw []byte, contentType string, edits []subscription.RestoreEdit, in *relay.SubscriptionRestoreInputs) (relay.Payload, error) {
 	rb := relay.NewBody(raw, relay.OriginPeerFrame)
 	doc, err := relay.Doc(rb)
 	if err != nil {
@@ -556,7 +569,7 @@ func applyRestore(raw []byte, contentType string, edits []subscription.RestoreEd
 			ops = append(ops, doc.Replace(pl.node, e.Value))
 		}
 	}
-	return relay.Apply(rb, contentType, relay.EditSubscriptionEndpointRestore, ops...)
+	return relay.ApplyChanges(rb, contentType, relay.Change{Edit: relay.EditSubscriptionEndpointRestore, Ops: ops, Restore: in})
 }
 
 // noSubscriberPayload is the payload a refused or failed subscriber

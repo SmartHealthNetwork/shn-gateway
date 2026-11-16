@@ -122,15 +122,31 @@ func (m *model) subscriptionChannelRestore(eff effect) bool {
 	return false
 }
 
+// SubscriptionRestoreInputs are the facts E-20's check of a link's url reads
+// (Change.Restore): the search by url the subscriber's gateway framed for its
+// system, so a link restored from it is held to that search, whatever the
+// answer holds. Subscriber and Topic name the binding the notification
+// addresses must be for; Sealed are the values the gateway sealed the search's
+// endpoint to, each "<kid>.<sealed>", one per key during an overlap; and
+// Endpoint is the endpoint the subscriber's system searched by. An input left
+// empty restores nothing: the check is never skipped.
+type SubscriptionRestoreInputs struct {
+	Subscriber, Topic string
+	Sealed            []string
+	Endpoint          string
+}
+
 // subscriptionLinkURLRestored is E-20's check of a link's query, v the
 // replacement of the root Bundle link url n: the query keeps every parameter
 // byte for byte, in its place, but a url parameter, which may change only as
-// E-20 restores it: from notification addresses, each the channel.endpoint a
-// Subscription in this answer held and E-20 replaced in the same change set,
-// to the one endpoint all of those were replaced with, written as one FHIR
-// search value. So a link's url is restored to nothing but the endpoint the
-// same edit opened from the payer's own seals, and never to another. The part
-// before the query is the base re-key's, judged as before.
+// E-20 restores it, to one endpoint written as one FHIR search value, from
+// notification addresses each of which is either the channel.endpoint a
+// Subscription in this answer held and E-20 replaced in the same change set
+// with that endpoint, or an address of the search the subscriber's gateway
+// framed (framedSearchAddress), restored to that search's endpoint. So a
+// link's url is restored to nothing but the endpoint the same edit opened
+// from the payer's own seals, or the payer's own search, and never to
+// another. The part before the query is the base re-key's, judged as before.
 func (m *model) subscriptionLinkURLRestored(n splice.NodeID, v []byte) bool {
 	old, err := m.doc.StringValue(n)
 	var now string
@@ -165,12 +181,47 @@ func (m *model) subscriptionLinkURLRestored(n splice.NodeID, v []byte) bool {
 		}
 		restored := m.restoredEndpoints()
 		for _, a := range addrs {
-			if ep, ok := restored[a]; !ok || ep == "" || ep != ends[0] {
-				return false
+			if ep, ok := restored[a]; ok && ep != "" && ep == ends[0] {
+				continue
 			}
+			if m.framedSearchAddress(a) && ends[0] == m.restoreIn.Endpoint {
+				continue
+			}
+			return false
 		}
 	}
 	return true
+}
+
+// framedSearchAddress reports whether a, an address a link's url named, is a
+// notification address of the search the subscriber's gateway framed
+// (m.restoreIn), read by the core's own grammar: an absolute http or https
+// URL with a host, no query or fragment (either could carry a tail of its own
+// after a slash) and no space or backslash (which no search value the
+// subscriber's gateway reads holds), whose last five path segments are "notify", the topic
+// input and the subscriber input (each path-unescaped), then a key id and a
+// sealed value that, joined by ".", are exactly one of the sealed inputs (a
+// key id and a sealed value hold no "."). What precedes those segments is
+// not read: the subscriber's gateway does not know the notifier gateway's
+// ingress. With any input empty, no address is.
+func (m *model) framedSearchAddress(a string) bool {
+	in := m.restoreIn
+	if in == nil || in.Subscriber == "" || in.Topic == "" || in.Endpoint == "" || len(in.Sealed) == 0 {
+		return false
+	}
+	u, err := url.Parse(a)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || strings.ContainsAny(a, "# \\") {
+		return false
+	}
+	segs := strings.Split(a, "/")
+	n := len(segs)
+	if n < 6 || segs[n-5] != "notify" {
+		return false
+	}
+	topic, err1 := url.PathUnescape(segs[n-4])
+	subscriber, err2 := url.PathUnescape(segs[n-3])
+	return err1 == nil && err2 == nil && topic == in.Topic && subscriber == in.Subscriber &&
+		slices.Contains(in.Sealed, segs[n-2]+"."+segs[n-1])
 }
 
 // restoredEndpoints maps each restorable Subscription channel.endpoint the

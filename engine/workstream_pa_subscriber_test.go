@@ -59,7 +59,7 @@ func TestSubscriber_TheLocationEdit(t *testing.T) {
 		if c.tail != "" {
 			stated.address[shnsdk.FrameHeaderSubscriptionLocation] = c.tail
 		}
-		p, err := g.restoredAnswer(recordedRequest(x), raw, mediaFHIRJSON, subscription.Keys{}, subscription.Binding{}, stated, subscriberBase, c.writes)
+		p, err := g.restoredAnswer(recordedRequest(x), raw, mediaFHIRJSON, subscription.Keys{}, subscription.Binding{}, subscription.Search{}, stated, subscriberBase, c.writes)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -81,7 +81,7 @@ func TestSubscriber_TheLocationEdit(t *testing.T) {
 	subscriptionLocationValue = func(base, tail string) string { return base + "/x/" + tail }
 	defer func() { subscriptionLocationValue = prev }()
 	stated := statedAnswer{status: http.StatusCreated, address: map[string]string{shnsdk.FrameHeaderSubscriptionLocation: "Subscription/s1"}}
-	if _, err := g.restoredAnswer(recordedRequest(&exchangeRecorder{}), raw, mediaFHIRJSON, subscription.Keys{}, subscription.Binding{}, stated, subscriberBase, true); !errors.Is(err, relay.ErrVerifyMismatch) {
+	if _, err := g.restoredAnswer(recordedRequest(&exchangeRecorder{}), raw, mediaFHIRJSON, subscription.Keys{}, subscription.Binding{}, subscription.Search{}, stated, subscriberBase, true); !errors.Is(err, relay.ErrVerifyMismatch) {
 		t.Fatalf("a value the core refuses: %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestSubscriber_TheRestoreRecordsWhyNot(t *testing.T) {
 		"an unreadable list": {`{"resourceType":"Bundle","entry":{}}`, []string{EditNotMadeRestoreUnreadableBundle}},
 	} {
 		x := &exchangeRecorder{}
-		p, err := g.restoredAnswer(recordedRequest(x), []byte(c.raw), mediaFHIRJSON, keys, b, statedAnswer{status: http.StatusOK}, subscriberBase, false)
+		p, err := g.restoredAnswer(recordedRequest(x), []byte(c.raw), mediaFHIRJSON, keys, b, subscription.Search{}, statedAnswer{status: http.StatusOK}, subscriberBase, false)
 		if err != nil || p.Ownership() != relay.OwnershipRelayed {
 			t.Fatalf("%s: %v %v, want carried as sent", name, p, err)
 		}
@@ -117,7 +117,7 @@ func TestSubscriber_TheRestoreRecordsWhyNot(t *testing.T) {
 	// Every library reason has its recorded value, in the closed list.
 	for _, why := range []string{subscription.NotMadeNoEndpoint, subscription.NotMadeForeignAddress, subscription.NotMadeAnotherBinding,
 		subscription.NotMadeNoSealedHeaders, subscription.NotMadeKeyRetired, subscription.NotMadeSealInvalid,
-		subscription.NotMadeNoStatedBase, subscription.NotMadeUnreadable} {
+		subscription.NotMadeNoStatedBase, subscription.NotMadeUnreadable, subscription.NotMadeLinkURL} {
 		if v, ok := restoreNotMade[why]; !ok || v != "E-20:"+why || !slices.Contains(EditNotMadeValues, v) {
 			t.Errorf("%s: recorded as %q (%v)", why, v, ok)
 		}
@@ -141,7 +141,7 @@ func TestSubscriber_ApplyRestore(t *testing.T) {
 	}
 	es, ee := at(`"a"`)
 	hs, he := at(`["h"]`)
-	p, err := applyRestore(raw, mediaFHIRJSON, []subscription.RestoreEdit{{Start: es, End: ee, Value: []byte(`"https://payer.example/n"`)}, {Start: hs, End: he, Remove: true}})
+	p, err := applyRestore(raw, mediaFHIRJSON, []subscription.RestoreEdit{{Start: es, End: ee, Value: []byte(`"https://payer.example/n"`)}, {Start: hs, End: he, Remove: true}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestSubscriber_ApplyRestore(t *testing.T) {
 		"a span the answer does not hold": {Start: es + 1, End: ee, Value: []byte(`"x"`)},
 		"a removal of the root":           {Start: 0, End: len(raw), Remove: true},
 	} {
-		if _, err := applyRestore(raw, mediaFHIRJSON, []subscription.RestoreEdit{e}); err == nil {
+		if _, err := applyRestore(raw, mediaFHIRJSON, []subscription.RestoreEdit{e}, nil); err == nil {
 			t.Errorf("%s: made", name)
 		}
 	}

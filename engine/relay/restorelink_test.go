@@ -254,3 +254,93 @@ func TestSubscriptionRestoreCheckIsLinear(t *testing.T) {
 		return call
 	})
 }
+
+// E-20's check of a link restored from the search the subscriber's gateway
+// framed (the restore's inputs, SubscriptionRestoreInputs): the url may change
+// to the endpoint input, written as one value, when every address it named is
+// a notification address for the subscriber and topic inputs whose key id and
+// sealed value are one of the sealed inputs; with no restored Subscription in
+// the answer, and whatever precedes an address's tail. A restore to any other
+// value, of an address the search did not frame, or with any other parameter
+// changed, is refused; so are inputs on any other edit, and inputs other than
+// the four E-20 reads.
+func TestSubscriptionLinkURLRestoreFromTheSearch(t *testing.T) {
+	const (
+		sealed1  = "AAAAAAAAAAA.c2VhbGVk"
+		sealed2  = "BBBBBBBBBBB.c2VhbGVkMg"
+		addr     = "https://provider-gw.example/notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk"
+		addr2    = "https://provider-gw.example/notify/cdex-task/payer/BBBBBBBBBBB/c2VhbGVkMg"
+		endpoint = "https://payer-sys.example/notify?tenant=a"
+		stated   = "https://provider.example/fhir"
+		base     = "https://payer-gw.example/cdex/provider/p1"
+	)
+	q := func(v string) string { return url.QueryEscape(v) }
+	in := SubscriptionRestoreInputs{Subscriber: "payer", Topic: "cdex-task", Sealed: []string{sealed1, sealed2}, Endpoint: endpoint}
+	empty := func(link string) []byte {
+		return []byte(`{"resourceType":"Bundle","type":"searchset","total":0,"link":[{"relation":"self","url":"` + link + `"}]}`)
+	}
+	apply := func(t *testing.T, body []byte, link string, in *SubscriptionRestoreInputs) error {
+		t.Helper()
+		b := NewBody(body, OriginPeerFrame)
+		d := mustDoc(t, b)
+		_, err := ApplyChanges(b, fhirJSON, Change{Edit: EditSubscriptionEndpointRestore, Ops: []Op{d.Replace(at(t, d, "link", "0", "url"), []byte(`"`+link+`"`))}, Restore: in})
+		return err
+	}
+	oldLink := stated + "/Subscription?url=" + q(addr) + "&status=requested,active"
+	good := base + "/Subscription?url=" + q(endpoint) + "&status=requested,active"
+	if err := apply(t, empty(oldLink), good, &in); err != nil {
+		t.Fatalf("the restore of an empty answer's link: %v", err)
+	}
+	two := stated + "/Subscription?url=" + q(addr+","+addr2)
+	if err := apply(t, empty(two), base+"/Subscription?url="+q(endpoint), &in); err != nil {
+		t.Fatalf("the restore of both keys' addresses: %v", err)
+	}
+	// What precedes the tail is not read: the payer's gateway does not
+	// know the provider gateway's ingress.
+	elsewhere := strings.Replace(oldLink, url.QueryEscape("https://provider-gw.example"), url.QueryEscape("https://other-gw.example/x"), 1)
+	if err := apply(t, empty(elsewhere), good, &in); err != nil {
+		t.Fatalf("an address at another ingress: %v", err)
+	}
+	for name, c := range map[string]struct {
+		link, to string
+		in       *SubscriptionRestoreInputs
+	}{
+		"no inputs":                      {oldLink, good, nil},
+		"a restore to another value":     {oldLink, base + "/Subscription?url=" + q("https://evil.example/x") + "&status=requested,active", &in},
+		"a restore to two values":        {oldLink, base + "/Subscription?url=" + q(endpoint+",https://evil.example/x") + "&status=requested,active", &in},
+		"a sealed value not framed":      {strings.Replace(oldLink, "c2VhbGVk", "b3RoZXI", 1), good, &in},
+		"a key id not framed":            {strings.Replace(oldLink, "AAAAAAAAAAA", "CCCCCCCCCCC", 1), good, &in},
+		"another subscriber":             {strings.Replace(oldLink, "%2Fpayer%2F", "%2Fpayer-2%2F", 1), good, &in},
+		"another topic":                  {strings.Replace(oldLink, "cdex-task", "pas", 1), good, &in},
+		"a framed address and another":   {stated + "/Subscription?url=" + q(addr+",https://evil.example/x"), base + "/Subscription?url=" + q(endpoint), &in},
+		"not an address":                 {stated + "/Subscription?url=" + q("https://elsewhere.example/x"), base + "/Subscription?url=" + q(endpoint), &in},
+		"an address with a query":        {stated + "/Subscription?url=" + q(addr+"?a=b"), base + "/Subscription?url=" + q(endpoint), &in},
+		"an address that is not http":    {stated + "/Subscription?url=" + q(strings.Replace(addr, "https:", "ftp:", 1)), base + "/Subscription?url=" + q(endpoint), &in},
+		"an address with no host":        {stated + "/Subscription?url=" + q("https:///notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk"), base + "/Subscription?url=" + q(endpoint), &in},
+		"a query that ends in a tail":    {stated + "/Subscription?url=" + q("https://evil.example/x?y=/notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk"), base + "/Subscription?url=" + q(endpoint), &in},
+		"a space before the tail":        {stated + "/Subscription?url=" + q("https://provider-gw.example/a b/notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk"), base + "/Subscription?url=" + q(endpoint), &in},
+		"a backslash before the tail":    {stated + "/Subscription?url=" + q(`https://provider-gw.example/a\\b/notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk`), base + "/Subscription?url=" + q(endpoint), &in},
+		"a fragment that ends in a tail": {stated + "/Subscription?url=" + q("https://evil.example/x#/notify/cdex-task/payer/AAAAAAAAAAA/c2VhbGVk"), base + "/Subscription?url=" + q(endpoint), &in},
+		"another parameter changed":      {oldLink, base + "/Subscription?url=" + q(endpoint) + "&status=active", &in},
+		"empty inputs":                   {oldLink, good, &SubscriptionRestoreInputs{}},
+		"an empty endpoint input":        {oldLink, base + "/Subscription?url=&status=requested,active", &SubscriptionRestoreInputs{Subscriber: "payer", Topic: "cdex-task", Sealed: []string{sealed1}}},
+	} {
+		if err := apply(t, empty(c.link), c.to, c.in); !errors.Is(err, ErrVerifyMismatch) {
+			t.Errorf("%s: %v, want the core's check of E-20 to refuse it", name, err)
+		}
+	}
+	// Two changes of one set may not both carry inputs.
+	b2 := NewBody(empty(oldLink), OriginPeerFrame)
+	d2 := mustDoc(t, b2)
+	if _, err := ApplyChanges(b2, fhirJSON,
+		Change{Edit: EditSubscriptionEndpointRestore, Ops: []Op{d2.Replace(at(t, d2, "link", "0", "url"), []byte(`"`+good+`"`))}, Restore: &in},
+		Change{Edit: EditSubscriptionEndpointRestore, Restore: &in}); !errors.Is(err, ErrInvalidEdit) {
+		t.Errorf("two changes carrying inputs: %v, want ErrInvalidEdit", err)
+	}
+	// The inputs are E-20's alone.
+	b := NewBody([]byte(`{"resourceType":"Patient","id":"a"}`), OriginPeerFrame)
+	d := mustDoc(t, b)
+	if _, err := ApplyChanges(b, fhirJSON, Change{Edit: EditCDSCallbackStrip, Ops: []Op{d.Replace(at(t, d, "id"), []byte(`"b"`))}, Restore: &in}); !errors.Is(err, ErrInvalidEdit) {
+		t.Errorf("restore inputs on another edit: %v, want ErrInvalidEdit", err)
+	}
+}

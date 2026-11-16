@@ -141,6 +141,9 @@ type model struct {
 	// restored is E-20's restored channel.endpoints by their original
 	// string (restoredEndpoints), built once, on first need.
 	restored map[string]string
+	// restoreIn is E-20's inputs, the search the subscriber's gateway
+	// framed (Change.Restore), or nil.
+	restoreIn *SubscriptionRestoreInputs
 	// rootLists is a root Bundle's array members by folded name
 	// (rootBundleLists), built once, on first need.
 	rootLists map[string][]splice.NodeID

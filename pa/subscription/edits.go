@@ -54,7 +54,25 @@ const (
 	// present and not an array, or an entry is not an object, so nothing in
 	// it is restored or re-keyed.
 	NotMadeUnreadable = "unreadable-bundle"
+	// NotMadeLinkURL (§6.2 step 3): a url parameter of a link, any of them,
+	// with or without a modifier, names a notification address, or cannot be
+	// read, and neither the search this gateway framed (Search) nor a
+	// Subscription restored in the same answer restores it to the
+	// subscriber's endpoint; the link keeps that url as written.
+	NotMadeLinkURL = "link-url-not-restored"
 )
+
+// Search is the search by url a subscriber's gateway framed for its system
+// (§6.2 step 4), as E-20 restores the answer's links from it: Endpoint, the
+// endpoint the system searched by, and Sealed, the values this gateway sealed
+// it to (SealEndpointForSearch: the current key's, and the predecessor's
+// during an overlap), each "<kid>.<sealed>", which E-21 wrote into the
+// notification addresses the notifier's server echoes. The zero Search is an
+// interaction that framed none, such as a page.
+type Search struct {
+	Endpoint string
+	Sealed   []string
+}
 
 // NotMade is an edit the library did not make, and why (§8: each edit has
 // its not-made reasons, which the engine records).
@@ -251,7 +269,7 @@ func RekeyForNotifier(k Keys, a Address, sealedHeaders string, s *Subscription) 
 // same changes by place, for a caller that makes them through its own
 // verified edit.
 func Restore(k Keys, b Binding, statedBase, counterpartBase string, body []byte) (out []byte, made int, notMade []NotMade, err error) {
-	r, err := restore(k, b, statedBase, counterpartBase, body)
+	r, err := restore(k, b, statedBase, counterpartBase, Search{}, body)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -276,14 +294,41 @@ type RestoreEdit struct {
 // than made: the same decisions, the same made count and the same not-made
 // reasons, for a caller that makes and verifies the changes itself.
 func RestoreEdits(k Keys, b Binding, statedBase, counterpartBase string, body []byte) (edits []RestoreEdit, made int, notMade []NotMade, err error) {
-	r, err := restore(k, b, statedBase, counterpartBase, body)
+	r, err := restore(k, b, statedBase, counterpartBase, Search{}, body)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	return r.edits, r.made, r.notMade, nil
 }
 
-func restore(k Keys, b Binding, statedBase, counterpartBase string, body []byte) (*restorer, error) {
+// RestoreSearch is Restore on the answer to a search this gateway framed (s):
+// a link's url naming only notification addresses for b's subscriber and
+// topic whose sealed values are s.Sealed is restored to s.Endpoint, whatever
+// Subscriptions the answer holds, so the link repeats the search; a url
+// Restore would restore from the answer's own Subscriptions still is.
+func RestoreSearch(k Keys, b Binding, statedBase, counterpartBase string, s Search, body []byte) (out []byte, made int, notMade []NotMade, err error) {
+	r, err := restore(k, b, statedBase, counterpartBase, s, body)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	out, err = applySplices(body, r.splices)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return out, r.made, r.notMade, nil
+}
+
+// RestoreSearchEdits is RestoreSearch's changes, each named by place
+// (RestoreEdit), as RestoreEdits is Restore's.
+func RestoreSearchEdits(k Keys, b Binding, statedBase, counterpartBase string, s Search, body []byte) (edits []RestoreEdit, made int, notMade []NotMade, err error) {
+	r, err := restore(k, b, statedBase, counterpartBase, s, body)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return r.edits, r.made, r.notMade, nil
+}
+
+func restore(k Keys, b Binding, statedBase, counterpartBase string, s Search, body []byte) (*restorer, error) {
 	if statedBase != "" && counterpartBase == "" {
 		return nil, errors.New("subscription: a stated base needs the counterpart base to re-key to")
 	}
@@ -291,7 +336,7 @@ func restore(k Keys, b Binding, statedBase, counterpartBase string, body []byte)
 	if err != nil {
 		return nil, err
 	}
-	r := &restorer{k: k, b: b, stated: statedBase, counterpart: counterpartBase}
+	r := &restorer{k: k, b: b, stated: statedBase, counterpart: counterpartBase, search: s}
 	switch rt, _ := root.memberFolded("resourceType").stringOf(); rt {
 	case "Subscription":
 		r.subscription(root)
@@ -341,6 +386,8 @@ type restorer struct {
 	// opened maps each channel.endpoint a Subscription in this answer
 	// held, a notification address, to the endpoint E-20 restored there.
 	opened map[string]string
+	// search is the search this gateway framed, if any (RestoreSearch).
+	search Search
 }
 
 func (r *restorer) not(reason string) {
@@ -416,10 +463,15 @@ func (r *restorer) address(n *jnode, link bool) {
 		return
 	}
 	if u, err := url.Parse(v); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		// Not an absolute http or https address, so neither re-keyed nor
+		// restored (a relative link included): a url naming a notification
+		// address is recorded, never passed over.
+		r.notLinkURL(v, link)
 		return
 	}
 	if r.stated == "" {
 		r.unstated = true
+		r.notLinkURL(v, link)
 		return
 	}
 	if rekeyed, ok := underBase(v, r.stated, r.counterpart); ok {
@@ -431,52 +483,136 @@ func (r *restorer) address(n *jnode, link bool) {
 		}
 		r.replace(n, jsonString(rekeyed))
 		r.made++
+		return
 	}
+	// Not under the stated base, so neither re-keyed nor restored.
+	r.notLinkURL(v, link)
+}
+
+// notLinkURL records NotMadeLinkURL for a paging link (link) left as written
+// whose url names a notification address or cannot be read
+// (linkNamesAddress): it is recorded, never passed over in silence.
+func (r *restorer) notLinkURL(v string, link bool) {
+	if link && linkNamesAddress(v) {
+		r.not(NotMadeLinkURL)
+	}
+}
+
+// linkNamesAddress reports whether any url parameter of link's query, with
+// or without a modifier (url:below and the like), has a value that cannot be
+// read or names a notification address (namesAddress). Every parameter is
+// read, never only the first: a parameter's name is read unescaped, and one
+// whose name cannot be read may be a url parameter, so its value is read too.
+func linkNamesAddress(link string) bool {
+	_, query, ok := strings.Cut(link, "?")
+	if !ok {
+		return false
+	}
+	for _, part := range strings.Split(query, "&") {
+		rawName, value, _ := strings.Cut(part, "=")
+		if name, err := url.QueryUnescape(rawName); err == nil && name != "url" && !strings.HasPrefix(name, "url:") {
+			continue
+		}
+		raw, err := url.QueryUnescape(value)
+		if err != nil || namesAddress(raw) {
+			return true
+		}
+	}
+	return false
 }
 
 // linkURLRestored is a paging link, already at the per-counterpart base, with
 // its url search parameter restored as E-20 restores channel.endpoint: the
 // notifier's server echoes the search it was given, a url naming the
 // notification addresses E-21 wrote, which the subscriber's system never
-// searched by. When every address in the value is the channel.endpoint of a
-// Subscription this answer carries that E-20 restored (opened), and all were
-// restored to one endpoint, the value becomes that endpoint, escaped as a
-// FHIR search value and a query; every other parameter keeps its bytes and
-// place. The relay's check of E-20 holds the link to exactly that
-// (subscriptionLinkURLRestored). A value that does not restore so (an answer
-// with no Subscription of the payer's in it, or an address no entry holds)
-// is left as written, and a search by it is the subscriber's gateway's loop
-// rule's to refuse, never an empty answer.
+// searched by. Each address in the value is restored from the search this
+// gateway framed (searchEndpoint) or else from the Subscription this answer
+// carries that E-20 restored there (opened); when every one is, all to one
+// endpoint, the value becomes that endpoint, escaped as a FHIR search value
+// and a query, and every other parameter keeps its bytes and place. The
+// relay's check of E-20 holds the link to exactly that
+// (subscriptionLinkURLRestored). Only a url parameter without a modifier is
+// restored. When one does not restore so, the whole link is left as written.
+// Whenever a url parameter the link keeps as written, any of them, with or
+// without a modifier, names a notification address or cannot be read
+// (linkNamesAddress), why is recorded (NotMadeLinkURL): a search by it is the
+// subscriber's gateway's loop rule's to refuse, never an empty answer. A
+// value restored is the subscriber's own endpoint, never read so.
 func (r *restorer) linkURLRestored(link string) string {
 	path, query, ok := strings.Cut(link, "?")
 	if !ok {
 		return link
 	}
 	parts := strings.Split(query, "&")
+	kept := make([]string, 0, len(parts))
 	for i, part := range parts {
 		name, value, _ := strings.Cut(part, "=")
 		if name != "url" {
+			kept = append(kept, part)
 			continue
 		}
 		raw, err := url.QueryUnescape(value)
 		if err != nil {
+			r.notLinkURL(link, true)
 			return link
 		}
 		addrs, err := SearchURLValues(raw)
 		if err != nil || len(addrs) == 0 {
+			r.notLinkURL(link, true)
 			return link
 		}
-		endpoint := ""
+		endpoint, restorable := "", true
 		for _, a := range addrs {
-			ep, ok := r.opened[a]
+			ep, ok := r.searchEndpoint(a)
+			if !ok {
+				ep, ok = r.opened[a]
+			}
 			if !ok || (endpoint != "" && ep != endpoint) {
-				return link
+				restorable = false
+				continue
 			}
 			endpoint = ep
 		}
+		if !restorable {
+			r.notLinkURL(link, true)
+			return link
+		}
 		parts[i] = "url=" + url.QueryEscape(fhirSearchEscaper.Replace(endpoint))
 	}
+	r.notLinkURL("?"+strings.Join(kept, "&"), true)
 	return path + "?" + strings.Join(parts, "&")
+}
+
+// namesAddress reports whether v, a link's url search value unescaped from
+// the query, names a notification address in any part split at a comma, by
+// the loop rule's reading (LooksLikeNotificationAddress, with any topic and
+// participant): an address a search by it would be refused on, so a link left
+// with it is recorded. It reads more than an exact tail (a trailing slash, an
+// escaped key id), never less.
+func namesAddress(v string) bool {
+	anyName := func(s string) bool { return s != "" }
+	for _, part := range strings.Split(v, ",") {
+		if LooksLikeNotificationAddress(part, anyName, anyName) {
+			return true
+		}
+	}
+	return false
+}
+
+// searchEndpoint is the endpoint the framed search (r.search) restores a, a
+// notification address in a link's url: a's tail names this binding's
+// subscriber and topic, and its key id and sealed value are one of the values
+// this gateway sealed the search to. What precedes the tail is not read, as
+// for a Subscription's channel.endpoint.
+func (r *restorer) searchEndpoint(a string) (string, bool) {
+	if r.search.Endpoint == "" {
+		return "", false
+	}
+	pa, ok := ParseAddressTail(a)
+	if !ok || pa.Subscriber != r.b.Subscriber || pa.Topic != r.b.Topic || !slices.Contains(r.search.Sealed, pa.SealedEndpoint) {
+		return "", false
+	}
+	return r.search.Endpoint, true
 }
 
 // underBase is v re-keyed from base to counterpart when v is under base by

@@ -4,6 +4,36 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A payer's Subscription search's self link repeats the search, an empty answer's too (v1.14.0)
+
+- **Fixed (payer):** on the answer to your Subscription search by `url` (every Subscription
+  search your system makes, the one before a create included), the restore of the provider's
+  answer (`subscription-endpoint-restore`, E-20) writes a link's `url` search parameter back to
+  the endpoint your system searched by whenever each address it names is a notification address
+  for you and the topic whose key id and sealed value are one your gateway sealed that search's
+  endpoint to, whatever Subscriptions the answer holds. Before, it did so only when the answer
+  carried a Subscription of yours restored from that address, so an empty answer's `self` link,
+  and during a key rotation's overlap a link naming both keys' addresses, kept the provider
+  gateway's address, and following it was refused on routing: `422` for an empty answer's link,
+  `400` for a link naming both keys' addresses. Your gateway's core holds a link restored from
+  your search to that search: the endpoint and sealed values it checks against come from the
+  request your gateway framed, never from the provider's answer. A page fetch, a request with no
+  `url`, keeps the rule that reads the answer's own restored Subscriptions.
+- **Added (payer):** `E-20:link-url-not-restored` in the access line's `editsNotMade`: a link
+  whose `url` search parameter names a notification address, or cannot be read, and that neither
+  your search nor a Subscription restored in the same answer restores, keeps the provider's
+  value. That includes a link outside the base the provider's gateway states, a relative or
+  non-`http` link, and a link under no stated base. A link whose `url` parameter names no notification address keeps that parameter as sent
+  (the link itself is re-keyed to your base when it is under the base the provider's gateway
+  states) and is not recorded; an entry's `fullUrl` is
+  never recorded under this value.
+- **Added (Go API):** `subscription.Search`, `subscription.RestoreSearch`,
+  `subscription.RestoreSearchEdits` and `subscription.NotMadeLinkURL`;
+  `relay.SubscriptionRestoreInputs` and `relay.Change.Restore`, the search E-20's core check of a
+  restored link reads; `engine.EditNotMadeRestoreLinkURL`.
+- **Not yet proven live:** following a restored link against a provider's live FHIR server; the
+  fix is pinned by the gateway's own tests against a stand-in for the provider's FHIR server.
+
 ## A provider's CDex Task notifications reach the payer's own endpoint (v1.13.0)
 
 - **Added (provider):** with `PROVIDER_CDEX_SUBSCRIPTION_SCOPE` set, your gateway mounts the

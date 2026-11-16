@@ -403,6 +403,11 @@ func Exact(body Body, contentType string) Payload {
 type Change struct {
 	Edit EditID
 	Ops  []Op
+	// Restore is E-20's inputs (SubscriptionRestoreInputs): the search the
+	// subscriber's gateway framed, which the core's check of a restored
+	// link's url reads. Only an E-20 change carries it, and only one change
+	// of a set; nil is an E-20 change on an answer to no framed search.
+	Restore *SubscriptionRestoreInputs
 }
 
 // Apply applies one registered edit to body. See ApplyChanges.
@@ -462,6 +467,20 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 			return Payload{}, fmt.Errorf("%w: %s is made only by QueryEdited", ErrInvalidEdit, c.Edit)
 		}
 	}
+	var restoreIn *SubscriptionRestoreInputs
+	for _, c := range changes {
+		switch {
+		case c.Restore == nil:
+		case c.Edit != EditSubscriptionEndpointRestore:
+			return Payload{}, fmt.Errorf("%w: %s takes no restore inputs; only %s does", ErrInvalidEdit, c.Edit, EditSubscriptionEndpointRestore)
+		case restoreIn != nil:
+			return Payload{}, fmt.Errorf("%w: two changes carry restore inputs", ErrInvalidEdit)
+		default:
+			in := *c.Restore
+			in.Sealed = slices.Clone(c.Restore.Sealed)
+			restoreIn = &in
+		}
+	}
 	src := body.bytes()
 	doc, err := scan(src)
 	if err != nil {
@@ -485,6 +504,7 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 	if err != nil {
 		return Payload{}, fmt.Errorf("%w: %v", ErrInvalidEdit, err)
 	}
+	m.restoreIn = restoreIn
 	out, spans, err := spliceHook(doc, ops...)
 	if err != nil {
 		// The splice's own errors are reported as text only: a name

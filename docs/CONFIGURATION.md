@@ -877,7 +877,10 @@ There is nothing to configure:
   `E-20:not-a-notification-address`, `E-20:another-subscriber-or-topic`,
   `E-20:no-sealed-headers`, `E-20:key-retired`, `E-20:seal-invalid` (the seals do not open for the
   provider that answered: another provider's, or tampered), `E-20:no-stated-base`,
-  `E-20:unreadable-bundle`, `E-20:unreadable-answer`, `E-23:no-tail` and `E-23:unreadable-tail`.
+  `E-20:unreadable-bundle`, `E-20:unreadable-answer`, `E-23:no-tail` and `E-23:unreadable-tail`;
+  from shn-gateway v1.14.0, `E-20:link-url-not-restored` (a search link's `url` names a
+  notification address, or cannot be read, and neither your search nor a Subscription the
+  answer restored restores it).
   From shn-gateway v1.13.0, on a provider's notification a payer's gateway delivers (see
   [Subscribe to the provider's Tasks' changes](#subscribe-to-the-providers-tasks-changes-payer-from-shn-gateway-v1130)),
   carried as sent where E-17 was not made: `E-17:no-stated-base` (the provider's gateway stated
@@ -3970,10 +3973,13 @@ from the body it sends (E-18, `subscription-header-seal`). The provider's gatewa
 notification address there, and the provider's system stores that. On every answer, your gateway
 writes back your own endpoint and headers in each Subscription that is yours (E-20,
 `subscription-endpoint-restore`), and writes the provider's search entries' and paging links'
-addresses at your base for the provider, a paging link's `url` restored to your own endpoint, when
-each address it names was one of this answer's Subscriptions your gateway restored, so that
-following it repeats your search (a search whose `url` is itself a notification address is
-refused `422`, recorded `routing`); a create's or update's answer gains a `Location` at that
+addresses at your base for the provider, a paging link's `url` restored to your own endpoint, so
+that following it repeats your search: on the answer to your search by `url`, when each address it
+names is one your gateway wrote from that search (whatever the answer holds, an empty one and a
+key rotation's overlap included), and otherwise when each was one of the answer's Subscriptions
+your gateway restored. A link it does not restore keeps the provider's value, and when its `url` names a notification
+address or cannot be read, the access line's `editsNotMade` names `E-20:link-url-not-restored` (a search whose `url` is itself a
+notification address is refused `422`, recorded `routing`); a create's or update's answer gains a `Location` at that
 base (E-23, `subscription-location-rekey`). Each is named in `X-SHN-Edited`. An answer whose
 Subscriptions your gateway restored carries no `ETag`: the provider's named the provider's bytes,
 not the ones your system receives. For an update's or a delete's `If-Match`, send

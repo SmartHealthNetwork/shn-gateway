@@ -954,6 +954,12 @@ const (
 	EditNotMadeRestoreSealInvalid      = "E-20:seal-invalid"
 	EditNotMadeRestoreNoStatedBase     = "E-20:no-stated-base"
 	EditNotMadeRestoreUnreadableBundle = "E-20:unreadable-bundle"
+	// EditNotMadeRestoreLinkURL: the subscriber's gateway left a search
+	// answer's link url (E-20) as the notifier's server wrote it, because it
+	// names a notification address, or cannot be read, and neither the
+	// search the gateway framed nor a Subscription restored in the same
+	// answer restores it to the subscriber's endpoint.
+	EditNotMadeRestoreLinkURL = "E-20:link-url-not-restored"
 	// EditNotMadeLocationNoTail: the subscriber's gateway wrote no Location
 	// (E-23) because the notifier's gateway framed no subscriptionLocation.
 	EditNotMadeLocationNoTail = "E-23:no-tail"
@@ -986,7 +992,7 @@ var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnr
 	EditNotMadeSealUnreadable, EditNotMadeSealNotSealable,
 	EditNotMadeRestoreUnreadableAnswer, EditNotMadeRestoreNoEndpoint, EditNotMadeRestoreNotAnAddress, EditNotMadeRestoreAnotherBinding,
 	EditNotMadeRestoreNoSealedHeaders, EditNotMadeRestoreKeyRetired, EditNotMadeRestoreSealInvalid, EditNotMadeRestoreNoStatedBase,
-	EditNotMadeRestoreUnreadableBundle, EditNotMadeLocationNoTail, EditNotMadeLocationUnreadableTail,
+	EditNotMadeRestoreUnreadableBundle, EditNotMadeRestoreLinkURL, EditNotMadeLocationNoTail, EditNotMadeLocationUnreadableTail,
 	EditNotMadeSubscriptionLocationNotUnderBase, EditNotMadeSubscriptionLocationNoLocation,
 	EditNotMadeNotificationNoStatedBase, EditNotMadeNotificationNotUnderBase, EditNotMadeNotificationNoBase}
 
