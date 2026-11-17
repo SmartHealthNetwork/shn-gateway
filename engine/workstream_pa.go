@@ -121,6 +121,10 @@ var paIngressRoutes = map[string]ingressHandler{
 	// the notification address its gateway wrote into the payer's
 	// Subscription.
 	RouteCDexNotify: {"cdex-notify-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexNotifyIngress }},
+	// A Subscription at the provider's plain base, which names no payer:
+	// answered with where the payers' bases are listed
+	// (workstream_pa_pas_payer_base.go).
+	RoutePASSubscription: {"pas-subscription-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASSubscriptionPlain }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -248,6 +252,29 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		route("POST /Questionnaire/$next-question", noCredential, g.ingressRoute(RouteDTR))
 		route("POST /Claim/$submit", noCredential, g.ingressRoute(RoutePAS))
 		route("POST /Claim/$inquire", noCredential, g.ingressRoute(RoutePASInquire))
+		// The same operations at each payer's base (pasroute.Prefix), on the
+		// same routes, routed to the payer the base names; and the payers
+		// whose bases take a Subscription (PASPayersPath). The patterns are
+		// handlePASIngress's and handlePASInquireIngress's patternPAS*Payer,
+		// which they dispatch on
+		// (TestPASPayerBase_MountedOnTheProviderIngressOnly). The base serves
+		// no CapabilityStatement until its own is built: the plain ingress's
+		// declares operations the base does not serve. The base's
+		// Subscription routes are the subscribe leg's, mounted here with its
+		// handler; until then the base serves no Subscription.
+		route("POST /pas/payer/{payer}/Claim/$submit", noCredential, g.ingressRoute(RoutePAS))
+		route("POST /pas/payer/{payer}/Claim/$inquire", noCredential, g.ingressRoute(RoutePASInquire))
+		route("GET /pas/payers", noCredential, g.withIngressCorrelation(g.handlePASPayers))
+		// A Subscription at the plain base names no payer to route it to: a
+		// create is answered 422 and every other interaction (a search, read,
+		// vread, instance $status, update, patch or delete) 404, each naming
+		// PASPayersPath.
+		route("POST /Subscription", noCredential, g.ingressRoute(RoutePASSubscription))
+		route("GET /Subscription", noCredential, g.ingressRoute(RoutePASSubscription))
+		route("GET /Subscription/{rest...}", noCredential, g.ingressRoute(RoutePASSubscription))
+		route("PUT /Subscription/{id}", noCredential, g.ingressRoute(RoutePASSubscription))
+		route("PATCH /Subscription/{id}", noCredential, g.ingressRoute(RoutePASSubscription))
+		route("DELETE /Subscription/{id}", noCredential, g.ingressRoute(RoutePASSubscription))
 		// The base R4 operation a system submits a coverage eligibility
 		// request with (IHE FAIS ITI-124).
 		route("POST /CoverageEligibilityRequest/$submit", noCredential, g.ingressRoute(RouteEligibility))
@@ -271,6 +298,8 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
 			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)
+			// SMART App Launch has every FHIR base serve its configuration.
+			route("GET /pas/payer/{payer}/.well-known/smart-configuration", noCredential, g.handlePASBaseSmartConfig)
 		}
 		if g.cfg.IngressBaseURL != "" {
 			// HRex 1.2.0 endpoint discovery:

@@ -1089,6 +1089,17 @@ From shn-gateway v1.8.0, a provider's gateway serves DTR's adaptive rounds at
 `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question`,
 and its ingress CapabilityStatement at `GET /metadata` lists `$next-question`.
 
+From shn-gateway v1.15.0, a provider's gateway serves PAS at each payer's base,
+`POST /pas/payer/{payer}/Claim/$submit` and
+`POST /pas/payer/{payer}/Claim/$inquire`, on the plain base's PAS routes and
+legs, and its SMART configuration at
+`GET /pas/payer/{payer}/.well-known/smart-configuration`, but no
+CapabilityStatement yet: `GET /pas/payer/{payer}/metadata` is answered `404`. It
+lists at `GET /pas/payers` the payers whose bases take a Subscription; and
+answers a Subscription at its plain base (`/Subscription`) with where those
+bases are listed. The listing and the Subscription routes are evolving with the
+notification path they belong to.
+
 The main listener, on `HOST` and `PORT`:
 
 | Item | Class | Owner |
@@ -1106,6 +1117,16 @@ The main listener, on `HOST` and `PORT`:
 | `POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question` | PA workstream | PA workstream |
 | `POST /Claim/$submit` | PA workstream | PA workstream |
 | `POST /Claim/$inquire` | PA workstream | PA workstream |
+| `POST /pas/payer/{payer}/Claim/$submit` | PA workstream | PA workstream |
+| `POST /pas/payer/{payer}/Claim/$inquire` | PA workstream | PA workstream |
+| `GET /pas/payer/{payer}/.well-known/smart-configuration` | core | core |
+| `GET /pas/payers` | PA workstream, evolving | PA workstream |
+| `POST /Subscription (provider)` | PA workstream, evolving | PA workstream |
+| `GET /Subscription (provider)` | PA workstream, evolving | PA workstream |
+| `GET /Subscription/{rest...} (provider)` | PA workstream, evolving | PA workstream |
+| `PUT /Subscription/{id}` | PA workstream, evolving | PA workstream |
+| `PATCH /Subscription/{id}` | PA workstream, evolving | PA workstream |
+| `DELETE /Subscription/{id}` | PA workstream, evolving | PA workstream |
 | `POST /CoverageEligibilityRequest/$submit` | PA workstream, evolving | PA workstream |
 | `POST /$submit-attachment` | PA workstream, evolving | PA workstream |
 | `POST /cdex/payer/{payer}` | PA workstream, evolving | PA workstream |
@@ -1124,9 +1145,9 @@ The main listener, on `HOST` and `PORT`:
 | `PUT /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
 | `DELETE /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
 | `PATCH /cdex/provider/{provider}/Subscription/{rest...}` | PA workstream, evolving | PA workstream |
-| `POST /Subscription` | PA workstream, evolving | PA workstream |
-| `GET /Subscription` | PA workstream, evolving | PA workstream |
-| `GET /Subscription/{rest...}` | PA workstream, evolving | PA workstream |
+| `POST /Subscription (payer)` | PA workstream, evolving | PA workstream |
+| `GET /Subscription (payer)` | PA workstream, evolving | PA workstream |
+| `GET /Subscription/{rest...} (payer)` | PA workstream, evolving | PA workstream |
 | `POST /notify/cdex-task/{subscriber}/{kid}/{sealed}` | PA workstream, evolving | PA workstream |
 | `GET /cdex/provider/{provider}/metadata` | core | core |
 | `GET /cdex/provider/{provider}/.well-known/smart-configuration` | core | core |
@@ -1963,6 +1984,8 @@ table.
 | `subject.binding-differs` | core | core |
 | `cdex.requester-differs` | PA workstream, evolving | PA workstream |
 | `cdex.owner-differs` | PA workstream, evolving | PA workstream |
+| `pas.payer-differs` | PA workstream, evolving | PA workstream |
+| `pas.payer-unresolved` | PA workstream, evolving | PA workstream |
 | `dtr.adaptive-address-carried` | PA workstream | PA workstream |
 | `crd.embedded.validated` | module 3 | module 3 |
 | `prefetch.obtained` | PA workstream | PA workstream |
@@ -1995,6 +2018,7 @@ table.
 | `cdex-read-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-subscription-ingress` | PA workstream, evolving | PA workstream |
 | `cdex-notify-ingress` | PA workstream, evolving | PA workstream |
+| `pas-subscription-ingress` | PA workstream, evolving | PA workstream |
 | `federated-query-ingress` | FQS workstream | FQS workstream |
 
 | Item | Class | Owner |

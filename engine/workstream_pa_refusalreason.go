@@ -47,6 +47,9 @@ const (
 	reasonCDexReadPlainBase            refusalReason = errCDexReadPlainBase
 	reasonCDexReadPath                 refusalReason = errCDexReadPath
 	reasonCDexReadBody                 refusalReason = errCDexReadBody
+	reasonPASBaseNoPayer               refusalReason = errPASBaseNoPayer
+	reasonPASSubscriptionPlainBase     refusalReason = errPASSubscriptionPlainBase
+	reasonPASSubscriptionNotFound      refusalReason = errPASSubscriptionNotFound
 )
 
 // paRefusalReasons are the PA adapter's registered reasons.
@@ -74,6 +77,7 @@ func paRefusalReasons() []refusalReason {
 		reasonScopeSubscriptionCreate, reasonScopeSubscriptionRead, reasonScopeSubscriptionUpdate,
 		reasonScopeSubscriptionDelete, reasonScopeSubscriptionSearch,
 		reasonNotifyNotANotification, reasonNotifyContent, reasonNotifyShape, reasonNotifyContext, reasonNotifyAddress, reasonNotifyNotRekeyable,
+		reasonPASBaseNoPayer, reasonPASSubscriptionPlainBase, reasonPASSubscriptionNotFound,
 	}
 }
 

@@ -465,6 +465,25 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 				return f
 			}
 		}
+		// sealedFor is the frame with the endpoint and headers sealed for
+		// subscriber by k, this gateway's own keys when k is nil.
+		sealedFor := func(k *subscription.Keys, subscriber string) func(p *signalPayer) map[string]string {
+			return func(p *signalPayer) map[string]string {
+				f := valid(p)
+				keys := p.g.paState().subscriberKeys
+				if k != nil {
+					keys = *k
+				}
+				b := subscription.Binding{Subscriber: subscriber, Notifier: "provider-x", Topic: cdextopic.TokenValue}
+				se := keys.SealEndpoint(b, payerEndpoint)
+				sh, err := keys.SealHeaders(b, se, []string{"Authorization: Bearer payer-secret"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f[shnsdk.FrameHeaderSubscriptionEndpoint], f[shnsdk.FrameHeaderSubscriptionChannel] = se, sh
+				return f
+			}
+		}
 		patient := func(status int) func(w http.ResponseWriter) {
 			return func(w http.ResponseWriter) {
 				w.Header().Set("Content-Type", "application/fhir+json")
@@ -482,10 +501,17 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 		const pat = `{"resourceType":"Patient","id":"p1"}`
 		content := []byte(strings.Replace(string(event), `{"fullUrl":"`+signalProviderBase+`/Task/t1",`, `{"fullUrl":"`+signalProviderBase+`/Task/t1","resource":{"resourceType":"Task","id":"t1"},`, 1))
 		for name, r := range map[string]row{
-			"control":                                              {valid, event, nil, http.StatusNoContent, "", ""},
-			"no sealed endpoint":                                   {without(shnsdk.FrameHeaderSubscriptionEndpoint), event, nil, http.StatusForbidden, RefusalAuthority, "carries no sealed endpoint or headers"},
-			"no sealed headers":                                    {without(shnsdk.FrameHeaderSubscriptionChannel), event, nil, http.StatusForbidden, RefusalAuthority, "carries no sealed endpoint or headers"},
-			"another notifier's sealed values":                     {sealedAs("provider-y", payerEndpoint, []string{"Authorization: Bearer payer-secret"}), event, nil, http.StatusForbidden, RefusalAuthority, ""},
+			"control":                          {valid, event, nil, http.StatusNoContent, "", ""},
+			"no sealed endpoint":               {without(shnsdk.FrameHeaderSubscriptionEndpoint), event, nil, http.StatusForbidden, RefusalAuthority, "carries no sealed endpoint or headers"},
+			"no sealed headers":                {without(shnsdk.FrameHeaderSubscriptionChannel), event, nil, http.StatusForbidden, RefusalAuthority, "carries no sealed endpoint or headers"},
+			"another notifier's sealed values": {sealedAs("provider-y", payerEndpoint, []string{"Authorization: Bearer payer-secret"}), event, nil, http.StatusForbidden, RefusalAuthority, ""},
+			// A value another payer's gateway sealed, or this gateway sealed for
+			// another payer, opens for no one else: an address naming it that
+			// reached this payer is refused, never delivered (§7.2). The first
+			// is refused on its key id, which is not this gateway's; the second
+			// under this gateway's own key, on the seal's binding.
+			"another payer's sealed values":                        {sealedFor(foreignKeys(t), "payer-y"), event, nil, http.StatusForbidden, RefusalAuthority, ""},
+			"values this gateway sealed for another payer":         {sealedFor(nil, "payer-y"), event, nil, http.StatusForbidden, RefusalAuthority, ""},
 			"an endpoint that is not https":                        {sealedAs("provider-x", "http://payer-sys.example/notify", nil), event, nil, http.StatusUnprocessableEntity, RefusalIntegrity, ""},
 			"a header that is not an HTTP field":                   {sealedAs("provider-x", payerEndpoint, []string{"no colon here"}), event, nil, http.StatusUnprocessableEntity, RefusalFidelity, ""},
 			"content on the signal leg":                            {valid, content, nil, http.StatusForbidden, RefusalAuthority, ""},

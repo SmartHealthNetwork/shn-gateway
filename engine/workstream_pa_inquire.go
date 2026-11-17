@@ -884,6 +884,12 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: leg, Seam: "provider-ingress", Whose: "own"}))
+	// A payer's base that names no registered payer is refused on routing
+	// once the caller is authenticated, the body read and the builder header
+	// checked, before the request's content is checked.
+	if g.pasBaseRefused(w, r) {
+		return
+	}
 	// The subject (Claim.patient resolving to a pci, the unknown-member setting inside
 	// resolveSubjectPCI), an inquiry that cannot be read and routing refuse at
 	// every level; the inquiry's own shape and consistency (readPASInquiryFacts)
@@ -910,11 +916,12 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	}
 	// Routed by the inquiry's OWN Coverage, the same rule the submit ingress
 	// follows: a Coverage naming no resolvable payer fails closed rather than
-	// defaulting to one.
-	recipient, payer, status, msg, reason := g.pasRecipient(body)
+	// defaulting to one. At a payer's base (patternPASInquirePayer) it is
+	// routed to the payer the base names, and its Coverage only compared
+	// (N12).
+	recipient, payers, note, status, msg, reason := g.pasIngressRecipient(r, body)
 	if status != 0 {
-		exchangeOf(r.Context()).routedFor(status, reason)
-		writeJSON(w, status, map[string]string{"error": msg})
+		refusePASRouting(w, r, status, msg, reason)
 		return
 	}
 	scope.leg = leg
@@ -933,6 +940,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	g.notePASPayer(note, leg, child)
 	content := Content{WorkstreamType: workstreamPA, Payload: request, Carried: true, OnBehalf: builder != ""}
 	var stated statedAnswer
 	var answerType string
@@ -987,7 +995,7 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		}
 		unread = RulePatientAnswer
 	}
-	if g.carriedAnswerRefused(answerCtx, w, answer, shnsdk.LineOf(observedTarget), "pa.pas", "", []shnsdk.PayerIdentifier{payer}) {
+	if g.carriedAnswerRefused(answerCtx, w, answer, shnsdk.LineOf(observedTarget), "pa.pas", "", payers) {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		return
 	}

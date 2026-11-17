@@ -2063,6 +2063,44 @@ own refusal rather than the gateway's. Note that the earliest line requires the
 inquiry to name at least one item and the later ones do not, so an inquiry by
 authorization number alone is accepted here and answered by the payer.
 
+**A payer's PAS base** (from shn-gateway v1.15.0). Each registered payer also has a base on
+this gateway, `{PROVIDER_DAVINCI_INGRESS_BASE_URL}/pas/payer/{payer}`, named by the payer's
+participant id: configure it in your EHR as that payer's base, as you would the payer's own
+base in a direct integration, and change nothing else. `POST {base}/Claim/$submit` and
+`POST {base}/Claim/$inquire` are served as at the plain base, with the same checks,
+amendments, records and answers, except that the request goes to the payer the base names
+whatever its Coverage names, and is carried as sent. A Coverage your payer directory
+(`PAYER_DIRECTORY`) resolves to another registered payer is noted once as the observer event
+`pas.payer-differs`. A Coverage the gateway cannot resolve to a registered payer, because you
+set no payer directory or because the Coverage names no payer identifier it lists, is noted
+once as `pas.payer-unresolved` instead: whether that payer is the base's is unknown, so it is
+noted as neither the same payer nor another. Each event carries no payer or member identifier,
+and neither is ever a refusal; at the plain base an unresolved Coverage is refused `422`. A
+base that names no registered payer is refused `404` with an OperationOutcome, recorded as
+`routing`, and nothing is sent. Only what every request at the plain base meets first comes
+before it: the caller's authentication (`401`, or `503` when your gateway cannot check it), the
+body's size, coding and reading (`413` over the network's limit, `415`, `400`), and the
+`SHN-Builder` header and the builder it names (your own system must not send one; a module
+client must, once, naming a builder of its module for the request's leg, see "Naming the
+builder"); the request's content is not otherwise checked, but for a `$submit`'s Claim, read
+only to tell a submission from an amendment. `CONFORMANCE_TOLERATE_PEERS` applies to the
+base's payer, whose answer it is: by the payer identifier the Coverage names when it names the
+base's payer, and otherwise by the payer identifiers the base's payer registered. The base has
+its SMART configuration, at
+`GET {base}/.well-known/smart-configuration`, the same document as the plain base's (at a
+base that names no registered payer it is answered `404`, as at a payer gateway's CDex base
+for an unknown provider), but no CapabilityStatement yet: `GET {base}/metadata` is answered
+`404`, since the plain base's statement declares operations the payer's base does not serve.
+
+**A Subscription** (from v1.15.0). A Subscription names no payer, so the plain base cannot
+route one: `POST /Subscription` is refused `422`, and `GET /Subscription`, `GET` below it
+(`GET /Subscription/{id}`, its `_history` and `$status` included), and `PUT`, `PATCH` and
+`DELETE /Subscription/{id}`, `404`, each with an OperationOutcome naming `/pas/payers`,
+recorded as `routing`; nothing is sent. `GET /pas/payers` lists the registered payers whose
+bases take a Subscription, each with its participant id, the payer identifiers it registered
+and its base: `{"payers":[{"participant":"…","payerIdentifiers":[{"system":"…","value":"…"}],"base":"…"}]}`.
+In v1.15.0 no payer's base takes a Subscription, so the list is empty.
+
 `POST /$submit-attachment` sends documentation for a prior authorization to a payer: a
 CDex 2.1.0 `$submit-attachment` (a `Parameters` with its `TrackingId`, `AttachTo`,
 `MemberId`, `PayerId`, `OrganizationId` or `ProviderId`, and one or more `Attachment`). From
@@ -2157,7 +2195,7 @@ payer was asked): the payer gateway keys each authorization by its patient as we
 | Env var | Description |
 |---|---|
 | `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
-| `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises, and the base of its documentation return paths (`/cdex/payer/<payer>`). **Required** when the ingress is enabled. From v1.1.0 it must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
+| `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises, and the base of its documentation return paths (`/cdex/payer/<payer>`) and, from v1.15.0, of its payers' PAS bases (`/pas/payer/<payer>`). **Required** when the ingress is enabled. From v1.1.0 it must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
 | `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. From v0.63.0 an entry may add `"module": "on-behalf"` to register that client as a module ingress client ([below](#a-module-ingress-client)); an unknown module, or a `builders` key on any entry, refuses to boot. |
 | `CDS_FHIR_SERVER_READ` | `private`, `public` or `off`; unset means `private`. How the gateway reads, to choose the payer, through a CDS Hooks request's own `fhirServer`: the Coverage when the request carries none and your system of record does not hold the member (from v0.61.0 what that read routed by is carried as the request's `prefetch.coverage`; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and the payor Organization a coverage your EHR sent names by reference alone when the request does not resolve it, for any member, unless the request's `fhirServer` is your system of record's own FHIR base and your system resolves it (see [CDS Hooks prefetch](#cds-hooks-prefetch)). `private` (the default) reads an `https` server in your own network or on the internet, never a loopback, link-local, metadata or reserved address; `public` reads only an `https` server on port 443 at a public address; `off` never calls `fhirServer`, and carries nothing. Any other value refuses to boot, and so does a value other than `off` set without `PROVIDER_DAVINCI_INGRESS` (unset needs no ingress). A gateway SHN hosts runs `public`, or `off` if you set it (see the section). |
 | `ENRICH_NATIVE_REQUESTS` | `true` or `false`; unset means `false`. By default a Da Vinci request your EHR sends is carried as sent (apart from the CDS Hooks callback, which is always removed, and, from v0.61.0, the coverage read through that callback's `fhirServer` to route by, which is then carried): nothing else is added to it. Set `true` to have the gateway add what a request leaves out, read from your own system of record: each advertised CDS Hooks prefetch value (see [CDS Hooks prefetch](#cds-hooks-prefetch)), and the patient's Coverage and Patient on a `$questionnaire-package` request that carries none. Either way, a coverage a request leaves out is read from your system of record to choose the payer (or, unless `CDS_FHIR_SERVER_READ=off`, through the request's own `fhirServer` for a member that system does not hold). Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected. Any other value refuses to boot. |
@@ -3104,7 +3142,10 @@ carried.
   the credential beside it verifies. Otherwise the payer is answered the network's own `404`,
   `{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Subscription not found"}]}`,
   the same bytes in every case, recorded on the leg's `authority`, and nothing more is sent. An
-  update of an id your system answers `404` or `410` is checked as a create.
+  update of an id your system answers `404` or `410` gets every check a create gets and is sent as
+  a create is, its channel re-keyed (E-19), as an update at the payer's id: your system creates
+  the Subscription there, or answers as it would a payer integrated directly when it does not
+  take client-assigned ids. This is intended.
 - **An update and a delete** carry the payer's `If-Match`, when it sent one, as the HTTP
   `If-Match` of that request, exactly as sent; your gateway's own read before them carries none.
 - **A read and a vread** are sent with the payer's `_elements` and `_summary`, when it sent them,
@@ -3114,6 +3155,15 @@ carried.
   `_elements` without `channel` leaves out the channel) is the network's `404`, as is one that is
   not the payer's. One that hides the criteria or the filter is still the payer's own
   Subscription, and is delivered.
+- **A known limit, metadata only.** A read, vread, delete or `$status` of an id or version that
+  holds no Subscription is answered by your system's own `404` or `410`, carried as sent once it
+  passes the check on error answers, which differs from the network's `404` for another payer's
+  Subscription. A payer can therefore tell an id, or a version, that holds another payer's
+  Subscription from one that holds none: if your system assigns Subscription ids in sequence, it
+  can count other payers' Subscriptions, see them appear and disappear, and count a
+  Subscription's versions. It learns nothing of their content: not whose they are, their filter,
+  their endpoint or any patient. If that count matters to you, have your system assign
+  Subscription ids that are not sequential.
 - **A search** reaches your gateway with no `url`: the payer's endpoint travels only sealed, by
   the payer's gateway (two values during that gateway's key rotation). Your gateway writes the
   `url` first, its own notification address for the same endpoint (one comma-separated value
@@ -3125,6 +3175,18 @@ carried.
   sent, its trailing `_elements` included (which must keep `channel`). A search's or a page's
   `2xx` is delivered only when every Subscription in it is the payer's; outcome entries are
   carried.
+- **A known limit, metadata only: an empty page.** A page that holds no Subscription is delivered
+  without that test, with its `total` and its links as your system wrote them. A payer that holds
+  the page id of another payer's search (not guessable when your system's page ids are random, as
+  HAPI FHIR's are by default) can ask for an empty page of it and learn that search's `total`; if
+  your system writes the search's `url` into a page's links, also the other payer's notification
+  address (its network identity, key id and sealed endpoint value, never its endpoint or headers,
+  which open only under that payer's gateway's key) and the search's other parameters as that
+  payer sent them (`status`, `_id`, `_count`, `_elements`). The address cannot be used: your
+  gateway writes every address for the payer the Hub authenticated, refuses one framed as a sealed
+  value, and accepts a notification at an address only with its own credential for that address.
+  This is accepted, as closest to a direct connection, where the page would show that payer's
+  endpoint in the clear. If the count matters to you, keep your system's page ids random.
 - **Every `2xx` answer** is first held to the shape of the interaction it answers, and nothing
   else is delivered:
 
@@ -3974,22 +4036,24 @@ notification address there, and the provider's system stores that. On every answ
 writes back your own endpoint and headers in each Subscription that is yours (E-20,
 `subscription-endpoint-restore`), and writes the provider's search entries' and paging links'
 addresses at your base for the provider, a paging link's `url` restored to your own endpoint, so
-that following it repeats your search: on the answer to your search by `url`, when each address it
-names is one your gateway wrote from that search (whatever the answer holds, an empty one and a
-key rotation's overlap included), and otherwise when each was one of the answer's Subscriptions
-your gateway restored. A link it does not restore keeps the provider's value, and when its `url` names a notification
-address or cannot be read, the access line's `editsNotMade` names `E-20:link-url-not-restored` (a search whose `url` is itself a
-notification address is refused `422`, recorded `routing`); a create's or update's answer gains a `Location` at that
-base (E-23, `subscription-location-rekey`). Each is named in `X-SHN-Edited`. An answer whose
-Subscriptions your gateway restored carries no `ETag`: the provider's named the provider's bytes,
-not the ones your system receives. For an update's or a delete's `If-Match`, send
-`W/"<meta.versionId>"` of the Subscription you read back, the version the provider's server
-stored, as a FHIR server's `ETag` names it; your gateway carries it as sent. A search's `url` is
-sealed too, under both keys during an overlap, and the search finds exactly the Subscriptions you
-made with that endpoint. A Subscription sealed under a key past its rotation's overlap reads
-back with the provider gateway's notification address, and the access line's `editsNotMade`
-names `E-20:key-retired`; your next search by its endpoint does not find it, and your system
-creates a new one.
+that following it repeats your search, when each address it names leads to that one endpoint: on
+the answer to your search by `url`, an address that names one of the values your gateway sealed
+that search's endpoint to leads to the endpoint you searched by, whatever the answer holds (an
+empty one and a key rotation's overlap included), and an address that was the `channel.endpoint`
+of one of the answer's Subscriptions your gateway restored leads to that Subscription's endpoint.
+A link it does not restore keeps the provider's value, and when its `url` names a notification
+address or cannot be read, the access line's `editsNotMade` names `E-20:link-url-not-restored` (a
+search whose `url` is itself a notification address is refused `422`, recorded `routing`); a
+create's or update's answer gains a `Location` at that base (E-23, `subscription-location-rekey`).
+Each is named in `X-SHN-Edited`. An answer whose Subscriptions your gateway restored carries no
+`ETag`: the provider's named the provider's bytes, not the ones your system receives. For an
+update's or a delete's `If-Match`, send `W/"<meta.versionId>"` of the Subscription you read back,
+the version the provider's server stored, as a FHIR server's `ETag` names it; your gateway carries
+it as sent. A search's `url` is sealed too, under both keys during an overlap, and the search
+finds exactly the Subscriptions you made with that endpoint. A Subscription sealed under a key
+past its rotation's overlap reads back with the provider gateway's notification address, and the
+access line's `editsNotMade` names `E-20:key-retired`; your next search by its endpoint does not
+find it, and your system creates a new one.
 
 Your gateway checks, before anything is sent, at every conformance level, and records each
 refusal as its own:

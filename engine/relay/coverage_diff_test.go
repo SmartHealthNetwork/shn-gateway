@@ -14,8 +14,11 @@ import (
 // ids, fullUrls (absolute, relative, with or without a version) and
 // contained resources; Provenances (signed or not) whose targets name
 // resources by fullUrl, by type and id (with or without a version), by #id,
-// or nothing in the document; and Signature-shaped objects at any depth,
-// inside a resource or outside all of them.
+// by "#" (their container, when they are contained), or nothing in the
+// document; Signatures in extensions and Task inputs; and
+// Signature-shaped objects at any depth, in members R4 does not define (read
+// as Signatures), inside a resource of an R4 type or another, or outside all
+// of them.
 func randomSignedDoc(r *rand.Rand) string {
 	types := []string{"Patient", "Basic", "Task", "Subscription", "Provenance", "x-type", "Bundle"}
 	ids := []string{"1", "2", "3", "a", ""}
@@ -64,7 +67,13 @@ func randomSignedDoc(r *rand.Rand) string {
 			m = append(m, `"x":`+sig())
 		}
 		if r.IntN(5) == 0 {
-			m = append(m, `"ext":[{"url":"u","valueSignature":`+sig()+`}]`)
+			// An extension or a modifier extension holds a Signature by its
+			// type; a member merely named like one, by its shape.
+			name := []string{"extension", "modifierExtension", "ext"}[r.IntN(3)]
+			m = append(m, `"`+name+`":[{"url":"u","valueSignature":`+sig()+`}]`)
+		}
+		if typ == "Task" && r.IntN(3) == 0 {
+			m = append(m, `"input":[{"type":{},"valueSignature":`+sig()+`}]`)
 		}
 		if depth < 2 && r.IntN(3) == 0 {
 			var cs []string
@@ -164,8 +173,10 @@ func TestCoverageKeepsEachRule(t *testing.T) {
 		"a Provenance target by fullUrl with a version":      {`{"resourceType":"Bundle","entry":[{"fullUrl":"https://x/P/1","resource":{"resourceType":"P","v":1}},{"resource":{"resourceType":"Provenance","signature":[{}],"target":[{"reference":"https://x/P/1/_history/3"}]}}]}`, []string{"entry", "0", "resource", "v"}, []string{"Provenance.signature"}},
 		"a Provenance target by type and the fullUrl's tail": {`{"resourceType":"Bundle","entry":[{"fullUrl":"https://x/P/9","resource":{"resourceType":"P","v":1}},{"resource":{"resourceType":"Provenance","signature":[{}],"target":[{"reference":"P/9"}]}}]}`, []string{"entry", "0", "resource", "v"}, []string{"Provenance.signature"}},
 		"a Provenance target by #id":                         {`{"resourceType":"Provenance","signature":[{}],"contained":[{"resourceType":"P","id":"c","v":1}],"target":[{"reference":"#c"}]}`, []string{"contained", "0", "v"}, []string{"Provenance.signature"}},
-		"many Signatures in one resource":                    {`{"resourceType":"Task","a":[` + strings.Repeat(`{"type":0,"when":0,"who":0},`, 5) + `{"type":0,"when":0,"who":0}],"v":1}`, []string{"v"}, []string{"Signature in Task"}},
-		"a signed Bundle and a Signature inside it":          {`{"resourceType":"Bundle","signature":{"type":0,"when":0,"who":0},"entry":[{"resource":{"resourceType":"Task","s":{"type":0,"when":0,"who":0},"v":1}}]}`, []string{"entry", "0", "resource", "v"}, []string{"Bundle.signature", "Signature in Task"}},
+		"many Signatures in one resource":                    {`{"resourceType":"Task","input":[` + strings.Repeat(`{"valueSignature":{"type":0,"when":0,"who":0}},`, 5) + `{"valueSignature":{"type":0,"when":0,"who":0}}],"v":1}`, []string{"v"}, []string{"Signature in Task"}},
+		"a signed Bundle and a Signature inside it":          {`{"resourceType":"Bundle","signature":{"type":0,"when":0,"who":0},"entry":[{"resource":{"resourceType":"Task","output":[{"valueSignature":{"type":0,"when":0,"who":0}}],"v":1}}]}`, []string{"entry", "0", "resource", "v"}, []string{"Bundle.signature", "Signature in Task"}},
+		"only Signature-shaped, at a place of another type":  {`{"resourceType":"Task","input":[{"type":{"type":0,"when":0,"who":0}}],"v":1}`, []string{"v"}, nil},
+		"Signature-shaped, in a member R4 does not define":   {`{"resourceType":"Task","a":[{"type":0,"when":0,"who":0}],"v":1}`, []string{"v"}, []string{"Signature in Task"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := NewBody([]byte(c.src), OriginPeerFrame)

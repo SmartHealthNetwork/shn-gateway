@@ -741,7 +741,28 @@ func wantEvidenceRecorded(t *testing.T, r ExchangeRecord, row evidenceSubjectRow
 // Each row is the carried control with one mutation of the record or of its
 // read (evidenceSubjectRows); the deployed connector's own reading of each
 // shape is pinned in fhirsor's TestSoR_ResolveByReference_EvidenceShapes.
-func TestProviderData_EvidenceAboutAnotherPatientIsRefused(t *testing.T) {
+//
+// Each level runs as a top-level test of its own, so the engine's hash
+// shards (tools/ci/test-shard.sh -hash) spread the table's rows rather than
+// hold them in one shard; TestLevelSplitTestsRunEveryLevel holds the four.
+func TestProviderData_EvidenceAboutAnotherPatientIsRefusedAtNone(t *testing.T) {
+	evidenceAboutAnotherPatientIsRefused(t, EnforcementNone)
+}
+
+func TestProviderData_EvidenceAboutAnotherPatientIsRefusedAtObserve(t *testing.T) {
+	evidenceAboutAnotherPatientIsRefused(t, EnforcementObserve)
+}
+
+func TestProviderData_EvidenceAboutAnotherPatientIsRefusedAtStructural(t *testing.T) {
+	evidenceAboutAnotherPatientIsRefused(t, EnforcementStructural)
+}
+
+func TestProviderData_EvidenceAboutAnotherPatientIsRefusedAtStrict(t *testing.T) {
+	evidenceAboutAnotherPatientIsRefused(t, EnforcementStrict)
+}
+
+// evidenceAboutAnotherPatientIsRefused is the submission's rows at one level.
+func evidenceAboutAnotherPatientIsRefused(t *testing.T, level ConformanceEnforcement) {
 	t.Parallel() // each row builds its own gateway, keys, substrate and system of record
 	const member = "MBR-PD-UC04"
 	demo := Demo{BirthDate: "1982-11-03", FamilyName: "Chen-ProviderData"}
@@ -752,31 +773,29 @@ func TestProviderData_EvidenceAboutAnotherPatientIsRefused(t *testing.T) {
 			ids = ids[:1]
 		}
 		for _, recordID := range ids {
-			for _, level := range allLevels {
-				t.Run(row.name+"/record "+recordID+"/"+level.String(), func(t *testing.T) {
-					t.Parallel()
-					condition, readFails := mutatedEvidence(t, row, recordID)
-					order := withReason(t, buildAuthoredQROrderWithID(t, "sr-uc04-evidence", "Patient/"+member, uc04.System, uc04.Code, uc04.Display, uc04.Dx))
-					g, stub, _ := newAuthoredQRSingleShotFixture(t, member, demo, order)
-					mountOriginationRoutes(g)
-					g.cfg.ConformanceEnforcement = level
-					useRecordIDSoRHolding(t, g, member, recordID, demo, "member's own Coverage", condition)
-					if condition == nil {
-						// The system holds no record the order names.
-						delete(g.cfg.SoR.(*recordIDSoR).evidence, "Condition/cond-reason")
-					}
-					if readFails != nil {
-						g.cfg.SoR = evidenceReadFails{refReadFails{SystemOfRecord: g.cfg.SoR, ref: "Condition/cond-reason"}, readFails}
-					}
-					rec, recs := serveRecorded(t, g, "POST /scenario/uc04", testOrderBody(order, `"member":"`+member+`"`))
-					wantEvidenceAnswer(t, "POST /scenario/uc04", rec.Code, rec.Body.String(), row)
-					if legAttempted(stub.legTypes, "pas-claim") || !legAttempted(stub.legTypes, "dtr-questionnaire-fetch") {
-						t.Fatalf("legs %v: want the questionnaire fetched and no PAS claim", stub.legTypes)
-					}
-					wantCarried(t, rec.Body.String(), stub.legTypes...)
-					wantEvidenceRecorded(t, onlyRecord(t, recs), row)
-				})
-			}
+			t.Run(row.name+"/record "+recordID, func(t *testing.T) {
+				t.Parallel()
+				condition, readFails := mutatedEvidence(t, row, recordID)
+				order := withReason(t, buildAuthoredQROrderWithID(t, "sr-uc04-evidence", "Patient/"+member, uc04.System, uc04.Code, uc04.Display, uc04.Dx))
+				g, stub, _ := newAuthoredQRSingleShotFixture(t, member, demo, order)
+				mountOriginationRoutes(g)
+				g.cfg.ConformanceEnforcement = level
+				useRecordIDSoRHolding(t, g, member, recordID, demo, "member's own Coverage", condition)
+				if condition == nil {
+					// The system holds no record the order names.
+					delete(g.cfg.SoR.(*recordIDSoR).evidence, "Condition/cond-reason")
+				}
+				if readFails != nil {
+					g.cfg.SoR = evidenceReadFails{refReadFails{SystemOfRecord: g.cfg.SoR, ref: "Condition/cond-reason"}, readFails}
+				}
+				rec, recs := serveRecorded(t, g, "POST /scenario/uc04", testOrderBody(order, `"member":"`+member+`"`))
+				wantEvidenceAnswer(t, "POST /scenario/uc04", rec.Code, rec.Body.String(), row)
+				if legAttempted(stub.legTypes, "pas-claim") || !legAttempted(stub.legTypes, "dtr-questionnaire-fetch") {
+					t.Fatalf("legs %v: want the questionnaire fetched and no PAS claim", stub.legTypes)
+				}
+				wantCarried(t, rec.Body.String(), stub.legTypes...)
+				wantEvidenceRecorded(t, onlyRecord(t, recs), row)
+			})
 		}
 	}
 }

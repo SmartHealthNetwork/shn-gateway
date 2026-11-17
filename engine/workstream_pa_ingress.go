@@ -549,6 +549,13 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// Tag the leg for every check before routing; the correlation id is added
 	// once the leg is routed.
 	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: leg, Seam: "provider-ingress", Whose: "own"}))
+	// A payer's base that names no registered payer is refused on routing
+	// once the caller is authenticated, the body read (its Claim read only to
+	// name the leg) and the builder header checked against that leg, before
+	// the request's content is otherwise checked.
+	if g.pasBaseRefused(w, r) {
+		return
+	}
 	// Bind the subject across the conformant bundle (every patient reference → one pci). The
 	// minimized ParseClaimBundle path is retired here — a real Da Vinci partner sends the full
 	// conformant bundle (Patient + Coverage + payor Org + …), which ParseClaimBundle rejects. The
@@ -566,10 +573,11 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	// (Finding 1): a conformant $submit carries the payor Org as a sibling bundle entry (br-payer's
 	// findInBundle form), NOT in the provider SoR; bundleref.go says which entry a reference
 	// names. Contained / inline payor forms still route without hitting resolveRef.
-	recipient, payer, status, msg, reason := g.pasRecipient(body)
+	// At a payer's base (patternPASSubmitPayer) the claim is routed to the
+	// payer the base names, and its Coverage only compared (N12).
+	recipient, payers, note, status, msg, reason := g.pasIngressRecipient(r, body)
 	if status != 0 {
-		exchangeOf(r.Context()).routedFor(status, reason)
-		writeJSON(w, status, map[string]string{"error": msg})
+		refusePASRouting(w, r, status, msg, reason)
 		return
 	}
 	scope.leg = leg
@@ -646,6 +654,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	g.notePASPayer(note, leg, child)
 	var stated statedAnswer
 	var answerType string
 	crJSON, err := g.OriginateLeg(withStatedAnswerSink(withAnswerMediaTypeSink(observationContext, &answerType), &stated), r, recipient, leg, pci, child, "",
@@ -711,7 +720,7 @@ func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 		}
 		unread = RulePatientAnswer
 	}
-	if g.carriedAnswerRefused(answerCtx, w, crJSON, shnsdk.LineOf(observedTarget), "pa.pas", "", []shnsdk.PayerIdentifier{payer}) {
+	if g.carriedAnswerRefused(answerCtx, w, crJSON, shnsdk.LineOf(observedTarget), "pa.pas", "", payers) {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))
 		return
 	}

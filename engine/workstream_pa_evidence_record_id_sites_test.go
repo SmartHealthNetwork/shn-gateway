@@ -209,11 +209,32 @@ func TestProviderData_TheResumeCarriesTheEvidenceUnderTheMembersRecordID(t *test
 // record the order names has one of the shapes the submission's completion
 // decides (evidenceSubjectRows), under either record id. The resume's
 // completion answers it as the submission's does
-// (TestProviderData_EvidenceAboutAnotherPatientIsRefused), recorded the same
+// (TestProviderData_EvidenceAboutAnotherPatientIsRefusedAt*), recorded the same
 // way whatever the resume sent before it, and no ClaimUpdate is sent. The
 // UC-06 resume sends no leg before its completion; the UC-07 resume's
 // patient-DTR leg, sent before, stands.
-func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatient(t *testing.T) {
+//
+// Each level runs as a top-level test of its own, so the engine's hash
+// shards (tools/ci/test-shard.sh -hash) spread the table's rows rather than
+// hold them in one shard; TestLevelSplitTestsRunEveryLevel holds the four.
+func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatientAtNone(t *testing.T) {
+	resumeRefusesEvidenceAboutAnotherPatient(t, EnforcementNone)
+}
+
+func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatientAtObserve(t *testing.T) {
+	resumeRefusesEvidenceAboutAnotherPatient(t, EnforcementObserve)
+}
+
+func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatientAtStructural(t *testing.T) {
+	resumeRefusesEvidenceAboutAnotherPatient(t, EnforcementStructural)
+}
+
+func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatientAtStrict(t *testing.T) {
+	resumeRefusesEvidenceAboutAnotherPatient(t, EnforcementStrict)
+}
+
+// resumeRefusesEvidenceAboutAnotherPatient is the resume's rows at one level.
+func resumeRefusesEvidenceAboutAnotherPatient(t *testing.T, level ConformanceEnforcement) {
 	t.Parallel() // each row builds its own gateway, keys, substrate and system of record
 	for _, sc := range []struct{ scenario, member string }{
 		{"uc06", "MBR-PD-UC06"},
@@ -225,23 +246,21 @@ func TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatient(t *testing.T) 
 				ids = ids[:1]
 			}
 			for _, recordID := range ids {
-				for _, level := range allLevels {
-					t.Run(sc.scenario+"/"+row.name+"/record "+recordID+"/"+level.String(), func(t *testing.T) {
-						t.Parallel()
-						atResume, readFails := mutatedEvidence(t, row, recordID)
-						if atResume == nil {
-							atResume = []byte{} // the system holds none by then
-						}
-						run := runProviderDataResumeFailing(t, sc.scenario, sc.member, recordID, level, atResume, readFails)
-						wantEvidenceAnswer(t, "POST /scenario/"+sc.scenario+"/complete", run.complete.Code, run.complete.Body.String(), row)
-						resumed := run.stub.legTypes[run.legsAtResume:]
-						if legAttempted(resumed, "pas-claim-update") || len(run.capture.get("pas-claim-update")) != 0 {
-							t.Fatalf("resume legs %v: want no ClaimUpdate sent", resumed)
-						}
-						wantCarried(t, run.complete.Body.String(), resumed...)
-						wantEvidenceRecorded(t, onlyRecord(t, run.recs), row)
-					})
-				}
+				t.Run(sc.scenario+"/"+row.name+"/record "+recordID, func(t *testing.T) {
+					t.Parallel()
+					atResume, readFails := mutatedEvidence(t, row, recordID)
+					if atResume == nil {
+						atResume = []byte{} // the system holds none by then
+					}
+					run := runProviderDataResumeFailing(t, sc.scenario, sc.member, recordID, level, atResume, readFails)
+					wantEvidenceAnswer(t, "POST /scenario/"+sc.scenario+"/complete", run.complete.Code, run.complete.Body.String(), row)
+					resumed := run.stub.legTypes[run.legsAtResume:]
+					if legAttempted(resumed, "pas-claim-update") || len(run.capture.get("pas-claim-update")) != 0 {
+						t.Fatalf("resume legs %v: want no ClaimUpdate sent", resumed)
+					}
+					wantCarried(t, run.complete.Body.String(), resumed...)
+					wantEvidenceRecorded(t, onlyRecord(t, run.recs), row)
+				})
 			}
 		}
 	}

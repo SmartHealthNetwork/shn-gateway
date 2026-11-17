@@ -170,28 +170,48 @@ func TestEligibility_UnresolvedContainedPatientPastTheStrictReadersLimitsIsRefus
 // Past the strict reader's token bound, as past its other limits, a "#id"
 // patient resolves through the contained resources, and one no contained
 // Patient answers is refused, at every level.
-func TestEligibility_ContainedPatientPastTheTokenBound(t *testing.T) {
+//
+// Each level runs as a top-level test of its own, so the engine's hash
+// shards (tools/ci/test-shard.sh -hash) spread the table's rows rather than
+// hold them in one shard; TestLevelSplitTestsRunEveryLevel holds the four.
+func TestEligibility_ContainedPatientPastTheTokenBoundAtNone(t *testing.T) {
+	containedPatientPastTheTokenBound(t, EnforcementNone)
+}
+
+func TestEligibility_ContainedPatientPastTheTokenBoundAtObserve(t *testing.T) {
+	containedPatientPastTheTokenBound(t, EnforcementObserve)
+}
+
+func TestEligibility_ContainedPatientPastTheTokenBoundAtStructural(t *testing.T) {
+	containedPatientPastTheTokenBound(t, EnforcementStructural)
+}
+
+func TestEligibility_ContainedPatientPastTheTokenBoundAtStrict(t *testing.T) {
+	containedPatientPastTheTokenBound(t, EnforcementStrict)
+}
+
+// containedPatientPastTheTokenBound is the contained patient's rows at one
+// level.
+func containedPatientPastTheTokenBound(t *testing.T, level ConformanceEnforcement) {
 	t.Parallel()
-	for _, level := range eligibilityLevels {
-		t.Run("resolved/"+level.String(), func(t *testing.T) {
-			t.Parallel()
-			p := eligibilityPayer(t, level, false)
-			body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#pat", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
-			run := runObserved(t, p, "coverage-eligibility", body, p.pci)
-			if ref, err := ParseCoverageEligibilityResponsePatient(run.answer.body); run.answer.status != http.StatusOK || err != nil || ref != "Patient/"+dtrFrameMember || run.differs != 0 {
-				t.Fatalf("answer %d %.300s (%d binding-differs events), want answered about the member", run.answer.status, run.answer.body, run.differs)
-			}
-		})
-		t.Run("unresolved/"+level.String(), func(t *testing.T) {
-			t.Parallel()
-			p := eligibilityPayer(t, level, false)
-			body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#nobody", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
-			ans := p.sendAs(t, "coverage-eligibility", "", body, p.pci)
-			if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), "parse member failed") {
-				t.Fatalf("answer %d %.300s, want 400 parse member failed", ans.status, ans.body)
-			}
-		})
-	}
+	t.Run("resolved", func(t *testing.T) {
+		t.Parallel()
+		p := eligibilityPayer(t, level, false)
+		body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#pat", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
+		run := runObserved(t, p, "coverage-eligibility", body, p.pci)
+		if ref, err := ParseCoverageEligibilityResponsePatient(run.answer.body); run.answer.status != http.StatusOK || err != nil || ref != "Patient/"+dtrFrameMember || run.differs != 0 {
+			t.Fatalf("answer %d %.300s (%d binding-differs events), want answered about the member", run.answer.status, run.answer.body, run.differs)
+		}
+	})
+	t.Run("unresolved", func(t *testing.T) {
+		t.Parallel()
+		p := eligibilityPayer(t, level, false)
+		body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#nobody", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
+		ans := p.sendAs(t, "coverage-eligibility", "", body, p.pci)
+		if ans.status != http.StatusBadRequest || !strings.Contains(string(ans.body), "parse member failed") {
+			t.Fatalf("answer %d %.300s, want 400 parse member failed", ans.status, ans.body)
+		}
+	})
 }
 
 // msgReplacedCharacter is the refusal of a request whose member value carries a character

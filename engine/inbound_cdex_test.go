@@ -118,6 +118,55 @@ func TestFederatedQueryAnswer_AuthoredFulfillmentWithVerifiedEmbeds(t *testing.T
 		_, _, err := sealCDexFulfillment(signed, records)
 		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
 	})
+	// A signature's member names read in any case (shn-sdk v1.13.0), in what
+	// the facility's gateway receives: the payer's request Task and the
+	// facility's own records. A Provenance's own signature is unshaped, so only
+	// the member's name can mark it signed.
+	t.Run("a request Task holding a Provenance signed under SIGNATURE that targets it is refused", func(t *testing.T) {
+		signed := bytes.Replace(task, []byte(`"intent":"order",`), []byte(`"intent":"order","contained":[{"resourceType":"Provenance","id":"p",`+
+			`"target":[{"reference":"#"}],"SIGNATURE":[{"display":"not shaped"}]}],`), 1)
+		if bytes.Equal(signed, task) {
+			t.Fatal("the Task fixture changed; the Provenance was not added")
+		}
+		_, _, err := sealCDexFulfillment(signed, records)
+		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
+	})
+	t.Run("a facility's record, a Provenance signed under SIGNATURE that targets the request Task, is refused", func(t *testing.T) {
+		signed := bytes.Replace(records, []byte(`"entry":[`), []byte(`"entry":[{"fullUrl":"urn:shn:fedquery:p","resource":`+
+			`{"resourceType":"Provenance","id":"prov-1","target":[{"reference":"Task/cdex-req-1"}],"SIGNATURE":[{"display":"not shaped"}]}},`), 1)
+		if bytes.Equal(signed, records) {
+			t.Fatal("the records fixture changed; the Provenance was not added")
+		}
+		_, _, err := sealCDexFulfillment(task, signed)
+		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
+	})
+	// The records Bundle's id is rewritten only where the request Task already
+	// uses it; only then does a signature over that Bundle stop the build.
+	recordsWithID := bytes.Replace(records, []byte(`{"resourceType":"Bundle","type":"searchset",`), []byte(`{"resourceType":"Bundle","id":"results","type":"searchset",`), 1)
+	signedRecords := bytes.Replace(recordsWithID, []byte(`"entry":[`), []byte(`"entry":[{"fullUrl":"urn:shn:fedquery:p","resource":`+
+		`{"resourceType":"Provenance","id":"prov-1","target":[{"reference":"Bundle/results"}],"SIGNATURE":[{"display":"not shaped"}]}},`), 1)
+	takesResults := bytes.Replace(task, []byte(`"intent":"order",`), []byte(`"intent":"order","contained":[{"resourceType":"Basic","id":"results","code":{"text":"x"}}],`), 1)
+	if bytes.Equal(recordsWithID, records) || bytes.Equal(signedRecords, recordsWithID) || bytes.Equal(takesResults, task) {
+		t.Fatal("a fixture changed; the records id, the Provenance or the Task's contained resource was not added")
+	}
+	t.Run("a facility's record, a Provenance signed under SIGNATURE that targets the records Bundle, is refused where its id is rewritten", func(t *testing.T) {
+		_, _, err := sealCDexFulfillment(takesResults, signedRecords)
+		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
+	})
+	t.Run("a facility's record, a Provenance signed under SIGNATURE that targets the records Bundle, is fulfilled where its id is kept", func(t *testing.T) {
+		if _, _, err := sealCDexFulfillment(task, signedRecords); err != nil {
+			t.Fatalf("the records Bundle keeps its id, so the fulfillment edits nothing the signature covers: %v", err)
+		}
+	})
+	t.Run("a request Task holding a Signature whose member names are in another case is refused", func(t *testing.T) {
+		signed := bytes.Replace(task, []byte(`"intent":"order",`), []byte(`"intent":"order","extension":[{"url":"http://example.org/sig","valueSignature":`+
+			`{"Type":[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}],"WHEN":"2026-06-19T21:53:54+00:00","Who":{"reference":"Organization/payer"}}}],`), 1)
+		if bytes.Equal(signed, task) {
+			t.Fatal("the Task fixture changed; the Signature was not added")
+		}
+		_, _, err := sealCDexFulfillment(signed, records)
+		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
+	})
 	t.Run("a request Task in a status that does not allow fulfillment is refused", func(t *testing.T) {
 		done := bytes.Replace(task, []byte(`"status":"requested"`), []byte(`"status":"completed"`), 1)
 		_, _, err := sealCDexFulfillment(done, records)
@@ -133,6 +182,8 @@ func TestFederatedQueryAnswer_AuthoredFulfillmentWithVerifiedEmbeds(t *testing.T
 			var refused *cdexRequestRefused
 			if !errors.As(err, &refused) {
 				t.Errorf("%s: want a request refusal, got %v", name, err)
+			} else if refused.signed() {
+				t.Errorf("%s: a shape refusal reads as a signed-content one", name)
 			}
 		}
 	})
@@ -152,6 +203,11 @@ func assertCDexRefused(t *testing.T, err, sentinel error) {
 	var refused *cdexRequestRefused
 	if !errors.As(err, &refused) || !errors.Is(err, sentinel) {
 		t.Fatalf("want a request refusal wrapping %v, got %v", sentinel, err)
+	}
+	// Only a signed-content refusal is recorded on the fidelity of the
+	// gateway's own edit.
+	if want := sentinel == shnsdk.ErrCDexSignedContent || sentinel == relay.ErrSignedContent; refused.signed() != want {
+		t.Fatalf("refusal %v reads as signed content: %v, want %v", err, refused.signed(), want)
 	}
 	if strings.Contains(refused.reason, "{") || !strings.HasPrefix(refused.reason, "federated query refused: ") {
 		t.Fatalf("refusal reason %q", refused.reason)
@@ -760,6 +816,11 @@ func TestCDexEvidence_E14RepointsSubjectReferenceAlone(t *testing.T) {
 		{"a signature in the report", strings.Replace(facDR2, `"status":"final",`, `"status":"final",`+signature, 1), prov, "Signature in DiagnosticReport"},
 		{"a contained signed Provenance that targets the report", strings.Replace(facDR2, `"status":"final",`, `"status":"final","contained":[`+signedProvenance("DiagnosticReport/dr-2")+`],`, 1), prov, "Provenance.signature"},
 		{"the facility's signed Provenance that attributes the report", facDR2, signedProvenance("DiagnosticReport/dr-2"), "Provenance.signature"},
+		{"the facility's Provenance signed under Signature", facDR2, signedProvenanceAs("DiagnosticReport/dr-2", "Signature"), "Provenance.signature"},
+		{"the facility's Provenance signed under SIGNATURE", facDR2, signedProvenanceAs("DiagnosticReport/dr-2", "SIGNATURE"), "Provenance.signature"},
+		{"a contained Provenance signed under SIGNATURE that targets the report", strings.Replace(facDR2, `"status":"final",`, `"status":"final","contained":[`+strings.Replace(signedProvenance("DiagnosticReport/dr-2"), `"signature"`, `"SIGNATURE"`, 1)+`],`, 1), prov, "Provenance.signature"},
+		{"a contained signed Provenance that targets its container (#)", strings.Replace(facDR2, `"status":"final",`, `"status":"final","contained":[`+signedProvenance("#")+`],`, 1), prov, "Provenance.signature"},
+		{"a contained Provenance signed under Signature that targets its container (#)", strings.Replace(facDR2, `"status":"final",`, `"status":"final","contained":[`+strings.Replace(signedProvenance("#"), `"signature"`, `"Signature"`, 1)+`],`, 1), prov, "Provenance.signature"},
 	} {
 		t.Run("signed: "+row.name, func(t *testing.T) {
 			_, edits, err := rekeyFacilityReportSubject([]byte(row.report), []byte(row.prov), claimPatient)
@@ -794,6 +855,46 @@ func TestCDexEvidence_E14RepointsSubjectReferenceAlone(t *testing.T) {
 		if _, _, err := rekeyFacilityReportSubject([]byte(report), []byte(prov), claimPatient); err == nil {
 			t.Errorf("%s: carried", name)
 		}
+	}
+}
+
+// E-14's decision that the facility's attributing Provenance signs the
+// report agrees with the signed-content check's, for the same Provenance
+// beside the report in one message: under every case of its own signature's
+// name, under a member R4 does not define there, and with none.
+func TestCDexEvidence_E14SignedAgreesWithCoverage(t *testing.T) {
+	for _, member := range []string{"signature", "Signature", "SIGNATURE", "sIGNATURe", "signatures", ""} {
+		prov := `{"resourceType":"Provenance","id":"prov-1","target":[{"reference":"DiagnosticReport/dr-2"}],"recorded":"2026-01-01T00:00:00Z"}`
+		if member != "" {
+			prov = signedProvenanceAs("DiagnosticReport/dr-2", member)
+		}
+		t.Run("member "+member, func(t *testing.T) {
+			e14, err := provenanceSigned([]byte(prov))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := relay.NewBody([]byte(`{"resourceType":"Bundle","type":"collection","entry":[{"resource":`+facDR2+`},{"resource":`+prov+`}]}`), relay.OriginPeerFrame)
+			doc, err := relay.Doc(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, _ := doc.Member(doc.Root(), "entry")
+			report, _ := doc.Member(doc.Elems(entries)[0], "resource")
+			subject, _ := doc.Member(report, "subject")
+			ref, _ := doc.Member(subject, "reference")
+			_, err = relay.Apply(body, "application/fhir+json", relay.EditFacilityReportSubjectRekey, doc.Replace(ref, []byte(`"Patient/MBR-UC05"`)))
+			var signed *relay.SignedContentError
+			covered := errors.As(err, &signed)
+			if err != nil && (!covered || signed.Carrier != "Provenance.signature") {
+				t.Fatalf("apply: %v, want edited or refused under Provenance.signature alone", err)
+			}
+			if e14 != covered {
+				t.Fatalf("E-14 reads signed=%v, the signed-content check %v (%v)", e14, covered, err)
+			}
+			if want := member != "" && member != "signatures"; e14 != want {
+				t.Fatalf("signed=%v, want %v", e14, want)
+			}
+		})
 	}
 }
 

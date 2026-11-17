@@ -2603,7 +2603,7 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteCDexSubscriptionBase, RouteCDexSubscription, RouteCDexNotify, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteCDexSubscriptionBase, RouteCDexSubscription, RouteCDexNotify, RoutePASSubscription, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

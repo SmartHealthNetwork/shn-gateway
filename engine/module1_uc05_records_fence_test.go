@@ -259,14 +259,24 @@ func facilityEntry(t *testing.T, entries []any, rt string) map[string]any {
 // names the facility's own Patient, adds that Patient, carried with the member
 // identifier, to the records Bundle.
 func facilitySubject(t *testing.T, subject map[string]any, signedProvenance bool) func(int, []byte) []byte {
+	if signedProvenance {
+		return facilitySubjectSigned(t, subject, "signature")
+	}
+	return facilitySubjectSigned(t, subject, "")
+}
+
+// facilitySubjectSigned is facilitySubject with the facility's Provenance
+// signed under member signature, its own signature's name in any case, or
+// unsigned when signature is "".
+func facilitySubjectSigned(t *testing.T, subject map[string]any, signature string) func(int, []byte) []byte {
 	return func(n int, p []byte) []byte {
 		if n != 1 {
 			return p
 		}
 		return withFacilityRecords(t, p, func(entries []any) []any {
 			facilityEntry(t, entries, "DiagnosticReport")["subject"] = subject
-			if signedProvenance {
-				facilityEntry(t, entries, "Provenance")["signature"] = []any{map[string]any{
+			if signature != "" {
+				facilityEntry(t, entries, "Provenance")[signature] = []any{map[string]any{
 					"type": []any{map[string]any{"system": "urn:iso-astm:E1762-95:2013", "code": "1.2.840.10065.1.12.1.1"}},
 					"when": "2026-01-01T00:00:00Z", "who": map[string]any{"display": "a clinician"},
 				}}
@@ -362,28 +372,32 @@ func TestHandleUC05_FacilityReportSubjectE14(t *testing.T) {
 // A signature over the facility's report, here the facility's Provenance
 // that attributes it, refuses E-14 at every level: 422 signed content cannot
 // be edited, the fidelity of SHN's own edit at the build, and no claim update
-// is sent. Its control: the same signed report already naming the Claim's
-// patient needs no edit and is carried.
+// is sent. The Provenance's own signature is read under its name in any case
+// ("Signature", "SIGNATURE"), as the signed-content check reads it. Its
+// control: the same signed report already naming the Claim's patient needs
+// no edit and is carried.
 func TestHandleUC05_SignedFacilityReportRefusesE14(t *testing.T) {
 	const route = "POST /scenario/uc05"
 	for _, level := range allLevels {
-		t.Run(level.String(), func(t *testing.T) {
-			gw, stub := uc05Fixture(t, level, facilitySubject(t, map[string]any{"reference": "Patient/fac-77"}, true))
-			rec, recs := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))
-			body := rec.Body.String()
-			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "signed content cannot be edited (E-14, Provenance.signature)") ||
-				!strings.Contains(body, "federated-query legs this request sent were carried and stand.") {
-				t.Fatalf("status %d: %s; want 422 signed content cannot be edited (E-14, Provenance.signature), stating the legs carried", rec.Code, body)
-			}
-			if legAttempted(stub.legTypes, "pas-claim-update") {
-				t.Fatalf("a claim update was sent (legs: %v)", stub.legTypes)
-			}
-			r := onlyRecord(t, recs)
-			wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
-			if r.RefusalStage != vocab.RefusalStageBuild {
-				t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
-			}
-		})
+		for _, member := range []string{"signature", "Signature", "SIGNATURE"} {
+			t.Run(member+"/"+level.String(), func(t *testing.T) {
+				gw, stub := uc05Fixture(t, level, facilitySubjectSigned(t, map[string]any{"reference": "Patient/fac-77"}, member))
+				rec, recs := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))
+				body := rec.Body.String()
+				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "signed content cannot be edited (E-14, Provenance.signature)") ||
+					!strings.Contains(body, "federated-query legs this request sent were carried and stand.") {
+					t.Fatalf("status %d: %s; want 422 signed content cannot be edited (E-14, Provenance.signature), stating the legs carried", rec.Code, body)
+				}
+				if legAttempted(stub.legTypes, "pas-claim-update") {
+					t.Fatalf("a claim update was sent (legs: %v)", stub.legTypes)
+				}
+				r := onlyRecord(t, recs)
+				wantRefusal(t, r, http.StatusUnprocessableEntity, RefusedByProviderGateway, RefusalFidelity)
+				if r.RefusalStage != vocab.RefusalStageBuild {
+					t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
+				}
+			})
+		}
 		t.Run("control: already the Claim's patient/"+level.String(), func(t *testing.T) {
 			gw, stub := uc05Fixture(t, level, facilitySubject(t, map[string]any{"reference": "Patient/MBR-UC05"}, true))
 			rec, _ := serveRecorded(t, gw, route, testRouteBody(gw, "/scenario/uc05", ""))

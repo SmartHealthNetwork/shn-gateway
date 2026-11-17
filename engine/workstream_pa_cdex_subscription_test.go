@@ -1695,6 +1695,20 @@ func TestCDexSubscribe_RefusalsByPrimitive(t *testing.T) {
 			return f
 		},
 			http.StatusForbidden, RefusalAuthority, refusalCDexSubscribeNotSealed, EditNotMadeSubscriptionNotSealedValues, false, false},
+		// Another payer's notification address is not a sealed value: framed
+		// as one, it is refused, never written.
+		"another payer's notification address as the sealed endpoint": {func(t *testing.T) subFrame {
+			f := createFrame(t, cdexSubscriptionJSON(nil))
+			f.endpoint = foreignAddress(t)
+			return f
+		},
+			http.StatusForbidden, RefusalAuthority, refusalCDexSubscribeNotSealed, EditNotMadeSubscriptionNotSealedValues, false, false},
+		"another payer's notification address as a search's sealed endpoint": {func(t *testing.T) subFrame {
+			f := searchFrame(t, payerEndpoint)
+			f.endpoint = foreignAddress(t)
+			return f
+		},
+			http.StatusForbidden, RefusalAuthority, "a sealed endpoint that is not one", EditNotMadeSearchNotSealedValue, false, false},
 		"malformed sealed headers": {func(t *testing.T) subFrame { f := createFrame(t, cdexSubscriptionJSON(nil)); f.channel = "x"; return f },
 			http.StatusForbidden, RefusalAuthority, refusalCDexSubscribeNotSealed, EditNotMadeSubscriptionNotSealedValues, false, false},
 		// The body is read by its structure, never its label: FHIR XML is the

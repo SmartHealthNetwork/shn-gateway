@@ -260,6 +260,17 @@ end-to-end signature. To have values added, the request's patient must be named 
 network member id; see the member id limitation in
 [CDS Hooks prefetch](CONFIGURATION.md#cds-hooks-prefetch).
 
+From shn-gateway v1.15.0, an EHR that keeps one base per payer, as a directly integrated
+EHR does, configures each payer's base on the gateway,
+`{PROVIDER_DAVINCI_INGRESS_BASE_URL}/pas/payer/{payer}`, and sends `Claim/$submit` and
+`Claim/$inquire` there, and discovers the token endpoint at its
+`.well-known/smart-configuration`: the request goes to that payer whatever its Coverage names,
+and a Coverage naming another payer, or one the gateway cannot resolve, is noted, never
+refused. The payer's base serves no CapabilityStatement yet (see
+[A payer's PAS base](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)).
+A Subscription sent to the plain base names no payer, so it is refused, naming
+`/pas/payers`, where the payers' bases that take one are listed.
+
 See [`PROVIDER_DAVINCI_INGRESS` and related variables in
 CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
 for the full field reference, the SMART Backend Services inbound authentication

@@ -434,15 +434,23 @@ func Rows() []relay.Edit {
 				"is then removed when the subscriber wrote none. Each fullUrl and paging link under the base the notifier's " +
 				"gateway stated is re-keyed to the per-counterpart base, and a paging link's url search parameter, which the " +
 				"notifier's server echoes as the notification addresses E-21 wrote, is restored to the subscriber's own " +
-				"endpoint when each of those addresses is the channel.endpoint of a Subscription in the same answer that this " +
-				"edit restored, all to that one endpoint; every other parameter keeps its bytes, and the core checks it. " +
-				"Made even where an in-payload signature covers " +
-				"them; that signature then no longer verifies in the subscriber's copy, and the answer says so. A " +
+				"endpoint when each of those addresses leads to that one endpoint: on the answer to a search by url, an " +
+				"address that ends in a notification address for this subscriber and the topic, with a key id and sealed " +
+				"value that are one the subscriber's gateway sealed that search's endpoint to, leads to the endpoint the " +
+				"subscriber's system searched by, whatever Subscriptions the answer holds; an address that is the " +
+				"channel.endpoint of a Subscription in the same answer that this edit restored leads to that " +
+				"Subscription's endpoint. Every other parameter keeps its bytes, and the core checks it. Any url " +
+				"parameter of a link, with or without a modifier, that names a notification address or cannot be read, " +
+				"and is not restored, is carried as written, and the exchange records it. Made even where an in-payload " +
+				"signature covers what it changes; that signature then no longer verifies in the subscriber's copy, and " +
+				"the answer says so. A " +
 				"Subscription whose address does not end so, or whose seals do not open (another notifier's, tampered, or " +
 				"made under a key past its rotation's overlap), is carried as the notifier sent it, and the exchange " +
 				"records why.",
 			Authority: "The sealed values the subscriber's own gateway made, opened under its own key with the subscriber, the " +
-				"notifier the Hub authenticated and the topic bound to the seal; and the per-counterpart base, rebuilt from " +
+				"notifier the Hub authenticated and the topic bound to the seal; for a search's link, the endpoint the " +
+				"subscriber's system searched by and the values its gateway sealed it to, read from the request that " +
+				"gateway framed, never from the answer; and the per-counterpart base, rebuilt from " +
 				"the gateway's ingress base and the counterpart's network identity. Nothing is stored per Subscription.",
 			Disclosure: "When a notifier answers a subscriber's Subscription interaction with Subscriptions, the subscriber's " +
 				"gateway puts back the channel.endpoint and channel.header the subscriber wrote in place of the notifier " +

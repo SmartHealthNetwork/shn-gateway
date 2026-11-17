@@ -1159,6 +1159,12 @@ func TestProviderIngressStatement_QuestionnaireOperationsAreTheMountedRoutes(t *
 		// CDex $submit-attachment at a payer's return path.
 		"POST /cdex/payer/{payer}":                    "",
 		"POST /cdex/payer/{payer}/$submit-attachment": "",
+		// A Subscription at the plain base: by its id, its version or its
+		// $status below it.
+		"GET /Subscription/{rest...}": "",
+		"PUT /Subscription/{id}":      "",
+		"PATCH /Subscription/{id}":    "",
+		"DELETE /Subscription/{id}":   "",
 	}
 	wild := func(seg string) bool { return strings.HasPrefix(seg, "{") }
 	for _, pattern := range g.RoutePatternsForTest() {

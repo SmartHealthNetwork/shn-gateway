@@ -253,6 +253,17 @@ var providerOtherRoutes = []string{
 	"POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question",
 	"POST /Claim/$submit",
 	"POST /Claim/$inquire",
+	// PAS at each payer's base, the payers' bases,
+	// and the plain base's Subscription refusals.
+	"POST /pas/payer/{payer}/Claim/$submit",
+	"POST /pas/payer/{payer}/Claim/$inquire",
+	"GET /pas/payers",
+	"POST /Subscription",
+	"GET /Subscription",
+	"GET /Subscription/{rest...}",
+	"PUT /Subscription/{id}",
+	"PATCH /Subscription/{id}",
+	"DELETE /Subscription/{id}",
 	"POST /CoverageEligibilityRequest/$submit",
 	"POST /$submit-attachment",
 	"POST /cdex/payer/{payer}",
@@ -262,6 +273,7 @@ var providerOtherRoutes = []string{
 	"GET /metadata",
 	"POST /oauth/token",
 	"GET /.well-known/smart-configuration",
+	"GET /pas/payer/{payer}/.well-known/smart-configuration",
 	"GET /.well-known/davinci-configuration",
 	// The payer's attachment request, delivered by the Hub, once the
 	// provider sets its own Task endpoint (PROVIDER_CDEX_TASK_URL).

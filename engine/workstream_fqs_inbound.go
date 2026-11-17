@@ -4,9 +4,11 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -98,11 +100,19 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	// The answer extends the payer's own request Task and embeds the records
-	// Bundle exactly; every copied span is declared and verified when sealed.
+	// The answer extends the requester's own request Task and embeds the
+	// records Bundle exactly; every copied span is declared and verified when
+	// sealed.
 	answer, fulfilled, err := sealCDexFulfillment(queryJSON, inner)
 	var refused *cdexRequestRefused
 	if errors.As(err, &refused) {
+		if refused.signed() {
+			// An extension of signed content is refused on the fidelity
+			// of the gateway's own edit, at the build: the rule the
+			// refusal's answer settles under, unless that answer itself
+			// fails its own check.
+			exchangeOf(r.Context()).refusingFidelity(vocab.RefusalStageBuild)
+		}
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusUnprocessableEntity, refused.reason, nil)
 		return
 	}
@@ -117,7 +127,7 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 	g.respondLeg(w, r, "facility-disclosure", "federated-query-response", "federated-query", env.Metadata.CorrelationID, answer, builtAnswer, tok.Subject, env.Metadata.Sender, consentRef, answerTok)
 }
 
-// sealCDexFulfillment fulfills the payer's CDex request Task with the
+// sealCDexFulfillment fulfills the requester's CDex request Task with the
 // facility's records Bundle and seals the result as the registered
 // cdex-fulfillment answer. Every part the fulfillment copies from the request
 // or the records is declared as an embed, so sealing verifies it is
@@ -125,9 +135,9 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 // egress validation the gateway runs before sending).
 //
 // A request Task the fulfillment cannot extend (not one well-formed Task,
-// signed, or in a status that does not allow fulfillment) is the requester's
-// and is returned as a *cdexRequestRefused; any other error is a fault in the
-// facility's own build.
+// signed by the SDK's reading or the relay's, or in a status that does not
+// allow fulfillment) is the requester's and is returned as a
+// *cdexRequestRefused; any other error is a fault in the facility's own build.
 func sealCDexFulfillment(requestTask, records []byte) (relay.Payload, []byte, error) {
 	var none relay.Payload
 	task := relay.NewBody(requestTask, relay.OriginPeerFrame)
@@ -137,13 +147,18 @@ func sealCDexFulfillment(requestTask, records []byte) (relay.Payload, []byte, er
 	f, err := shnsdk.BuildCDexFulfillment(requestTask, records)
 	switch {
 	case errors.Is(err, shnsdk.ErrCDexSignedContent):
-		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task carries signed content, which a fulfillment cannot extend", err: err}
+		return none, nil, &cdexRequestRefused{reason: refusalCDexSignedTask, err: err}
 	case errors.Is(err, shnsdk.ErrCDexTaskStatus):
 		return none, nil, &cdexRequestRefused{reason: "federated query refused: the request Task's status does not allow fulfillment", err: err}
 	case err != nil:
 		return none, nil, err
 	}
 	held := relay.NewBody(records, relay.OriginUpstreamResponse)
+	if carrier, err := cdexSignedByTheRelay(f, held); err != nil {
+		return none, nil, err
+	} else if carrier != "" {
+		return none, nil, &cdexRequestRefused{reason: refusalCDexSignedTask, err: fmt.Errorf("%w: %s", relay.ErrSignedContent, carrier)}
+	}
 	embeds := make([]relay.Embed, 0, len(f.Copied))
 	for _, c := range f.Copied {
 		src := task
@@ -170,6 +185,16 @@ func (e *cdexRequestRefused) Error() string { return e.reason }
 
 func (e *cdexRequestRefused) Unwrap() error { return e.err }
 
+// signed reports whether the Task was refused because a signature covers it,
+// by the SDK's reading or the relay's.
+func (e *cdexRequestRefused) signed() bool {
+	return errors.Is(e.err, shnsdk.ErrCDexSignedContent) || errors.Is(e.err, relay.ErrSignedContent)
+}
+
+// refusalCDexSignedTask answers a request Task the fulfillment would extend
+// though a signature covers it.
+const refusalCDexSignedTask = "federated query refused: the request Task carries signed content, which a fulfillment cannot extend"
+
 // cdexRequestShapeOK reports whether task is one well-formed JSON document
 // (no repeated member names) that is a Task whose contained and output, when
 // present, are arrays: the shape a fulfillment extends.
@@ -191,4 +216,43 @@ func cdexRequestShapeOK(task relay.Body) bool {
 		}
 	}
 	return true
+}
+
+// cdexSignedByTheRelay names a signature that covers what the fulfillment f
+// changes, read by the relay's one rule, which the SDK's reading need not
+// match, or returns "". The gateway judges signed content by that rule alone,
+// so a fulfillment the SDK builds is still refused when:
+//
+//   - a signature covers the request Task, read in the fulfilled Task, which
+//     holds the request Task and the records it embeds: a signature in the
+//     Task (such as one at a place FHIR R4 types Signature, though it lacks a
+//     member R4 requires), or a signed Provenance in the Task or among the
+//     records that targets it (its members read in any case);
+//   - the fulfillment writes the records Bundle's id (it has none, or one the
+//     Task already uses) and a signature covers that Bundle.
+//
+// The fulfilled Task differs from the request only by its status, the added
+// output and the embedded records, none of which can take a signature off
+// the Task. Embedding could add one only through the relay's wide reading of
+// "#" (a signed Provenance with that target in a contained array inside the
+// records would read as covering the Task); the records this gateway builds
+// hold no contained array outside their records, so it refuses no more here.
+func cdexSignedByTheRelay(f shnsdk.CDexFulfillment, held relay.Body) (string, error) {
+	out, err := relay.Doc(relay.NewBody(f.Task, relay.OriginPeerFrame))
+	if err != nil {
+		return "", err
+	}
+	if carrier := out.SignedCarrier(out.Root()); carrier != "" {
+		return carrier, nil
+	}
+	rd, err := relay.Doc(held)
+	if err != nil {
+		return "", err
+	}
+	if id, ok := rd.Member(rd.Root(), "id"); ok {
+		if own, err := rd.StringValue(id); err == nil && own == f.ResultsID {
+			return "", nil // the records are embedded as they are
+		}
+	}
+	return rd.SignedCarrier(rd.Root()), nil
 }

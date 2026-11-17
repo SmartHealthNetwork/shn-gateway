@@ -4,6 +4,211 @@ What each `shn-gateway` release changed, section by section, newest release
 first. Each release's notes are also published with it on GitHub. What the
 stability promise covers is in [`STABILITY.md`](STABILITY.md).
 
+## A federated query's Task is judged signed by the rule every edit is held to (v1.15.0)
+
+- **Changed (facility's gateway, the federated query `federated-query`):** before it sends a
+  CDex fulfillment, your gateway also asks whether a signature covers what the fulfillment
+  changes, by the rule it holds every edit it makes to: the request `Task` (a signature that
+  covers it as a whole, found as FHIR R4 places it, or a signed `Provenance` in the `Task` or among your system's
+  records that targets it), and the records `Bundle` when the fulfillment writes its `id`. It
+  refuses what that rule reads as signed even where the fulfillment's own reading finds no
+  signature: such as a `Signature` at a place R4 types `Signature` (an extension's or a `Task`
+  input's `valueSignature`) that lacks a member R4 requires, or a signed `Provenance` whose
+  `resourceType`, `target` or `reference`, or the `id` of the `Task` it targets, is named in
+  another case. It is refused `422 federated query refused: the request Task carries signed
+  content, which a fulfillment cannot extend`, at every conformance level, where earlier
+  releases sent the fulfillment.
+- **Changed (exchange record):** that `422`, and the same `422` for a `Task` the fulfillment's
+  own reading finds signed, is recorded with rule `fidelity` at stage `build` (the fidelity of
+  your gateway's own edit); earlier releases recorded the latter under no named rule (`other`).
+- **Added (Go API):** `relay.(*Document).SignedCarrier` names the signature that covers a value
+  as a whole, by the rule `relay.Apply` refuses an edit of signed content by, or nothing.
+
+## A signed Provenance's targets are read under their members' names in any case (v1.15.0)
+
+- **Changed (every role, the coverage of your gateway's own edits):** in finding what a signature
+  in a message covers before your gateway edits it, your gateway reads the members that say what a
+  signed Provenance covers by their names in any case, as it reads the signature itself: the
+  Provenance's `target` and each target's `reference`, and, in resolving a reference, a resource's
+  `id`, a Bundle entry's `fullUrl` and `resource`, and a `contained` array (such as `Target`, `ID`
+  or `Contained`). Earlier releases read them by their exact names only, so an edit your gateway
+  made in a resource a target named only through one named in another case was made and disclosed
+  without naming that Provenance's signature. That edit is refused as signed content (or, for
+  an edit made even on signed content, disclosed naming `Provenance.signature`). An object whose
+  `resourceType` is named in another case is read both ways: a signature in it is read by its
+  required members and covers the resource enclosing it, and the object is also the
+  resource it names, which a target may name and which, as a Bundle or a Provenance with its own
+  signature, covers what that signature covers.
+
+## The gateway builds on shn-sdk v1.13.0 (v1.15.0)
+
+- **Changed:** the gateway pins shn-sdk v1.13.0.
+- **Changed (facility's gateway, the federated query `federated-query`):** when it builds a CDex
+  fulfillment, your gateway reads a signature's member names in any case (such as `Signature` or
+  `SIGNATURE`): a `Signature` element found by its shape (`type`, `when` or `_when`, and `who`) in
+  the request `Task`, and a `Provenance`'s own `signature` member, for a `Provenance` in the
+  request `Task` that targets it or in your system's records that targets the `Task`, or, where
+  the request `Task` already uses the records `Bundle`'s `id` so the fulfillment gives it another,
+  in your system's records that targets the records `Bundle`. Such content is now refused `422
+  federated query refused: the request Task carries signed content, which a fulfillment cannot
+  extend`, where earlier releases could read it as unsigned and extend the `Task`.
+
+## E-14 reads the facility's Provenance signature under its name in any case (v1.15.0)
+
+- **Changed (provider's gateway, the claim update `pas-claim-update`):** when the facility's
+  Provenance that attributes a report is signed under its own signature member named in another
+  case (such as `Signature` or `SIGNATURE`), your gateway now refuses to re-point the report's
+  subject (E-14) with `422 signed content cannot be edited (E-14, Provenance.signature)`, as it
+  does for `signature`. Earlier releases re-pointed it as if the report were unsigned.
+- **Added (Go API):** `relay.OwnSignatureMember` reports whether a member is a Bundle's or a
+  Provenance's own signature, its name read in any case.
+
+## A contained Provenance's `#` target covers the resource that contains it (v1.15.0)
+
+- **Changed (every role, the coverage of your gateway's own edits):** in finding what a signature
+  in a message covers before your gateway edits it, a Provenance that a resource contains, with
+  its own signature and a target `#` (FHIR R4's reference to the resource containing it), covers
+  that resource. Earlier releases read `#` as naming nothing, so such a Provenance covered
+  only itself, and an edit your gateway made in the resource containing it was made and disclosed
+  without naming that Provenance's signature. That edit is refused as signed content (or, for
+  an edit made even on signed content, disclosed naming `Provenance.signature`). A `#` target in a
+  Provenance that is not contained names nothing.
+
+## A Bundle's or a Provenance's own signature is read under its name in any case (v1.15.0)
+
+- **Changed (every role, the coverage of your gateway's own edits):** in finding what a signature
+  in a message covers before your gateway edits it, your gateway reads a Bundle's or a
+  Provenance's own signature in that message under its member's name in any case (such as
+  `SIGNATURE`), as `Bundle.signature` or `Provenance.signature`. Earlier releases read one named
+  in another case as a `Signature` in that resource only when its `type`, `when` and `who` were
+  each named exactly (a refusal or disclosure named `Signature in Bundle` or `Signature in
+  Provenance`, and a Provenance's covered only the Provenance itself), and otherwise read no
+  signature there. So an edit your gateway makes in such a Bundle, in such a Provenance, or in a
+  resource such a Provenance in the same message targets, which earlier releases made and
+  disclosed with no signature named, or naming only `Signature in Provenance`, is now refused as
+  signed content (or, for an edit made even on signed content, disclosed naming
+  `Bundle.signature` or `Provenance.signature`).
+
+## A provider's Subscription leg: an empty page of another payer's search, documented (v1.15.0)
+
+- **Documented (provider):** on `cdex-task-subscribe`, a page that holds no Subscription is
+  delivered without the ownership test, with its `total` and its links as your system wrote
+  them. A payer holding another payer's page id learns that search's `total` and, if your system
+  writes the search's `url` into a page's links, the other payer's notification address (its
+  identity, key id and sealed endpoint value; never its endpoint or headers) and that search's
+  other parameters. The address cannot be used to subscribe, search or notify as that payer.
+  Keep your system's page ids random if the count matters to you. This is accepted, as closest
+  to a direct connection.
+- **Unchanged:** the gateway's behaviour; this documents what shn-gateway v1.15.0 does.
+
+## A signature in a message is found by its place, as FHIR R4 types it (v1.15.0)
+
+- **Changed (every role, the coverage of your gateway's own edits):** your gateway finds a `Signature` element in a message by
+  the type FHIR R4 gives its place: at any place R4 types `Signature` (such as
+  `Contract.signer.signature`, a Task input's or a Parameters parameter's `valueSignature`, an
+  extension's `valueSignature` at any depth), the member names on its path read in any case. An
+  object at a place R4 types as something else (an element of another type) does not mark its
+  resource as signed because it has a `Signature`'s members (`type`, `when`, `who`): an edit
+  there is made and disclosed with no signature named, where earlier releases refused it or named
+  a signature. One exception: a facility's gateway refuses a CDex fulfillment of a request `Task`
+  that holds such an object anywhere, or one that writes the `id` of a records `Bundle` holding such
+  an object outside its entries' resources, because the fulfillment's own reading finds a
+  `Signature` by its shape. Where no R4 type describes a place (outside any resource, in a resource whose type is
+  not an R4 resource type, in a member R4 does not define there, or a value of another kind than
+  its place's type), an object with those members is read as a signature.
+- **Changed (every role, the coverage of your gateway's own edits):** your gateway also reads as a `Signature` an object at
+  a place R4 types `Signature` that lacks a member R4 requires (among them a Bundle's or a
+  Provenance's own signature named in another case; one named `signature` was read as one
+  before too), and, where no R4 type describes the place, an object whose `Signature` members
+  (`type`, `when`, `who`) are named in another case. So an edit your gateway makes in a
+  resource holding one is refused as signed content (or, for an edit made even on signed
+  content, disclosed naming the signature), where earlier releases made and disclosed it with no
+  signature named.
+- **Changed (every role, the coverage of your gateway's own edits):** a signed-content refusal or disclosure names a resource's
+  type in its carrier (`Signature in <type>`) only when that is an R4 resource type, and
+  `Signature` otherwise, so a message names at most one such carrier per R4 resource type,
+  beside `Bundle.signature`, `Provenance.signature` and `Signature`.
+
+## E-20's row states how a search answer's link `url` is restored (v1.15.0)
+
+- **Fixed (Go API):** in package `pa/paedits`, the E-20 row (`subscription-endpoint-restore`)
+  states the rule the gateway follows. Its `Precondition` said a link's `url` was
+  restored only from a Subscription in the same answer. It now says that each address the `url`
+  names leads to your endpoint either from the search your gateway framed (on the answer to a
+  search by `url`, whatever Subscriptions the answer holds) or from a Subscription restored in
+  the same answer, all to that one endpoint. It also says that any `url` parameter, with or
+  without a modifier, that names a notification address or cannot be read and is not restored is
+  carried as written and recorded. Its `Authority` names the search your gateway framed as the
+  source of a search's link.
+- **Documented (payer):** the E-20 paragraph of `docs/CONFIGURATION.md` states the same rule:
+  each address a link's `url` names leads to your endpoint, from your search (on the answer to a
+  search by `url`) or from a restored Subscription, all to that one endpoint.
+- **Unchanged:** the gateway's behaviour.
+
+## A provider's Subscription leg: a known metadata-only limit, and update-as-create, documented (v1.15.0)
+
+- **Documented (provider):** on `cdex-task-subscribe`, a payer can tell an id that holds another
+  payer's Subscription (the network's `404`) from one that holds none (your system's own `404` or
+  `410`, carried as sent). If your system assigns Subscription ids in sequence, a payer can count
+  other payers' Subscriptions, see them appear and disappear, and count their versions, and
+  learns nothing of their content. Assign ids that are not sequential if that count matters to
+  you. An update of an id that holds no Subscription gets every check a create gets and is sent
+  as a create is (E-19), at the payer's id, as intended.
+- **Unchanged:** the gateway's behaviour; this documents what shn-gateway v1.15.0 does.
+
+## A provider's gateway serves PAS at each payer's base (v1.15.0)
+
+- **Added (provider, with the Da Vinci ingress):** from shn-gateway v1.15.0, each registered
+  payer has a base on your gateway, `{PROVIDER_DAVINCI_INGRESS_BASE_URL}/pas/payer/{payer}`,
+  named by the payer's participant id. Your EHR configures it as that payer's base, as it would
+  the payer's own base in a direct integration. `POST {base}/Claim/$submit` and
+  `POST {base}/Claim/$inquire` are served on the plain base's routes (`pas`, `pas-inquire`) and
+  legs, with the same checks, amendments and answers, and go to the payer the base names
+  whatever the request's Coverage names. `GET {base}/.well-known/smart-configuration` is the
+  plain base's SMART configuration. The base has no CapabilityStatement:
+  `GET {base}/metadata` is answered `404`.
+- **Added (provider):** a request at a payer's base is carried to the base's payer as sent.
+  A Coverage your payer directory resolves to another registered payer is noted once as the
+  observer event `pas.payer-differs` (evolving); one the gateway cannot resolve to a registered
+  payer, with no payer directory set or for what the Coverage names, as `pas.payer-unresolved`
+  (evolving). Neither carries a payer or member identifier, or refuses. At the plain base a
+  Coverage naming no payer the gateway can resolve is refused `422`.
+  `CONFORMANCE_TOLERATE_PEERS` applies to the base's payer, whose answer it is: by the
+  identifier the Coverage names when that is the base's payer, and otherwise by the payer
+  identifiers the base's payer registered.
+- **Added (provider):** at every conformance level, a payer's base that names no registered
+  payer is refused `404` with an OperationOutcome, on `routing`, before the request's content is
+  otherwise checked and before anything is sent. Only what every request at the plain base meets
+  first comes before it: the caller's authentication (`401`, or `503` when your gateway cannot
+  check it), the body's size, coding and reading (`413` over the network's limit, `415`, `400`),
+  and the `SHN-Builder` header and the builder it names (your own system must not send one; a
+  module client must, once, naming a builder of its module for the request's leg, for which a
+  `$submit`'s Claim is read only to tell a submission from an amendment). Its SMART
+  configuration is answered `404` too, with no OperationOutcome and no record, as at a payer
+  gateway's CDex base for an unknown provider.
+- **Added (provider):** a Subscription names no payer, so the plain base cannot route one.
+  Before anything is sent, at every conformance level, `POST /Subscription` is refused `422`,
+  and `GET /Subscription`, `GET` below it (a read, vread, history or instance `$status` among
+  them), and `PUT`, `PATCH` and `DELETE /Subscription/{id}` `404`, each with an OperationOutcome
+  naming `/pas/payers`, on `routing`, recorded on the route `pas-subscription` (observer tag
+  `pas-subscription-ingress`). These routes are evolving.
+- **Added (provider):** `GET /pas/payers` (evolving) lists the registered payers whose bases take
+  a Subscription, in participant id order, each with its participant id, the payer identifiers
+  it registered and its base:
+  `{"payers":[{"participant":"…","payerIdentifiers":[{"system":"…","value":"…"}],"base":"…"}]}`.
+  In v1.15.0 no payer's base takes a Subscription, so the list is empty.
+- **Upgrade note (provider):** make the routes shn-gateway v1.15.0 adds reachable at the ingress base before your EHR
+  uses them. A provider whose own proxy, WAF or load balancer admits only the routes earlier
+  releases served must add them.
+- **Changed (monitoring):** the HTTP server metric names the ten routes shn-gateway v1.15.0 adds, so its series bound
+  rises by fourteen method-route pairs.
+- **Added (Go API):** `engine.PASPayersPath`, `engine.RoutePASSubscription`,
+  `engine.PASPayerDiffersEvent` and `engine.PASPayerUnresolvedEvent`; the package
+  `pa/pasroute`; and `cdexroute.BaseUnder`, the per-participant base rule
+  `cdexroute.ProviderBase` and `pasroute.Base` share.
+- **Not yet proven live:** the payer's PAS base, the payers' listing and the plain base's
+  Subscription refusals are pinned by the gateway's own tests; no network gate sends to them.
+
 ## A payer's Subscription search's self link repeats the search, an empty answer's too (v1.14.0)
 
 - **Fixed (payer):** on the answer to your Subscription search by `url` (every Subscription
@@ -23,10 +228,10 @@ stability promise covers is in [`STABILITY.md`](STABILITY.md).
   whose `url` search parameter names a notification address, or cannot be read, and that neither
   your search nor a Subscription restored in the same answer restores, keeps the provider's
   value. That includes a link outside the base the provider's gateway states, a relative or
-  non-`http` link, and a link under no stated base. A link whose `url` parameter names no notification address keeps that parameter as sent
-  (the link itself is re-keyed to your base when it is under the base the provider's gateway
-  states) and is not recorded; an entry's `fullUrl` is
-  never recorded under this value.
+  non-`http` link, and a link under no stated base. A link whose `url` parameter names no
+  notification address keeps that parameter as sent (the link itself is re-keyed to your base
+  when it is under the base the provider's gateway states) and is not recorded; an entry's
+  `fullUrl` is never recorded under this value.
 - **Added (Go API):** `subscription.Search`, `subscription.RestoreSearch`,
   `subscription.RestoreSearchEdits` and `subscription.NotMadeLinkURL`;
   `relay.SubscriptionRestoreInputs` and `relay.Change.Restore`, the search E-20's core check of a

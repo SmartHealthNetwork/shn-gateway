@@ -125,6 +125,16 @@ func TestSupplementalReport_Refusals(t *testing.T) {
 		{"a contained signed Provenance that targets the report", strings.Replace(held, `"status":"final"`,
 			`"status":"final","contained":[`+signedProvenance("DiagnosticReport/dr-7")+`]`, 1),
 			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+		{"a contained Provenance that targets the report, signed under Signature", strings.Replace(held, `"status":"final"`,
+			`"status":"final","contained":[`+strings.Replace(signedProvenance("DiagnosticReport/dr-7"), `"signature"`, `"Signature"`, 1)+`]`, 1),
+			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+		// "#" in a contained resource names its container: the report.
+		{"a contained signed Provenance that targets its container (#)", strings.Replace(held, `"status":"final"`,
+			`"status":"final","contained":[`+signedProvenance("#")+`]`, 1),
+			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+		{"a contained Provenance that targets its container (#), signed under SIGNATURE", strings.Replace(held, `"status":"final"`,
+			`"status":"final","contained":[`+strings.Replace(signedProvenance("#"), `"signature"`, `"SIGNATURE"`, 1)+`]`, 1),
+			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
 		{"a repeated subject", strings.Replace(held, `"status":"final"`, `"subject":{"reference":"Patient/pat-7"}`, 1), http.StatusBadGateway, msgSupplementalUnreadable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,9 +151,12 @@ func TestSupplementalReport_Refusals(t *testing.T) {
 }
 
 // signedProvenance is a signed Provenance that targets ref.
-func signedProvenance(ref string) string {
+func signedProvenance(ref string) string { return signedProvenanceAs(ref, "signature") }
+
+// signedProvenanceAs is signedProvenance with its signature under member.
+func signedProvenanceAs(ref, member string) string {
 	return `{"resourceType":"Provenance","id":"prov-1","target":[{"reference":"` + ref + `"}],"recorded":"2026-01-01T00:00:00Z",` +
-		`"agent":[{"who":{"display":"a clinician"}}],"signature":[{"type":[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}],` +
+		`"agent":[{"who":{"display":"a clinician"}}],"` + member + `":[{"type":[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}],` +
 		`"when":"2026-01-01T00:00:00Z","who":{"display":"a clinician"}}]}`
 }
 

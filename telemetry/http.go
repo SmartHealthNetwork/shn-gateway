@@ -76,6 +76,15 @@ var HTTPRoutePatterns = []string{
 	"POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question",
 	"POST /Claim/$submit",
 	"POST /Claim/$inquire",
+	"POST /pas/payer/{payer}/Claim/$submit",
+	"POST /pas/payer/{payer}/Claim/$inquire",
+	"GET /pas/payers",
+	"POST /Subscription",
+	"GET /Subscription",
+	"GET /Subscription/{rest...}",
+	"PUT /Subscription/{id}",
+	"PATCH /Subscription/{id}",
+	"DELETE /Subscription/{id}",
 	"POST /CoverageEligibilityRequest/$submit",
 	"POST /$submit-attachment",
 	"POST /cdex/payer/{payer}",
@@ -84,6 +93,7 @@ var HTTPRoutePatterns = []string{
 	"GET /metadata",
 	"POST /oauth/token",
 	"GET /.well-known/smart-configuration",
+	"GET /pas/payer/{payer}/.well-known/smart-configuration",
 	"GET /.well-known/davinci-configuration",
 	"POST /Task",
 	"POST /scenario/uc01",
@@ -195,8 +205,9 @@ func HTTPStatusErrorPairs() int {
 }
 
 // HTTPServerRequestDuration is the semantic convention's server request
-// duration (MON-R29), OpenTelemetry only. Its series bound, 682,168, is a
-// cap the SDK's cardinality limit is set to; a gateway records far fewer.
+// duration (MON-R29), OpenTelemetry only. Its series bound (SeriesBound, which
+// TestHTTPServerBound_MON_R18 pins for the routes the gateway serves) is a cap
+// the SDK's cardinality limit is set to; a gateway records far fewer.
 var HTTPServerRequestDuration = &Instrument{Name: "http.server.request.duration", Kind: Histogram, Unit: "s",
 	Description: "Duration of HTTP server requests.",
 	Attributes: []Attribute{

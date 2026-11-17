@@ -612,6 +612,15 @@ const provenanceBundle = `{
   ]
 }`
 
+// renamedOnce is b with its one occurrence of from replaced by to.
+func renamedOnce(t *testing.T, b []byte, from, to string) []byte {
+	t.Helper()
+	if n := bytes.Count(b, []byte(from)); n != 1 {
+		t.Fatalf("fixture: %d occurrences of %s, want 1", n, from)
+	}
+	return bytes.Replace(b, []byte(from), []byte(to), 1)
+}
+
 func TestApplySignedContent(t *testing.T) {
 	pas := NewBody(readFixture(t, "valid/pas-submit-2.0.json"), OriginPeerFrame)
 	pasDoc := mustDoc(t, pas)
@@ -621,6 +630,13 @@ func TestApplySignedContent(t *testing.T) {
 	provDoc := mustDoc(t, prov)
 	inq := NewBody(readFixture(t, "valid/pas-inquiry-response-2.2.json"), OriginPeerFrame)
 	inqDoc := mustDoc(t, inq)
+	// The same Bundle and Provenance with each one's own signature member
+	// named in another case: still that resource's own signature, its
+	// carrier.
+	pasUpper := NewBody(renamedOnce(t, readFixture(t, "valid/pas-submit-2.0.json"), `"signature"`, `"SIGNATURE"`), OriginPeerFrame)
+	pasUpperDoc := mustDoc(t, pasUpper)
+	provTitle := NewBody(renamedOnce(t, []byte(provenanceBundle), `"signature"`, `"Signature"`), OriginPeerFrame)
+	provTitleDoc := mustDoc(t, provTitle)
 
 	str := []byte(`"changed"`)
 	type row struct {
@@ -681,6 +697,24 @@ func TestApplySignedContent(t *testing.T) {
 		}, ""},
 		{"Provenance.signature: entry metadata outside the target", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "0", "fullUrl"), str)}
+		}, ""},
+		{"Bundle.SIGNATURE: a token inside an entry", pasUpper, EditDTRCoverageObtain, func() []Op {
+			return []Op{pasUpperDoc.Replace(at(t, pasUpperDoc, "entry", "0", "fullUrl"), str)}
+		}, "Bundle.signature"},
+		{"Bundle.SIGNATURE: a member added to the Bundle", pasUpper, EditDTRCoverageObtain, func() []Op {
+			return []Op{pasUpperDoc.InsertMember(pasUpperDoc.Root(), "x", []byte(`1`))}
+		}, "Bundle.signature"},
+		{"Provenance.Signature: target by relative reference", provTitle, EditDTRCoverageObtain, func() []Op {
+			return []Op{provTitleDoc.Replace(at(t, provTitleDoc, "entry", "0", "resource", "insurer", "reference"), str)}
+		}, "Provenance.signature"},
+		{"Provenance.Signature: contained target", provTitle, EditDTRCoverageObtain, func() []Op {
+			return []Op{provTitleDoc.Replace(at(t, provTitleDoc, "entry", "3", "resource", "contained", "0", "name"), str)}
+		}, "Provenance.signature"},
+		{"Provenance.Signature: the Provenance itself", provTitle, EditDTRCoverageObtain, func() []Op {
+			return []Op{provTitleDoc.Replace(at(t, provTitleDoc, "entry", "5", "resource", "recorded"), str)}
+		}, "Provenance.signature"},
+		{"Provenance.Signature: an untargeted resource", provTitle, EditDTRCoverageObtain, func() []Op {
+			return []Op{provTitleDoc.Replace(at(t, provTitleDoc, "entry", "2", "resource", "status"), str)}
 		}, ""},
 		{"Signature element: its enclosing resource", prov, EditDTRCoverageObtain, func() []Op {
 			return []Op{provDoc.Replace(at(t, provDoc, "entry", "4", "resource", "status"), str)}

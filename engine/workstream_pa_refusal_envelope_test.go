@@ -324,7 +324,10 @@ var ingressRouteLegs = map[string][]string{
 	RouteCDexSubscriptionBase: {"cdex-task-subscribe"},
 	RouteCDexSubscription:     {"cdex-task-subscribe"},
 	RouteCDexNotify:           {"cdex-task-signal"},
-	RouteFederatedQuery:       {"federated-query"},
+	// The plain base's Subscription refusals originate no leg: the subscribe
+	// leg's taxonomy row is not yet published, so it has no answer envelope.
+	RoutePASSubscription: {},
+	RouteFederatedQuery:  {"federated-query"},
 }
 
 // noIngressRouteYet are the legs with an answer envelope that no ingress

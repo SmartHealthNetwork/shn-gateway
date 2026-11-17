@@ -16,10 +16,13 @@ import (
 // its Da Vinci ingress serves to the participant's own system: every route it
 // mounts but the operator's, with ingress authentication and the ingress
 // base URL both set, and the payer's Subscription to its Tasks' changes taken
-// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE), which mounts the notification route. A hosted edge in front of the gateway forwards exactly
-// this surface; the hosted control plane's listener rules are checked against
-// this file, so a route added here reaches the hosted edge or fails that
-// check.
+// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE), which mounts the notification route. A
+// hosted edge in front of the gateway forwards this surface as route
+// families, each serving a route here, and every route here by exactly one of
+// them; a path under a family that is not a route here reaches the gateway,
+// whose own mux answers it. The hosted control plane's listener rules are
+// checked against this file both ways, so a route added here reaches the
+// hosted edge or fails that check.
 var providerIngressSurfaceFile = filepath.Join("testdata", "provider-ingress-surface.json")
 
 // payerIngressSurfaceFile is the same for a payer gateway with its Da Vinci

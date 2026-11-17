@@ -1,15 +1,22 @@
 [
+  "DELETE /Subscription/{id}",
   "GET /.well-known/davinci-configuration",
   "GET /.well-known/smart-configuration",
+  "GET /Subscription",
+  "GET /Subscription/{rest...}",
   "GET /cdex/payers",
   "GET /cds-services",
   "GET /metadata",
+  "GET /pas/payer/{payer}/.well-known/smart-configuration",
+  "GET /pas/payers",
+  "PATCH /Subscription/{id}",
   "POST /$submit-attachment",
   "POST /Claim/$inquire",
   "POST /Claim/$submit",
   "POST /CoverageEligibilityRequest/$submit",
   "POST /Questionnaire/$next-question",
   "POST /Questionnaire/$questionnaire-package",
+  "POST /Subscription",
   "POST /Task",
   "POST /cdex/payer/{payer}",
   "POST /cdex/payer/{payer}/$submit-attachment",
@@ -18,5 +25,8 @@
   "POST /dtr/payer/{payer}/{rest...}",
   "POST /notify/cdex-task/{subscriber}/{kid}/{sealed}",
   "POST /oauth/token",
-  "POST /substrate/inbound"
+  "POST /pas/payer/{payer}/Claim/$inquire",
+  "POST /pas/payer/{payer}/Claim/$submit",
+  "POST /substrate/inbound",
+  "PUT /Subscription/{id}"
 ]

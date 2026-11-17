@@ -180,6 +180,27 @@ func signedOnce(t *testing.T, answer []byte) []byte {
 	return withBundleSignature(t, answer)
 }
 
+// signedOnceAs is signedOnce with the Bundle's own signature under member,
+// its name in any case.
+func signedOnceAs(t *testing.T, answer []byte, member string) []byte {
+	t.Helper()
+	signed := signedOnce(t, answer)
+	if member == "signature" {
+		return signed
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(signed, &top); err != nil || top["signature"] == nil {
+		t.Fatalf("fixture: no Bundle signature to rename (%v)", err)
+	}
+	top[member] = top["signature"]
+	delete(top, "signature")
+	b, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 const pendRekeyBase = "https://provider-gw.example/davinci"
 
 func rekeyRun(t *testing.T, leg carriedAnswerLeg, level ConformanceEnforcement, base string) (*httptest.ResponseRecorder, ExchangeRecord, []byte) {
@@ -248,28 +269,223 @@ func TestPASIngress_PendPayerURLIsRekeyed(t *testing.T) {
 }
 
 // A payer-url under a signature is re-keyed all the same (D127), and the
-// header names every signature that covered it.
+// header names every signature that covered it, the Bundle's own signature
+// under its name in any case ("SIGNATURE").
 func TestPASIngress_SignedPendPayerURLIsRekeyedAndDisclosed(t *testing.T) {
 	t.Parallel()
-	for _, leg := range carriedAnswerLegs() {
-		base := leg.answer
-		leg.answer = func(t *testing.T) []byte {
-			return signedOnce(t, withEntry(t, base(t), pendRekeyTask(`"valueUrl":"https://payer.example/fhir"`)))
+	for _, member := range []string{"signature", "SIGNATURE"} {
+		for _, leg := range carriedAnswerLegs() {
+			base := leg.answer
+			leg.answer = func(t *testing.T) []byte {
+				return signedOnceAs(t, withEntry(t, base(t), pendRekeyTask(`"valueUrl":"https://payer.example/fhir"`)), member)
+			}
+			for _, level := range allLevels {
+				t.Run(member+"/"+leg.leg+"/"+level.String(), func(t *testing.T) {
+					rec, xr, _ := rekeyRun(t, leg, level, pendRekeyBase)
+					if rec.Code != http.StatusOK || bytes.Contains(rec.Body.Bytes(), []byte(`"valueUrl":"https://payer.example/fhir"`)) {
+						t.Fatalf("answer %d %s, want the signed payer-url re-keyed", rec.Code, rec.Body)
+					}
+					want := []string{`pas-pend-return-rekey; signed="Bundle.signature"`}
+					if h := rec.Header().Values(EditedHeader); !slices.Equal(h, want) {
+						t.Fatalf("%s = %q, want %q", EditedHeader, h, want)
+					}
+					if !slices.Equal(xr.AnswerEdits, []string{"E-10"}) {
+						t.Fatalf("answer edits %v", xr.AnswerEdits)
+					}
+				})
+			}
 		}
-		for _, level := range allLevels {
-			t.Run(leg.leg+"/"+level.String(), func(t *testing.T) {
-				rec, xr, _ := rekeyRun(t, leg, level, pendRekeyBase)
-				if rec.Code != http.StatusOK || bytes.Contains(rec.Body.Bytes(), []byte(`"valueUrl":"https://payer.example/fhir"`)) {
-					t.Fatalf("answer %d %s, want the signed payer-url re-keyed", rec.Code, rec.Body)
+	}
+}
+
+// A payer-url in a Task a signed Provenance in the answer targets is
+// re-keyed all the same (D127), and the header names the Provenance's own
+// signature, its member named in any case ("Signature" as "signature"),
+// on every carried PAS leg and at every level.
+func TestPASIngress_PendPayerURLUnderAProvenanceSignatureIsDisclosed(t *testing.T) {
+	t.Parallel()
+	for _, member := range []string{"signature", "Signature"} {
+		prov := `{"fullUrl":"https://payer.example/fhir/Provenance/rekey-sig","resource":{"resourceType":"Provenance","id":"rekey-sig",` +
+			`"target":[{"reference":"Task/rekey"}],"recorded":"2026-10-29T00:00:00Z","agent":[{"who":{"display":"a reviewer"}}],` +
+			`"` + member + `":[{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-10-29T00:00:00Z","who":{"display":"a reviewer"}}]}}`
+		for _, leg := range carriedAnswerLegs() {
+			base := leg.answer
+			leg.answer = func(t *testing.T) []byte {
+				return withEntry(t, withEntry(t, base(t), pendRekeyTask(`"valueUrl":"https://payer.example/fhir"`)), prov)
+			}
+			// A leg whose answer is a signed Bundle names that signature too.
+			want := `pas-pend-return-rekey; signed="Provenance.signature"`
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(base(t), &top); err != nil {
+				t.Fatal(err)
+			}
+			if top["signature"] != nil {
+				want = `pas-pend-return-rekey; signed="Bundle.signature, Provenance.signature"`
+			}
+			for _, level := range allLevels {
+				t.Run(member+"/"+leg.leg+"/"+level.String(), func(t *testing.T) {
+					rec, xr, _ := rekeyRun(t, leg, level, pendRekeyBase)
+					if rec.Code != http.StatusOK || bytes.Contains(rec.Body.Bytes(), []byte(`"valueUrl":"https://payer.example/fhir"`)) {
+						t.Fatalf("answer %d %s, want the signed payer-url re-keyed", rec.Code, rec.Body)
+					}
+					if h := rec.Header().Values(EditedHeader); !slices.Equal(h, []string{want}) {
+						t.Fatalf("%s = %q, want %q", EditedHeader, h, want)
+					}
+					if !slices.Equal(xr.AnswerEdits, []string{"E-10"}) {
+						t.Fatalf("answer edits %v", xr.AnswerEdits)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A payer-url in a Task that contains a signed Provenance targeting "#", its
+// container, is re-keyed all the same (D127), and the header names that
+// Provenance's own signature, its member named in any case, on every
+// carried PAS leg and at every level. "#" from a Provenance that is an entry,
+// not contained, names nothing: the re-key is disclosed with no signature
+// of its own (on the submit and update legs at none and observe only: their
+// reference graph check refuses that "#" at structural and strict).
+func TestPASIngress_PendPayerURLUnderAContainedProvenanceSignatureIsDisclosed(t *testing.T) {
+	t.Parallel()
+	prov := func(member string) string {
+		return `{"resourceType":"Provenance","id":"rekey-sig","target":[{"reference":"#"}],"recorded":"2026-10-29T00:00:00Z",` +
+			`"agent":[{"who":{"display":"a reviewer"}}],` +
+			`"` + member + `":[{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-10-29T00:00:00Z","who":{"display":"a reviewer"}}]}`
+	}
+	for _, c := range []struct {
+		name      string
+		contained bool
+		member    string
+	}{
+		{"contained/signature", true, "signature"},
+		{"contained/SIGNATURE", true, "SIGNATURE"},
+		{"contained/ſignature", true, "ſignature"},
+		{"an entry", false, "signature"},
+	} {
+		for _, leg := range carriedAnswerLegs() {
+			base := leg.answer
+			leg.answer = func(t *testing.T) []byte {
+				task := pendRekeyTask(`"valueUrl":"https://payer.example/fhir"`)
+				if c.contained {
+					task = strings.Replace(task, `"status":"requested",`, `"status":"requested","contained":[`+prov(c.member)+`],`, 1)
+					return withEntry(t, base(t), task)
 				}
-				want := []string{`pas-pend-return-rekey; signed="Bundle.signature"`}
-				if h := rec.Header().Values(EditedHeader); !slices.Equal(h, want) {
-					t.Fatalf("%s = %q, want %q", EditedHeader, h, want)
+				return withEntry(t, withEntry(t, base(t), task), `{"fullUrl":"https://payer.example/fhir/Provenance/rekey-sig","resource":`+prov(c.member)+`}`)
+			}
+			var signed []string
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(base(t), &top); err != nil {
+				t.Fatal(err)
+			}
+			if top["signature"] != nil {
+				signed = append(signed, "Bundle.signature")
+			}
+			if c.contained {
+				signed = append(signed, "Provenance.signature")
+			}
+			want := "pas-pend-return-rekey"
+			if len(signed) > 0 {
+				want += `; signed="` + strings.Join(signed, ", ") + `"`
+			}
+			for _, level := range allLevels {
+				if !c.contained && leg.leg != "pas-claim-inquire" && (level == EnforcementStructural || level == EnforcementStrict) {
+					// The submit and update answers' reference graph
+					// check (opt-in, structural and strict) refuses a "#"
+					// outside any contained resource itself; the inquiry
+					// answer's check reads no reference graph.
+					continue
 				}
-				if !slices.Equal(xr.AnswerEdits, []string{"E-10"}) {
-					t.Fatalf("answer edits %v", xr.AnswerEdits)
+				t.Run(c.name+"/"+leg.leg+"/"+level.String(), func(t *testing.T) {
+					rec, xr, _ := rekeyRun(t, leg, level, pendRekeyBase)
+					if rec.Code != http.StatusOK || bytes.Contains(rec.Body.Bytes(), []byte(`"valueUrl":"https://payer.example/fhir"`)) {
+						t.Fatalf("answer %d %s, want the payer-url re-keyed", rec.Code, rec.Body)
+					}
+					if h := rec.Header().Values(EditedHeader); !slices.Equal(h, []string{want}) {
+						t.Fatalf("%s = %q, want %q", EditedHeader, h, want)
+					}
+					if !slices.Equal(xr.AnswerEdits, []string{"E-10"}) {
+						t.Fatalf("answer edits %v", xr.AnswerEdits)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A payer-url in a Task a signed Provenance in the answer covers through
+// members named in another case is re-keyed all the same (D127), and the
+// header names that Provenance's signature, on every carried PAS leg and at
+// every level. Each case names the Task through one such member only: the
+// Provenance's target or its reference, the Task's id, its entry's fullUrl
+// or resource, or the Task's contained array holding the Provenance. On the
+// submit and update legs at structural and strict, the answer's reference
+// graph check (opt-in) reads a Task with no usable id or fullUrl, or an
+// entry with no resource, as a broken graph and refuses the answer first.
+func TestPASIngress_PendPayerURLUnderAProvenanceTargetInAnyCaseIsDisclosed(t *testing.T) {
+	t.Parallel()
+	prov := func(target, reference, ref string) string {
+		return `{"resourceType":"Provenance","id":"rekey-sig","` + target + `":[{"` + reference + `":"` + ref + `"}],"recorded":"2026-10-29T00:00:00Z",` +
+			`"agent":[{"who":{"display":"a reviewer"}}],"signature":[{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-10-29T00:00:00Z","who":{"display":"a reviewer"}}]}`
+	}
+	entry := func(p string) string {
+		return `{"fullUrl":"https://payer.example/fhir/Provenance/rekey-sig","resource":` + p + `}`
+	}
+	task := pendRekeyTask(`"valueUrl":"https://payer.example/fhir"`)
+	const taskURL = "https://payer.example/fhir/Task/rekey"
+	for _, c := range []struct {
+		name    string
+		graph   string // the reference graph check's refusal, where it reads one
+		entries []string
+	}{
+		{"Target", "", []string{task, entry(prov("Target", "reference", "Task/rekey"))}},
+		{"REFERENCE", "", []string{task, entry(prov("target", "REFERENCE", "Task/rekey"))}},
+		// The Task's fullUrl ends in another id: only its id names it.
+		{"ID", "carries a resource without a usable resourceType and id", []string{strings.NewReplacer(`"id":"rekey"`, `"ID":"rekey"`, taskURL+`"`, taskURL+`-entry"`).Replace(task), entry(prov("target", "reference", "Task/rekey"))}},
+		// The Task's own id is another: only its entry's fullUrl names it.
+		{"FullUrl", "has no fullUrl", []string{strings.NewReplacer(`"fullUrl"`, `"FullUrl"`, `"id":"rekey"`, `"id":"rekey-task"`).Replace(task), entry(prov("target", "reference", taskURL))}},
+		{"Resource", "carries no resource", []string{strings.NewReplacer(`"resource"`, `"Resource"`, `"id":"rekey"`, `"id":"rekey-task"`).Replace(task), entry(prov("target", "reference", taskURL))}},
+		{"Contained", "", []string{strings.Replace(task, `"status":"requested",`, `"status":"requested","Contained":[`+prov("target", "reference", "#")+`],`, 1)}},
+	} {
+		for _, leg := range carriedAnswerLegs() {
+			base := leg.answer
+			leg.answer = func(t *testing.T) []byte {
+				a := base(t)
+				for _, e := range c.entries {
+					a = withEntry(t, a, e)
 				}
-			})
+				return a
+			}
+			want := `pas-pend-return-rekey; signed="Provenance.signature"`
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(base(t), &top); err != nil {
+				t.Fatal(err)
+			}
+			if top["signature"] != nil {
+				want = `pas-pend-return-rekey; signed="Bundle.signature, Provenance.signature"`
+			}
+			for _, level := range allLevels {
+				t.Run(c.name+"/"+leg.leg+"/"+level.String(), func(t *testing.T) {
+					rec, xr, _ := rekeyRun(t, leg, level, pendRekeyBase)
+					if c.graph != "" && leg.leg != "pas-claim-inquire" && (level == EnforcementStructural || level == EnforcementStrict) {
+						if rec.Code != http.StatusBadGateway || !bytes.Contains(rec.Body.Bytes(), []byte("PAS response graph: entry 1")) ||
+							!bytes.Contains(rec.Body.Bytes(), []byte(c.graph)) || len(xr.AnswerEdits) != 0 {
+							t.Fatalf("answer %d %s, edits %v: want the reference graph refusal", rec.Code, rec.Body, xr.AnswerEdits)
+						}
+						return
+					}
+					if rec.Code != http.StatusOK || bytes.Contains(rec.Body.Bytes(), []byte(`"valueUrl":"https://payer.example/fhir"`)) {
+						t.Fatalf("answer %d %s, want the signed payer-url re-keyed", rec.Code, rec.Body)
+					}
+					if h := rec.Header().Values(EditedHeader); !slices.Equal(h, []string{want}) {
+						t.Fatalf("%s = %q, want %q", EditedHeader, h, want)
+					}
+					if !slices.Equal(xr.AnswerEdits, []string{"E-10"}) {
+						t.Fatalf("answer edits %v", xr.AnswerEdits)
+					}
+				})
+			}
 		}
 	}
 }

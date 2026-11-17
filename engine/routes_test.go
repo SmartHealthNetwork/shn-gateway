@@ -29,6 +29,15 @@ var (
 		"POST /dtr/fetch-server/{payer}/{line}/{tag}/Questionnaire/$next-question",
 		"POST /Claim/$submit",
 		"POST /Claim/$inquire",
+		"POST /pas/payer/{payer}/Claim/$submit",
+		"POST /pas/payer/{payer}/Claim/$inquire",
+		"GET /pas/payers",
+		"POST /Subscription",
+		"GET /Subscription",
+		"GET /Subscription/{rest...}",
+		"PUT /Subscription/{id}",
+		"PATCH /Subscription/{id}",
+		"DELETE /Subscription/{id}",
 		"POST /CoverageEligibilityRequest/$submit",
 		"POST /$submit-attachment",
 		"POST /cdex/payer/{payer}",
@@ -43,6 +52,10 @@ var (
 		"POST /oauth/token",
 		"GET /.well-known/smart-configuration",
 	}
+	// providerIngressAuthRoutePatterns are mounted on a provider whose
+	// ingress authenticates its callers: a payer's base's SMART
+	// configuration.
+	providerIngressAuthRoutePatterns = []string{"GET /pas/payer/{payer}/.well-known/smart-configuration"}
 	// davinciConfigRoutePatterns are mounted when the ingress names its base
 	// URL.
 	davinciConfigRoutePatterns = []string{"GET /.well-known/davinci-configuration"}
@@ -131,6 +144,7 @@ func wantRoutes(role string, c routeConditions) []string {
 			want = append(want, ingressRoutePatterns...)
 			if c.ingressAuth {
 				want = append(want, ingressAuthRoutePatterns...)
+				want = append(want, providerIngressAuthRoutePatterns...)
 			}
 			if c.baseURL {
 				want = append(want, davinciConfigRoutePatterns...)
@@ -241,7 +255,7 @@ func TestRoutes_EachRoleMountsItsPinnedSet(t *testing.T) {
 // The split above is the classified lists, and every condition's set is a
 // subset of what the classification says the role registers.
 func TestRoutes_PinnedSetsAreTheClassifiedRoutes(t *testing.T) {
-	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns, notifyRoutePatterns)
+	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, providerIngressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns, notifyRoutePatterns)
 	slices.Sort(split)
 	other := slices.Clone(providerOtherRoutes)
 	slices.Sort(other)

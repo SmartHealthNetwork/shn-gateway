@@ -203,7 +203,10 @@ func rekeyFacilityReportSubject(report, provenance []byte, claimPatient string) 
 }
 
 // provenanceSigned reports whether the facility's Provenance that attributes
-// the report carries a signature, which covers the report it targets. A
+// the report carries its own signature, which covers the report it targets:
+// a member relay.OwnSignatureMember reads as a Provenance's signature, by
+// its name in any case, as the signed-content check reads a Provenance in
+// the message. It is read as a Provenance whatever its resourceType says. A
 // Provenance it cannot read is an error: whether a signature covers the
 // report is unknown, so the edit is not made.
 func provenanceSigned(provenance []byte) (bool, error) {
@@ -211,8 +214,12 @@ func provenanceSigned(provenance []byte) (bool, error) {
 	if err != nil || doc.Kind(doc.Root()) != relay.KindObject {
 		return false, errors.New("the Provenance attributing the supplemental report is not a resource")
 	}
-	_, ok := doc.Member(doc.Root(), "signature")
-	return ok, nil
+	for _, m := range doc.Members(doc.Root()) {
+		if relay.OwnSignatureMember("Provenance", m.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // facilityReportCheck admits the facility's report exactly as answered, or

@@ -56,15 +56,15 @@ func signedSearchset(e, g int, dup bool) string {
 		fmt.Fprintf(&b, `{"relation":"next","url":"https://p.example/fhir/Subscription?i=%d"}`, i)
 	}
 	b.WriteString(`],"entry":[`)
-	sig := `{"type":[],"when":"x","who":{}}`
+	sig := `{"url":"u","valueSignature":{"type":[],"when":"x","who":{}}}`
 	if dup {
-		b.WriteString(`{"resource":{"resourceType":"Subscription","s":[` + strings.TrimSuffix(strings.Repeat(sig+",", g), ",") + `]}}`)
+		b.WriteString(`{"resource":{"resourceType":"Subscription","extension":[` + strings.TrimSuffix(strings.Repeat(sig+",", g), ",") + `]}}`)
 	} else {
 		for i := range g {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			b.WriteString(`{"resource":{"resourceType":"Subscription","s":` + sig + `}}`)
+			b.WriteString(`{"resource":{"resourceType":"Subscription","extension":[` + sig + `]}}`)
 		}
 	}
 	b.WriteString(`]}`)
@@ -88,6 +88,11 @@ func TestCoverageHitsCostIsNearLinearInEditsAndRegions(t *testing.T) {
 				t.Fatal(err)
 			}
 			cov := coverage(doc.d)
+			// Each Subscription is covered by its own Signatures, kept once
+			// a region: n regions, or one.
+			if want := map[bool]int{false: n, true: 1}[dup]; len(cov.regions) != want {
+				t.Fatalf("%d covered regions, want %d", len(cov.regions), want)
+			}
 			return func() {
 				for _, eff := range m.effects {
 					_ = cov.hits(*eff)
@@ -112,8 +117,7 @@ func TestApplyCostIsNearLinearInSignedProvenance(t *testing.T) {
 	})
 }
 
-// typeName is the i-th of distinct names a carrier repeats ("Signature in
-// <type>"): a capital, then letters.
+// typeName is the i-th of distinct names: a capital, then letters.
 func typeName(i int) string {
 	b := []byte{'A'}
 	for {
@@ -125,28 +129,24 @@ func typeName(i int) string {
 	}
 }
 
-// One effect touching many regions, each its own carrier (a signed resource
-// of its own type inside the value an edit changes), costs time near linear
-// in them, not their number times the carriers already found.
+// One effect touching many regions, each its own carrier, costs time near
+// linear in them, not their number times the carriers already found. A
+// document's carriers are bounded (one per R4 resource type, and three
+// more; TestCoverageCarriersAreBounded), far below this row's sizes, so it
+// builds the regions itself, as a document's resources lie (side by side,
+// each signed under a carrier of its own), to hold hits to it for any
+// carrier set.
 func TestCoverageHitsCostIsNearLinearInDistinctCarriers(t *testing.T) {
 	wantLinearCost(t, "hits (distinct carriers)", 49152, func(n int) func() {
-		var b strings.Builder
-		b.WriteString(`{"resourceType":"Bundle","x":[`)
+		regions := make([]coveredRegion, n)
 		for i := range n {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(`{"resourceType":"` + typeName(i) + `","s":{"type":[],"when":"x","who":{}}}`)
+			regions[i] = coveredRegion{start: 2 * i, end: 2*i + 1, carrier: "Signature in " + typeName(i)}
 		}
-		b.WriteString(`],"v":1}`)
-		d, err := splice.Scan([]byte(b.String()), splice.Limits{})
-		if err != nil {
-			t.Fatal(err)
+		cov := newCoverageMap(regions)
+		if !cov.nested {
+			t.Fatal("side-by-side regions read as not nested")
 		}
-		x, _ := d.Member(d.Root(), "x")
-		s, e := d.Span(x)
-		eff := effect{start: s, end: e}
-		cov := coverage(d)
+		eff := effect{start: 0, end: 2 * n}
 		if got := len(cov.hits(eff)); got != n {
 			t.Fatalf("%d carriers, want %d", got, n)
 		}

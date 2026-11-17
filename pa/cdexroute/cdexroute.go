@@ -58,10 +58,18 @@ const ProviderPrefix = "/cdex/provider/"
 // checks by the same rule, so a base it would refuse is refused here, where a
 // payer gateway's boot check builds one.
 func ProviderBase(ingressBase, provider string) (string, error) {
+	return BaseUnder(ingressBase, ProviderPrefix, provider, "provider")
+}
+
+// BaseUnder is the base of participant's one segment after prefix, under a
+// gateway's own ingress base, held to ProviderBase's rules and refused with
+// its errors: another per-participant base on the same ingress (pasroute) is
+// built by the one rule. role names the participant in an error.
+func BaseUnder(ingressBase, prefix, participant, role string) (string, error) {
 	if err := canonicalBase(ingressBase); err != nil {
 		return "", err
 	}
-	return under(ingressBase, ProviderPrefix, provider, "provider")
+	return under(ingressBase, prefix, participant, role)
 }
 
 // The ways an ingress base is not canonical (canonicalBase).
