@@ -13,6 +13,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdexroute"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdextask"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -76,6 +77,10 @@ const (
 	// Patient a bare reference names.
 	cdexReadUnboundRedirected = "Task.for is a reference Patient/{id}, and the provider's system answered the read from another address after a redirect, so the gateway cannot tell which server that Patient is on: answer the read at the Task endpoint itself, or name the member on the Task's subject (an identifier typed v2-0203#MB)"
 	cdexReadUnboundPatient    = "the Patient Task.for names carries no one member identifier (system " + shnsdk.MemberSystem + ")"
+	// The member the provider's own answer names the patient by (the Task's
+	// member number, or its Patient's member identifier) is blank: it names no
+	// one, and the provider's system answered it, not the reading payer.
+	cdexReadUnboundNamesNoOne = "the provider's system names the Task's patient by a member identifier that names no one (it is blank, or a bare Patient/)"
 )
 
 // cdexReadNotFound is the network's answer to a provider's 2xx that the
@@ -240,8 +245,16 @@ func (g *Gateway) bindCDexReadSubject(ctx context.Context, task cdextask.Task, t
 		exchangeOf(ctx).refusing(RefusalAuthority)
 		return "", http.StatusBadGateway, refusalCDexReadUnbound + cause
 	}
+	// Both bytes bound from are the provider's own system's: the Task it answered
+	// (read strictly, cdexReadDelivers), and the Patient its record holds, which is
+	// never scanned strictly. Either is bound as the system of record's answer
+	// (bindRecordSubjectRecorded): one the binding cannot decode binds the member by
+	// its id alone, as in earlier releases, and the read is carried.
 	bind := func(member string, payload []byte) (string, int, string) {
-		pci, status, msg, recorded := g.bindInboundSubjectRecorded(ctx, member, payload, http.StatusBadGateway)
+		if memberNamesNoOne(member) {
+			return unbound(cdexReadUnboundNamesNoOne)
+		}
+		pci, status, msg, recorded := g.bindRecordSubjectRecorded(ctx, member, payload, http.StatusBadGateway)
 		switch {
 		case status == 0:
 			return pci, 0, ""
@@ -303,7 +316,7 @@ func barePatientReference(p cdextask.Patient) (string, bool) {
 		return "", false
 	}
 	id, ok := strings.CutPrefix(p.Reference, "Patient/")
-	if !ok || id == "." || id == ".." || !idShape.MatchString(id) {
+	if !ok || !fhirid.Valid(id) {
 		return "", false
 	}
 	return id, true

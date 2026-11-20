@@ -458,6 +458,9 @@ func TestRelayEditReceivedByTable(t *testing.T) {
 		// system: no other party receives either.
 		relay.EditSubscriptionEndpointRekey:  {"subscription-endpoint-rekey", 0},
 		relay.EditSubscriptionURLSearchRekey: {"subscription-url-search-rekey", 0},
+		// E-22 is made on the delivery to the provider's own endpoint: no
+		// other party receives it.
+		relay.EditPASNotifiedReturnRekey: {"pas-notified-return-rekey", 0},
 		// E-18 is made to the Subscription the subscriber's gateway sends:
 		// the notifier's gateway receives it. E-20 and E-23 are made on the
 		// answer to the subscriber's own system: no other party receives

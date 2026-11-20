@@ -416,9 +416,10 @@ func pasMemberFromRefOK(ref string) (string, bool) {
 // is no member on any leg, even named by a bare reference to a patient the
 // system holds and the request does not carry (a dependent's parent, as
 // origination sends it on CRD and DTR). Its control, the same reference as an
-// order's subject, is named. The elements are FHIR's, by their exact
-// (case-sensitive) names: an element "Subscriber" is no Coverage slot, and the
-// patient it references is named as any other.
+// order's subject, is named. The elements are FHIR's, read as FHIR spells them
+// within the Coverage whatever the case they are sent in (strictView): an
+// element "Subscriber" is the Coverage's subscriber slot, so the patient it
+// references is its party and named by no one, as for the exact spelling.
 func TestCarriedMembers_ABareCoverageSlotNamesNoOne(t *testing.T) {
 	coverage := func(slot string) string {
 		return `{"resourceType":"Coverage","beneficiary":{"reference":"Patient/MBR-COVERED"},"` + slot + `":{"reference":"Patient/MBR-OX"}}`
@@ -448,10 +449,12 @@ func TestCarriedMembers_ABareCoverageSlotNamesNoOne(t *testing.T) {
 	}
 	for leg, payload := range payloads("Subscriber") {
 		t.Run("Subscriber/"+leg, func(t *testing.T) {
-			g, _ := heldRecordsGateway(t)
-			got := g.requestNamedPatients(context.Background(), leg, "corr-1", []byte(payload), heldPCI(t, "MBR-COVERED"))
-			if want := []involvedPatient{{pci: heldPCI(t, "MBR-OX"), involvement: shnsdk.InvolvementRequestNamed}}; !slices.Equal(got, want) {
-				t.Fatalf("named %v, want MBR-OX: \"Subscriber\" is no Coverage element", got)
+			if got := carriedMembers([]byte(payload), leg); slices.Contains(got, "MBR-OX") {
+				t.Fatalf("members %v name the Coverage's party", got)
+			}
+			g, omitted := heldRecordsGateway(t)
+			if got := g.requestNamedPatients(context.Background(), leg, "corr-1", []byte(payload), heldPCI(t, "MBR-COVERED")); got != nil || len(*omitted) != 0 {
+				t.Fatalf("named %v, omitted %v; want no one: \"Subscriber\" is the subscriber slot", got, *omitted)
 			}
 		})
 	}
@@ -842,7 +845,7 @@ func TestRequestNamedPatients_ANameOfACutMemberIsLeftOut(t *testing.T) {
 			`{"resource":` + patient + `},` + strings.Join(entries, ",") + `]}`),
 	} {
 		t.Run(leg, func(t *testing.T) {
-			if got := namedMembers(payload, leg); len(got) != maxInvolvedMembers+1 || got[len(got)-1].member != "zz-subject" {
+			if got := mustMembers(t)(namedMembers(payload, leg)); len(got) != maxInvolvedMembers+1 || got[len(got)-1].member != "zz-subject" {
 				t.Fatalf("members %v: the row needs the subject cut last", got)
 			}
 			g, omitted := heldRecordsGateway(t)
@@ -1045,7 +1048,7 @@ func TestRequestNamedPatients_NoOneIsNamedWhenTheWalkRunsOutOfBudget(t *testing.
 	if err != nil || !found {
 		t.Fatalf("subject: %v %v", found, err)
 	}
-	members := namedMembers(payload, "dtr-questionnaire-fetch")
+	members := mustMembers(t)(namedMembers(payload, "dtr-questionnaire-fetch"))
 	results := []namedResult{}
 	for _, m := range members {
 		pci, outcome, err := g.identifyNamed(context.Background(), m, subject)
@@ -1153,10 +1156,11 @@ func TestRequestNamedPatients_CRDsContextPatientIDIsNeverNamed(t *testing.T) {
 	}
 }
 
-// A request that repeats a member name, which readers may read two ways, names
-// no member off PAS (its members are read as the strict reader reads it), so no
-// one is named. Its control: the same request without the repeat names the
-// held member.
+// A request that repeats a member name, which readers may read two ways, is
+// read as the strict reader reads it: it names no member, and the involved pass
+// records the omission once, request-unreadable, rather than read as a request naming
+// no one. Its control: the same request without the repeat names the held
+// member.
 func TestRequestNamedPatients_ARequestThatRepeatsANameNamesNoOne(t *testing.T) {
 	for _, tc := range []struct {
 		name, obs string
@@ -1171,7 +1175,7 @@ func TestRequestNamedPatients_ARequestThatRepeatsANameNamesNoOne(t *testing.T) {
 			g, omitted := heldRecordsGateway(t)
 			got := g.requestNamedPatients(context.Background(), "dtr-questionnaire-fetch", "corr-1", payload, heldPCI(t, "MBR-COVERED"))
 			var want []involvedPatient
-			var omits []string
+			omits := []string{involvedOmitRequestUnreadable}
 			if tc.named {
 				want, omits = []involvedPatient{{pci: heldPCI(t, "MBR-OX"), involvement: shnsdk.InvolvementRequestNamed}}, nil
 			}

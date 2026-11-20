@@ -169,10 +169,16 @@ type payerAnswer struct {
 }
 
 // send delivers body on leg through handleInbound, bound to the covered
-// member's pci, naming operation in the request frame when set.
+// member's pci on a leg whose request names its patient, and to no patient on
+// one whose row says its request names none, as the Framework mints it,
+// naming operation in the request frame when set.
 func (p *levelPayer) send(t *testing.T, leg, operation string, body []byte) payerAnswer {
 	t.Helper()
-	return p.sendAs(t, leg, operation, body, p.pci)
+	subject := p.pci
+	if spec, ok := legSpecFor(leg); ok && (spec.namesNoPatient() || spec.fromAnswer()) {
+		subject = ""
+	}
+	return p.sendAs(t, leg, operation, body, subject)
 }
 
 // sendAs is send for a token whose subject is subject.

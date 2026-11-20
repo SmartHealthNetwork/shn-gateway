@@ -47,6 +47,7 @@ type deliveryEdit func(g *Gateway, x *exchangeRecorder, doc *relay.Document, in 
 // (TestDeliveryEdits_EveryRegisteredEditHasAMaker).
 var deliveryEdits = map[relay.EditID]deliveryEdit{
 	relay.EditCDexTaskNotificationAddressRekey: (*Gateway).notificationAddressRekey,
+	relay.EditPASNotifiedReturnRekey:           (*Gateway).pasNotifiedReturnRekey,
 }
 
 // deliveryEditIDs are the registered edits of leg that the recipient makes on

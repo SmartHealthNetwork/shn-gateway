@@ -276,6 +276,15 @@ func TestSubscriber_TheScopeEachRequestTakes(t *testing.T) {
 		"system/Task.write system/Task.read":  false,
 		"system/subscription.c":               false,
 		"system/Task.c system/Subscription.c": true,
+		// A wildcard permits the Subscription routes for what it grants.
+		"system/*.c":                 true,
+		"system/*.write":             true,
+		"system/*.*":                 true,
+		"system/*.rs":                false,
+		"system/*.c?x=1":             false,
+		"system/*.rc":                false,
+		"patient/*.write":            false,
+		"system/Task.r system/*.cud": true,
 	} {
 		if got := subscriptionScopesPermit(granted, taskCreate); got != want {
 			t.Errorf("%q permits a create: %v, want %v", granted, got, want)
@@ -286,17 +295,21 @@ func TestSubscriber_TheScopeEachRequestTakes(t *testing.T) {
 	}
 }
 
-// A registered client's Subscription scopes are advertised as listed, one
-// with a query or a misspelled one never; and the boot rule refuses a
-// misspelled Subscription scope.
+// A registered client's Subscription scopes and wildcards are advertised as
+// listed, each once, one with a query or a misspelled one never; and the boot
+// rule refuses a misspelled Subscription scope.
 func TestSubscriber_ScopesAdvertisedAndChecked(t *testing.T) {
 	clients := map[string]IngressClientRegistration{
 		"a": {Scopes: []string{TaskWriteScope, "system/Subscription.cruds", "system/Subscription.r?x=1"}},
 		"b": {Scopes: []string{TaskWriteScope, "system/Subscription.read"}},
 		"m": {Module: "x", Scopes: []string{"system/Subscription.*"}},
+		// A wildcard is advertised as a resource scope is: one that grants
+		// r once, as a read scope and a Subscription scope both, and one
+		// that grants only create as a Subscription scope.
+		"w": {Scopes: []string{"system/*.rs", "system/*.write", "system/*.c?x=1"}},
 	}
-	got := ingressScopes("payer", clients)
-	if want := []string{TaskWriteScope, "system/Subscription.cruds", "system/Subscription.read"}; !slices.Equal(got, want) {
+	got := ingressScopes("payer", clients, false)
+	if want := []string{TaskWriteScope, "system/*.rs", "system/*.write", "system/Subscription.cruds", "system/Subscription.read"}; !slices.Equal(got, want) {
 		t.Fatalf("advertised %q, want %q", got, want)
 	}
 	if err := CheckPayerIngressScopes([]string{TaskWriteScope, "system/Subscription.xyz"}); err == nil {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/internal/endpointcert"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 )
 
 // Reading the Coverage through the request's own fhirServer (CDS Hooks): the
@@ -476,7 +477,7 @@ func payorOrganizationID(ref, base string) (string, bool) {
 	if !ok && base != "" {
 		rest, ok = strings.CutPrefix(ref, strings.TrimRight(base, "/")+"/Organization/")
 	}
-	if !ok || !fhirIDRE.MatchString(rest) || rest == "." || rest == ".." {
+	if !ok || !fhirid.Valid(rest) {
 		return "", false
 	}
 	return rest, true

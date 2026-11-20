@@ -868,7 +868,7 @@ func inquiryDecisionOf(raw []byte) (string, shnsdk.PriorAuthResult, bool) {
 func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request) {
 	w, scope := g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopePASInquire) {
 		return
 	}
 	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)

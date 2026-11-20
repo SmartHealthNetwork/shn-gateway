@@ -43,8 +43,15 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 	// level. One the PHG does not hold reads the same as one that is someone else,
 	// so the refusal does not tell the requester whether the PHG holds the patient.
 	member := strings.TrimPrefix(req.PatientRef, "Patient/")
-	if member == "" {
+	if req.PatientRef == "" {
 		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalPatientDTRNoPatient, nil)
+		return
+	}
+	// A reference that names no one ("Patient/" with no id, or a blank one) is
+	// refused as every route refuses it, on authority, before anything is read.
+	if memberNamesNoOne(member) {
+		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonMemberNamesNoOne)
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, msgMemberNamesNoOne, nil)
 		return
 	}
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)

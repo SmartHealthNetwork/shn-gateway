@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"sort"
@@ -12,11 +13,13 @@ import (
 )
 
 // paRequestInvolvedLegs are the PA legs whose request names the other
-// patients it carries and whose answer names the payer's own binding of the
-// member when it differs from the leg token's patient: the
-// prior-authorization legs, and coverage eligibility, whose batch names a
-// patient for each request.
+// patients it carries and, but on the PAS content notification, whose answer
+// names the payer's own binding of the member when it differs from the leg
+// token's patient: the prior-authorization legs, coverage eligibility, whose
+// batch names a patient for each request, and the PAS topic's content
+// notification, whose decision may name more than one (D31).
 var paRequestInvolvedLegs = map[string]bool{
+	"pas-subscription-notify": true,
 	"coverage-eligibility":    true,
 	"crd-order-select":        true,
 	"crd-order-dispatch":      true,
@@ -31,7 +34,9 @@ var paRequestInvolvedLegs = map[string]bool{
 // paRequestInvolvedLegs, neither on the others.
 func (paWorkstream) involvement(leg string) (request, answer bool) {
 	in := paRequestInvolvedLegs[leg]
-	return in, in
+	// The PAS content notification's answer is the provider's endpoint's,
+	// carried as it answered: no payer binding to name.
+	return in, in && leg != legPASSubscriptionNotify
 }
 
 // requestMembers is every member a request on PA leg names, each read exactly as
@@ -39,27 +44,71 @@ func (paWorkstream) involvement(leg string) (request, answer bool) {
 // member of each request it submits, read as its binding reads it
 // (eligibilitySubmissions, eligibilitySubmissionMember) and bound from the
 // resources carried with that request; every other leg names carriedMembers,
-// bound from the whole request.
-func (paWorkstream) requestMembers(leg string, payload []byte) []namedMember {
+// bound from the whole request. Off coverage eligibility the request is read from its
+// strict view (strictView), once for every reader here; a non-empty request no
+// view can be made of is errRequestPatientsUnreadable, never read as naming no one.
+// On coverage eligibility, a body eligibilitySubmissions cannot read, empty or
+// absent included, is errRequestPatientsUnreadable too, and each request it
+// submits whose own member cannot be read is an unreadable member, never left
+// out as naming no one.
+func (w paWorkstream) requestMembers(leg string, payload []byte) ([]namedMember, error) {
+	return w.requestMembersIn(context.Background(), leg, payload)
+}
+
+// requestMembersIn is requestMembers, the PAS content notification's read
+// at the payer's FHIR base its gateway states, which the notification's
+// context carries (withNotifiedBase), as its binding reads it.
+func (paWorkstream) requestMembersIn(ctx context.Context, leg string, payload []byte) ([]namedMember, error) {
+	if leg == legPASSubscriptionNotify {
+		return pasNotifiedMembers(payload, notifiedBaseFrom(ctx))
+	}
 	var out []namedMember
 	if leg == "coverage-eligibility" {
+		// An eligibility request always names its member, so a body whose
+		// requests cannot be read, an empty or absent one included, is one
+		// whose patients are unknown: errRequestPatientsUnreadable, counted as
+		// an omission and never read as naming no one. So is each request in
+		// it whose own member cannot be read: an unreadable member, counted
+		// once, beside every member the other requests name; a request whose
+		// reference names no one (errMemberNamesNoOne) is such a member.
+		// Which routes reach each case: the leg's ingress route
+		// reads the body with eligibilitySubmissions and each request's member
+		// with eligibilitySubmissionMember, and refuses either error 400 first
+		// ("parse member failed" for the member, or its own text for one that
+		// names no one), so only an embedder's direct
+		// OriginateLeg sends a body or a request this cannot read. Module 1
+		// builds its own request with the SDK's builder for a member its system
+		// of record holds, so it never sends any of these.
 		subs, err := eligibilitySubmissions(payload)
 		if err != nil {
-			return nil
+			return nil, errRequestPatientsUnreadable
 		}
 		for _, sub := range subs {
-			if m, err := eligibilitySubmissionMember(sub); err == nil && m != "" {
-				out = append(out, namedMember{member: m, scope: sub.scope, ownScope: true})
+			// A request whose patient reference names no one is a read error
+			// (errMemberNamesNoOne), never a blank member: it is counted as
+			// unreadable, and the system of record is never read for it.
+			m, err := eligibilitySubmissionMember(sub)
+			if err != nil {
+				out = append(out, namedMember{unreadable: true})
+				continue
 			}
+			out = append(out, namedMember{member: m, scope: sub.scope, ownScope: true})
 		}
-		return out
+		return out, nil
+	}
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	view, err := strictView(payload)
+	if err != nil {
+		return nil, err
 	}
 	pas := leg == "pas-claim" || leg == "pas-claim-update"
 	var subject, shared map[string]bool
 	if pas {
-		subject, shared = pasSubjectNames(payload)
+		subject, shared = pasSubjectNames(view)
 	}
-	members := carriedMembers(payload, leg)
+	members := carriedMembersIn(view, leg)
 	// On CRD the leg's own patient is context.patientId, by the request's
 	// structure, as the leg's subject binding reads it. When no resource the
 	// request carries references it, it is still the name subjectCarriedNames
@@ -77,7 +126,7 @@ func (paWorkstream) requestMembers(leg string, payload []byte) []namedMember {
 	for _, m := range members {
 		out = append(out, namedMember{member: m, scope: payload, pas: pas, subject: subject[m] && !shared[m], shared: shared[m], legName: legName != "" && m == legName})
 	}
-	return out
+	return out, nil
 }
 
 // crdSubjectLegs are the CRD legs whose own patient is context.patientId.
@@ -111,38 +160,20 @@ func crdPatientID(payload []byte) string {
 // is unknown, never the subject (two Patients are never one person), and so is
 // Claim.patient's own name when two carried Patients go by it. Only the
 // operative Claim, the first, decides, as the PAS subject binding reads it.
-func pasSubjectNames(payload []byte) (subject, shared map[string]bool) {
-	var doc any
-	if decodeMessage(payload, &doc) != nil {
-		return nil, nil
-	}
+// view is the request's strict view (strictView), the one carriedMembers
+// reads, so the Patients it counts are the ones carriedMembers names. The
+// Claim's "patient" and its type "Claim" are read exactly, not through the
+// view's names: the PAS readers before it (readConformantPASSubjects, on the
+// requester's ingress and the payer's) refuse a "patient" named in another case
+// (a member that matches a field only by case, relay.Decode) and find no Claim
+// in a resource typed otherwise than exactly "Claim", so a request read here
+// names its Claim as they read it.
+func pasSubjectNames(view canonicalView) (subject, shared map[string]bool) {
+	doc := view.doc
 	bundle, _ := doc.(map[string]any)
 	entries, _ := bundle["entry"].([]any)
-	readName := func(ref string) string {
-		if strings.Contains(ref, "Patient/") {
-			return pasMemberFromRef(ref)
-		}
-		return ref
-	}
-	// patientNames are the names a Patient is read under; fullURL is its
-	// entry's, when it is an entry's resource.
-	patientNames := func(r map[string]any, fullURL string) []string {
-		var out []string
-		if fullURL != "" {
-			out = append(out, readName(fullURL))
-		}
-		if id, ok := r["id"].(string); ok && id != "" {
-			out = append(out, id)
-		}
-		ids, _ := r["identifier"].([]any)
-		for _, i := range ids {
-			im, _ := i.(map[string]any)
-			if v, ok := im["value"].(string); ok && v != "" && im["system"] == shnsdk.MemberSystem {
-				out = append(out, v)
-			}
-		}
-		return out
-	}
+	readName := pasSubjectName
+	patientNames := pasPatientNames
 	// count is, for each name, the Patients the request carries under it, at
 	// any depth (an entry's, a contained one, one in a nested Bundle). A
 	// contained Patient is counted under "#<id>" too, the name carriedMembers
@@ -243,6 +274,36 @@ func pasSubjectNames(payload []byte) (subject, shared map[string]bool) {
 	return subject, shared
 }
 
+// pasSubjectName is the name a reference or a fullUrl reads as: the id of a
+// Patient/<id>, else the reference itself (pasSubjectNames).
+func pasSubjectName(ref string) string {
+	if strings.Contains(ref, "Patient/") {
+		return pasMemberFromRef(ref)
+	}
+	return ref
+}
+
+// pasPatientNames are the names a Patient is read under (pasSubjectNames):
+// its entry's fullUrl read as a reference (fullURL, "" when it is no entry's
+// resource), its id and its member identifiers (shnsdk.MemberSystem).
+func pasPatientNames(r map[string]any, fullURL string) []string {
+	var out []string
+	if fullURL != "" {
+		out = append(out, pasSubjectName(fullURL))
+	}
+	if id, ok := r["id"].(string); ok && id != "" {
+		out = append(out, id)
+	}
+	ids, _ := r["identifier"].([]any)
+	for _, i := range ids {
+		im, _ := i.(map[string]any)
+		if v, ok := im["value"].(string); ok && v != "" && im["system"] == shnsdk.MemberSystem {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // carriedMembers is every member a request on leg names, sorted and each
 // once, each read exactly as that leg's subject binding reads the member a
 // reference names, so every reference to the leg's own patient reads as the
@@ -270,16 +331,31 @@ func pasSubjectNames(payload []byte) (subject, shared map[string]bool) {
 //     CRD and DTR) names no one either.
 //
 // A Patient's member identifier is never read: the subject is bound by the id
-// its request uses. An unreadable request names none. The request is read as
-// the leg's deciding readers read it (decodeMessage): one that repeats a
-// member name, exactly or in another case, can be read two ways, so it too
-// names none, and the Hub never records an exchange under a patient those
-// readers did not see.
+// its request uses. The request is read from its canonical view
+// (strictView): decoded as the leg's deciding readers decode it, with each
+// name these rules read, and each resource type they compare, as FHIR spells
+// it within each FHIR resource whatever the case it was sent in, so a Patient under "Contained", a
+// "resourceType":"patient" or a {"Reference":"Patient/p2"} is named as a
+// lenient reader reads it. A request no view can be made of (one that is not
+// well-formed JSON, or repeats a member name, exactly or in another case, so
+// that it can be read two ways) names none here; requestMembers reports it
+// (errRequestPatientsUnreadable), and the involved pass records the omission
+// rather than read it as naming no one.
 func carriedMembers(payload []byte, leg string) []string {
-	var doc any
-	if len(payload) == 0 || decodeMessage(payload, &doc) != nil {
+	if len(payload) == 0 {
 		return nil
 	}
+	view, err := strictView(payload)
+	if err != nil {
+		return nil
+	}
+	return carriedMembersIn(view, leg)
+}
+
+// carriedMembersIn is carriedMembers over a request's canonical view. Every
+// identity it takes and compares (the party entries and slots) is of that view.
+func carriedMembersIn(view canonicalView, leg string) []string {
+	doc := view.doc
 	read := func(ref string) (string, bool) {
 		if !strings.Contains(ref, "Patient/") {
 			return "", false
@@ -292,7 +368,7 @@ func carriedMembers(payload []byte, leg string) []string {
 	// Only the PAS binding names a carried Patient by the reference to it; the
 	// others (CRD, the DTR package, the inquiry) name it by its id.
 	byReference := leg == "pas-claim" || leg == "pas-claim-update"
-	partyEntries, partySlots := entryPartyReads(doc)
+	partyEntries, partySlots := entryPartyReads(view)
 	if partySlots == nil {
 		partySlots = map[uintptr]bool{}
 	}
@@ -317,9 +393,8 @@ func carriedMembers(payload []byte, leg string) []string {
 				// A Coverage's party, the person its subscriber or policyHolder
 				// element names, is no member, whether the request carries that
 				// person or names them by a bare reference: the element's
-				// reference names no one. Decided by the element, by FHIR's
-				// exact (case-sensitive) names, never by whether the party is
-				// carried.
+				// reference names no one. Decided by the element, by its name in
+				// the canonical view, never by whether the party is carried.
 				for _, k := range []string{"subscriber", "policyHolder"} {
 					if slot, ok := v[k].(map[string]any); ok {
 						partySlots[reflect.ValueOf(slot).Pointer()] = true
@@ -410,13 +485,15 @@ func carriedMembers(payload []byte, leg string) []string {
 	return out
 }
 
-// entryPartyReads are, when doc is a Bundle, the resources of its Patient
+// entryPartyReads are, when the view is a Bundle, the resources of its Patient
 // entries that are a Coverage's party (shnsdk.CoverageEntryParties, read once
 // for the Bundle), and the subscriber and policyHolder of its Coverage entries
 // whose reference resolves to one from the Coverage's entry
-// (shnsdk.BundleReferenceURL), each by its identity in doc.
-func entryPartyReads(doc any) (parties, slots map[uintptr]bool) {
-	bundle, _ := doc.(map[string]any)
+// (shnsdk.BundleReferenceURL), each by its identity in the view. The view is
+// the request's (strictView, or bindingView in the binding), the one its caller walks,
+// so the SDK's exact-name rules read the names a lenient reader reads.
+func entryPartyReads(view canonicalView) (parties, slots map[uintptr]bool) {
+	bundle, _ := view.doc.(map[string]any)
 	set := shnsdk.CoverageEntryParties(bundle)
 	if len(set) == 0 {
 		return nil, nil

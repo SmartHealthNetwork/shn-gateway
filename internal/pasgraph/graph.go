@@ -42,6 +42,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 )
 
 // The bounds the rule reads within: bytes, resources, references and depth.
@@ -249,51 +252,13 @@ func ReadOf(raw []byte, needResponse bool) (*Graph, error) {
 		return nil, Structural(RefusalBound, "the Bundle has %d entries, more than the %d this rule reads", len(g.Entries), MaxResources)
 	}
 	for i, v := range g.Entries {
-		e, ok := v.(map[string]any)
-		if !ok {
-			return nil, Structural(RefusalEntry, "entry %d is not an object", i)
+		entry, _, err := g.readEntry(i, v)
+		if err != nil {
+			return nil, err
 		}
-		full, ok := e["fullUrl"].(string)
-		if !ok || full == "" {
-			return nil, Structural(RefusalEntry, "entry %d has no fullUrl", i)
-		}
-		u, err := url.Parse(full)
-		if err != nil || !u.IsAbs() || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(full, "/_history/") {
-			return nil, Structural(RefusalFullURL, "entry %d fullUrl %q is not an absolute, versionless identity", i, full)
-		}
-		r, ok := e["resource"].(map[string]any)
-		if !ok {
-			return nil, Structural(RefusalEntry, "entry %d (%s) carries no resource", i, full)
-		}
-		// An entry's identity is its fullUrl. Under a RESTful (http/https) fullUrl
-		// the resource carries the id that address ends in; under a URN (FHIR R4
-		// Bundle: a resource with no id is placed under urn:uuid) the resource may
-		// carry no id at all, and nothing is minted for it. An id the payer did
-		// state must be usable under either.
-		typ, tok := r["resourceType"].(string)
-		idValue, stated := r["id"]
-		id, iok := idValue.(string)
-		if !tok || !ResourceTypeName(typ) || (stated && (!iok || !SafeResourceID(id))) {
-			return nil, Structural(RefusalIdentity, "entry %d (%s) carries a resource without a usable resourceType and id", i, full)
-		}
-		if u.Scheme == "http" || u.Scheme == "https" {
-			if !stated {
-				return nil, Structural(RefusalIdentity, "entry %d (%s) carries a resource without a usable resourceType and id", i, full)
-			}
-			if u.Host == "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) {
-				return nil, Structural(RefusalFullURL, "entry %d fullUrl %q does not end in its resource's identity %s/%s", i, full, typ, id)
-			}
-		} else if !stated && u.Scheme != "urn" {
-			return nil, Structural(RefusalFullURL, "entry %d (%s) carries a resource without an id under a fullUrl that is neither RESTful nor a URN", i, full)
-		}
-		if _, exists := g.ByURL[full]; exists {
-			return nil, Structural(RefusalRepeatedIdentity, "entry %d repeats the identity %s", i, full)
-		}
-		entry := &Entry{full, r, i}
-		g.ByURL[full] = entry
-		if typ == "ClaimResponse" {
+		if entry.ResourceType() == "ClaimResponse" {
 			if g.Response != nil {
-				return nil, Structural(RefusalClaimResponses, "the Bundle carries more than one ClaimResponse (%s and %s)", g.Response.FullURL, full)
+				return nil, Structural(RefusalClaimResponses, "the Bundle carries more than one ClaimResponse (%s and %s)", g.Response.FullURL, entry.FullURL)
 			}
 			g.Response = entry
 		}
@@ -302,6 +267,94 @@ func ReadOf(raw []byte, needResponse bool) (*Graph, error) {
 		return nil, Structural(RefusalNoClaimResponse, "the Bundle carries no ClaimResponse")
 	}
 	return g, nil
+}
+
+// readFacts are what readEntry read of an entry, its identity and its
+// resource's type and id, as far as it read them before a refusal (each empty
+// when it read none).
+type readFacts struct{ full, typ, id string }
+
+// readEntry reads Bundle entry i (v) into the graph, by every rule an entry
+// is held to (an object with an absolute, versionless fullUrl, a resource
+// with a usable resourceType and id that its RESTful fullUrl ends in, an
+// identity no earlier entry has), and adds it to ByURL. err is the first rule
+// it fails; the entry is then not added. The one reading every entry point
+// shares (ReadOf, ReadNotified).
+func (g *Graph) readEntry(i int, v any) (*Entry, readFacts, error) {
+	e, ok := v.(map[string]any)
+	if !ok {
+		return nil, readFacts{}, Structural(RefusalEntry, "entry %d is not an object", i)
+	}
+	// What a refusal below reports of the entry: its resource type and id,
+	// when it carries them, and its fullUrl, each read with its member name
+	// compared under case folding, as a lenient reader takes it, so what an
+	// entry this rule refuses would be to such a reader is never passed over
+	// (ReadNotified, claims). The rule itself reads the names exactly.
+	var facts readFacts
+	if r, ok := FoldedMember(e, "resource").(map[string]any); ok {
+		facts.typ, _ = FoldedMember(r, "resourceType").(string)
+		facts.id, _ = FoldedMember(r, "id").(string)
+	}
+	facts.full, _ = FoldedMember(e, "fullUrl").(string)
+	full, ok := e["fullUrl"].(string)
+	if !ok || full == "" {
+		return nil, facts, Structural(RefusalEntry, "entry %d has no fullUrl", i)
+	}
+	facts.full = full
+	u, err := url.Parse(full)
+	if err != nil || !u.IsAbs() || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(full, "/_history/") {
+		return nil, facts, Structural(RefusalFullURL, "entry %d fullUrl %q is not an absolute, versionless identity", i, full)
+	}
+	r, ok := e["resource"].(map[string]any)
+	if !ok {
+		return nil, facts, Structural(RefusalEntry, "entry %d (%s) carries no resource", i, full)
+	}
+	// An entry's identity is its fullUrl. Under a RESTful (http/https) fullUrl
+	// the resource carries the id that address ends in; under a URN (FHIR R4
+	// Bundle: a resource with no id is placed under urn:uuid) the resource may
+	// carry no id at all, and nothing is minted for it. An id the payer did
+	// state must be usable under either.
+	typ, tok := r["resourceType"].(string)
+	idValue, stated := r["id"]
+	id, iok := idValue.(string)
+	if !tok || !ResourceTypeName(typ) || (stated && (!iok || !SafeResourceID(id))) {
+		return nil, facts, Structural(RefusalIdentity, "entry %d (%s) carries a resource without a usable resourceType and id", i, full)
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		if !stated {
+			return nil, facts, Structural(RefusalIdentity, "entry %d (%s) carries a resource without a usable resourceType and id", i, full)
+		}
+		if u.Host == "" || !strings.HasSuffix(u.Path, "/"+typ+"/"+id) {
+			return nil, facts, Structural(RefusalFullURL, "entry %d fullUrl %q does not end in its resource's identity %s/%s", i, full, typ, id)
+		}
+	} else if !stated && u.Scheme != "urn" {
+		return nil, facts, Structural(RefusalFullURL, "entry %d (%s) carries a resource without an id under a fullUrl that is neither RESTful nor a URN", i, full)
+	}
+	if _, exists := g.ByURL[full]; exists {
+		return nil, facts, Structural(RefusalRepeatedIdentity, "entry %d repeats the identity %s", i, full)
+	}
+	entry := &Entry{full, r, i}
+	g.ByURL[full] = entry
+	return entry, readFacts{full: full, typ: typ}, nil
+}
+
+// FoldedMember is m's member whose name equals name under case folding
+// (jsonmember.FoldedName), nil when it has none: the member a lenient reader
+// takes for name, the exactly named one first. The facts readEntry builds
+// with it are acted on only by ReadNotified, whose notification names no
+// member twice under folding (the notification route refuses one that does),
+// so there it is the one member.
+func FoldedMember(m map[string]any, name string) any {
+	if v, ok := m[name]; ok {
+		return v
+	}
+	want := jsonmember.FoldedName(name)
+	for k, v := range m {
+		if jsonmember.FoldedName(k) == want {
+			return v
+		}
+	}
+	return nil
 }
 
 // Validate applies the rule with every reference required to resolve.
@@ -803,14 +856,4 @@ func SortedKeys(x map[string]any) []string {
 
 // SafeResourceID is whether id is a usable FHIR resource id: 1 to 64 of
 // [A-Za-z0-9-.], and neither "." nor "..".
-func SafeResourceID(id string) bool {
-	if len(id) == 0 || len(id) > 64 || id == "." || id == ".." {
-		return false
-	}
-	for _, c := range id {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
-			return false
-		}
-	}
-	return true
-}
+func SafeResourceID(id string) bool { return fhirid.Valid(id) }

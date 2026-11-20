@@ -122,7 +122,8 @@ func TestParse_ReadsASubjectFromTheAnswer(t *testing.T) {
 // TestParse_ReadsASubjectOfNone: a leg flagged subject none parses, and only
 // that leg reports it; it does not read as a leg whose patient comes from the
 // answer. The shipped taxonomy flags the payer's subscription to its CDex
-// Tasks' changes and the provider's notification of them alone (D132).
+// Tasks' changes and the provider's notification of them (D132), and the
+// provider's subscription to the PAS topic, alone.
 func TestParse_ReadsASubjectOfNone(t *testing.T) {
 	var shipped []string
 	for _, l := range PA().Legs {
@@ -130,8 +131,8 @@ func TestParse_ReadsASubjectOfNone(t *testing.T) {
 			shipped = append(shipped, l.TransactionType)
 		}
 	}
-	if !slices.Equal(shipped, []string{"cdex-task-subscribe", "cdex-task-signal"}) {
-		t.Fatalf("the shipped taxonomy flags %v subject none, want [cdex-task-subscribe cdex-task-signal]", shipped)
+	if want := []string{"cdex-task-subscribe", "cdex-task-signal", "pas-subscription-subscribe", "pas-subscription-signal"}; !slices.Equal(shipped, want) {
+		t.Fatalf("the shipped taxonomy flags %v subject none, want %v", shipped, want)
 	}
 	valid, err := json.Marshal(PA())
 	if err != nil {

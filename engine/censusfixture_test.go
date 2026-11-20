@@ -35,6 +35,24 @@ type censusSoR struct {
 	// of the census default (and of censusPayerOverrides): a partner payer's identity
 	// for a row that must be routed by one.
 	payer *shnsdk.PayerIdentifier
+	// emptyIs, when set, is the member the empty member id reads as: a FHIR
+	// system of record holding only that member answers an identifier search
+	// with an empty value ("<system>|") with it. A row that sets it fails on
+	// any read that searches for a member naming no one.
+	emptyIs string
+	// reads, when set, logs the member id each member-keyed read was given.
+	reads *[]string
+}
+
+// key is the member memberID is read as (emptyIs).
+func (d *censusSoR) key(memberID string) string {
+	if d.reads != nil {
+		*d.reads = append(*d.reads, memberID)
+	}
+	if memberID == "" && d.emptyIs != "" {
+		return d.emptyIs
+	}
+	return memberID
 }
 
 var (
@@ -585,6 +603,7 @@ var censusPayerOverrides = map[string]shnsdk.PayerIdentifier{
 // ResolvePatient returns the member's PCI and demographics. Unknown members yield
 // found=false.
 func (d *censusSoR) ResolvePatient(memberID string) (pci string, demo Demo, found bool) {
+	memberID = d.key(memberID)
 	p, ok := censusPersonas[memberID]
 	if !ok {
 		return "", Demo{}, false
@@ -595,6 +614,7 @@ func (d *censusSoR) ResolvePatient(memberID string) (pci string, demo Demo, foun
 
 // PatientFHIRRef — the in-memory stub uses logical refs (no FHIR store / scoped ids).
 func (d *censusSoR) PatientFHIRRef(memberID string) (string, bool) {
+	memberID = d.key(memberID)
 	if _, ok := censusPersonas[memberID]; !ok {
 		return "", false
 	}
@@ -604,6 +624,7 @@ func (d *censusSoR) PatientFHIRRef(memberID string) (string, bool) {
 // CoverageInforce answers whether the member's coverage is in force. Unknown
 // members are treated as not in force.
 func (d *censusSoR) CoverageInforce(memberID string) (inforce bool, reason string) {
+	memberID = d.key(memberID)
 	p, ok := censusPersonas[memberID]
 	if !ok {
 		return false, ""
@@ -614,6 +635,7 @@ func (d *censusSoR) CoverageInforce(memberID string) (inforce bool, reason strin
 // ClinicalContext returns the provider-LOCAL clinical context for a member.
 // Members with no clinical data (not-covered, unknown) yield found=false.
 func (d *censusSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bool) {
+	memberID = d.key(memberID)
 	p, ok := censusPersonas[memberID]
 	if !ok || !p.hasClinical {
 		return shnsdk.ClinicalContext{}, false
@@ -626,6 +648,7 @@ func (d *censusSoR) ClinicalContext(memberID string) (shnsdk.ClinicalContext, bo
 // NOTE: MBR-UC05 deliberately yields false — the operative report is EXTERNAL
 // (held by metro-spine), which is what forces the consent-gated federated query.
 func (d *censusSoR) SupplementalReport(memberID string) ([]byte, bool) {
+	memberID = d.key(memberID)
 	if memberID != "MBR-UC04" {
 		return nil, false
 	}
@@ -702,6 +725,7 @@ const censusSupplierNPI = "1999999999"
 // request time was held in no participant's system, so the authorization it
 // produced named an order no later inquiry could re-read.
 func (d *censusSoR) OpenOrder(memberID string) ([]byte, bool) {
+	memberID = d.key(memberID)
 	o, ok := censusOrders()[memberID]
 	if !ok {
 		return nil, false
@@ -762,6 +786,7 @@ func buildCensusDispatchOrder(id, patRef string, t DemoOrderTuple) ([]byte, erro
 // other member is untouched, so all pre-existing hermetic origination stays byte-identical).
 // Unknown members yield found=false.
 func (d *censusSoR) OpenCoverage(memberID string) ([]byte, bool) {
+	memberID = d.key(memberID)
 	if _, _, found := d.ResolvePatient(memberID); !found {
 		return nil, false
 	}
@@ -929,6 +954,7 @@ func (d *censusSoR) SearchPatientContext(_ context.Context, resourceType, id str
 // found=false. The provider does NOT hold these — they are retrieved by the
 // consent-gated federated query (the non-aggregation showcase).
 func (d *censusSoR) FacilityRecords(memberID string) (map[string][]byte, bool) {
+	memberID = d.key(memberID)
 	if memberID != "MBR-UC05" {
 		return nil, false
 	}

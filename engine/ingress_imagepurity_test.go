@@ -42,15 +42,19 @@ func TestIngressAuthOK_NoRuntimeDisable(t *testing.T) {
 		t.Fatalf("read gateway.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func (g *Gateway) ingressAuthOK(")
-	if start < 0 {
-		t.Fatal("ingressAuthOK not found")
-	}
-	end := strings.Index(body[start:], "\n}\n")
-	fn := body[start : start+end]
-	for _, forbidden := range []string{"os.Getenv", "Getenv", "Header.Get", "FormValue", "ingressAuthDisable"} {
-		if strings.Contains(fn, forbidden) {
-			t.Errorf("ingressAuthOK references %q — no runtime auth-disable path may exist", forbidden)
+	// The functions every ingress route's admission runs through: a payer's
+	// (ingressAuthGrant) and a provider's (providerIngressGrant).
+	for _, name := range []string{"ingressAuthOK", "ingressAuthGrant", "providerIngressGrant"} {
+		start := strings.Index(body, "func (g *Gateway) "+name+"(")
+		if start < 0 {
+			t.Fatalf("%s not found", name)
+		}
+		end := strings.Index(body[start:], "\n}\n")
+		fn := body[start : start+end]
+		for _, forbidden := range []string{"os.Getenv", "Getenv", "Header.Get", "FormValue", "ingressAuthDisable"} {
+			if strings.Contains(fn, forbidden) {
+				t.Errorf("%s references %q — no runtime auth-disable path may exist", name, forbidden)
+			}
 		}
 	}
 }

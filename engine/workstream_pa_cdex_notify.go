@@ -2,16 +2,7 @@
 
 package engine
 
-import (
-	"net/http"
-	"strings"
-
-	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
-	"github.com/SmartHealthNetwork/shn-gateway/pa/cdextopic"
-	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
-	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
-	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
-)
+import "net/http"
 
 // The notifier's half of a notification (the notifications design §6.2 step
 // 5, §6.3, §7.3, §7.4, §9): the provider's own system posts each notification
@@ -104,114 +95,6 @@ const (
 // only on a gateway that takes the payer's Subscription (cdex-task-subscribe),
 // since only that gateway writes the addresses.
 func (g *Gateway) handleCDexNotifyIngress(w http.ResponseWriter, r *http.Request) {
-	leg := legCDexTaskSignal
-	exchangeOf(r.Context()).leg(leg)
-	w, scope := g.withScope(w, relay.RoleRequester)
-	w = &fhirOperationWriter{w}
-	refuse := func(rule string, status int, msg string, reason refusalReason) {
-		exchangeOf(r.Context()).refusingFor(rule, reason)
-		writeJSON(w, status, map[string]string{"error": msg})
-	}
-	topic := cdextopic.Topic{}
-	// The address the provider's system posted to, as this gateway wrote
-	// it: its ingress, then the path as sent, escaped.
-	raw := strings.TrimRight(g.cfg.IngressBaseURL, "/") + r.URL.EscapedPath()
-	addr, isAddress := subscription.ParseAddress(raw, g.cfg.IngressBaseURL)
-	// The credential first, before the body is read: it is carried in the
-	// address and the headers alone (one Authorization and one
-	// X-SHN-Channel, verified together over the address), so a sender that
-	// holds none cannot make this gateway read a body up to its limit. An
-	// address this gateway never writes (another topic, a query, a value
-	// that is no sealed endpoint's form), or a gateway that writes none, has
-	// no credential that verifies.
-	isAddress = isAddress && addr.Topic == topic.Token() && r.URL.RawQuery == "" && !r.URL.ForceQuery
-	st := g.paState()
-	auths, channels := r.Header.Values(subscription.AuthorizationHeader), r.Header.Values(subscription.ChannelHeader)
-	if st == nil || st.cdexSubscription == nil || !isAddress || len(auths) != 1 || len(channels) != 1 ||
-		st.cdexSubscription.keys.VerifyCredential(addr, channels[0], auths[0]) != nil {
-		refuse(RefusalAuthentication, http.StatusUnauthorized, errNotifyCredential, reasonIngressAuthentication)
-		return
-	}
-	sub := st.cdexSubscription
-	// Then the body, read as every ingress route reads one, so a coding or a
-	// size it cannot take is refused as there.
-	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)
-	if !ok {
-		return
-	}
-	// The body by its structure alone, never its label (the one shared
-	// classifier), then the route's structural minimum. The classifier's
-	// refusal is equivalent to ParseNotification's for every body that
-	// reaches it (each refuses what is not one FHIR JSON object it can read),
-	// so no body tells the two apart; it is kept as the shared reading every
-	// check on a body starts from.
-	if kind, _, err := subscription.ClassifyBody(body); err != nil || kind != subscription.BodyFHIRJSON {
-		why := "it is not one FHIR JSON resource this network can read"
-		refuse(RefusalRouting, http.StatusBadRequest, errNotifyNotANotification+why, reasonNotifyNotANotification)
-		return
-	}
-	n, rf := subscription.ParseNotification(body, topic)
-	if rf != nil {
-		refuse(RefusalRouting, http.StatusBadRequest, errNotifyNotANotification+rf.Reason, reasonNotifyNotANotification)
-		return
-	}
-	if subscription.Leg(topic, n) != leg {
-		refuse(RefusalAuthority, http.StatusForbidden, errNotifyContent, reasonNotifyContent)
-		return
-	}
-	if !n.ContextDeclared(topic.NotificationShape()) {
-		refuse(RefusalAuthority, http.StatusForbidden, errNotifyContext, reasonNotifyContext)
-		return
-	}
-	if rf := n.CheckShape(topic.NotificationShape(), sub.base.String()); rf != nil {
-		refuse(RefusalAuthority, http.StatusForbidden, errNotifyShape+rf.Reason, reasonNotifyShape)
-		return
-	}
-	switch readNotification(n.Body(), relay.OriginIngressRequest, sub.base.String()) {
-	case notificationUnreadable:
-		exchangeOf(r.Context()).refusingFidelity(vocab.RefusalStageBuild)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errNotifyUnreadable})
-		return
-	case notificationAddressUnreadable:
-		refuse(RefusalRouting, http.StatusUnprocessableEntity, errNotifyAddress, reasonNotifyAddress)
-		return
-	case notificationAddressNotRekeyable:
-		refuse(RefusalRouting, http.StatusUnprocessableEntity, errNotifyNotRekeyable, reasonNotifyNotRekeyable)
-		return
-	}
-	// A module ingress client builds no notification; the route admits the
-	// provider's own system alone.
-	if _, ok := g.ingressBuilder(w, r, leg); !ok {
-		return
-	}
-	ct := carriedFHIRMediaType(r.Header.Get("Content-Type"))
-	frame := map[string]string{
-		shnsdk.FrameHeaderSubscriptionEndpoint: addr.SealedEndpoint,
-		shnsdk.FrameHeaderSubscriptionChannel:  channels[0],
-		shnsdk.FrameHeaderStatedBase:           sub.base.String(),
-		"Content-Type":                         ct,
-	}
-	r = r.WithContext(withFindingContext(r.Context(), findingContext{LegType: leg, Seam: "notifier-ingress", Whose: "own"}))
-	scope.leg = leg
-	ex := g.exchanges.Begin(workstreamPA)
-	child := g.ingressCorrelation(w, r)
-	content := Content{WorkstreamType: workstreamPA, Payload: relay.Exact(relay.NewBody(n.Body(), relay.OriginIngressRequest), ct), Carried: true, SubscribeFrame: frame}
-	var stated statedAnswer
-	var answerType string
-	ctx := withStatedAnswerSink(withAnswerMediaTypeSink(r.Context(), &answerType), &stated)
-	// The leg names no patient on either side (its row's subject: none).
-	answer, err := g.OriginateLeg(ctx, r, addr.Subscriber, leg, "", child, "", content)
-	spec, _ := legSpecFor(leg)
-	legProj := Leg{Type: leg, Physics: spec.Physics, Content: content}
-	if err != nil {
-		g.recordLeg(ex.ID, legProj.Project(child, "error"))
-		if g.relayOriginationError(w, err) {
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-	g.recordLeg(ex.ID, legProj.Project(child, "answered"))
-	g.writeRelayedAnswer(w, stated, writableAnswerMediaType(answerType), relay.Exact(relay.NewBody(answer, relay.OriginPeerFrame), writableAnswerMediaType(answerType)),
-		relay.Key{Leg: leg, Role: relay.RoleRequester, Direction: relay.DirectionResponse, Outcome: relay.OutcomeAnswered})
+	exchangeOf(r.Context()).leg(legCDexTaskSignal)
+	g.handleNotifyIngress(w, r, cdexNotifier)
 }

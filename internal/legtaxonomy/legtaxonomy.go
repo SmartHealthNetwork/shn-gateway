@@ -74,6 +74,19 @@ type Leg struct {
 	// request and response both name no patient, and empty on every other
 	// leg (the root module's legtaxonomy.Leg.Subject).
 	Subject string `json:"subject,omitempty"`
+	// Involved says on which sides of the leg the gateway names the other
+	// patients a message carries in its envelope's involved list, absent on a
+	// leg that names them on neither (the root module's
+	// legtaxonomy.Leg.Involved). The engine's own table of it is held equal
+	// to this column (TestLegInvolvement_IsTheLegTaxonomys).
+	Involved *Involvement `json:"involved,omitempty"`
+}
+
+// Involvement is a leg's involved column: whether its request, and whether
+// its answer, names the other patients it carries.
+type Involvement struct {
+	Request bool `json:"request"`
+	Answer  bool `json:"answer"`
 }
 
 // SubjectFromAnswer marks a leg whose request names no patient: its patient

@@ -117,6 +117,11 @@ func TestPACatalog_Contracts(t *testing.T) {
 		"cdex-task-status":        "",
 		"cdex-task-subscribe":     "",
 		"cdex-task-signal":        "",
+		// Carried whatever the two sides' PA lines: the Subscription and its
+		// topic are the same at every PAS line the network carries.
+		"pas-subscription-subscribe": "",
+		"pas-subscription-signal":    "",
+		"pas-subscription-notify":    "",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("catalog has %d legs, pin has %d — update BOTH", len(paCatalog), len(want))

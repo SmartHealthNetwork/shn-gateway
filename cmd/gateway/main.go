@@ -22,6 +22,9 @@ func main() {
 	if printVersion(os.Args[1:], os.Stdout) {
 		return
 	}
+	if code, ok := probeMode(os.Args[1:], os.Stderr); ok {
+		os.Exit(code)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := app.Run(ctx, os.Getenv, os.Stdout); err != nil {

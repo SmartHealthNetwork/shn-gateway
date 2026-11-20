@@ -949,7 +949,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 			t.Errorf("Ownership(%d) = %q, want %q", o, o.String(), want)
 		}
 	}
-	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14", "E-16", "E-17", "E-18", "E-19", "E-20", "E-21", "E-23"}) {
+	if got := EditIDs(); !slices.Equal(got, []EditID{"E-01", "E-02", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11", "E-12", "E-13", "E-14", "E-16", "E-17", "E-18", "E-19", "E-20", "E-21", "E-22", "E-23"}) {
 		t.Fatalf("EditIDs = %v", got)
 	}
 	ids := EditIDs()
@@ -964,7 +964,7 @@ func TestOwnershipAndIdentifiers(t *testing.T) {
 }
 
 func TestBuilderSetIsClosed(t *testing.T) {
-	want := []BuilderID{"gateway-refusal", "cdex-fulfillment", "cdex-records", "sor-searchset", "sdk-crd-request",
+	want := []BuilderID{"gateway-refusal", "cdex-fulfillment", "cdex-decline", "cdex-records", "sor-searchset", "sdk-crd-request",
 		"sdk-dtr-package", "sdk-pas-submit", "sdk-pas-update", "sdk-pas-inquiry", "sdk-eligibility",
 		"sdk-federated-query", "sdk-patient-dtr", "dtr-next-question"}
 	if !slices.Equal(registeredBuilders, want) {

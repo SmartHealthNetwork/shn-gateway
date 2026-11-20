@@ -928,6 +928,7 @@ type exchangeShape struct {
 	Tokens         []string `json:"tokens,omitempty"`
 	Involved       []string `json:"involved,omitempty"`
 	StoreErrors    []string `json:"storeErrors,omitempty"`
+	NetworkRetries []string `json:"networkRetries,omitempty"`
 	ValidatorCalls int      `json:"validatorCalls,omitempty"`
 	Findings       int      `json:"findings,omitempty"`
 	ObserveDropped int      `json:"observeDropped,omitempty"`
@@ -943,6 +944,7 @@ type shapeBackend struct {
 type shapeReports struct {
 	mu                                  sync.Mutex
 	legs, tokens, involved, storeErrors []string
+	retries                             []string
 	validator, findings, dropped        int
 }
 
@@ -956,6 +958,7 @@ func (r *shapeReports) wire(t *testing.T, g *Gateway) {
 	g.cfg.TokenMetric = func(o string, _ time.Duration) { lock(func() { r.tokens = append(r.tokens, o) }) }
 	g.cfg.InvolvedMetric = func(reason string) { lock(func() { r.involved = append(r.involved, reason) }) }
 	g.cfg.StoreErrorMetric = func(store string) { lock(func() { r.storeErrors = append(r.storeErrors, store) }) }
+	g.cfg.NetworkRetryMetric = func(service, result string) { lock(func() { r.retries = append(r.retries, service+"/"+result) }) }
 	g.cfg.ValidatorMetric = func(string, string, time.Duration) { lock(func() { r.validator++ }) }
 	g.cfg.FindingMetric = func(FindingMetric) { lock(func() { r.findings++ }) }
 	g.cfg.ObserveCheckDroppedMetric = func() { lock(func() { r.dropped++ }) }
@@ -998,6 +1001,7 @@ func shapeOf(name, source string, level ConformanceEnforcement, rec ExchangeReco
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sh.Legs, sh.Tokens, sh.Involved, sh.StoreErrors = r.legs, r.tokens, r.involved, r.storeErrors
+	sh.NetworkRetries = r.retries
 	sh.ValidatorCalls, sh.Findings, sh.ObserveDropped = r.validator, r.findings, r.dropped
 	return sh
 }

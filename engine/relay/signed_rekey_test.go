@@ -41,14 +41,19 @@ const rekeyed = `"https://provider-gw.example/cdex/payer/payer-1"`
 // restore (E-18, E-19 and E-20, D132; their rows are in
 // signed_subscription_test.go and signed_subscriber_test.go) and a CDex Task
 // notification's address re-key (E-17, as E-12; its rows are in
-// signed_notification_test.go), they are the only edits that
+// signed_notification_test.go) and a PAS content notification's payer-url
+// re-key (E-22, E-10's change on the notified decision, D127 decision 13),
+// with E-18 and E-20 made on the PAS topic's subscribe leg too (the tenth
+// recorded exception; its rows are in test/adversarial
+// pas_subscription_subscriber_test.go),
+// they are the only edits that
 // are: every other edit of
 // signed content is still refused, and each of the two is refused on any other
 // signed value.
 func TestSignedContentRekeyExemption(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(signedExempt)); !slices.Equal(got, []EditID{EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore,
-		EditCDexTaskNotificationAddressRekey, EditSubscriptionHeaderSeal, EditSubscriptionEndpointRekey, EditSubscriptionEndpointRestore}) {
-		t.Fatalf("signed-content exempt edits %v, want exactly E-10, E-11, E-12, E-13, E-17, E-18, E-19 and E-20", got)
+		EditCDexTaskNotificationAddressRekey, EditSubscriptionHeaderSeal, EditSubscriptionEndpointRekey, EditSubscriptionEndpointRestore, EditPASNotifiedReturnRekey}) {
+		t.Fatalf("signed-content exempt edits %v, want exactly E-10, E-11, E-12, E-13, E-17, E-18, E-19, E-20 and E-22", got)
 	}
 	bundleSigned := NewBody(pendBundle(`,"signature":{`+signatureElement+`}`, "", ""), OriginPeerFrame)
 	provSigned := NewBody(pendBundle("", "", `,{"resource":{"resourceType":"Provenance","target":[{"reference":"Task/t1"}],`+

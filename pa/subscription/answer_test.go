@@ -406,3 +406,104 @@ func TestCheckSubscribeAnswer_AValueFollowedByMoreIsNotOneObject(t *testing.T) {
 		}
 	}
 }
+
+// brProviderAck is the reference PAS subscriber's answer to a notification
+// that carries no ClaimResponse (a handshake, a heartbeat, an empty event),
+// HAPI FHIR's rest-hook convention: the response to the transaction the
+// notification is delivered as.
+const brProviderAck = `{"resourceType":"Bundle","type":"transaction-response","entry":[]}`
+
+// A no-content notification's answer holds no resource (N5): CheckErrorAnswer's
+// rule, and an acknowledgement Bundle too, a transaction-response or
+// batch-response whose entries hold only their response, any outcome an
+// OperationOutcome holding none. Anything holding a resource is refused 502
+// on authority, as is another Bundle type.
+func TestCheckSignalAnswer(t *testing.T) {
+	const xmlAck = `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><status value="200 OK"/><outcome><OperationOutcome><issue><severity value="information"/><code value="informational"/></issue></OperationOutcome></outcome></response></entry></Bundle>`
+	outcome := `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational"}]}`
+	for _, c := range []struct {
+		name, body string
+		refused    bool
+	}{
+		{"the reference subscriber's acknowledgement", brProviderAck, false},
+		{"a transaction-response with no entry", `{"resourceType":"Bundle","type":"transaction-response"}`, false},
+		{"a transaction-response whose entries hold their response", `{"resourceType":"Bundle","id":"r1","type":"transaction-response","link":[{"relation":"self","url":"https://x.test/fhir"}],"entry":[{"response":{"status":"200 OK","location":"Bundle/b1/_history/1","etag":"W/\"1\"","lastModified":"2026-11-19T00:00:00Z"}}]}`, false},
+		{"a batch-response", `{"resourceType":"Bundle","type":"batch-response","entry":[{"response":{"status":"201 Created"}}]}`, false},
+		{"an entry's response outcome, an OperationOutcome holding none", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK","outcome":` + outcome + `}}]}`, false},
+		{"member names in another case", `{"resourceType":"Bundle","Type":"transaction-response","Entry":[{"Response":{"status":"200 OK"}}]}`, false},
+		{"an XML acknowledgement with an outcome", xmlAck, false},
+		{"an XML batch-response", `<Bundle xmlns="http://hl7.org/fhir"><type value="batch-response"/><entry><response><status value="200 OK"/></response></entry></Bundle>`, false},
+		// What CheckErrorAnswer carries, carried too.
+		{"an OperationOutcome", answerOutcome, false},
+		{"no body", "", false},
+		{"proxy HTML", "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>", false},
+		// Refused: a resource anywhere, or another Bundle.
+		{"a resource in an entry", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"resource":` + patientJSON + `,"response":{"status":"200 OK"}}]}`, true},
+		{"an entry holding more than its response", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"fullUrl":"https://x.test/fhir/Patient/p1","response":{"status":"200 OK"}}]}`, true},
+		{"a contained resource", `{"resourceType":"Bundle","type":"transaction-response","contained":[` + patientJSON + `],"entry":[]}`, true},
+		{"a resource outside the entries", `{"resourceType":"Bundle","type":"transaction-response","signature":{"who":` + patientJSON + `},"entry":[]}`, true},
+		{"an outcome holding a resource", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK","outcome":{"resourceType":"OperationOutcome","contained":[` + patientJSON + `],"issue":[]}}}]}`, true},
+		{"an outcome that is not an OperationOutcome", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK","outcome":` + patientJSON + `}}]}`, true},
+		{"a response holding a resource elsewhere", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK","extension":[{"url":"x","valueReference":{"x":` + patientJSON + `}}]}}]}`, true},
+		{"an entry's response not an object", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":"200 OK"}]}`, true},
+		{"a searchset", `{"resourceType":"Bundle","type":"searchset","entry":[]}`, true},
+		{"a Bundle of no type", `{"resourceType":"Bundle","entry":[]}`, true},
+		{"a collection holding a Patient", `{"resourceType":"Bundle","type":"collection","entry":[{"resource":` + patientJSON + `}]}`, true},
+		{"a Bundle read two ways", `{"resourceType":"Bundle","type":"transaction-response","type":"searchset"}`, true},
+		{"an XML entry with a resource", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><resource><Patient><id value="p1"/></Patient></resource><response><status value="200 OK"/></response></entry></Bundle>`, true},
+		{"an XML entry holding more than its response", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><fullUrl value="https://x.test/fhir/Patient/p1"/><response><status value="200 OK"/></response></entry></Bundle>`, true},
+		{"an XML outcome holding a contained Patient", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><outcome><OperationOutcome><contained><Patient/></contained><issue/></OperationOutcome></outcome></response></entry></Bundle>`, true},
+		{"an XML outcome that is a Patient", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><outcome><Patient><id value="p1"/></Patient></outcome></response></entry></Bundle>`, true},
+		{"an XML searchset", `<Bundle xmlns="http://hl7.org/fhir"><type value="searchset"/></Bundle>`, true},
+		{"an XML Bundle of no type", `<Bundle xmlns="http://hl7.org/fhir"><entry><response><status value="200 OK"/></response></entry></Bundle>`, true},
+		{"an XML Bundle with a resource outside its entries", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><signature><who><Patient/></who></signature></Bundle>`, true},
+		{"an XML Bundle not well-formed", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry>`, true},
+		{"a Patient", patientJSON, true},
+		// A contained member is a resource whatever it holds, read the same
+		// in JSON as in XML.
+		{"a contained member at the root, holding no resourceType", `{"resourceType":"Bundle","type":"transaction-response","contained":[{"id":"p1","name":[{"family":"Doe"}]}],"entry":[]}`, true},
+		{"an empty contained member in another case", `{"resourceType":"Bundle","type":"transaction-response","Contained":[],"entry":[]}`, true},
+		{"a contained member in a response", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK","contained":[{"id":"p1"}]}}]}`, true},
+		{"an XML contained element at the root", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><contained/></Bundle>`, true},
+		{"entry as an object holding a Patient", `{"resourceType":"Bundle","type":"transaction-response","entry":{"resource":` + patientJSON + `}}`, true},
+		{"an XML Bundle with two types", `<Bundle xmlns="http://hl7.org/fhir"><type value="searchset"/><type value="transaction-response"/></Bundle>`, true},
+		{"an XML type in another namespace", `<Bundle xmlns="http://hl7.org/fhir"><x:type xmlns:x="urn:x" value="transaction-response"/></Bundle>`, true},
+		{"an XML type whose value is in another namespace", `<Bundle xmlns="http://hl7.org/fhir"><type xmlns:x="urn:x" x:value="transaction-response"/></Bundle>`, true},
+		{"an XML type nested below the root", `<Bundle xmlns="http://hl7.org/fhir"><type value="searchset"/><entry><response><type value="transaction-response"/></response></entry></Bundle>`, true},
+		{"an XML response in another namespace", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><x:response xmlns:x="urn:x"><status value="200 OK"/></x:response></entry></Bundle>`, true},
+		{"an XML OperationOutcome nested in an outcome's OperationOutcome", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><outcome><OperationOutcome><issue><details><OperationOutcome/></details></issue></OperationOutcome></outcome></response></entry></Bundle>`, true},
+		{"an XML outcome's OperationOutcome in another namespace", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><outcome><OperationOutcome xmlns="urn:x"/></outcome></response></entry></Bundle>`, true},
+		// Decided by structure: a reference is carried as written, whatever
+		// it names, as an OperationOutcome's diagnostics are.
+		{"a response location naming a Patient", `{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"201 Created","location":"Patient/p1/_history/1","etag":"W/\"1\""}}]}`, false},
+		{"an XML response location naming a Patient", `<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><status value="201 Created"/><location value="Patient/p1/_history/1"/></response></entry></Bundle>`, false},
+		// Only the root's own type is the Bundle's: a nested one is neither
+		// read as it nor counted beside it.
+		{"an XML acknowledgement with a nested identifier type", `<Bundle xmlns="http://hl7.org/fhir"><identifier><type><text value="x"/></type></identifier><type value="transaction-response"/></Bundle>`, false},
+		{"an XML Bundle whose only type is nested", `<Bundle xmlns="http://hl7.org/fhir"><identifier><type value="transaction-response"/></identifier></Bundle>`, true},
+		{"an XML acknowledgement by a prefix", `<f:Bundle xmlns:f="http://hl7.org/fhir"><f:type value="transaction-response"/><f:entry><f:response><f:status value="200 OK"/></f:response></f:entry></f:Bundle>`, false},
+	} {
+		r := CheckSignalAnswer([]byte(c.body))
+		if !c.refused {
+			if r != nil {
+				t.Errorf("%s: refused %+v, want carried", c.name, r)
+			}
+			continue
+		}
+		wantRefusal(t, c.name, r, http.StatusBadGateway, recording.RefusalAuthority)
+	}
+}
+
+// Every answer that is not a Bundle reads exactly as CheckErrorAnswer reads
+// it: the acknowledgement is the one thing CheckSignalAnswer adds.
+func TestCheckSignalAnswerIsCheckErrorAnswerButForTheAcknowledgement(t *testing.T) {
+	for _, body := range []string{answerOutcome, "", "upstream down", patientJSON, answerSubscription, `{"error":"x"}`, "[" + patientJSON + "]",
+		`<OperationOutcome xmlns="http://hl7.org/fhir"><issue/></OperationOutcome>`, `<Patient xmlns="http://hl7.org/fhir"/>`, `{"resourceType":"OperationOutcome","contained":[` + patientJSON + `],"issue":[]}`} {
+		if got, want := CheckSignalAnswer([]byte(body)), CheckErrorAnswer([]byte(body)); (got == nil) != (want == nil) {
+			t.Errorf("%q: CheckSignalAnswer %+v, CheckErrorAnswer %+v", body, got, want)
+		}
+	}
+	if CheckErrorAnswer([]byte(brProviderAck)) == nil {
+		t.Fatal("control: CheckErrorAnswer carries the acknowledgement, so the row above cannot tell the two apart")
+	}
+}

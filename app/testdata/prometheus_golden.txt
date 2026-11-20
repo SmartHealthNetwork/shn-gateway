@@ -568,6 +568,7 @@ shn_gateway_involved_omitted_total{shn_reason="authorization-refused"} 1
 shn_gateway_involved_omitted_total{shn_reason="budget"} 1
 shn_gateway_involved_omitted_total{shn_reason="involvement-not-carried"} 1
 shn_gateway_involved_omitted_total{shn_reason="overflow"} 1
+shn_gateway_involved_omitted_total{shn_reason="request-unreadable"} 1
 shn_gateway_involved_omitted_total{shn_reason="system-of-record-unavailable"} 1
 shn_gateway_involved_omitted_total{shn_reason="unknown-member"} 1
 # HELP shn_gateway_legs_total Origination leg events, by outcome.
@@ -577,6 +578,15 @@ shn_gateway_legs_total{shn_outcome="denied"} 1
 shn_gateway_legs_total{shn_outcome="failed"} 1
 shn_gateway_legs_total{shn_outcome="routed"} 1
 shn_gateway_legs_total{shn_outcome="unreachable"} 1
+# HELP shn_gateway_network_retries_total Calls to the Hub or the Authorization Framework sent again, on a new connection, after an instance that had not yet loaded the network's membership refused them, by service and the retry's result.
+# TYPE shn_gateway_network_retries_total counter
+shn_gateway_network_retries_total{shn_retry_result="answered",shn_service="authz"} 1
+shn_gateway_network_retries_total{shn_retry_result="answered",shn_service="hub"} 1
+shn_gateway_network_retries_total{shn_retry_result="failed",shn_service="authz"} 1
+shn_gateway_network_retries_total{shn_retry_result="failed",shn_service="hub"} 1
+shn_gateway_network_retries_total{shn_retry_result="other",shn_service="other"} 1
+shn_gateway_network_retries_total{shn_retry_result="refused",shn_service="authz"} 1
+shn_gateway_network_retries_total{shn_retry_result="refused",shn_service="hub"} 1
 # HELP shn_gateway_peers_known Holders the last successful registrar read converged.
 # TYPE shn_gateway_peers_known gauge
 shn_gateway_peers_known 3

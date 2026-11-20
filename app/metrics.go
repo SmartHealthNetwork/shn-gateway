@@ -306,6 +306,16 @@ func tokenMetricHook(reg *telemetry.Registry) func(outcome string, d time.Durati
 	}
 }
 
+// networkRetryMetricHook returns the engine.Config.NetworkRetryMetric
+// callback: one shn.gateway.network.retries count per retry of a call a Hub or
+// Authorization Framework instance refused because it had not yet loaded the
+// network's membership, by service and result (EMF NetworkRetry).
+func networkRetryMetricHook(reg *telemetry.Registry) func(service, result string) {
+	return func(service, result string) {
+		reg.Add(telemetry.NetworkRetries, 1, service, result)
+	}
+}
+
 // storePoolStat is the slice of pgxpool.Stat this gateway reports. Named fields rather
 // than the pgxpool type so the emission is testable without a database (pgxpool.Stat's
 // fields are unexported and it can only be produced by a live pool).

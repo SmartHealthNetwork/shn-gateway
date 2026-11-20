@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -139,7 +140,7 @@ func (g *Gateway) obtainDTRPatient(ctx context.Context, member string, fence pat
 		return nil, 0, ""
 	}
 	id, ok := strings.CutPrefix(ref, "Patient/")
-	if !ok || !fhirIDRE.MatchString(id) {
+	if !ok || !fhirid.Valid(id) {
 		status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
 		return nil, status, msg
 	}

@@ -57,10 +57,11 @@ var (
 )
 
 // HTTPRoutePatterns are the patterns of every route a gateway's main
-// listener can serve, whatever its role and configuration: the engine's
-// (engine.Gateway.RoutePatternsForTest, pinned to this list by
-// TestHTTPRoutePatternsAreTheMountedRoutes), /health, /internal/checks and
-// /internal/stats.
+// listener can serve, whatever its role, configuration and build: every
+// route pattern the engine declares (each a constant of its routePattern
+// type, which test/gatewayfence's
+// TestHTTPRoutePatternsAreEveryRoutePatternConstant holds this list to
+// under every build), and /health, /internal/checks and /internal/stats.
 // A pattern without a method serves any method; a GET pattern also serves
 // HEAD.
 var HTTPRoutePatterns = []string{
@@ -96,6 +97,29 @@ var HTTPRoutePatterns = []string{
 	"GET /pas/payer/{payer}/.well-known/smart-configuration",
 	"GET /.well-known/davinci-configuration",
 	"POST /Task",
+	"POST /notify/cdex-task/{subscriber}/{kid}/{sealed}",
+	"POST /pas/payer/{payer}/Subscription",
+	"GET /pas/payer/{payer}/Subscription",
+	"GET /pas/payer/{payer}/Subscription/{rest...}",
+	"PUT /pas/payer/{payer}/Subscription/{rest...}",
+	"DELETE /pas/payer/{payer}/Subscription/{rest...}",
+	"PATCH /pas/payer/{payer}/Subscription/{rest...}",
+	"GET /cds-client/jwks.json",
+	"POST /cdex/provider/{provider}/Task",
+	"GET /cdex/providers",
+	"GET /cdex/provider/{provider}/Task/{id}",
+	"GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
+	"GET /Task/{id}",
+	"GET /Task/{id}/_history/{vid}",
+	"POST /cdex/provider/{provider}/Subscription",
+	"GET /cdex/provider/{provider}/Subscription",
+	"GET /cdex/provider/{provider}/Subscription/{rest...}",
+	"PUT /cdex/provider/{provider}/Subscription/{rest...}",
+	"DELETE /cdex/provider/{provider}/Subscription/{rest...}",
+	"PATCH /cdex/provider/{provider}/Subscription/{rest...}",
+	"GET /cdex/provider/{provider}/metadata",
+	"POST /notify/pas/{subscriber}/{kid}/{sealed}",
+	"GET /cdex/provider/{provider}/.well-known/smart-configuration",
 	"POST /scenario/uc01",
 	"POST /scenario/uc02",
 	"POST /scenario/uc02-payerb",

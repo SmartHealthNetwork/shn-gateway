@@ -61,7 +61,7 @@ func (fqsWorkstream) routes(g *Gateway, role string) []mountedRoute {
 // the provider's ingress is (paRoutes).
 func (g *Gateway) fqsRoutes(role string) []mountedRoute {
 	var out []mountedRoute
-	route := func(pattern string, credential routeCredential, h http.HandlerFunc) {
+	route := func(pattern routePattern, credential routeCredential, h http.HandlerFunc) {
 		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: credential})
 	}
 	switch role {
@@ -72,6 +72,15 @@ func (g *Gateway) fqsRoutes(role string) []mountedRoute {
 		route("POST /Task", noCredential, g.ingressRoute(RouteFederatedQuery))
 	}
 	return out
+}
+
+// scopeFederatedQuery is the scope the federated query's route takes: one
+// that permits creating a Task, the request the provider's own system sends.
+var scopeFederatedQuery = routeScope{resources: []string{"Task"}, need: taskCreate, reason: reasonScopeFederatedQuery}
+
+// routeScopes: the federated query's route's.
+func (fqsWorkstream) routeScopes() []scopedPattern {
+	return []scopedPattern{{"POST /Task", scopeFederatedQuery}}
 }
 
 // ingressRoutes: the federated query's ingress handler, with the observer
@@ -128,8 +137,8 @@ func (fqsWorkstream) forward(string) forwardHandler { return nil }
 
 // involvement and requestMembers: a federated query names the one patient its
 // consent covers, so it names no other patient for the involved list.
-func (fqsWorkstream) involvement(string) (request, answer bool)   { return false, false }
-func (fqsWorkstream) requestMembers(string, []byte) []namedMember { return nil }
+func (fqsWorkstream) involvement(string) (request, answer bool)            { return false, false }
+func (fqsWorkstream) requestMembers(string, []byte) ([]namedMember, error) { return nil, nil }
 
 // The federated query declares no relay edits on its legs.
 func (fqsWorkstream) relayEdits() []relayEdit { return nil }
@@ -187,5 +196,9 @@ var fqsLegOwnership = func() map[relay.Key]relay.Rule {
 		// The facility's gateway answers with its own message, built from the
 		// facility's records.
 		k(relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: authored, Builders: []relay.BuilderID{relay.BuilderCDexFulfillment}},
+		// A request Task whose status does not allow it to be fulfilled is
+		// the facility's own decision: its gateway answers with the
+		// facility's error answer, as the facility would answer directly.
+		k(relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeUpstreamError): {Allowed: authored, Builders: []relay.BuilderID{relay.BuilderCDexDecline}},
 	}
 }()

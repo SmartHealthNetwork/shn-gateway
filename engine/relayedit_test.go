@@ -76,19 +76,21 @@ func TestRelayEditRegistryPinned(t *testing.T) {
 				"Bundle.entry[i].response.location", "Bundle.entry[i].link[j].url",
 				"Bundle.entry[0].resource.parameter[i].valueReference.reference (the parameter named subscription)",
 				"Bundle.entry[0].resource.parameter[i].part[j].valueReference.reference (the part named focus of the parameter named notification-event)"}, "replace-value"},
-		{"E-18", "subscription-header-seal", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionRequest,
+		{"E-18", "subscription-header-seal", []string{"cdex-task-subscribe", "pas-subscription-subscribe"}, relay.RoleRequester, relay.DirectionRequest,
 			[]string{"Subscription.channel.endpoint", "Subscription.channel.header"}, "remove-member"},
-		{"E-19", "subscription-endpoint-rekey", []string{"cdex-task-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
+		{"E-19", "subscription-endpoint-rekey", []string{"cdex-task-subscribe", "pas-subscription-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
 			[]string{"Subscription.channel.endpoint", "Subscription.channel.header"}, "replace-value"},
-		{"E-20", "subscription-endpoint-restore", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
+		{"E-20", "subscription-endpoint-restore", []string{"cdex-task-subscribe", "pas-subscription-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
 			[]string{"Subscription.channel.endpoint", "Subscription.channel.header",
 				"Bundle.entry[i].resource.channel.endpoint (a Subscription)", "Bundle.entry[i].resource.channel.header (a Subscription)",
 				"Bundle.entry[i].fullUrl", "Bundle.link[i].url"}, "replace-value"},
 		// A query edit: the request's url search parameter, no body path.
-		{"E-21", "subscription-url-search-rekey", []string{"cdex-task-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
+		{"E-21", "subscription-url-search-rekey", []string{"cdex-task-subscribe", "pas-subscription-subscribe"}, relay.RoleRecipient, relay.DirectionRequest,
 			[]string{"the url search parameter of GET [base]/Subscription"}, "rewrite-query"},
+		{"E-22", "pas-notified-return-rekey", []string{"pas-subscription-notify"}, relay.RoleRecipient, relay.DirectionRequest,
+			[]string{"Task.input[i].valueUrl (the input whose type is PASTempCodes#payer-url)"}, "replace-value"},
 		// A header edit: no path, the header its row names.
-		{"E-23", "subscription-location-rekey", []string{"cdex-task-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
+		{"E-23", "subscription-location-rekey", []string{"cdex-task-subscribe", "pas-subscription-subscribe"}, relay.RoleRequester, relay.DirectionResponse,
 			nil, "set-header"},
 	}
 	if len(relayEdits) != len(want) {

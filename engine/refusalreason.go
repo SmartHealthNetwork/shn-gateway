@@ -26,17 +26,19 @@ type refusalReason string
 // Authentication and scope at an ingress.
 const (
 	reasonIngressAuthentication refusalReason = msgIngressAuthentication
-	reasonScopeTaskCreate       refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits creating a Task, such as " + TaskWriteScope + ", system/Task.c or system/Task.*, with no query"
-	reasonScopeTaskRead         refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits reading a Task, such as " + TaskReadScope + ", system/Task.r or system/Task.*, with no query"
+	reasonScopeTaskCreate       refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits creating a Task, such as " + TaskWriteScope + ", system/Task.c, system/*.c or system/Task.*, with no query"
+	reasonScopeTaskRead         refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits reading a Task, such as " + TaskReadScope + ", system/Task.r, system/*.r or system/Task.*, with no query"
 	reasonScenarioCaller        refusalReason = errUnauthorizedCaller
 )
 
 // Message integrity, authority and size, on every route.
 const (
-	reasonUnsupportedCoding     refusalReason = errUnsupportedCoding
-	reasonPatientUnidentifiable refusalReason = msgPatientUnidentifiable
-	reasonRequestTooLarge       refusalReason = errRequestTooLarge
-	reasonEnvelopeTooLarge      refusalReason = errRequestTooLarge + ": sealed for the network"
+	reasonUnsupportedCoding         refusalReason = errUnsupportedCoding
+	reasonPatientUnidentifiable     refusalReason = msgPatientUnidentifiable
+	reasonRequestPatientsUnreadable refusalReason = msgRequestPatientsUnreadable
+	reasonMemberNamesNoOne          refusalReason = msgMemberNamesNoOne
+	reasonRequestTooLarge           refusalReason = errRequestTooLarge
+	reasonEnvelopeTooLarge          refusalReason = errRequestTooLarge + ": sealed for the network"
 )
 
 // Routing with no recipient.
@@ -54,7 +56,7 @@ const (
 func coreRefusalReasons() []refusalReason {
 	return []refusalReason{
 		reasonIngressAuthentication, reasonScopeTaskCreate, reasonScopeTaskRead, reasonScenarioCaller,
-		reasonUnsupportedCoding, reasonPatientUnidentifiable, reasonRequestTooLarge, reasonEnvelopeTooLarge,
+		reasonUnsupportedCoding, reasonPatientUnidentifiable, reasonRequestPatientsUnreadable, reasonMemberNamesNoOne, reasonRequestTooLarge, reasonEnvelopeTooLarge,
 		reasonNoPayerRouter, reasonNoPayerIdentifier, reasonCoverageNamesTwoPayers, reasonUnregisteredPayer,
 		reasonNoCoverageOnFile, reasonMemberCoverageTwoPayers, reasonNoSharedLine,
 	}

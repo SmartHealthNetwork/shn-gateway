@@ -9,6 +9,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
+	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
 // refuseOriginRecord answers a read of the participant's records an
@@ -78,7 +79,13 @@ func failOriginRead(ctx context.Context, w http.ResponseWriter, status int, msg 
 	if err == nil {
 		return false
 	}
-	exchangeOf(ctx).sorFailure(err)
+	// A member that names no one is the request's, refused on authority,
+	// never recorded as the system of record's failure.
+	if errors.Is(err, errMemberNamesNoOne) {
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonMemberNamesNoOne)
+	} else {
+		exchangeOf(ctx).sorFailure(err)
+	}
 	writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 	return true
 }
@@ -103,15 +110,16 @@ func failOriginReadErr(ctx context.Context, w http.ResponseWriter, err error) bo
 // patient read) as the backend failure it is (failOriginRead); a request this
 // gateway's PAS builder refused on the fidelity of its own build (an inquiry
 // whose Coverage names a person whose record cannot ride it,
-// isPASBuildFidelity) as that refusal, at the build stage; anything else with
-// its status. Each says which legs were carried.
+// isPASBuildFidelity) as that refusal, at the build stage, with
+// buildFidelityStatus's status; anything else with its status. Each says which
+// legs were carried.
 func (g *Gateway) answerFollowFailure(ctx context.Context, w http.ResponseWriter, status int, msg string, err error) {
 	if g.relayOriginationError(w, err) {
 		return
 	}
 	if isPASBuildFidelity(err) {
 		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": withCarriedLegs(ctx, msg)})
+		writeJSON(w, buildFidelityStatus(err), map[string]string{"error": withCarriedLegs(ctx, msg)})
 		return
 	}
 	var readErr *SoRReadError
@@ -128,6 +136,11 @@ func (g *Gateway) answerFollowFailure(ctx context.Context, w http.ResponseWriter
 // SHN's own fill failing its check (refuseOwnFill); any other failure is
 // answered with its status. Each says which legs were carried.
 func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recipient string, err error) {
+	// A read for a member that names no one is the request's (failOriginReadErr).
+	if errors.Is(err, errMemberNamesNoOne) {
+		failOriginReadErr(ctx, w, err)
+		return
+	}
 	status, msg := statusForPopulateErr(err), messageForPopulateErr(err)
 	if errors.Is(err, errPopulateForeignSubject) {
 		g.refuseOwnFill(ctx, w, recipient, msg)
@@ -139,36 +152,77 @@ func (g *Gateway) failPopulate(ctx context.Context, w http.ResponseWriter, recip
 	writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
 }
 
-// evidenceFidelityRefusal is the answer to evidence the gateway's own edit
-// cannot carry, recorded as the fidelity of SHN's own edit at the build: 422
-// with the signed-content refusal (D113) for evidence E-06 would re-point and
-// a signature covers, as the supplemental report's is, and 422 saying so for a
-// record read from the participant's system that the build cannot carry as
-// read, or cannot fill because the system does not hold it (errRecordNotCarried).
-// ok is false for any other error.
-func evidenceFidelityRefusal(err error) (int, string, bool) {
+// buildFidelityStatus is the status of a refusal on the fidelity of the
+// gateway's own build, which follows whose content it is (gateway/STABILITY.md,
+// "What the gateway cannot carry or edit"); the refusal's rule and stage are
+// its own. It is 502 for what the gateway read from its own participant's
+// system and cannot carry: a record the system of record answered that the
+// build cannot carry as read (errRecordNotCarried, the built request's
+// spelling checks among them), or that E-06 would re-point where a signature
+// covers it. Every other such refusal is 422:
+//   - a record the request names that the system does not hold
+//     (evidenceNotHeldError): the request named it;
+//   - any other signed-content refusal, and the SDK builders' own refusals of
+//     the request's facts and carried records.
+//
+// Each is told apart by its type, never by its message.
+func buildFidelityStatus(err error) int {
+	var notHeld *evidenceNotHeldError
+	if errors.As(err, &notHeld) {
+		return http.StatusUnprocessableEntity
+	}
 	var signed *relay.SignedContentError
 	if errors.As(err, &signed) {
-		return http.StatusUnprocessableEntity, signed.Error(), true
+		if signed.Edit == relay.EditEvidenceSubjectRekey {
+			return http.StatusBadGateway
+		}
+		return http.StatusUnprocessableEntity
 	}
 	if errors.Is(err, errRecordNotCarried) {
-		return http.StatusUnprocessableEntity, err.Error(), true
+		return http.StatusBadGateway
+	}
+	return http.StatusUnprocessableEntity
+}
+
+// evidenceFidelityRefusal is the answer to evidence the gateway's own edit
+// cannot carry, recorded as the fidelity of SHN's own edit at the build, with
+// buildFidelityStatus's status: the signed-content refusal (D113) for evidence
+// E-06 would re-point and a signature covers, a record read from the
+// participant's system that the build cannot carry as read, and a record the
+// request references that the system does not hold, each saying so
+// (errRecordNotCarried). A record read that is past the gateway's own carrying
+// limits (evidencePastLimitError) is 502 naming the record and the limit. ok is
+// false for any other error.
+func evidenceFidelityRefusal(err error) (int, string, bool) {
+	var past *evidencePastLimitError
+	if errors.As(err, &past) {
+		return http.StatusBadGateway, past.Error(), true
+	}
+	var signed *relay.SignedContentError
+	if errors.As(err, &signed) {
+		return buildFidelityStatus(err), signed.Error(), true
+	}
+	if errors.Is(err, errRecordNotCarried) {
+		return buildFidelityStatus(err), err.Error(), true
 	}
 	return 0, "", false
 }
 
 // failEvidenceLinkage answers a PAS request whose evidence could not be
 // linked (completeAuthoredPASRequest), after the legs before the claim:
-// evidence the gateway's own edit cannot carry is refused 422
-// (evidenceFidelityRefusal), a record the gateway could not prepare is its own
+// evidence the gateway's own edit cannot carry is refused with
+// buildFidelityStatus's status (502 for a record read from the system of
+// record, 422 for one the request names that it does not hold), and a record
+// read past the gateway's own carrying limits 502, each recorded as the
+// fidelity of the build (evidenceFidelityRefusal), a record the gateway could not prepare is its own
 // 500, a record the system answered with something other than that resource
 // is the system's invalid answer, 502 naming the record, and a read of the
 // participant's system that failed to answer is a backend failure, each
 // recorded as failOriginRead does, and anything else the gateway's own 502,
 // refused under no named rule: a request graph the completion will not read
-// (its own bounds and shape rules, and the relay's limits on a record as the
-// request carries it), an authored request that does not match its source,
-// or no system of record configured (cfg.SoR nil). A record the system does
+// that no record read takes past a limit (its own bounds and shape rules), an
+// authored request that does not match its source, or no system of record
+// configured (cfg.SoR nil). A record the system does
 // not hold is refused 422 as evidence the build cannot fill
 // (evidenceFidelityRefusal). Each says which legs were carried.
 func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) {
@@ -190,7 +244,7 @@ func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) 
 		return
 	}
 	var readErr *SoRReadError
-	if errors.As(err, &readErr) {
+	if errors.As(err, &readErr) || errors.Is(err, errMemberNamesNoOne) {
 		status, why := SoRFailureResponse(err)
 		failOriginRead(ctx, w, status, msg+": "+why, err)
 		return
@@ -205,3 +259,28 @@ func failEvidenceLinkage(ctx context.Context, w http.ResponseWriter, err error) 
 // msgNoPHG is the refusal of a call to originate to a patient's PHG when the
 // network registers none.
 const msgNoPHG = "no PHG registered"
+
+// readRecordNotCarried is err, an amendment build's failure, with the SDK's
+// refusal of a record it carries as written (shnsdk.ErrPASRecordNotCarried)
+// answered as a record read from the participant's own system that the build
+// cannot carry as read (errRecordNotCarried, 502): for a build whose every
+// record carried so is the system's or SHN's own, decided by the build's
+// inputs at its call site, never by the message. Any other error is returned
+// as it is.
+func readRecordNotCarried(err error) error {
+	if errors.Is(err, shnsdk.ErrPASRecordNotCarried) {
+		return &readRecordNotCarriedError{err: err}
+	}
+	return err
+}
+
+// readRecordNotCarriedError keeps the SDK's refusal (its message, and
+// errors.Is reporting shnsdk.ErrPASRecordNotCarried) and reports
+// errRecordNotCarried too, so buildFidelityStatus answers it 502.
+type readRecordNotCarriedError struct{ err error }
+
+func (e *readRecordNotCarriedError) Error() string { return e.err.Error() }
+
+func (e *readRecordNotCarriedError) Unwrap() error { return e.err }
+
+func (e *readRecordNotCarriedError) Is(target error) bool { return target == errRecordNotCarried }

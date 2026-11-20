@@ -304,7 +304,7 @@ func TestDiagnosticVerifiedLegRequiresBoundAuthority(t *testing.T) {
 				t.Fatal(err)
 			}
 			hash := sha256hex(env.Ciphertext)
-			tok := signTestToken(shnsdk.Token{Operation: paCatalog[env.Metadata.TransactionType].Op, Frame: "provider-tpo", Holder: requester.ID, CorrelationID: "bound", PayloadHash: hash, Expiry: g.cfg.Clock().Add(time.Minute)}, key)
+			tok := signTestToken(shnsdk.Token{Operation: paCatalog[env.Metadata.TransactionType].Op, Frame: "provider-tpo", Holder: requester.ID, CorrelationID: "bound", Subject: "pci:diagnostic", PayloadHash: hash, Expiry: g.cfg.Clock().Add(time.Minute)}, key)
 			raw, _ := json.Marshal(tok)
 			env.Metadata.AuthzToken = string(raw)
 			switch mutation {

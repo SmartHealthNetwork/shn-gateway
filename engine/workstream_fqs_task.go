@@ -39,6 +39,23 @@ type cdexCoding struct {
 	Code   string `json:"code"`
 }
 
+// blankTaskFor reports whether a federated-query Task, read by its exact member
+// names, names its patient by a relative reference that names no one: the
+// member it reads as (one "Patient/" taken off, as cdexTaskQuery takes it)
+// names no member (memberNamesNoOne). An absent or empty Task.for, or a Task
+// that does not read so, is left to the reader that follows.
+func blankTaskFor(task []byte) bool {
+	var view struct {
+		For *struct {
+			Reference *string `json:"reference"`
+		} `json:"for"`
+	}
+	if decodeMessage(task, &view) != nil || view.For == nil || view.For.Reference == nil || *view.For.Reference == "" {
+		return false
+	}
+	return memberNamesNoOne(strings.TrimPrefix(*view.For.Reference, "Patient/"))
+}
+
 // cdexTaskQuery is a federated-query Task read as its data request, and the
 // member its patient names. It is the one reading of the Task's patient: the
 // requester's gateway binds the patient it checks consent for with it, and
@@ -47,6 +64,11 @@ type cdexCoding struct {
 // Task that is not a data request the leg's scope admits (one patient, named
 // document types), or whose patient cannot be read.
 func cdexTaskQuery(task []byte) (shnsdk.ParsedCDexRequest, string, error) {
+	// A Task.for that names no one is refused before the SDK's reader reads
+	// it, whatever that reader answers for it (errMemberNamesNoOne).
+	if blankTaskFor(task) {
+		return shnsdk.ParsedCDexRequest{}, "", errMemberNamesNoOne
+	}
 	parsed, err := shnsdk.ParseCDexTaskDataRequest(relativeCDexPatients(task))
 	if err != nil {
 		return shnsdk.ParsedCDexRequest{}, "", err

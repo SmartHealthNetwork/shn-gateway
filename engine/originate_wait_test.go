@@ -1167,6 +1167,7 @@ func pendingPersonaContinuation() Continuation {
 		Line:            "2.0",
 		CorrID:          "corr-pending",
 		MemberID:        pendingPersonaMember,
+		SubjectPCI:      "pci:" + pendingPersonaMember,
 		SoRPatientID:    "Patient/" + pendingPersonaMember,
 		OrderRef:        pendingPersonaOrderRef,
 		ClaimIdentifier: "urn:shn:correlation|corr-pending",
@@ -1383,7 +1384,14 @@ func (s *pasFollowStub) RoundTrip(req *http.Request) (*http.Response, error) {
 		Sender: "payer", Recipient: "provider", TransactionType: leg,
 		AuthorityFrame: "payer-coverage", Timestamp: s.clock().UTC().Format(time.RFC3339), CorrelationID: corrID,
 	}
-	out, err := sealForProvider(meta, payload, s.providerEncPub, s.authzPriv, corrID, op, "payer-coverage", "payer", s.pci, s.clock())
+	// The answer's token names the request's patient, as the Framework mints
+	// it: the patient the request token names.
+	subject := s.pci
+	var reqTok shnsdk.Token
+	if json.Unmarshal([]byte(env.Metadata.AuthzToken), &reqTok) == nil && reqTok.Subject != "" {
+		subject = reqTok.Subject
+	}
+	out, err := sealForProvider(meta, payload, s.providerEncPub, s.authzPriv, corrID, op, "payer-coverage", "payer", subject, s.clock())
 	if err != nil {
 		return errResp("stub: sealForProvider: " + err.Error()), nil
 	}

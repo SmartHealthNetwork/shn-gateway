@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -28,7 +29,7 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 	w, scope := g.withScope(w, relay.RoleRequester)
 	scope.leg = legType
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeFederatedQuery) {
 		return
 	}
 	exchangeOf(r.Context()).leg(legType)
@@ -64,6 +65,12 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 		return
 	}
 	_, member, err := cdexTaskQuery(task)
+	if errors.Is(err, errMemberNamesNoOne) {
+		// Its patient names no one: the subject binding's refusal.
+		status, msg := subjectBindingFailure(r.Context(), err)
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
 	if err != nil {
 		// The leg's scope (its taxonomy row's named-docs-only): a data request
 		// for one patient's named documents, the patient read from Task.for.

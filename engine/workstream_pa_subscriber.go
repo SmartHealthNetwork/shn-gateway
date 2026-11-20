@@ -20,7 +20,8 @@ import (
 // counterpart, as it would at the counterpart's own base, and asks its
 // $status; the gateway carries each interaction on the topic's subscribe leg,
 // through the Hub, to the counterpart's gateway, which serves the notifier's
-// half (workstream_pa_cdex_subscription.go for the HRex Task topic).
+// half (workstream_pa_subscribe_inbound.go, its rules written out at
+// workstream_pa_cdex_subscription.go for the HRex Task topic).
 //
 // serveSubscriptions is the half, generic over the topic. The base that mounts
 // it (a workstream's per-counterpart base: workstream_pa_cdex_subscriber.go
@@ -140,7 +141,7 @@ func (s *subscribeRequest) frameHeaders() map[string]string {
 
 // subscriptionTopics are the topics a gateway serves a subscribe leg for: the
 // topic tokens a notification address may name (§6.5's loop rule).
-var subscriptionTopics = []subscription.Topic{cdexTopic}
+var subscriptionTopics = []subscription.Topic{cdexTopic, pasTopic}
 
 // isSubscriptionTopic reports whether tok is a served topic's token.
 func isSubscriptionTopic(tok string) bool {

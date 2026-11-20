@@ -321,30 +321,34 @@ var sorFailureRoutes = []string{"crd", "pas", "patient-dtr", "eligibility", "rec
 
 // callSoRRoute sends route's request from sender straight to its inbound
 // handler.
+// sorRouteToken is the request token each route arrives with: for the
+// covered member's patient, as the Framework mints a patient leg's token.
+var sorRouteToken = shnsdk.Token{Subject: "pci:sor-route"}
+
 func callSoRRoute(t *testing.T, g *Gateway, route string, w http.ResponseWriter, r *http.Request, sender string) {
 	t.Helper()
 	env := shnsdk.Envelope{}
 	env.Metadata.Sender, env.Metadata.CorrelationID = sender, "corr-sor"
 	switch route {
 	case "crd":
-		g.handleCRDNativeInbound(w, r, env, shnsdk.Token{}, conformantCRD("MBR-COVERED", "72148"), "")
+		g.handleCRDNativeInbound(w, r, env, sorRouteToken, conformantCRD("MBR-COVERED", "72148"), "")
 	case "pas":
-		g.handlePASNativeInbound(w, r, env, shnsdk.Token{}, loadPASGolden(t, "MBR-COVERED"), "")
+		g.handlePASNativeInbound(w, r, env, sorRouteToken, loadPASGolden(t, "MBR-COVERED"), "")
 	case "eligibility":
 		b, e := shnsdk.BuildEligibilityRequestExact("MBR-COVERED", "1234567890", shnsdk.CMSPayerIdentity, time.Now())
 		if e != nil {
 			t.Fatal(e)
 		}
-		g.handleEligibilityInbound(w, r, env, shnsdk.Token{}, b, "")
+		g.handleEligibilityInbound(w, r, env, sorRouteToken, b, "")
 	case "records":
 		b, e := shnsdk.BuildCDexTaskDataRequest("Patient/MBR-COVERED", "DocumentReference", "2023-01-01", "2023-12-31", shnsdk.CDexTaskMeta{AuthoredOn: time.Unix(1700000000, 0), Requester: "provider", Owner: "facility"})
 		if e != nil {
 			t.Fatal(e)
 		}
 		env.Metadata.ConsentRef = "consent"
-		g.handleFederatedQueryInbound(w, r, env, shnsdk.Token{}, b, "")
+		g.handleFederatedQueryInbound(w, r, env, sorRouteToken, b, "")
 	case "patient-dtr":
-		g.handlePatientDTRInbound(w, r, env, shnsdk.Token{}, []byte(`{"patientRef":"Patient/MBR-COVERED"}`), "")
+		g.handlePatientDTRInbound(w, r, env, sorRouteToken, []byte(`{"patientRef":"Patient/MBR-COVERED"}`), "")
 	default:
 		t.Fatalf("unknown route %s", route)
 	}
@@ -522,7 +526,8 @@ func TestSoRRequesterReadsRepeatingAMember(t *testing.T) {
 			return answer{status, msg}
 		}},
 		"supplemental report": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {
-			_, _, status, msg, _ := g.supplementalReport(context.Background(), "MBR-COVERED", "MBR-COVERED")
+			_, _, refusal := g.supplementalReport(context.Background(), "MBR-COVERED", "MBR-COVERED")
+			status, msg, _ := refusalParts(refusal)
 			return answer{status, msg}
 		}},
 		"scenario origination": {fill: false, run: func(g *Gateway, _ SystemOfRecord) answer {

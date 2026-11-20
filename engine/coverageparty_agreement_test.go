@@ -341,31 +341,6 @@ func fenceNoPartyReason(t *testing.T, value []byte, i int) string {
 	return "another patient"
 }
 
-// ruleNameInAnotherCase reports whether any object in v has a member
-// spelling, in another case, a name shnsdk.CoverageParty reads.
-func ruleNameInAnotherCase(v any) bool {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, c := range x {
-			for _, n := range []string{"resourceType", "contained", "subscriber", "policyHolder", "reference", "id", "identifier"} {
-				if k != n && strings.EqualFold(k, n) {
-					return true
-				}
-			}
-			if ruleNameInAnotherCase(c) {
-				return true
-			}
-		}
-	case []any:
-		for _, c := range x {
-			if ruleNameInAnotherCase(c) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // foldedDuplicateMember reports whether any object in v has two members
 // whose names are equal under case folding.
 func foldedDuplicateMember(v any) bool {
@@ -401,9 +376,14 @@ func foldedDuplicateMember(v any) bool {
 // derivation reads a member-bearing Patient only when the walk can decide it
 // is the member: once a Coverage's party slot may name a Patient (its
 // undecided, pinned by the derivation rows), only a Patient that Coverage's
-// beneficiary names is read, and the probe is none. A row whose request
-// repeats a member name under case folding is read by no deciding reader, so
-// the involved list names no one in it, on every leg.
+// beneficiary names is read, and the probe is none. Each walker reads the row
+// through its view of the request (strictView, bindingView), in which the
+// names the rule reads take their FHIR spelling within a resource, so the
+// rule's answer the walkers agree with is its answer on that view: a row
+// spelling a name the rule reads in another case is read as the exact
+// spelling is. A row whose request repeats a member name under case folding is
+// read by no deciding reader, so the involved list names no one in it, on
+// every leg.
 func TestCoverageParty_WalkersAgree(t *testing.T) {
 	t.Parallel()
 	var refused atomic.Int32
@@ -415,11 +395,19 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 	for _, r := range sdkCoveragePartyRows(t) {
 		t.Run(r.Name, func(t *testing.T) {
 			cov := walkerVariant(t, r)
+			// The rule's answer on the walkers' view of the Coverage.
+			party := r.Party
+			if v, err := strictView(mustJSON(t, cov)); err == nil {
+				vc := v.doc.(map[string]any)
+				list, _ := vc["contained"].([]any)
+				c, _ := list[r.Contained].(map[string]any)
+				party = shnsdk.CoverageParty(vc, c)
+			}
 			for shape, payload := range map[string][]byte{
 				"resource": mustJSON(t, cov),
 				"entry":    mustJSON(t, map[string]any{"resourceType": "Bundle", "type": "collection", "entry": []any{map[string]any{"fullUrl": "urn:uuid:c1", "resource": cov}}}),
 			} {
-				wantWalked := !r.Party
+				wantWalked := !party
 				// The involved list's own party decision, held to the rule on
 				// every row: the candidate, when it is a Patient with an id no
 				// other contained resource shares, is named a member exactly
@@ -453,17 +441,14 @@ func TestCoverageParty_WalkersAgree(t *testing.T) {
 					if leg == "pas-claim" || leg == "pas-claim-update" {
 						name = "#" + id
 					}
-					if named := slices.Contains(members, name); named != !r.Party {
-						t.Fatalf("%s, carriedMembers on %s: the candidate %s named %v, want %v (party %v)", shape, leg, name, named, !r.Party, r.Party)
+					if named := slices.Contains(members, name); named != !party {
+						t.Fatalf("%s, carriedMembers on %s: the candidate %s named %v, want %v (party %v)", shape, leg, name, named, !party, party)
 					}
 				}
 				walked := false
 				forEachCarriedPatient(payload, "zz-probe", func(p map[string]any) { walked = walked || p["id"] == "zz-probe" })
-				var doc any
-				if err := json.Unmarshal(mustJSON(t, cov), &doc); err != nil {
-					t.Fatal(err)
-				}
-				if foldedDuplicateMember(cov) || ruleNameInAnotherCase(cov) || anyCoverageUndecided(doc) {
+				doc, _ := bindingView(mustJSON(t, cov))
+				if foldedDuplicateMember(cov) || anyCoverageUndecided(doc.doc) {
 					wantWalked = false
 				}
 				if walked != wantWalked {

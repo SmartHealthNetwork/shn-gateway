@@ -34,6 +34,12 @@ type workstream interface {
 	// (refusalreason.go): the fixed sentences its ingress refusals before the
 	// request reaches the Hub record, or nil.
 	refusalReasons() []refusalReason
+	// routeScopes are the workstream's provider ingress routes that take a
+	// scope, each pattern as it mounts it with the scope its handler checks
+	// (routeScope, routeScopeRefused), or nil: the provider's SMART
+	// configuration advertises them (providerScopes) and its boot rule reads
+	// the resource types they name (RouteScopeResources).
+	routeScopes() []scopedPattern
 	// canonicalContractVersion is the contract-version token the deployment's
 	// canonical validator (Config.Validator, FHIR_VALIDATE_URL) resolves for the
 	// workstream, or "" when the workstream names none.
@@ -74,8 +80,9 @@ type workstream interface {
 	involvement(leg string) (request, answer bool)
 	// requestMembers is every member a request on one of the workstream's
 	// legs names, each read as that leg binds its subject, with the bytes its
-	// patient is bound from.
-	requestMembers(leg string, payload []byte) []namedMember
+	// patient is bound from, or errRequestPatientsUnreadable for a request
+	// whose patients cannot be read, which is never read as naming no one.
+	requestMembers(leg string, payload []byte) ([]namedMember, error)
 	// newMemState is the workstream's own state in a new in-memory Store
 	// (memstore.go), or nil for a workstream that keeps none there.
 	newMemState() memState
@@ -166,6 +173,35 @@ func compiledRefusalReasons() []refusalReason {
 	return out
 }
 
+// compiledRouteScopes are the scopes the compiled-in workstreams' provider
+// ingress routes take.
+func compiledRouteScopes() []routeScope {
+	var out []routeScope
+	for _, w := range workstreams {
+		for _, r := range w.routeScopes() {
+			out = append(out, r.scope)
+		}
+	}
+	return out
+}
+
+// RouteScopeResources are the FHIR resource types the provider ingress
+// routes of this build's workstreams take a scope on, sorted, each once: the
+// ones its boot rule (CheckProviderIngressScopes) holds a registered scope's
+// spelling to.
+func RouteScopeResources() []string {
+	var out []string
+	for _, s := range compiledRouteScopes() {
+		for _, resource := range s.resources {
+			if !slices.Contains(out, resource) {
+				out = append(out, resource)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // catalogFor is the leg catalog of the compiled-in workstream whose content is
 // tagged workstreamType; ok is false when this build serves no such
 // workstream.
@@ -193,6 +229,32 @@ func legSpecFor(transactionType string) (legSpec, bool) {
 	}
 	return legSpec{}, false
 }
+
+// legSpecForOp is the leg one of whose operations is op, in whichever
+// compiled-in workstream declares it, and whether op is its answer's; ok is
+// false when none does. Operations are unique across the compiled-in
+// catalogs (TestWorkstreams_LegsAreUniqueAcrossCatalogs).
+func legSpecForOp(op string) (spec legSpec, answer, ok bool) {
+	for _, w := range workstreams {
+		for _, s := range w.catalog() {
+			switch op {
+			case s.Op:
+				return s, false, true
+			case s.RespOp:
+				return s, true, true
+			}
+		}
+	}
+	return legSpec{}, false, false
+}
+
+// namesNoPatient reports whether the leg's row names no patient on either
+// side (legtaxonomy.SubjectNone).
+func (s legSpec) namesNoPatient() bool { return s.Subject == legtaxonomy.SubjectNone }
+
+// fromAnswer reports whether the leg's row takes its patient from the answer
+// (legtaxonomy.SubjectFromAnswer).
+func (s legSpec) fromAnswer() bool { return s.Subject == legtaxonomy.SubjectFromAnswer }
 
 // answersFHIR reports whether the leg txType names, in either form, answers
 // this gateway's own refusal as an OperationOutcome (its answer envelope is
@@ -862,6 +924,13 @@ type legSpec struct {
 	// frame naming one on any other is refused (inboundFrameSubscription).
 	// The adapter sets it.
 	Signal bool
+	// Subject is the taxonomy row's subject: legtaxonomy.SubjectFromAnswer on a
+	// leg whose request names no patient and whose answer names the patient it
+	// discloses, legtaxonomy.SubjectNone on a leg that names no patient on
+	// either side, and "" on a leg whose request names its patient. Every
+	// token this gateway verifies is held to it (requestSubjectWant,
+	// answerSubjectWant), never to an empty expected subject.
+	Subject string
 	// AnswerEnvelope is the envelope of this gateway's own refusal on the leg,
 	// the taxonomy's (legtaxonomy.AnswerEnvelopeFHIR or AnswerEnvelopeJSON):
 	// an OperationOutcome on a leg its client reaches through a FHIR
@@ -927,7 +996,7 @@ func catalogFromTaxonomy(t legtaxonomy.Taxonomy, name string, detail map[string]
 			Physics: d.Physics, Contract: d.Contract,
 			FrameOperations: frameOperations(l), Seam: d.Seam, WireName: l.StagedName,
 			RecipientRoles: l.Response.Roles, TakenWhenSet: d.TakenWhenSet, ReadPath: d.ReadPath, Subscribe: d.Subscribe, Signal: d.Signal,
-			AnswerEnvelope: l.AnswerEnvelope,
+			AnswerEnvelope: l.AnswerEnvelope, Subject: l.Subject,
 		}
 	}
 	for _, tx := range slices.Sorted(maps.Keys(detail)) {

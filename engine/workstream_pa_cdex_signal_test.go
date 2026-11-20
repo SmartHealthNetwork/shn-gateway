@@ -25,6 +25,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdextopic"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -230,6 +231,12 @@ func TestDeliveryEdits_EveryRegisteredEditHasAMaker(t *testing.T) {
 	}
 	if signals == 0 || !slices.Equal(deliveryEditIDs(legCDexTaskSignal), []relay.EditID{relay.EditCDexTaskNotificationAddressRekey}) {
 		t.Fatalf("%d signal legs; cdex-task-signal's edits %v, want E-17", signals, deliveryEditIDs(legCDexTaskSignal))
+	}
+	if got := deliveryEditIDs(legPASSubscriptionNotify); !slices.Equal(got, []relay.EditID{relay.EditPASNotifiedReturnRekey}) {
+		t.Fatalf("pas-subscription-notify's edits %v, want E-22", got)
+	}
+	if got := deliveryEditIDs(legPASSubscriptionSignal); len(got) != 0 {
+		t.Fatalf("pas-subscription-signal's edits %v, want none", got)
 	}
 	for id := range deliveryEdits {
 		if !slices.Contains(headerDisclosedEdits, id) {
@@ -521,16 +528,16 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 			"a Patient in a focus part's valueReference":           {valid, patientAt(`{"name":"focus","valueReference":{`, `{"name":"focus","valueReference":{"x":`+pat+`,`), nil, http.StatusForbidden, RefusalAuthority, "id-only"},
 			"a Patient in the status's meta":                       {valid, patientAt(`"resource":{"resourceType":"Parameters",`, `"resource":{"resourceType":"Parameters","meta":{"x":`+pat+`},`), nil, http.StatusForbidden, RefusalAuthority, "id-only"},
 			"not a notification":                                   {valid, []byte(`{"resourceType":"Bundle","type":"history"}`), nil, http.StatusForbidden, RefusalAuthority, ""},
-			"nesting deeper than relay reads":                      {valid, patientAt(`"type":"history",`, `"type":"history","x":`+strings.Repeat(`{"a":`, 70)+`0`+strings.Repeat(`}`, 70)+`,`), nil, http.StatusBadGateway, RefusalAuthority, "closed notification shape"},
+			"nesting deeper than relay reads":                      {valid, patientAt(`"type":"history",`, `"type":"history","x":`+strings.Repeat(`{"a":`, 70)+`0`+strings.Repeat(`}`, 70)+`,`), nil, http.StatusForbidden, RefusalAuthority, "closed notification shape"},
 			"a focus with userinfo":                                {valid, []byte(signalEvent("https://u@provider.example/fhir/Task/t1")), nil, http.StatusUnprocessableEntity, RefusalRouting, "cannot be re-keyed"},
 			"a focus whose host ends in a dot":                     {valid, []byte(signalEvent("https://provider.example./fhir/Task/t1")), nil, http.StatusUnprocessableEntity, RefusalRouting, "cannot be re-keyed"},
-			"a string relay cannot read":                           {valid, patientAt(`{"name":"event-number","valueString":"1"}`, `{"name":"event-number","valueString":"\ud800"}`), nil, http.StatusBadGateway, RefusalFidelity, "read one way only"},
+			"a string relay cannot read":                           {valid, patientAt(`{"name":"event-number","valueString":"1"}`, `{"name":"event-number","valueString":"\ud800"}`), nil, http.StatusBadRequest, RefusalFidelity, "read one way only"},
 			"an additional-context Patient":                        {valid, patientAt(`{"name":"focus",`, `{"name":"additional-context","valueReference":{"reference":"Patient/p1"}},{"name":"focus",`), nil, http.StatusForbidden, RefusalAuthority, "additional-context"},
 			"an additional-context Task":                           {valid, patientAt(`{"name":"focus",`, `{"name":"additional-context","valueReference":{"reference":"`+signalProviderBase+`/Task/t2"}},{"name":"focus",`), nil, http.StatusForbidden, RefusalAuthority, "additional-context"},
 			"an additional-context naming nothing":                 {valid, patientAt(`{"name":"focus",`, `{"name":"additional-context"},{"name":"focus",`), nil, http.StatusForbidden, RefusalAuthority, "additional-context"},
-			"a part naming a patient":                              {valid, patientAt(`{"name":"focus",`, `{"name":"patient","valueReference":{"reference":"Patient/p1"}},{"name":"focus",`), nil, http.StatusBadGateway, RefusalAuthority, "closed notification shape"},
-			"an extension":                                         {valid, patientAt(`"type":"history",`, `"type":"history","extension":[{"url":"http://example.org/x","valueString":"y"}],`), nil, http.StatusBadGateway, RefusalAuthority, "closed notification shape"},
-			"a signed notification":                                {valid, []byte(strings.TrimSuffix(signalEvent(signalProviderBase+"/Task/t1"), "}") + `,"signature":{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-11-13T00:00:00Z","who":{"reference":"Organization/provider"}}}`), nil, http.StatusBadGateway, RefusalAuthority, "signature"},
+			"a part naming a patient":                              {valid, patientAt(`{"name":"focus",`, `{"name":"patient","valueReference":{"reference":"Patient/p1"}},{"name":"focus",`), nil, http.StatusForbidden, RefusalAuthority, "closed notification shape"},
+			"an extension":                                         {valid, patientAt(`"type":"history",`, `"type":"history","extension":[{"url":"http://example.org/x","valueString":"y"}],`), nil, http.StatusForbidden, RefusalAuthority, "closed notification shape"},
+			"a signed notification":                                {valid, []byte(strings.TrimSuffix(signalEvent(signalProviderBase+"/Task/t1"), "}") + `,"signature":{"type":[{"code":"1.2.840.10065.1.12.1.1"}],"when":"2026-11-13T00:00:00Z","who":{"reference":"Organization/provider"}}}`), nil, http.StatusForbidden, RefusalAuthority, "signature"},
 			"a sibling path on the provider's server":              {valid, patientAt(`{"fullUrl":"`+signalProviderBase+`/Task/t1",`, `{"fullUrl":"https://provider.example/fhirX/Task/t1",`), nil, http.StatusUnprocessableEntity, RefusalRouting, "not under the provider's stated FHIR base"},
 			"identity members on the provider's server, delivered": {valid, []byte(withIdentities(signalEvent(signalProviderBase+"/Task/t1"), signalProviderBase)), nil, http.StatusNoContent, "", ""},
 			"a fragment on the provider's address":                 {valid, patientAt(`{"fullUrl":"`+signalProviderBase+`/Task/t1",`, `{"fullUrl":"`+signalProviderBase+`/Task/t1#x",`), nil, http.StatusUnprocessableEntity, RefusalRouting, "not under the provider's stated FHIR base"},
@@ -567,6 +574,11 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 				if x.Outcome != ExchangeRefused || x.RefusedBy != RefusedByPayerGateway || x.Rule != r.rule {
 					t.Fatalf("record %s by %q on %q, want refused by the payer's gateway on %q", x.Outcome, x.RefusedBy, x.Rule, r.rule)
 				}
+				// Each fidelity refusal here is of a notification the gateway
+				// cannot build its delivery of: stage build.
+				if r.rule == RefusalFidelity && x.RefusalStage != vocab.RefusalStageBuild {
+					t.Fatalf("recorded at stage %q, want %q", x.RefusalStage, vocab.RefusalStageBuild)
+				}
 				if strings.Contains(string(a.body), "payer-secret") || strings.Contains(string(a.body), "payer-sys.example") {
 					t.Fatalf("the refusal names the payer's own values: %s", a.body)
 				}
@@ -578,12 +590,45 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 	}
 }
 
+// A registered edit the payer's gateway cannot make on a notification it can
+// read is this gateway's own fault, whoever sent the notification: refused
+// 502 on the fidelity of its own edit, at stage verify, nothing delivered, at
+// every conformance level. Only the notifier's message is answered 4xx.
+func TestCDexSignal_AFaultInTheGatewaysOwnEditIs502(t *testing.T) {
+	saved := deliveryEdits
+	t.Cleanup(func() { deliveryEdits = saved })
+	deliveryEdits = map[relay.EditID]deliveryEdit{
+		relay.EditCDexTaskNotificationAddressRekey: func(*Gateway, *exchangeRecorder, *relay.Document, deliveryInput) ([]relay.Op, error) {
+			return nil, fmt.Errorf("an edit failing its own verification")
+		},
+	}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			p := newSignalPayer(t, level)
+			se, sh := p.sealed(t, "provider-x", payerEndpoint, []string{"Authorization: Bearer payer-secret"})
+			a := p.signal(t, map[string]string{shnsdk.FrameHeaderSubscriptionEndpoint: se, shnsdk.FrameHeaderSubscriptionChannel: sh,
+				shnsdk.FrameHeaderStatedBase: signalProviderBase, "Content-Type": "application/fhir+json"}, []byte(signalEvent(signalProviderBase+"/Task/t1")))
+			if a.status != http.StatusBadGateway || !strings.Contains(string(a.body), refusalSignalEdit) {
+				t.Fatalf("answered %d %s, want 502 %q", a.status, a.body, refusalSignalEdit)
+			}
+			x := p.got.only(t)
+			if x.Outcome != ExchangeRefused || x.RefusedBy != RefusedByPayerGateway || x.Rule != RefusalFidelity || x.RefusalStage != vocab.RefusalStageVerify {
+				t.Fatalf("record %s by %q on %q at %q, want refused by the payer's gateway on %q at %q", x.Outcome, x.RefusedBy, x.Rule, x.RefusalStage, RefusalFidelity, vocab.RefusalStageVerify)
+			}
+			if len(p.bodies) != 0 {
+				t.Fatalf("the endpoint got %d notifications", len(p.bodies))
+			}
+		})
+	}
+}
+
 // credentialBeforeBody are the ingress routes whose credential travels in the
 // address and headers alone, so they check it before reading a body: an
 // unauthenticated sender cannot make the gateway read up to its limit. The
 // body-reading rows every other route shares run on them with a credential
-// that verifies (TestCDexNotify_TheCredentialComesBeforeTheBody).
-var credentialBeforeBody = map[string]bool{RouteCDexNotify: true}
+// that verifies (TestCDexNotify_TheCredentialComesBeforeTheBody,
+// TestPASNotify_TheCredentialComesBeforeTheBody).
+var credentialBeforeBody = map[string]bool{RouteCDexNotify: true, RoutePASNotify: true}
 
 // notifyRequest is a POST of body to the notification address the provider's
 // gateway p writes for payer-x, with its credential when authed.

@@ -290,6 +290,10 @@ func (e *SoRReadError) Error() string {
 // Backend credentials never become caller authentication errors. A 503 does not
 // promise automatic retries or business-operation idempotency.
 func SoRFailureResponse(err error) (int, string) {
+	// A member that names no one is the request's, not the system of record's.
+	if errors.Is(err, errMemberNamesNoOne) {
+		return http.StatusBadRequest, msgMemberNamesNoOne
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusServiceUnavailable, (&SoRReadError{Kind: SoRUnavailable}).Error()
 	}
@@ -359,6 +363,9 @@ func noteRead(ctx context.Context) (context.Context, func(class string)) {
 }
 
 func (r recordingSoR) ResolvePatientContext(ctx context.Context, key string) (string, Demo, bool, error) {
+	if memberNamesNoOne(key) {
+		return "", Demo{}, false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, c, err := r.inner.ResolvePatientContext(ctx, key)
 	if note != nil {
@@ -368,6 +375,9 @@ func (r recordingSoR) ResolvePatientContext(ctx context.Context, key string) (st
 }
 
 func (r recordingSoR) PatientFHIRRefContext(ctx context.Context, key string) (string, bool, error) {
+	if memberNamesNoOne(key) {
+		return "", false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.PatientFHIRRefContext(ctx, key)
 	if note != nil {
@@ -377,6 +387,9 @@ func (r recordingSoR) PatientFHIRRefContext(ctx context.Context, key string) (st
 }
 
 func (r recordingSoR) CoverageInforceContext(ctx context.Context, key string) (bool, string, error) {
+	if memberNamesNoOne(key) {
+		return false, "", errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.CoverageInforceContext(ctx, key)
 	if note != nil {
@@ -386,6 +399,9 @@ func (r recordingSoR) CoverageInforceContext(ctx context.Context, key string) (b
 }
 
 func (r recordingSoR) ClinicalContextContext(ctx context.Context, key string) (shnsdk.ClinicalContext, bool, error) {
+	if memberNamesNoOne(key) {
+		return shnsdk.ClinicalContext{}, false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.ClinicalContextContext(ctx, key)
 	if note != nil {
@@ -395,6 +411,9 @@ func (r recordingSoR) ClinicalContextContext(ctx context.Context, key string) (s
 }
 
 func (r recordingSoR) SupplementalReportContext(ctx context.Context, key string) ([]byte, bool, error) {
+	if memberNamesNoOne(key) {
+		return nil, false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.SupplementalReportContext(ctx, key)
 	if note != nil {
@@ -404,6 +423,9 @@ func (r recordingSoR) SupplementalReportContext(ctx context.Context, key string)
 }
 
 func (r recordingSoR) FacilityRecordsContext(ctx context.Context, key string) (map[string][]byte, bool, error) {
+	if memberNamesNoOne(key) {
+		return nil, false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.FacilityRecordsContext(ctx, key)
 	if note != nil {
@@ -413,6 +435,9 @@ func (r recordingSoR) FacilityRecordsContext(ctx context.Context, key string) (m
 }
 
 func (r recordingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte, bool, error) {
+	if memberNamesNoOne(key) {
+		return nil, false, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, b, err := r.inner.OpenOrderContext(ctx, key)
 	if note != nil {
@@ -422,6 +447,9 @@ func (r recordingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte,
 }
 
 func (r recordingSoR) OpenCoverageContext(ctx context.Context, key string) ([][]byte, error) {
+	if memberNamesNoOne(key) {
+		return nil, errMemberNamesNoOne // never read, so never noted
+	}
 	ctx, note := r.begin(ctx)
 	a, err := r.inner.OpenCoverageContext(ctx, key)
 	if note != nil {

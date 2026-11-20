@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 )
 
 // The subscriber's side of a topic Subscription (the notifications design
@@ -59,7 +60,7 @@ func subscriptionLocation(tail string) bool {
 		return false
 	}
 	for _, seg := range strings.Split(tail, "/") {
-		if seg == "." || seg == ".." {
+		if seg != "Subscription" && seg != "_history" && !fhirid.Valid(seg) {
 			return false
 		}
 	}

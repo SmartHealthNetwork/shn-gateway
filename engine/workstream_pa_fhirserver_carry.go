@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -405,7 +406,7 @@ func fhirServerCarriedEntries(answer []byte, payors [][]byte, others []bundleRef
 // trailing slash trimmed). A version, query or fragment, or any other base,
 // is never one.
 func absolutePayorOnBase(ref, base, id string) bool {
-	if !fhirIDRE.MatchString(id) || id == "." || id == ".." {
+	if !fhirid.Valid(id) {
 		return false
 	}
 	refBase, ok := strings.CutSuffix(ref, "/Organization/"+id)

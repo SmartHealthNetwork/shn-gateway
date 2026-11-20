@@ -1,12 +1,14 @@
 package relay
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
+	"github.com/SmartHealthNetwork/shn-sdk/signedcontent"
 )
 
 // randomSignedDoc writes a seeded random document in which signatures cover
@@ -106,12 +108,13 @@ func randomSignedDoc(r *rand.Rand) string {
 	return res(0)
 }
 
-// TestCoverageAgreesWithCoverageEach: on seeded random documents, for every
+// TestCoverageHitsAgreesWithHitsEach: on seeded random documents, for every
 // effect an operation can make (a replaced value, a removed member, an
 // insertion inside a container) and for random byte ranges, the indexed
 // coverage reports exactly the carriers, in exactly the order, that
-// comparing every effect with every region of the unindexed coverage does.
-func TestCoverageAgreesWithCoverageEach(t *testing.T) {
+// comparing every effect with every region of the reading (hitsEach over
+// signedcontent's regions) does.
+func TestCoverageHitsAgreesWithHitsEach(t *testing.T) {
 	r := rand.New(rand.NewPCG(20261114, 3))
 	cases, signed := 0, 0
 	for c := range 3000 {
@@ -120,8 +123,8 @@ func TestCoverageAgreesWithCoverageEach(t *testing.T) {
 		if err != nil {
 			t.Fatalf("case %d: %v\n%s", c, err, src)
 		}
-		ref := coverageEach(d)
-		cov := coverage(d)
+		cov := coverage([]byte(src))
+		ref := cov.regions
 		if len(ref) > 0 {
 			signed++
 		}
@@ -159,10 +162,9 @@ func TestCoverageAgreesWithCoverageEach(t *testing.T) {
 	t.Logf("%d effects compared", cases)
 }
 
-// The reference itself is exercised on the shapes the indexed coverage must
-// keep: a valueSignature in an extension covers its resource, a
-// Provenance's target by each form covers what it names, and a duplicate
-// region changes nothing.
+// The relay's coverage keeps each rule of the reading, indexed and not: a
+// valueSignature in an extension covers its resource, a Provenance's target
+// by each form covers what it names, and a duplicate region changes nothing.
 func TestCoverageKeepsEachRule(t *testing.T) {
 	for name, c := range map[string]struct {
 		src     string
@@ -184,9 +186,37 @@ func TestCoverageKeepsEachRule(t *testing.T) {
 			n := at(t, doc, c.path...)
 			s, e := doc.d.Span(n)
 			eff := effect{start: s, end: e}
-			if got, want := coverage(doc.d).hits(eff), hitsEach(coverageEach(doc.d), eff); !slices.Equal(got, c.carrier) || !slices.Equal(want, c.carrier) {
+			cov := coverage(b.bytes())
+			if got, want := cov.hits(eff), hitsEach(cov.regions, eff); !slices.Equal(got, c.carrier) || !slices.Equal(want, c.carrier) {
 				t.Fatalf("indexed %q, each %q, want %q", got, want, c.carrier)
 			}
+		})
+	}
+}
+
+// coverage reads only a body the relay already scanned, under the same
+// limits as signedcontent, so a body the reading refuses is a fault in the
+// gateway: coverage panics rather than read it as unsigned.
+func TestCoverageOfABodyTheReadingRefusesPanics(t *testing.T) {
+	for name, src := range map[string]string{
+		"a repeated member": `{"resourceType":"Bundle","signature":{},"signature":{}}`,
+		"not JSON":          `{"resourceType":`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				got := recover()
+				if got == nil {
+					t.Fatal("coverage read a body signedcontent refuses")
+				}
+				// The fault names the body's size and the reading's error,
+				// so it can be diagnosed.
+				_, want := signedcontent.Coverage([]byte(src))
+				msg, _ := got.(string)
+				if want == nil || !strings.Contains(msg, fmt.Sprintf("%d bytes", len(src))) || !strings.Contains(msg, want.Error()) {
+					t.Fatalf("panic %v, want one naming %d bytes and %v", got, len(src), want)
+				}
+			}()
+			coverage([]byte(src))
 		})
 	}
 }
@@ -247,124 +277,5 @@ func TestCoverageMapHitsAgreesWithHitsEach(t *testing.T) {
 	}
 	if paths[true] < 1000 || paths[false] < 100 {
 		t.Fatalf("both ways must be reached: %v", paths)
-	}
-}
-
-// TestTargetIndexResolvesAsRefersTo: on seeded random resources and
-// references built from the pieces refersTo reads (types with and without a
-// slash, ids, fullUrls absolute, relative, versioned, with a /_history/ that
-// is not a version, or none; contained resources; refs by #id, type and id,
-// fullUrl, one segment, an empty last segment), resolve names exactly the
-// resources refersTo matches, in their order; and over a run of references
-// sharing one index, each names only resources refersTo matches, and once
-// each is resolved every resource refersTo matches for it is resolved.
-func TestTargetIndexResolvesAsRefersTo(t *testing.T) {
-	r := rand.New(rand.NewPCG(20261114, 5))
-	types := []string{"Patient", "Task", "A/B", "Basic"}
-	ids := []string{"1", "2", "a", ""}
-	pick := func(s []string) string { return s[r.IntN(len(s))] }
-	fullURL := func() string {
-		switch r.IntN(8) {
-		case 0:
-			return ""
-		case 1:
-			return "https://x.example/fhir/" + pick(types) + "/" + pick(ids)
-		case 2:
-			return "https://x.example/fhir/" + pick(types) + "/" + pick(ids) + "/_history/" + pick(ids)
-		case 3:
-			return pick(types) + "/" + pick(ids)
-		case 4:
-			return "/" + pick(types) + "/" + pick(ids)
-		case 5:
-			return "x/_history/1/" + pick(types) + "/" + pick(ids)
-		case 6:
-			return "urn:uuid:" + pick(ids)
-		}
-		return "/_history/1"
-	}
-	ref := func() string {
-		switch r.IntN(9) {
-		case 0:
-			return "#" + pick(ids)
-		case 1:
-			return "#"
-		case 2:
-			return pick(types) + "/" + pick(ids) + "/_history/1"
-		case 3:
-			return pick(ids)
-		case 4:
-			return pick(types) + "/"
-		case 5:
-			return "/" + pick(types) + "/" + pick(ids)
-		case 6, 7:
-			return fullURL()
-		}
-		return pick(types) + "/" + pick(ids)
-	}
-	matched, total := 0, 0
-	for c := range 20000 {
-		var all []*resource
-		for i := range 1 + r.IntN(8) {
-			all = append(all, &resource{node: splice.NodeID(i), typ: pick(types), id: pick(ids), fullURL: fullURL(), contained: r.IntN(3) == 0})
-		}
-		want := func(ref string) []int {
-			var out []int
-			for i, res := range all {
-				if refersTo(ref, res) {
-					out = append(out, i)
-				}
-			}
-			return out
-		}
-		// One reference against a fresh index: exactly refersTo's.
-		one := ref()
-		if got, w := newTargetIndex(all).resolve(one), want(one); !slices.Equal(got, w) {
-			t.Fatalf("case %d: %q resolves to %v, refersTo matches %v (resources %+v)", c, one, got, w, all)
-		}
-		// A run of references over one index.
-		ix := newTargetIndex(all)
-		gotAll, wantAll := map[int]bool{}, map[int]bool{}
-		for range 1 + r.IntN(5) {
-			ref := ref()
-			w := want(ref)
-			for _, i := range ix.resolve(ref) {
-				if !slices.Contains(w, i) {
-					t.Fatalf("case %d: %q resolves to %d, which refersTo does not match", c, ref, i)
-				}
-				gotAll[i] = true
-			}
-			// Order: once a reference is resolved, every resource it may
-			// name is resolved, by it or an earlier one, so no region is
-			// added later than refersTo would add it.
-			for _, i := range w {
-				if !gotAll[i] {
-					t.Fatalf("case %d: after %q, resource %d it names is not yet resolved", c, ref, i)
-				}
-				wantAll[i] = true
-			}
-			total++
-			if len(w) > 0 {
-				matched++
-			}
-		}
-		for i := range wantAll {
-			if !gotAll[i] {
-				t.Fatalf("case %d: resource %d is matched by a reference but never resolved", c, i)
-			}
-		}
-	}
-	if matched < 5000 {
-		t.Fatalf("only %d of %d references match a resource", matched, total)
-	}
-}
-
-// A fullUrl ends in a type and an id only when the type is the resource's
-// own: a Patient whose fullUrl ends in Task/1 is not named by Patient/1.
-func TestTargetIndexTailIsTheResourcesOwnType(t *testing.T) {
-	all := []*resource{{typ: "Patient", fullURL: "https://x/Task/1"}, {node: 1, typ: "Task", fullURL: "https://x/Task/1"}}
-	for ref, want := range map[string][]int{"Patient/1": nil, "Task/1": {1}, "https://x/Task/1": {0, 1}} {
-		if got := newTargetIndex(all).resolve(ref); !slices.Equal(got, want) {
-			t.Errorf("%q: %v, want %v", ref, got, want)
-		}
 	}
 }

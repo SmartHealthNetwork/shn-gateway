@@ -57,7 +57,7 @@ func (g *Gateway) moduleOneState() *moduleOneState {
 // whether it originates (builds and sends a request of this gateway's own),
 // and its handler, a method of the gateway it is mounted on.
 type originationRoute struct {
-	pattern    string
+	pattern    routePattern
 	originates bool
 	handler    func(*Gateway, http.ResponseWriter, *http.Request)
 }
@@ -109,8 +109,8 @@ var originationRouteTable = []originationRoute{
 // for an originating route: its path, without the leading slash, its
 // segments joined by "-" ("POST /scenario/uc07/complete" is
 // "scenario-uc07-complete").
-func originationExchangeRoute(pattern string) string {
-	_, path, _ := strings.Cut(pattern, " ")
+func originationExchangeRoute(pattern routePattern) string {
+	_, path, _ := strings.Cut(string(pattern), " ")
 	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "-")
 }
 

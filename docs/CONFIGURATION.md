@@ -377,6 +377,13 @@ other participant's own environment, for example. By default your gateway carrie
 into, so its access line records `refusal.rule` `conformance` (from v1.7.0 on every route
 that binds a member; earlier releases recorded it as `other` on some ingress routes).
 
+A request that names its patient by a reference that names no one (empty or blank, or
+`Patient/` with no id) names no member, held or not: it is never read from your system of
+record and never identified from the empty member id. It is refused at every level, whatever
+this setting, `400 cannot identify the patient: the request names its patient by a reference
+that names no one` (recorded as `authority`), or by the leg's own refusal where it reads the
+patient first.
+
 A provider's and a payer's gateway read the setting wherever they bind a patient a request
 names: the legs the table below lists, and also the federated query at a provider's ingress and
 the CDex attachment request on both sides. A facility's gateway answers only the federated
@@ -497,7 +504,20 @@ There is nothing to configure:
   `other`. A refusal names who refused (`refusal.by`) and the network rule
   (`refusal.rule`: authentication, authority, consent, routing, replay,
   integrity, audit, fidelity, conformance for a check you opted into, limit,
-  or other when no rule is named). An exchange whose audit could not be
+  or other when no rule is named). From v1.16.0, a facility's gateway that
+  declines a federated query (`federated-query`) whose `Task`'s status does not
+  allow it to be fulfilled (such as `cancelled` or `completed`) records the
+  facility's own error answer: `outcome` `upstream-error`, status `422`,
+  `answerBuilder` `cdex-decline`, and no `refusal`. It is the facility's
+  decision, not a refusal of the network's, and the same at every conformance
+  level. It comes after the network's refusals of the request itself (consent,
+  the patient's binding, a request that reads two ways, the request's shape);
+  signed content bears only on an edit, and a decline makes none, so a signed
+  `Task` whose status does not allow it to be fulfilled is declined too. A
+  requester's gateway that negotiated no message frame receives, as for every
+  participant's error answer, the gateway's existing refusal for such a
+  requester instead (recorded `refused`, `answerBuilder` `gateway-refusal`),
+  not the facility's decline. An exchange whose audit could not be
   recorded is refused on `audit`: by the Hub, or, from v1.1.0, by the
   Authorization Framework when it could not record its
   decision, as its answer's `rule` states. Your caller's answer is unchanged
@@ -581,6 +601,10 @@ There is nothing to configure:
   - `resent`: `true` when a second send of the record was begun (the `503` above); `outcome`
     is then that send's, `not-sent` if none of it reached the Hub. Absent when it was sent
     once, or not at all.
+  - `resentConnection`, from v1.16.0, with `resent`: `new` when the second send went on a new
+    connection of its own, or `pooled` when it went on the gateway's client as it is (a
+    transport that is not Go's `*http.Transport`, where no new connection can be guaranteed),
+    which may reach the Hub instance that refused the first send again.
 - On a leg from the network, `backend` is your own system's answer: its
   `status`, `latencyMs`, `errorClass` and how many `calls` were made, reads
   and searches of your system of record included (they have status 0). It
@@ -818,7 +842,9 @@ There is nothing to configure:
   every refusal it writes is (`answerBuilder` `gateway-refusal`), a refusal
   before any leg was opened included. Both are absent when no answer was
   written, as when the gateway's own refusal could not be written and it
-  answered a bare `500`.
+  answered a bare `500`. From v1.16.0, a facility's gateway that declines a
+  federated query whose `Task`'s status does not allow it to be fulfilled
+  writes the facility's own error answer, `authored` by `cdex-decline`.
 - `requestEdits` and `answerEdits` (from v0.63.0) split `relayEdits` by body:
   the edits to the request `ownership` describes, and those to the answer
   (`["E-08"]`). From v1.7.0 `requestEdits` also names an edit made to a record
@@ -887,6 +913,12 @@ There is nothing to configure:
   no base: recorded for every such notification), `E-17:not-under-base` and `E-17:no-provider-base`
   (the payer's gateway has no base of its own for that provider). A notification E-17 cannot read
   one way only is refused, never carried.
+  From shn-gateway v1.16.0, on a payer's PAS decision notification a provider's gateway delivers
+  (see [Take a payer's PAS notifications](#take-a-payers-pas-notifications-provider-optional)),
+  carried as sent where E-22 was not made: `E-22:no-structural-payer-url` (a PAS Task's
+  `payer-url` that is not a string `valueUrl`) and `E-22:payer-does-not-take` (a payer not known
+  to take the documentation submission). A notification E-22 cannot read one way only is
+  refused, never carried.
   Absent when empty. Evolving.
 - `answerHeadersNotCarried` (from v1.3.0) names each `ETag`, `Last-Modified` or
   `Retry-After` of a participant's 2xx answer that was not carried, and, from v1.7.0, each
@@ -976,10 +1008,15 @@ shared state and the patients a leg leaves out:
   It is cumulative for the process, so alarm on its rate: a rising rate is a pool
   saturating.
 - `InvolvedOmitted` (`reason`): one count per patient a leg's involved list left out,
-  by reason: `overflow`, `system-of-record-unavailable`, `unknown-member`,
-  `authorization-refused`, `authorization-failed`, `involvement-not-carried` or
-  `budget`. `authorization-failed` covers a token that does not verify for the leg
-  and patient, from v1.1.0. The exchange has no record under a patient left out.
+  by reason: `overflow`, `system-of-record-unavailable`, `request-unreadable`,
+  `unknown-member`, `authorization-refused`, `authorization-failed`,
+  `involvement-not-carried` or `budget`. `authorization-failed` covers a token that
+  does not verify for the leg and patient, from v1.1.0. `request-unreadable`, from
+  v1.16.0, is a request whose patients the gateway cannot read at all, sent with no
+  list, counted once, or, on coverage eligibility, each request in it whose own
+  patient the gateway cannot read, counted once each while the patients the
+  others name stay on the list. The exchange has no record under a patient left
+  out.
   The access line's `involvedOmitted` counts the same, by reason, on any gateway,
   with or without metrics.
 
@@ -1058,6 +1095,11 @@ from a fixed list:
   it is not a line of any call
   ([DEPLOYMENT.md](DEPLOYMENT.md#connection-bounds),
   [MONITORING.md](MONITORING.md#connection-cuts)).
+- `NetworkRetry` (`service`, `result`), from v1.16.0, for each time the gateway sent a call to
+  the Hub (`hub`) or the Authorization Framework (`authz`) again because an instance of it that
+  had not yet read the network's membership refused it: `answered` (any other answer),
+  `refused` (refused that way again) or `failed` (no answer of the service's own)
+  ([MONITORING.md](MONITORING.md#retries-after-a-not-yet-loaded-refusal)).
 
 They add lines to a call's EMF output: for a leg from the network, up to 10
 more when answered (its stages, `rest` and its two sizes) and 12 when
@@ -1220,6 +1262,25 @@ nor a version Go records reads as `v0.0.0-unstamped`, which no
 check counts as a release. `gateway -version` prints it and where it came from
 (`v1.0.0 stamp`) and exits, before it reads any setting: `docker run --rm
 ghcr.io/smarthealthnetwork/shn-gateway:v1.0.0 -version`.
+
+From shn-gateway v1.16.0, **`gateway -probe <url>`** is the gateway's container health check.
+The image is distroless, with no shell or HTTP client, so a runtime runs the binary itself, in
+exec form, against your gateway's own port. For example, `["CMD", "/gateway", "-probe",
+"http://127.0.0.1:8080/health"]` as an ECS container `healthCheck`, or the same list as a
+Compose `healthcheck.test`. Give the check a timeout of 5 s (ECS's default) or more, past the
+probe's own 4 s. It reads the URL once and exits:
+- `0` when the URL answers `200`;
+- `1` on any other answer, a redirect (which it does not follow) or a request that fails within
+  4 s;
+- `2` for any other usage: no URL, more than one, or one that is not `http` on a loopback
+  address written as one (`127.0.0.1` or `[::1]`, never a name such as `localhost`) with a valid
+  port.
+
+It writes nothing when it succeeds and one line when it does not, which never repeats the URL,
+and reads no setting, file or network first. Point it at `GET /health`: that answers `200` once
+the gateway listens, whatever its checks report in the body, within the 2 s its store ping is
+bounded to. So the check says the gateway is serving, and a dependency that is down or slow does
+not fail it. A gateway that serves TLS itself has no plain-`http` port to probe.
 
 **`GET /internal/checks`** returns the most recent completed run: `503`
 (`{"error":"checks have not completed yet"}`) if the gateway hasn't completed
@@ -1786,7 +1847,13 @@ every level:
   `#id` patient reference, its `contained`) names no patient,
   since member names are case-sensitive: `400 eligibility request names "<member>" for
   "<name>": member names are case-sensitive, so the request names no patient to bind` (the
-  patient the exchange is for cannot be identified).
+  patient the exchange is for cannot be identified);
+- a request sent alone whose patient reference names no one (an empty or blank reference,
+  `Patient/` with no id, or a `#id` naming a contained Patient whose member identifier is blank;
+  in a Bundle, see **Patient** below) is never read
+  as naming the member `""`: `400 eligibility request names its patient by a reference that
+  names no one, so the request names no patient to bind` (authority: the patient the exchange
+  is for cannot be identified). Neither gateway reads its system of record for it.
 
 A request's `contained` resources are read for its patient only through a `#id` reference. The
 provider's gateway also reads them to route the request, and refuses a request whose
@@ -1828,9 +1895,10 @@ in another case is refused as above (`… the Bundle's entries cannot be read on
   requests name different payers is refused `422 the eligibility requests name more than one
   payer: …`, naming the requests and payers; send each payer's requests separately. A request of
   a batch that cannot be routed is refused as below, naming which request. No default: when the insurer names no payer
-  identifier and the request names no coverage, it is refused `422 no payer to route the
-  eligibility request by: …`; when the insurer names none and a coverage names none, `422 …: its
-  insurer names no payer identifier, and a coverage it names in insurance names none, …:
+  identifier (or the request names no insurer) and the request names no coverage, it is refused
+  `422 no payer to route the eligibility request by: …`; when the insurer names none (or there is
+  no insurer) and a coverage names none, `422 …: its insurer names no payer identifier, and a
+  coverage it names in insurance names none, …:
   insurance[i].coverage "<reference>"`. A reference of the expected type that nothing resolves
   is refused naming itself and what resolves a reference of its form (`422 …: its insurer is a
   reference to an Organization the gateway could not resolve, …; <remedy>: insurer
@@ -1936,6 +2004,12 @@ gateway answers with your Task fulfilled with the records) is relayed exactly.
   conformance level: recorded at `observe`, refused `502` at `structural` for a structural issue
   and at `strict`; a validator your gateway cannot reach, or has no lane for, refuses `500` at
   `strict`.
+- **A Task the facility declines.** From shn-gateway v1.16.0 on the facility's gateway, a Task
+  whose status does not allow it to be fulfilled (such as `cancelled` or `completed`) is
+  answered `422` with an `OperationOutcome` whose issue's `code` is `business-rule`, the
+  facility's own answer, at every level; your gateway relays it exactly. A signed Task that is
+  closed is declined the same way: signed content bears only on an edit, and a decline makes
+  none.
 - **Your Task** is carried as sent and not `$validate`d by your gateway.
 - **Not advertised yet.** The ingress `CapabilityStatement` (`GET /metadata`) does not list this
   interaction until a later shn-sdk release. The gateway serves it before then.
@@ -2078,7 +2152,8 @@ noted as neither the same payer nor another. Each event carries no payer or memb
 and neither is ever a refusal; at the plain base an unresolved Coverage is refused `422`. A
 base that names no registered payer is refused `404` with an OperationOutcome, recorded as
 `routing`, and nothing is sent. Only what every request at the plain base meets first comes
-before it: the caller's authentication (`401`, or `503` when your gateway cannot check it), the
+before it: the caller's authentication (`401`, or `503` when your gateway cannot check it) and,
+from v1.16.0, the route's own scope (`403 insufficient_scope`, see "Each route's own scope"), the
 body's size, coding and reading (`413` over the network's limit, `415`, `400`), and the
 `SHN-Builder` header and the builder it names (your own system must not send one; a module
 client must, once, naming a builder of its module for the request's leg, see "Naming the
@@ -2096,10 +2171,19 @@ for an unknown provider), but no CapabilityStatement yet: `GET {base}/metadata` 
 route one: `POST /Subscription` is refused `422`, and `GET /Subscription`, `GET` below it
 (`GET /Subscription/{id}`, its `_history` and `$status` included), and `PUT`, `PATCH` and
 `DELETE /Subscription/{id}`, `404`, each with an OperationOutcome naming `/pas/payers`,
-recorded as `routing`; nothing is sent. `GET /pas/payers` lists the registered payers whose
-bases take a Subscription, each with its participant id, the payer identifiers it registered
+recorded as `routing`; nothing is sent. On a gateway without `PROVIDER_PAS_SUBSCRIPTION`,
+whose listing is empty, each says instead, from v1.16.0, that the gateway takes no Subscription
+to the PAS topic at any payer's base, with the same status and rule. From v1.16.0 each is first
+held to a Subscription scope, or a wildcard, that permits the interaction (`403 insufficient_scope` otherwise;
+`system/Davinci.write` does not permit one). `GET /pas/payers`, which takes a scope a route
+under the payers' PAS bases takes (see "Each route's own scope"), lists the registered payers
+whose bases take a Subscription, each with its participant id, the payer identifiers it registered
 and its base: `{"payers":[{"participant":"…","payerIdentifiers":[{"system":"…","value":"…"}],"base":"…"}]}`.
-In v1.15.0 no payer's base takes a Subscription, so the list is empty.
+A v1.15.0 gateway lists each payer whose gateway takes the subscribe leg, whatever your
+settings, though no base on it takes a Subscription. From v1.16.0 a base on your
+gateway takes one only when `PROVIDER_PAS_SUBSCRIPTION` is set: without it the list is empty
+(`{"payers":[]}`), since no base there takes a Subscription, though each still takes that payer's
+claims.
 
 `POST /$submit-attachment` sends documentation for a prior authorization to a payer: a
 CDex 2.1.0 `$submit-attachment` (a `Parameters` with its `TrackingId`, `AttachTo`,
@@ -2196,7 +2280,8 @@ payer was asked): the payer gateway keys each authorization by its patient as we
 |---|---|
 | `PROVIDER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the provider gateway. |
 | `PROVIDER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL — the SMART audience the gateway pins and the token endpoint it advertises, and the base of its documentation return paths (`/cdex/payer/<payer>`) and, from v1.15.0, of its payers' PAS bases (`/pas/payer/<payer>`). **Required** when the ingress is enabled. From v1.1.0 it must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. |
-| `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. From v0.63.0 an entry may add `"module": "on-behalf"` to register that client as a module ingress client ([below](#a-module-ingress-client)); an unknown module, or a `builders` key on any entry, refuses to boot. |
+| `PROVIDER_PAS_SUBSCRIPTION` | From v1.16.0: set to `1` to take a payer's notifications of your system's Subscriptions to the PAS topic, delivered to the endpoint your system wrote, and to serve your system's Subscription to that topic at each payer's PAS base on the gateway ([below](#take-a-payers-pas-notifications-provider-optional)). `1` or `true` sets it; `0`, `false` or no value leaves it unset; any other value, spaces included, refuses to start (`gateway: PROVIDER_PAS_SUBSCRIPTION must be 1 or true to set it, or 0, false or empty to leave it unset, got "<value>"`). It requires `PROVIDER_DAVINCI_INGRESS` and `PROVIDER_DAVINCI_INGRESS_BASE_URL`, under which a notified decision's documentation return path is written; without either the gateway refuses to start (`gateway: PROVIDER_PAS_SUBSCRIPTION set requires PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL: …`), as with `PROVIDER_CDEX_TASK_URL`. A payer gateway refuses to start with it set to `1` or `true` (`gateway: PROVIDER_PAS_SUBSCRIPTION is provider-only (role="payer")…`). Optional. |
+| `INGRESS_CLIENTS_FILE` | Path to a JSON array of registered inbound clients: `[{"client_id":"…","alg":"ES384","public_key_pem":"-----BEGIN PUBLIC KEY-----…","scopes":["system/Davinci.write"]}]`. **Required** (≥1 client) when the ingress is enabled. From v0.63.0 an entry may add `"module": "on-behalf"` to register that client as a module ingress client ([below](#a-module-ingress-client)); an unknown module, or a `builders` key on any entry, refuses to boot, and from v1.16.0 so does a module client registered for a `Subscription` scope. |
 | `CDS_FHIR_SERVER_READ` | `private`, `public` or `off`; unset means `private`. How the gateway reads, to choose the payer, through a CDS Hooks request's own `fhirServer`: the Coverage when the request carries none and your system of record does not hold the member (from v0.61.0 what that read routed by is carried as the request's `prefetch.coverage`; see [Reading the coverage through `fhirServer`](#reading-the-coverage-through-fhirserver)), and the payor Organization a coverage your EHR sent names by reference alone when the request does not resolve it, for any member, unless the request's `fhirServer` is your system of record's own FHIR base and your system resolves it (see [CDS Hooks prefetch](#cds-hooks-prefetch)). `private` (the default) reads an `https` server in your own network or on the internet, never a loopback, link-local, metadata or reserved address; `public` reads only an `https` server on port 443 at a public address; `off` never calls `fhirServer`, and carries nothing. Any other value refuses to boot, and so does a value other than `off` set without `PROVIDER_DAVINCI_INGRESS` (unset needs no ingress). A gateway SHN hosts runs `public`, or `off` if you set it (see the section). |
 | `ENRICH_NATIVE_REQUESTS` | `true` or `false`; unset means `false`. By default a Da Vinci request your EHR sends is carried as sent (apart from the CDS Hooks callback, which is always removed, and, from v0.61.0, the coverage read through that callback's `fhirServer` to route by, which is then carried): nothing else is added to it. Set `true` to have the gateway add what a request leaves out, read from your own system of record: each advertised CDS Hooks prefetch value (see [CDS Hooks prefetch](#cds-hooks-prefetch)), and the patient's Coverage and Patient on a `$questionnaire-package` request that carries none. Either way, a coverage a request leaves out is read from your system of record to choose the payer (or, unless `CDS_FHIR_SERVER_READ=off`, through the request's own `fhirServer` for a member that system does not hold). Requests the gateway builds itself (`ORIGINATION_PROFILE`) are not affected. Any other value refuses to boot. |
 
@@ -2214,6 +2299,81 @@ of the clients pre-registered in `INGRESS_CLIENTS_FILE`. There is no plan to exp
 this ingress on the public internet. Dynamic client registration (as opposed to the
 static file above) remains a tracked enhancement.
 
+### Each route's own scope
+
+From v1.16.0, each route of this ingress takes a bearer granted a scope that permits it, as a
+payer's ingress routes do. Earlier releases admitted any bearer the ingress issued, or any
+registered client's own signed bearer, whatever scopes it was granted. The scope is per-leg
+authority, so the rule is the same at every conformance level.
+
+- **`system/Davinci.write`** permits every route below but a `Subscription`, at the plain base
+  or, with `PROVIDER_PAS_SUBSCRIPTION`, at a payer's PAS base. It is the scope this ingress has
+  always advertised, and the one a client that lists no `scopes` is registered for. It stays: a
+  client registered for it keeps reaching every other route, unchanged.
+- **Each route's own scope** permits that route: a system-level SMART scope on the FHIR resource
+  type the route's address names, permitting what the operation does. It may be written as
+  SMART v1 (`read`, `write`, `*`) or v2 (some of `c`, `r`, `u`, `d`, `s`, in that order). A
+  scope with a query (`?…`) permits nothing here, since the gateway cannot hold a call to its
+  filter. The route alone decides which scope it takes; the request's content never does.
+- **A wildcard**, `system/*.` followed by SMART's permissions (such as `system/*.rs` or
+  `system/*.write`), permits each route that takes those permissions, whatever resource it names.
+  It never permits a CDS service, which names no resource and takes `system/Davinci.write`
+  alone.
+- **The DTR IG's own scopes**, as it writes them (`system/questionnaire.rs`,
+  `system/valueset.rs`, `system/library.rs`), are read as `system/Questionnaire.rs`,
+  `system/ValueSet.rs` and `system/Library.rs`. No other spelling of a resource type in another
+  case is.
+
+| Route | Its own scope (v1, as the challenge names it) | Permits |
+|---|---|---|
+| `GET /cds-services`, `POST /cds-services/{id}` (CRD) | `system/Davinci.write` alone | — |
+| `POST /Questionnaire/$questionnaire-package`, each `$next-question` address (DTR) | `system/Questionnaire.read` | read (`r`) |
+| `POST /Claim/$submit`, and at each payer's PAS base | `system/Claim.write` | create (`c`) |
+| `POST /Claim/$inquire`, and at each payer's PAS base | `system/Claim.read` | read (`r`) |
+| `GET /pas/payers` | each scope a route under the payers' PAS bases names (`system/Claim.write system/Claim.read`, and with `PROVIDER_PAS_SUBSCRIPTION` `system/Subscription.write system/Subscription.read`) | any scope a route under those bases takes |
+| `POST /CoverageEligibilityRequest/$submit` | `system/CoverageEligibilityRequest.write` | create (`c`) |
+| `POST /$submit-attachment`, `POST /cdex/payer/{payer}` and its `$submit-attachment` | `system/DocumentReference.write` or `system/QuestionnaireResponse.write` | create (`c`) on either |
+| `GET /cdex/payers` | each scope a route under the payers' attachment addresses names | any scope a route under those addresses takes |
+| `POST /Task` (the federated query) | `system/Task.write` | create (`c`) |
+| `Subscription` at the plain base, and with `PROVIDER_PAS_SUBSCRIPTION` at each payer's PAS base | `system/Subscription.write` for a create, update or delete, `system/Subscription.read` for a read or search | the interaction (`c`, `r`, `u`, `d` or `s`); `system/Davinci.write` does not permit it |
+
+**A listing** of the payers' bases (`GET /pas/payers`, `GET /cdex/payers`) takes any scope that
+some route under the bases it lists takes, so a route added under those bases widens it, and
+`system/Davinci.write`.
+
+`/metadata`, the token endpoint, the `.well-known` documents and the notification route
+(whose credential is its sealed address, not a bearer) take no scope.
+
+**What a bearer is granted.** A token request that names no `scope` is granted every scope the
+client is registered for, and the answer's `scope` says which. A request that names scopes is
+granted exactly those, each one the client is registered for, as before. A client's own signed
+bearer (the direct form) is read the same way: one with no `scope` claim holds its client's
+registration, and one whose `scope` names a scope its registration does not hold, or is not a
+string, is granted none. A registered entry that is empty or holds a space is no scope a request
+can name, so it is not granted this way either.
+
+**A refusal.** A bearer that authenticates but is granted no scope that permits the route is
+refused `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="<the route's own
+scope>"` and the route's own sentence (for example `insufficient_scope: this route takes a bearer
+granted a scope that permits creating a Claim, such as system/Claim.write, system/Claim.c,
+system/*.c or system/Davinci.write, with no query`). It is recorded with rule `authority`, and
+nothing is sent. A bearer that does not authenticate is refused `401` as before.
+
+**At startup.** A client's scope on one of these resource types, `system/Davinci.write`, a
+wildcard or `Subscription`, spelled in a way SMART does not spell it (with the resource type in
+another case, such as `system/claim.c`, or an unknown permission), refuses to boot, naming the
+client and the scope. The DTR IG's own scopes are the exception. A scope on another resource is
+kept and permits nothing here. A client that can be granted no scope any route takes starts, is
+logged once, and is refused `403` on each route. The SMART configuration's `scopes_supported`
+lists `system/Davinci.write` and each route's own scope from the table; with
+`PROVIDER_PAS_SUBSCRIPTION`, each Subscription scope with no query one of your own clients (not a
+module client) is registered for. Each scope `scopes_supported` names suffices for a route, but
+it does not name every scope the routes take: a route that names a resource also takes any other
+SMART scope on that resource, with no query, that grants what it needs (such as `system/Claim.c`
+or `system/Claim.*`), the DTR IG's `system/questionnaire.rs` on the DTR routes, and a wildcard
+that grants what it needs. `scopes_supported` lists none of these except a Subscription scope one
+of your own clients registers, and never a wildcard.
+
 ### A module ingress client
 
 From v0.63.0. A module ingress client builds Da Vinci requests on your behalf: it plays the Da
@@ -2225,7 +2385,13 @@ differently:
   `INGRESS_CLIENTS_FILE`. `on-behalf` is the only module this build has. The builders such a
   client may name are the module's: `sdk-crd-request`, `sdk-dtr-package`, `sdk-pas-submit`,
   `sdk-pas-update`, `sdk-pas-inquiry`, `sdk-eligibility` and `sdk-federated-query`. They are not
-  configurable, and an entry that lists `builders` refuses to boot.
+  configurable, and an entry that lists `builders` refuses to boot. From v1.16.0 a module client
+  registers no `Subscription` scope, in any spelling or case: no module builds a Subscription
+  interaction, so every Subscription route refuses its requests and the scope could be granted
+  for nothing. Your gateway refuses to start with one (`ingress auth: registration "<id>": module
+  "on-behalf" is registered for "<scope>", a Subscription scope, but no module builds a
+  Subscription interaction, so no route takes it from this client: remove the scope`). A
+  wildcard scope (`system/*.…`) is kept, since it permits the module's own routes too.
 - **Naming the builder.** Each request names its builder in the `SHN-Builder` header, the one
   that builds that leg's request (for example `sdk-pas-submit` on `POST /Claim/$submit`).
 - **How it is sent.** The gateway sends the module's bytes exactly as built. It makes none of the
@@ -3294,8 +3460,12 @@ The payer's gateway refuses what only it can open or judge, and your system gets
 the answer: a notification whose sealed values do not open for your gateway and this payer
 (`403`, `authority`), one whose sealed endpoint fails the payer's delivery rule (`422`), the
 shape, `additional-context` and address refusals above, should a notification reach it unchecked
-(the shape's `502`), and an
+(the shape's `403`; before v1.16.0, `502`), one it cannot read one way only at the places it
+re-keys (`400`, on the fidelity of its own edit; before v1.16.0, `502`), and an
 endpoint answer that holds a resource other than an OperationOutcome's own (`502`, `authority`).
+From v1.16.0 the acknowledgement a FHIR server gives the transaction a notification is delivered
+as passes too: a `transaction-response` or `batch-response` Bundle whose entries hold only their
+`response`, any `outcome` an OperationOutcome holding no resource.
 When the payer's gateway is on a release before v1.13.0, the Hub refuses the notification on
 `routing`.
 
@@ -3369,6 +3539,7 @@ own way, set `PAYER_DAVINCI_BACKEND_CORRELATION=off` and it is not sent.
 | `PAYER_DAVINCI_CDS_BASE_URL` | Base URL for the partner's CDS Hooks (CRD) posts when they are **not** co-located with the FHIR base — e.g. a payer that serves `/cds-services` at the root but FHIR ops under `/fhir`. Empty ⇒ CDS uses `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_DTR_BASE_URL` | Base URL for the partner's DTR operations (`/Questionnaire/$questionnaire-package`, `/Questionnaire/$next-question`) when they are **not** co-located with the PAS base — e.g. a payer that serves DTR under `/dtr` and PAS under `/pas`. Empty ⇒ DTR uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
 | `PAYER_DAVINCI_PAS_BASE_URL` | Base URL for the partner's PAS operations (`/Claim/$submit` for submit and update) when they are **not** co-located with the DTR base. Empty ⇒ PAS uses `PAYER_DAVINCI_BASE_URL`. Requires `PAYER_DAVINCI_BASE_URL`. |
+| `PAYER_DAVINCI_SUBSCRIPTION_SCOPE` | From v1.16.0: the scope the gateway asks `PAYER_DAVINCI_TOKEN_URL`, with your Da Vinci client, for to reach your Subscription endpoint, at your PAS base (as your authorization server registers the client: to create, read, update, delete and search a Subscription). The gateway reads it trimmed of leading and trailing spaces and sends that value; a blank value is unset. Setting it takes a provider's Subscription to the PAS topic ([below](#take-a-providers-subscription-to-the-pas-topic-payer-optional)). Optional. |
 | `PAYER_ELIGIBILITY_URL` | Your system's own coverage-eligibility endpoint, when it has one: the absolute `http(s)` URL it takes the request's `POST` on (give the exact URL). The body is the request as the provider's system sent it: a `CoverageEligibilityRequest`, or, from shn-gateway v0.63.0, any other input of the FHIR R4 operation `CoverageEligibilityRequest/$submit`: a `Bundle` carrying one request with the resources it references, a `Bundle` that is a batch of requests, or a `Parameters` whose `resource` parameter holds one of these. Unset (the default): the gateway answers eligibility from your system of record's Coverage, one request at a time (from shn-gateway v1.9.0, a member's several Coverages name this payer when each carries one of its own identities, those it publishes on the network feed, on some payor, in any position, or, failing that, the payer directory resolves their identifiers to one holder, or, when it resolves none of them, they name the same identifiers in any order; otherwise the request is refused `422 ambiguous coverage for routing: the member's Coverage records do not name one payer`) (from shn-gateway v1.10.0 the answer names its insurer by an identity your holder publishes on the network feed, wherever your record lists it: see [The eligibility answer's insurer](#the-eligibility-answers-insurer)) (from shn-gateway v0.63.0 a batch is answered `501`, saying so; a batch of more than 17 requests is refused `413` first, as below), or, when it keeps none (`FHIR_DATA_URL` unset), answers `501` "coverage eligibility is not offered by this payer". A batch of more than 17 requests, in any form, is refused `413` before anything is read from it ("a gateway reads at most 17 in one batch"), whether or not this is set: one exchange is recorded under at most 17 patients. Set: each request's member is bound by your records (the first request's is the exchange's patient; every other request's is named on the answer's involved list), and each request (the one a `Bundle` or `Parameters` holds, each of a batch) is `$validate`d at the conformance level (an invalid one is refused `422` at `structural`, for a structural issue, and at `strict`, and your system is not called); the input is then carried there exactly, with the same authentication (`PAYER_DAVINCI_TOKEN_URL` and the client settings) and `PAYER_DAVINCI_BACKEND_HEADERS` as your other operations, and your answer is relayed as your system sent it; an error answer is relayed as your error. If your system gives no answer (unreachable, timed out), the requester is told so (`502`, saying whether your system received the request), as on your other operations; no answer is built from your records in its place. An answer about a patient other than the requests' is relayed at `none`, `observe` and `structural` (recorded at `observe` and `structural`) and refused at `strict`; an answer that names its patient otherwise than by reference (an identifier only) is treated the same way; an answer that cannot be read as a `CoverageEligibilityResponse`, or names no patient at all, is relayed at `none` and `observe` and refused (`502`) at `structural` and `strict`; an answer that is a `Bundle` is read as its `CoverageEligibilityResponse` entries (and those of the Bundles among its entries, one level deep; a Bundle nested deeper is treated as an answer that cannot be read), each held to these rules against the patients of all the requests (a response naming its patient by a reference to a Patient entry of the Bundle carrying it names that entry's patient), and one holding none, or whose entries cannot be read one way only (a member named in another case, a resource with no type or a null one), is treated as an answer that cannot be read; an entry carrying no resource at all (a batch-response entry carrying only its outcome) is no response; an answer naming the patient by your own Patient id for the member the request names is the same patient, and is relayed at every level. Telling the two apart reads your system of record only when the answer names a patient other than the request's, and never at `none`; with no system of record, the patient is one it does not hold; if that read fails, the answer is relayed at `observe` and `structural` (recorded as unavailable) and refused with the system-of-record failure at `strict`. Unlike the relayed PAS and questionnaire answers, your eligibility answer is `$validate`d at the conformance level: not at all at `none`, recorded at `observe`, refused (`502`) at `strict`, and at `structural` refused for a structural issue and recorded for a deeper one; a validator your gateway cannot reach refuses with `500` at `strict` and is recorded at `observe` and `structural`. A token naming another patient is not refused: the member the request names is bound by your records, as on the prior-authorization legs. Requires `PAYER_DAVINCI_BASE_URL`; a provider gateway refuses to boot with it. |
 
 **Where each operation goes.** For every PAS, DTR and CDex forward the gateway resolves the URL in this order: under the base your partner publishes for that contract line in its `.well-known/davinci-configuration` (the partner's own published rule, honored only when it is same-origin with the base that contract uses), then under the per-operation base if you set one, then under `PAYER_DAVINCI_BASE_URL`. HRex 1.2.0 defines each published value as the base an operation is invoked on, not the operation's URL, so the gateway always adds the operation's path to it: `davinci_pas_submission_endpoint#<line>` is the base for `/Claim/$submit` (submit and update) and `/Claim/$inquire`, `davinci_dtr_qpackage_endpoint#<line>` the base for `/Questionnaire/$questionnaire-package` (the gateway sends `/Questionnaire/$next-question` under the same base), and `davinci_cdex_attachsubmit_endpoint#2.1` the base for `/$submit-attachment`. The operation's path is added where the published base's path ends, before any query or fragment: the slashes that end the published path are dropped first, so none is doubled, and the rest of the URL the gateway builds is the published value as written, sent as any URL the gateway calls is. Nothing is read from how a published path ends: a value that already names an operation is still a base, so the operation's path is added to it and your system answers that URL; publish the base. The per-operation bases exist for partners that split DTR and PAS across bases and publish no `.well-known/davinci-configuration`; where the partner publishes one, its bases win and the configured bases are only the fallback. The published CDex base is honored only when it is same-origin with `PAYER_DAVINCI_BASE_URL`, and there is no per-operation base for it. The submission reaches your system exactly as the provider's system sent it, and your answer reaches the provider's system exactly.
@@ -3408,6 +3579,216 @@ identifier you register on the network, as the Da Vinci guides expect. A gateway
 either to a non-empty value refuses to start, naming it; an empty value is unset. Before you
 upgrade, make your system handle every payer identifier you register, then remove both
 settings.
+
+### Take a provider's Subscription to the PAS topic (payer, optional)
+
+From v1.16.0 your gateway can carry a provider's topic Subscription to the PAS topic
+(`http://hl7.org/fhir/us/davinci-pas/SubscriptionTopic/PASSubscriptionTopic`) to your system's
+own Subscription endpoint, at your PAS base: its create, read and vread, update, delete, search
+by `url`, the pages of that search and the instance `$status`. The leg is
+`pas-subscription-subscribe`, in the evolving tier (see `STABILITY.md`). It names no patient on
+either side. Every rule your gateway holds the interaction to is the one it holds a payer's
+Subscription to on the HRex Task topic at a provider ([Take a payer's Subscription to its Tasks'
+changes](#take-a-payers-subscription-to-its-tasks-changes-provider-optional)), with the roles
+the other way round, and two differences:
+
+- **The filter.** A Subscription to the PAS topic names exactly one `org-identifier` in its
+  filter, and each value must be an identifier the network attests for the provider that sends
+  it: an NPI today. A value written `system|value` must equal an attested identifier; a value
+  with no system, as the PAS specification writes its example, must equal the value of one. Any
+  other is refused `403` on authority, and nothing reaches your system. A value is never
+  rewritten.
+- **No header of the network's.** The forward names the provider in no header: the filter,
+  held to the provider's attested identifiers, says whose Subscription it is.
+
+**Taking it.** Your gateway takes the leg exactly when you set
+`PAYER_DAVINCI_SUBSCRIPTION_SCOPE` (table above), from that setting alone. It then declares the
+leg in its signed capability declaration, and reaches your Subscription endpoint at your PAS base
+(`PAYER_DAVINCI_PAS_BASE_URL`, or `PAYER_DAVINCI_BASE_URL` when that is unset) with its own
+token, asked for that scope from `PAYER_DAVINCI_TOKEN_URL` with your Da Vinci client and
+credential. Each call takes what every call to your system takes: `PAYER_DAVINCI_BACKEND_HEADERS`,
+`PAYER_DAVINCI_BACKEND_CORRELATION` and `PAYER_DAVINCI_BACKEND_TIMEOUT`. The base is stated to
+the provider's gateway with no ending slash, however it is written. Each Subscription's
+notification address is written under `PAYER_DAVINCI_INGRESS_BASE_URL`. Your gateway refuses to
+start otherwise:
+
+| Refusal | When |
+|---|---|
+| `gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE is payer-only (role="<role>")` | The scope is set on a gateway of another role. |
+| `gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_INGRESS and PAYER_DAVINCI_INGRESS_BASE_URL: each Subscription's notification address is written under that base, where the payer's system delivers its notifications` | The scope is set without the ingress or its base. |
+| `gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_BASE_URL: the payer's Subscription endpoint is reached at its PAS base` | The scope is set without your Da Vinci base. |
+| `gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_TOKEN_URL: the scope is asked of the payer's token endpoint` | The scope is set without your token endpoint. |
+| `gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_PAS_BASE_URL, the base the payer's Subscription endpoint is at, to be an absolute http or https URL with a host and no query or fragment ("<url>")` (or `PAYER_DAVINCI_BASE_URL`, when the PAS base is unset) | The base is not an absolute `http` or `https` URL with a host, or carries a query, a fragment or user information. |
+
+A gateway that does not take the leg answers one that reaches it `422 this payer takes no
+provider's Subscription to the PAS topic: its gateway reaches no Subscription endpoint of its own
+system for providers` (`routing`); the Hub routes none to it, refusing the provider `422 the
+recipient does not take …`. A hosted payer tenant takes the leg the same way on SHN Cloud, from
+v1.16.0, with the same rules.
+
+**A system that does not serve Subscription.** The leg is declared from your setting, whatever
+your system serves. A provider's Subscription that reaches a system that does not serve
+Subscription is carried to it, and your system's own answer (a `404`, or an `OperationOutcome`)
+goes back to the provider's system as sent, as a direct connection would give, held only to the
+rule every answer on the leg is (it names no patient); the network adds no refusal for it. At startup your gateway reads your system's CapabilityStatement
+(`GET [PAS base]/metadata`) as a signal for you alone: where it declares no `Subscription`
+resource, or cannot be read, the gateway logs `gateway: WARNING PAYER_DAVINCI_SUBSCRIPTION_SCOPE
+is set, and <why>` and raises the observer event `pas.subscription-unsupported`, naming why. That
+read never changes what your gateway declares or how a Subscription is carried.
+
+**Your system's notifications.** From v1.16.0 a gateway that takes the leg mounts the
+notification route, `POST [PAYER_DAVINCI_INGRESS_BASE_URL]/notify/pas/<provider>/<kid>/<sealed>`:
+the address it wrote into each Subscription (E-19), which your system posts each notification of
+that Subscription to, with the two `channel.header` values the gateway wrote there
+(`Authorization: Bearer <kid>.<tag>` and `X-SHN-Channel`), as a Subscriptions Backport IG
+rest-hook posts. The gateway sends each handshake, heartbeat and `id-only` event notification,
+its bytes as your system posted them, on `pas-subscription-signal` to the provider the address
+names, and carries the provider's endpoint's answer back to your system. It refuses, at every
+conformance level, with nothing sent: a notification without the gateway's credential for the
+address, or with one that does not verify, `401` (`authentication`), checked before the body is
+read; a body that is not a notification of the PAS topic, `400` (`routing`); and one with an
+`additional-context`, `403` (`authority`). A no-content notification is also held to the closed
+notification shape (no extension, no signature, each `focus` a `Bundle` or a `ClaimResponse`),
+`403` (`authority`). No address in a PAS notification is re-keyed, so none is refused for where
+it points. A provider whose gateway does not take the PAS topic's notifications is refused by the
+Hub, `422 the recipient does not take pas-subscription-signal: …` (`routing`), and that refusal
+is carried back to your system.
+
+**Your system's decision notifications.** From v1.16.0 a notification your system posts that
+carries its decision (a `full-resource` event notification) is sent on `pas-subscription-notify`,
+which names the decision's patient. Your gateway reads every resource the notification carries,
+wherever a FHIR reader could take one (the decision in an entry's `resource`, an entry of a PAS
+Response Bundle at any depth, a SubscriptionStatus parameter's `resource`, an entry's
+`response.outcome`, a contained resource, a `resource` array's elements, any other member), every
+member name and `resourceType` read in any case, and holds each to the rules below, as it does
+the notification's own members outside them (a SubscriptionStatus parameter's or part's
+`valueReference`, an entry's or the Bundle's `extension`); the entry members beside a resource (`fullUrl`, `request`, `response`, `search`) are read as they are, and
+the notification is carried as sent. Your gateway binds the patient from the decision: each
+ClaimResponse's `patient`, read as a PAS answer's is (a relative reference against its own
+entry's `fullUrl`, a `urn:uuid` or `urn:oid` reference to the entry whose `fullUrl` it is, by FHIR
+R4's Bundle rule, naming that Patient's id, and one that no entry resolves by the `Patient/<id>`
+it names). The first decision's first ClaimResponse's patient is the leg's, bound by the member
+that id names, in the order every PA leg binds one: your own member when your system of record
+holds it (refused `400` as unknown, when you require known members, if it does not); otherwise
+from the demographics of the Patient entry that ClaimResponse's reference resolves to (that entry
+itself, without a resource contained in it), or, where that reference resolves at the base your
+gateway states to `Patient/<id>`, of the one Patient of its decision written under a urn with that
+id, its `resourceType` and `id` read in any case (two such Patients are neither the leg's, and both are listed), when it carries a birth date and family name (`birthDate`, `name` and `family` read as FHIR spells them, as every leg's binding reads them); otherwise from the member id alone, the
+notification as a whole read only then, and only for whether the member's number is a Coverage
+party's, refused `422`. Every name that Patient is read under (its `fullUrl`, id and member
+identifiers) is the leg's patient. Every other patient the notification names, member names and
+`resourceType` read in any case, is carried on the network's involved list: each Patient it
+carries, anywhere, a Coverage's party aside, once, bound from itself; a Patient reference names the
+Patient at its exact identity, or failing that the one Patient read under the name it states at
+that base (a name two Patients share names neither), and a urn reference resolves in the Bundle
+that holds it and outward, never in a sibling Bundle; and a reference
+that names no carried Patient, or only a Coverage's party, is an identity of its own; a Patient whose `fullUrl` is a urn is read under its names at the base
+your gateway states. Inside a decision (a bare ClaimResponse at the `fullUrl` of the entry carrying
+it when that ends in `/ClaimResponse/<its own id>`, else at the base your gateway states), every reference resolves by that decision's own graph,
+as a PAS answer's does and as the leg's patient is bound (where the graph resolves nothing, by the
+`Patient/<id>` it names against the base your gateway states); outside any decision, a relative
+reference resolves by FHIR R4's Bundle rule, against the base of the entry it sits in when that
+entry's `fullUrl` is RESTful and otherwise (a URN `fullUrl`, none, or outside any entry) against
+the base your gateway states; a reference is the
+leg's patient exactly when it resolves to that patient's identity, and references resolving to
+different identities name different patients. Two Patients the
+notification carries under one member id, anywhere (another entry, a nested Bundle, a contained
+resource), are two patients, each bound from its own resource and named as its own identity.
+Each decision that is a PAS Response Bundle is held to the graph rules a PAS answer
+is read by at the PAS lines `PAYER_DAVINCI_CONTRACT_VERSIONS` declares your system speaks, or at
+any line it could be on (2.0.1, 2.2 and 2.1) when it declares none, since a notification states none: it passes when any of those lines accepts it, and
+is refused only when it meets none, the refusal naming each line tried and its failure. Your
+gateway refuses, with nothing sent:
+
+| Refusal | Levels | Status | Recorded |
+|---|---|---|---|
+| a ClaimResponse anywhere in the notification whose `applicationReceiverCode` (`extension-TransmissionIdentifiers`, a `valueString`) names an identifier the network does not attest for the provider, names one by a value that is not a string or with a `value[x]` beside its `valueString`, or that names none; a notification with no ClaimResponse; one holding an object whose `resourceType` is not a string with a value | every level | `403` | `authority` |
+| a decision whose patient the network cannot identify: a ClaimResponse, anywhere in the notification, naming no patient or one that resolves to no Patient, an entry after the SubscriptionStatus whose resource is neither a Bundle nor a ClaimResponse, or a defect touching that binding (a ClaimResponse entry it cannot read, a patient resolving to an identity an unreadable entry, or two entries, claim, an unreadable Patient carrying the patient's id, or any unreadable entry the binding would draw on given the decision as sent: a Patient carrying the member's demographics, or a Coverage that would make the member's number a party's) | every level | `422` | `authority` |
+| a decision larger than your gateway reads within its own limit | every level | `422` | `authority` |
+| a notification the provider's gateway cannot make E-22 on, since it cannot be read one way only (JSON with a lone surrogate in a string, say); the provider's gateway refuses it `400` on fidelity too | every level | `400` | `fidelity` |
+| a notification naming more than one patient: ClaimResponses naming more than one, any patient on its involved list that binds otherwise than the leg's patient, or a decision naming a subject that is not its ClaimResponse's patient by the subject rule a PAS answer is held to at the line the decision is read at; a patient on the involved list that your system of record cannot answer for is no second patient: the check cannot finish, recorded as an unavailable `patient.mixed` finding (at `observe` and `structural`, the notification carried), and the notification is refused with that system's failure as its status and message (`503` when it is unavailable, `502` otherwise), not this row's `422` | `strict` | `422` | `conformance` (`patient.mixed`) |
+| a decision that is a PAS Response Bundle and meets the graph rules a PAS answer is read by at none of the PAS lines `PAYER_DAVINCI_CONTRACT_VERSIONS` declares, or of any line it could be on when it declares none, the refusal naming each line and its failure (a Bundle that is not a `collection`, two ClaimResponses, an entry without a usable identity, a nested Bundle, a reference that does not resolve) | `structural`, `strict` | `422` | `conformance` (`answer.shape`) |
+
+### Take a payer's PAS notifications (provider, optional)
+
+From v1.16.0 your gateway can deliver a payer's notifications of your system's Subscriptions to
+the PAS topic, both legs in the evolving tier (see `STABILITY.md`): each handshake, heartbeat and
+`id-only` event notification (`pas-subscription-signal`, which names no patient on either side),
+and each notification carrying the payer's decision (`pas-subscription-notify`, which names the
+decision's patient). Set `PROVIDER_PAS_SUBSCRIPTION=1`, with the Da Vinci ingress and its base
+(see [the ingress settings](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)),
+and your gateway takes both legs, from that setting alone, and declares them in its signed
+capability declaration. Unset, it takes neither, so an upgrade never makes your gateway take
+them unasked.
+
+Your system makes its Subscription through your gateway, at the payer's PAS base there,
+`[PROVIDER_DAVINCI_INGRESS_BASE_URL]/pas/payer/{payer}` (`GET /pas/payers` lists each payer's, and,
+without `PROVIDER_PAS_SUBSCRIPTION`, none),
+the base it sends that payer's claims to: create (`POST [base]/Subscription`), read, vread and
+`$status` (`GET [base]/Subscription/<id>[/_history/<vid> | /$status]`), update
+(`PUT [base]/Subscription/<id>`), delete (`DELETE [base]/Subscription/<id>`), and search by its
+endpoint (`GET [base]/Subscription?url=<endpoint>`) with the pages its answer links, as it would
+at the payer's own base (`pas-subscription-subscribe`). Your gateway seals the endpoint and
+header values your system writes before the Subscription crosses the network (E-18), restores
+them in the payer's answers (E-20), and answers a create or an update with a `Location` at the
+payer's base on your gateway (E-23); the payer's gateway writes its own notification address
+into what the payer's system stores. Each interaction takes a bearer from your gateway's token
+endpoint granted a Subscription scope that permits it (create `c`; read, vread or `$status` `r`;
+update `u`; delete `d`; search `s`; SMART v1's `read`, `write` and `*`): register
+`system/Subscription.cruds`, or the permissions your system uses, in `scopes` for the client in
+`INGRESS_CLIENTS_FILE` that manages its Subscriptions, and your gateway's SMART configuration
+advertises it. `GET /pas/payers` takes that scope too, so that client finds each payer's base;
+`system/Davinci.write` does not permit the Subscription routes. A wildcard that grants an interaction's
+permission (such as `system/*.cruds`) is taken as well, though the SMART configuration does not
+list it. A scope with a query permits nothing, and a gateway refuses to start with a
+client registered for a Subscription scope SMART does not spell. Without
+`PROVIDER_PAS_SUBSCRIPTION` your gateway serves none of these routes. Each refusal is a network
+rule, at every conformance level, with nothing sent:
+
+| Refusal | Status | Recorded |
+|---|---|---|
+| a bearer whose scopes permit no such interaction on Subscription, with a `WWW-Authenticate: Bearer error="insufficient_scope"` challenge naming the scope to ask for | `403` | `authority` |
+| a base naming no registered payer | `422` for a create, `404` otherwise | `routing` |
+| a `PATCH` (a sealed channel cannot be patched; send the whole Subscription with `PUT`) | `405` | the fidelity of its own edit |
+| every other refusal of a Subscription interaction, as a payer's gateway refuses its system's at a provider's base ([the subscriber's routes](#subscribe-to-the-providers-tasks-changes-payer-from-shn-gateway-v1130)) | as there | as there |
+
+The payer's PAS base serves no CapabilityStatement yet, so it declares no `Subscription`; your
+system uses the base without reading one. On SHN Cloud a hosted provider's edge forwards these
+routes' `GET`, `POST`, `PUT`, `PATCH` and `DELETE`; a `HEAD` is refused `403` at the edge, so
+send the `GET`.
+
+Your gateway opens the endpoint and header values your system wrote into its Subscription,
+which your gateway sealed when the Subscription was made, and delivers the notification by
+`POST` to that endpoint, at its path and query, with your system's own header values and no
+credential of the network's, by the rules of every call to your own system. It delivers the
+notification byte for byte as the payer's system sent it, its addresses into the payer's server
+as the payer wrote them, with one exception: on a decision notification, each PAS Task's
+`payer-url` becomes your gateway's own documentation return path for that payer (E-22,
+`pas-notified-return-rekey`), as it is on the payer's answer to your claim (E-10), when that
+payer takes the documentation submission. E-22 is made even where a signature covers the
+`payer-url`, and that signature then no longer verifies in your copy; the delivery names the edit,
+and the signature, in `X-SHN-Edited`. Your endpoint's answer goes back to the payer's system as it
+answered; on the signal leg it is held to one rule, since that leg names no patient: FHIR passes
+only as an `OperationOutcome` holding no resource or, from v1.16.0, as the acknowledgement a FHIR
+server gives the transaction a notification is delivered as (a `transaction-response` or
+`batch-response` Bundle whose entries hold only their `response`, any `outcome` an
+`OperationOutcome` holding no resource), as a HAPI FHIR subscriber answers a handshake, a
+heartbeat or an empty event. Earlier releases refused that acknowledgement `502`, so the payer's
+system was told a notification your endpoint took had failed, and one that sent it again
+delivered it twice. Your gateway refuses, at every conformance level, with nothing delivered:
+
+| Refusal | Status | Recorded |
+|---|---|---|
+| sealed values missing, or that do not open (altered, sealed for another payer, topic, provider or endpoint, or under a key past its rotation's overlap) | `403` | `authority` |
+| an endpoint that is not an absolute `https` URL with no userinfo or fragment, or is itself a notification address of the network | `422` | `integrity` or `routing` |
+| a message that is not a notification of the PAS topic, or whose content does not match its leg (content on the signal leg, none on the decision leg), or has an `additional-context` | `403` | `authority` |
+| a signal-leg notification outside the PAS topic's closed notification shape (an extension, a signature, a member the SubscriptionStatus does not define) | `403` | `authority` |
+| a header value your system wrote that is not an HTTP field (`name: value`); the value is never named | `422` | the fidelity of the delivery |
+| a signal-leg endpoint answer, at any status, that is FHIR other than an `OperationOutcome` holding no resource or, from v1.16.0, an acknowledgement Bundle holding none | `502` | `authority` |
+| a notification reaching a gateway whose `PROVIDER_PAS_SUBSCRIPTION` is unset (the Hub still holding its earlier declaration) | `422 this provider takes no payer's PAS notification: …` | `routing` |
+| a decision notification relay cannot read one way only (JSON with a lone surrogate in a string, say), so E-22 cannot be made on it; never delivered with the payer's `payer-url` (the payer's gateway refuses it `400` too) | `400` | the fidelity of SHN's own edit |
+
+A hosted provider tenant takes the leg the same way on SHN Cloud, from v1.16.0.
 
 ### CDS service selection
 
@@ -3767,7 +4148,7 @@ to that provider's gateway. It is in the evolving tier (see `STABILITY.md`).
 |---|---|
 | `PAYER_DAVINCI_INGRESS` | Set to `1` to mount the ingress on the payer gateway (any non-empty value turns it on, `0` and `false` included). A gateway of any other role refuses to start with it set. |
 | `PAYER_DAVINCI_INGRESS_BASE_URL` | The gateway's public base URL: the SMART audience the gateway pins, the token endpoint it advertises, and the base of each provider's base below. **Required** when the ingress is enabled. It must be an absolute `http` or `https` URL with a host, no `?` or `#` and no user information, or the gateway refuses to start. From shn-gateway v1.12.0 it must also have no `.` or `..` path segment, spelled or percent-escaped, no space or control character, and only ASCII characters that RFC 3986 lets a URL carry, its host given in its ASCII (punycode) form, since it begins the `Location` a created Task is answered with ([The created Task's Location](#the-created-tasks-location-e-16-payer-and-provider)); otherwise the gateway refuses to start. A backslash, a quote, `<`, `>`, `{`, `}`, `|`, `^` and a backtick are refused: a client that parses URLs as browsers do reads a backslash as `/`. For a dot segment, a space, a character that is not ASCII or one of those characters the refusal names the setting and the fix; a control character is refused earlier, by the check every URL setting gets, naming the setting. |
-| `INGRESS_CLIENTS_FILE` | Your system's registered clients, as for the provider's ingress ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)). **Required** (≥1 client) when the ingress is enabled. A client that lists no `scopes` is registered for `system/Task.write`. One whose `scopes` hold a `system/Task` scope SMART does not spell (below), or no `system/Task` scope that permits creating a Task (`system/Task.write`, `system/Task.*`, or a v2 scope with `c`, with no query), refuses the gateway's start. Before v1.10.0, a client's `scopes` had to include `system/Task.write`. From shn-gateway v1.12.0, register a scope that permits reading too (`system/Task.read`, `system/Task.*`, or a v2 scope with `r`) for your system to read its Task ([below](#read-the-task-at-the-providers-base-payer-from-shn-gateway-v1120)). |
+| `INGRESS_CLIENTS_FILE` | Your system's registered clients, as for the provider's ingress ([above](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)). **Required** (≥1 client) when the ingress is enabled. A client that lists no `scopes` is registered for `system/Task.write`. One whose `scopes` hold a `system/Task` scope SMART does not spell (below), or no `system/Task` scope that permits creating a Task (`system/Task.write`, `system/Task.*`, or a v2 scope with `c`, with no query), refuses the gateway's start. Before v1.10.0, a client's `scopes` had to include `system/Task.write`. From shn-gateway v1.12.0, register a scope that permits reading too (`system/Task.read`, `system/Task.*`, or a v2 scope with `r`) for your system to read its Task ([below](#read-the-task-at-the-providers-base-payer-from-shn-gateway-v1120)). From shn-gateway v1.16.0, a wildcard that permits creating a Task (`system/*.write`, `system/*.*`, or a v2 wildcard with `c`, with no query) counts as a client's create scope, and a wildcard SMART does not spell refuses the start (below). |
 
 **Authenticating.** Your system gets a bearer from the gateway's own token endpoint
 (`POST /oauth/token`, SMART Backend Services, `private_key_jwt`), asking for the scope
@@ -3811,6 +4192,15 @@ From shn-gateway v1.10.0, the ingress reads scopes as SMART App Launch defines t
   `system/Task.c` is refused `403` there, at the plain endpoint as at a provider's base. A
   granular scope permits nothing here, even one with `c` or `r`: the gateway cannot enforce its
   query, so admitting the route on it would grant more than the scope does.
+- **From shn-gateway v1.16.0, a wildcard** (`system/*.` followed by SMART's permissions) permits
+  each route for the permissions it grants, as it does on a provider's ingress: the create
+  routes and the listing take `system/*.write`, `system/*.*` or a v2 wildcard with `c`; the read
+  routes take `system/*.read`, `system/*.*` or a v2 wildcard with `r`. A bearer granted only
+  `system/*.rs` is refused `403` on a create. A wildcard with a query permits nothing. A client
+  may register one in place of its `system/Task` create scope, and a wildcard SMART does not
+  spell (such as `system/*.rc`) refuses the gateway's start, naming the scope. Each one a client
+  lists, exactly as listed, that permits reading is advertised as a read scope is. Earlier
+  releases read a wildcard as another resource's scope, which permits nothing here.
 
 Before v1.10.0, the token endpoint granted one registered scope exactly as written, and each
 route took only a bearer granted exactly `system/Task.write`.
@@ -3985,7 +4375,12 @@ with no patient and no token. An answer whose token names no patient (any non-`2
 record, and so does an answer your gateway could not deliver to your system. The record is
 sent once, and sent again once only when the Hub's `503` carries `X-SHN-Delivered: no`, its
 statement that it took none of the record (`requesterBinding` below says when, and its
-`resent`); every other answer is final. It never delays or changes your system's answer: it is sent after
+`resent`); every other answer is final. From v1.16.0 that resend goes on a new connection
+of its own, so it cannot reach again the instance that refused the first send on the connection
+that instance answered on, when your gateway can open one: through a client whose base transport
+is Go's `*http.Transport` (the released gateway's). With any other transport, a program
+embedding the engine with its own, it is sent as before on the client's own connections, which
+may reach that same instance again (`resentConnection` below says which). It never delays or changes your system's answer: it is sent after
 the answer is written, within 10 s, and the read's access line is written once it is done, with
 `requesterBinding` (below). A gateway stopping waits for a record under way for up to 1 s, then
 cuts it ([DEPLOYMENT.md](DEPLOYMENT.md#stopping-the-gateway)); the read's access line is
@@ -4019,14 +4414,16 @@ scopes permit its interaction on Subscription, as the Task routes take Task scop
 for a create; read (`r`) for a read, a vread and a `$status`; update (`u`); delete (`d`); search
 (`s`) for a search and its pages, in SMART's spellings (`system/Subscription.read` is `rs`,
 `system/Subscription.write` is `cud`, `system/Subscription.*` all five; a v2 scope with a query
-permits nothing). A bearer without one is refused `403 insufficient_scope`, with a
+permits nothing). From shn-gateway v1.16.0 a wildcard permits them as it permits the Task routes
+(`system/*.cruds` permits every interaction). A bearer without one is refused `403 insufficient_scope`, with a
 `WWW-Authenticate` challenge naming `system/Subscription.write` or `system/Subscription.read`,
 recorded as `authority`, before anything else is read. A client registered only for Task scopes
 cannot subscribe: register a Subscription scope for it beside its Task scopes (for example
 `system/Subscription.cruds`) and ask for it in the token (`scope=system/Task.write
 system/Subscription.cruds`). A misspelled Subscription scope stops the gateway at start, as a
 misspelled Task scope does. Each provider's base's SMART configuration advertises each
-Subscription scope a registered client lists, exactly as listed.
+Subscription scope a registered client lists, exactly as listed, and from v1.16.0 each wildcard
+one lists that permits some Subscription interaction, each scope once.
 
 **What crosses the network.** Your Subscription's `channel.endpoint` and `channel.header` never
 leave your gateway in clear: it seals both under a key only it holds (derived from its identity,
@@ -4127,14 +4524,22 @@ other into the provider's own server outside its base, is refused `422` on routi
 delivered. A relative reference already resolves against your base for the provider, and is
 carried. The delivery names the edit in `X-SHN-Edited`. A notification outside the closed
 notification shape (no extension, no signature, no reference but its subscription's and its
-focus's) is refused `502` on authority, so the edit is never made on signed content here. An
+focus's) is refused `403` on authority (before v1.16.0, `502`), so the edit is never made on
+signed content here. An
 address on another server is carried as sent, and `editsNotMade` says why
 (`E-17:no-stated-base`, `E-17:not-under-base`, `E-17:no-provider-base`). A notification your
 gateway cannot read one way only at those places (JSON it cannot read unambiguously, such as a
-lone surrogate in a string) is refused `502` on the fidelity of its own edit, nothing
-delivered. Your endpoint's answer goes back to the provider's system as your
-endpoint answered, at any status, once it holds no resource but an OperationOutcome's own. Your
-gateway refuses, at every conformance level, nothing delivered:
+lone surrogate in a string) is refused `400` on the fidelity of its own edit (before v1.16.0,
+`502`), nothing delivered. The shape's refusal and this one refuse the provider's message,
+received through the Hub, so each is a `4xx`, the status the provider's gateway answers. Your
+endpoint's answer goes back to the provider's system as your
+endpoint answered, at any status, once it holds no resource but an OperationOutcome's own. From
+v1.16.0 the acknowledgement a FHIR server gives the transaction a notification is delivered as
+passes too: a `transaction-response` or `batch-response` Bundle whose entries hold only their
+`response`, any `outcome` an OperationOutcome holding no resource. Earlier releases refused it
+`502`, so the provider's system was told a notification your endpoint took had failed, and one
+that sent it again delivered it twice. Your gateway refuses, at every conformance level, nothing
+delivered:
 
 | Answer | When |
 |---|---|
@@ -4142,7 +4547,7 @@ gateway refuses, at every conformance level, nothing delivered:
 | `422 channel.endpoint must …` | The endpoint the seal opens to fails the delivery rule a Subscription is held to at create (`integrity`; a notification address of the network, `routing`). |
 | `403 the message on this notification leg is not a notification of the HRex Task topic that discloses no patient's data …` | The message is not a notification of the topic, or carries content (`authority`). |
 | `422 a channel.header value the subscriber wrote cannot be presented as an HTTP field (name: value), …` | A header value your system wrote is not `name: value` with a valid field name and value (the fidelity of the delivery); the value is never named. |
-| `502` with the reason | Your endpoint answers, at any status, with FHIR holding a resource other than an OperationOutcome's own, or with FHIR that cannot be read one way only (`authority`): the leg names no patient. An answer that is not FHIR, or has no body, is carried. |
+| `502` with the reason | Your endpoint answers, at any status, with FHIR holding a resource other than an OperationOutcome's own, a Bundle other than an acknowledgement holding none (from v1.16.0), or FHIR that cannot be read one way only (`authority`): the leg names no patient. An answer that is not FHIR, or has no body, is carried. |
 | `502 the gateway cannot deliver the notification with its own registered edits verified (fidelity of SHN's own edit); nothing was delivered` | E-17 failed its own verification: a fault in the gateway. |
 | `500 this gateway holds no subscription keys, so it cannot open a notification's sealed endpoint; nothing was delivered` | The gateway's identity yields no subscription keys: its own failure, not a refusal. |
 
@@ -4265,6 +4670,21 @@ routes), and the leg is recorded as this gateway's refusal on rule `authority`, 
 call is one leg, so its caller can resend it. The gateway makes that call once more, with a fresh holder assertion, only when
 the first attempt failed with a refused, reset or closed connection before its request was
 written: after the write the Framework may already have decided and recorded its decision.
+From v1.16.0 the gateway also sends the call again when a Framework instance answered its own
+`503 registry not yet loaded` with `X-SHN-Delivered: no` (and only then: a `503` without that
+header, with another `error`, or any other status is not resent for this): at most twice, each
+time on a new connection and with a fresh holder assertion, 250 ms and then 500 ms after the
+refusal, each attempt within the Framework client's own timeout and all of it within the call
+your gateway is answering. That instance refused before deciding anything, and an
+instance starting up can keep a pooled connection while a ready one serves beside it, so a new
+connection may reach the ready one. Refused every time, the leg is answered as above. A leg the
+Hub refuses the same way (an instance that has not yet read the network's membership refuses
+every leg before it reads the envelope) is sent again the same way: the same sealed envelope,
+with a fresh assertion, on a new connection, at most twice, the waits and retries within the
+leg's own deadline (the Hub client's timeout); refused every time, it is the
+Hub's `503` as before, recorded as `routing`. A retry is made only through a client whose base
+transport is Go's `*http.Transport` (the released gateway's), the only kind it can make open a
+new connection; each is counted ([MONITORING.md](MONITORING.md#retries-after-a-not-yet-loaded-refusal)).
 A `403` denial is `403 {"error":"authorization denied"}`. From v1.9.0 a `429` is
 `503 {"error":"the authorization service is limiting this gateway, so this leg was not
 sent"}`, with the Framework's `Retry-After` when it sent exactly one well-formed value, and

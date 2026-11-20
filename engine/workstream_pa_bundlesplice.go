@@ -22,10 +22,14 @@ import (
 
 // errRecordNotCarried is the fidelity of the gateway's own splice: a record
 // read from the participant's system that the splice cannot carry as read. It
-// is refused (422, at the build stage), as a record the SDK's Carried builders
-// cannot carry is (shnsdk.ErrPASRecordNotCarried), never answered as the
-// gateway's own failure: the record is the participant's, and the gateway does
-// not judge it, only declines to edit it into a request it cannot carry it in.
+// is refused at the build stage, never answered as the gateway's own failure:
+// the record is the participant's, and the gateway does not judge it, only
+// declines to edit it into a request it cannot carry it in. What cannot be
+// carried is what the gateway read from its own participant's system, so the
+// answer is 502 (buildFidelityStatus; gateway/STABILITY.md, "What the gateway
+// cannot carry or edit"). One refusal errors.Is reports as it answers 422
+// instead: a record the request names that the system does not hold
+// (evidenceNotHeldError).
 var errRecordNotCarried = errors.New("a record read from the system of record cannot be carried as read")
 
 // bundleEntryBytes is one entry to add to an encoded Bundle: its fullUrl,

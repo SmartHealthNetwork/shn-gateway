@@ -105,7 +105,7 @@ func TestEligibility_DeclaredTokenSubjectDifferenceIsRecorded(t *testing.T) {
 			p := eligibilityPayer(t, level, true)
 			answer := payersEligibilityAnswer("Patient/" + dtrFrameMember)
 			p.partner.respByPath[eligibilityPath] = answer
-			run := runObserved(t, p, "coverage-eligibility", eligibilityRequest(t, dtrFrameMember), "pci-of-another-patient")
+			run := runObserved(t, p, "coverage-eligibility", eligibilityRequest(t, dtrFrameMember), "pci:of-another-patient")
 			if run.answer.status != http.StatusOK || !bytes.Equal(run.answer.body, answer) {
 				t.Fatalf("answer %d %s, want the payer's answer relayed", run.answer.status, run.answer.body)
 			}
@@ -185,7 +185,7 @@ func sendConsented(t *testing.T, p *levelPayer, leg string, body []byte, subject
 	if err != nil {
 		t.Fatalf("decode response frame: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, frame: hdr.Headers, contentType: hdr.Headers["Content-Type"]}
 }
 
 func cdexTaskFor(t *testing.T, member string) []byte {

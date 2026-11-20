@@ -15,6 +15,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/connectors/smartauth"
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 )
 
 // SearchSystemOfRecord is an optional extension of SystemOfRecord: a bounded
@@ -258,7 +259,6 @@ func stringMember(doc *relay.Document, obj relay.NodeID, key string) (string, bo
 
 var (
 	searchTypeRE  = regexp.MustCompile(`^[A-Z][A-Za-z]{1,63}$`)
-	fhirIDRE      = regexp.MustCompile(`^[A-Za-z0-9\-.]{1,64}$`)
 	searchParamRE = regexp.MustCompile(`^[a-z][a-z-]{0,63}$`)
 	fhirDateRE    = regexp.MustCompile(`^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$`)
 	// searchCodeRE is a code a token narrowing may name: never a character
@@ -294,7 +294,7 @@ var searchIncludes = map[string]string{
 // (obtainRoutingCoverage).
 func SoRSearchQuery(resourceType, sorPatientID string, dates ...SearchDateRange) (string, error) {
 	bad := &SearchError{Outcome: SearchMalformed, Reason: "invalid search input"}
-	if !searchTypeRE.MatchString(resourceType) || !fhirIDRE.MatchString(sorPatientID) {
+	if !searchTypeRE.MatchString(resourceType) || !fhirid.Valid(sorPatientID) {
 		return "", bad
 	}
 	q := url.Values{"patient": {"Patient/" + sorPatientID}}

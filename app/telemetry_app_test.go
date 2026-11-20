@@ -167,13 +167,13 @@ func runtimeNamesOnly(text string) string {
 func TestSeriesBounds_MON_R18(t *testing.T) {
 	want := map[string]int{
 		"shn.gateway.exchanges": 0, "shn.gateway.exchange.duration": 0, "shn.gateway.backend.calls": 0, "shn.gateway.backend.duration": 0,
-		"shn.gateway.legs": 6, "shn.gateway.store.errors": 5, "shn.gateway.involved.omitted": 8,
+		"shn.gateway.legs": 6, "shn.gateway.store.errors": 5, "shn.gateway.involved.omitted": 9,
 		"shn.gateway.store.pool.connections": 4, "shn.gateway.store.pool.empty_acquires": 1, "shn.gateway.audit.appends": 1,
 		"shn.gateway.audit.retries": 6, "shn.gateway.audit.drops": 7, "shn.gateway.audit.queue.depth": 1, "shn.gateway.audit.endpoint.unknown": 1,
 		"shn.gateway.validator.lane.qualified": 12, "shn.gateway.validator.lane.attempts": 36, "shn.gateway.telemetry.exports": 4,
 		"shn.gateway.info": 60, "shn.gateway.certificate.expiry": 600, "shn.gateway.ingress_key.remaining": 1, "shn.gateway.ingress_key.age": 1,
 		"shn.gateway.dependency.age": 2, "shn.gateway.peers.known": 1, "shn.gateway.authorization.token.duration": 1,
-		"shn.gateway.authorization.tokens": 5,
+		"shn.gateway.authorization.tokens": 5, "shn.gateway.network.retries": 12,
 	}
 	kinds := len(engine.ExchangeKinds)
 	dirs, outcomes := len(engine.ExchangeDirections), len(engine.ExchangeOutcomes)
@@ -201,7 +201,7 @@ func TestSeriesBounds_MON_R18(t *testing.T) {
 			t.Errorf("%s: bound %d, pinned %d", inst.Name, got, want[inst.Name])
 		}
 	}
-	if !toyProfileBuild && kinds != 15 {
+	if !toyProfileBuild && kinds != 18 {
 		t.Errorf("%d exchange kinds in a release build; the exchange instruments' bounds follow it", kinds)
 	}
 }

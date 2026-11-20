@@ -28,8 +28,13 @@ func partyCoverage(contained string) string {
 }
 
 // unclearPartyCoverages are dependent Coverages carrying the parent exactly,
-// that the party rule names no party in because each spells a name it reads
-// in another case, though a reader that ignores case finds the parent a party.
+// each spelling a name the party rule reads in another case. The binding reads
+// a FHIR resource's names as FHIR spells them (bindingView), so where the name
+// is one the view spells (a slot's reference, the Coverage's type) the rule
+// names the parent as the exact spelling does; where it is not (a slot only a
+// lenient reader reads beside the exact one, a parent containing others) the
+// rule names no party, though a reader that ignores case finds the parent a
+// party.
 var unclearPartyCoverages = map[string]string{
 	"a slot named in another case beside the exact one": `{"resourceType":"Coverage","id":"c","contained":[` + exactParent + `],` +
 		`"policyHolder":{"reference":"#parent"},"Subscriber":{"display":"x"},"beneficiary":{"reference":"Patient/` + strangerMember + `"}}`,
@@ -38,23 +43,31 @@ var unclearPartyCoverages = map[string]string{
 	"the Coverage naming its type in another case":       strings.Replace(partyCoverage(`"contained":[`+exactParent+`]`), `"resourceType":"Coverage"`, `"ResourceType":"Coverage"`, 1),
 }
 
-// spellsTieName are the unclearPartyCoverages that spell a name a reference is
-// resolved by in another case.
+// spellsTieName are the unclearPartyCoverages that spell, in another case, a
+// name a reference is resolved by that the binding's view does not spell as
+// FHIR does: the parent's "Contained" is read as contained, so the parent
+// contains resources, which readers may resolve differently. The others spell
+// a name the view spells as FHIR does, so they read as the exact spelling does.
 var spellsTieName = map[string]bool{
 	"the parent containing a list named in another case": true,
-	"a slot naming its reference in another case":        true,
-	"the Coverage naming its type in another case":       true,
 }
 
-// The subject derivation reads a carried Patient's demographics by their
-// exact member names, as every reader of the request does. A resource a
-// reader taking names exactly reads another way yields none: a Coverage's
-// contained resources named only in another case (no reader taking names
-// exactly sees the parent there, so it is never read as the member), the
-// contained resources of a Coverage whose party the party rule cannot name
-// because it spells a name the rule reads in another case, a request
-// repeating a member name, and a Patient naming its birth date or name only in
-// another case. Every leg that derives a patient identifier reads it through
+// wantUnreadable is wantNoParent's want for a request the binding cannot decode at
+// all: refused (errRequestPatientsUnreadable), never bound by the id alone.
+const wantUnreadable = "unreadable"
+
+// The subject derivation reads a carried Patient's demographics through the
+// binding's view of the request (bindingView), in which each name the readers
+// read, and each type they compare, takes its FHIR spelling within a FHIR
+// resource: a Coverage's contained resources named in another case are its
+// contained resources, so the parent there is its party, as when they are
+// named exactly, and is never read as the member. The demographics themselves
+// are read by their exact names (PatientDemographics): a Patient naming its
+// birth date or name only in another case yields none. The contained resources
+// of a Coverage whose party the party rule cannot name, because it spells in
+// another case a name the view does not spell, yield none. A request repeating
+// a member name in a resource, exactly or in another case, can be read two ways:
+// the binding cannot decode it, and refuses it rather than bind by the id alone. Every leg that derives a patient identifier reads it through
 // this derivation. A request spelling a name a reference is resolved by in
 // another case is one readers may resolve differently: no beneficiary ties the
 // member's own Patient there, so beside a party slot it is not decided to be
@@ -67,11 +80,11 @@ func TestSubjectDerivation_ReadsCarriedPatientsByExactNames(t *testing.T) {
 		payload string
 		want    string
 	}{
-		"the party under Contained":                       {`{"prefetch":{"coverage":` + partyCoverage(`"Contained":[`+exactParent+`]`) + `}}`, none},
-		"the party under Contained, with the child":       {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"Contained":[`+exactParent+`]`) + `}}`, ""},
-		"the party under CONTAINED, in a searchset":       {`{"prefetch":{"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + partyCoverage(`"CONTAINED":[`+exactParent+`]`) + `}]}}}`, none},
-		"contained repeated":                              {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"contained":[`+exactParent+`],"contained":[]`) + `}}`, none},
-		"contained repeated in another case":              {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"contained":[],"Contained":[`+exactParent+`]`) + `}}`, none},
+		"the party under Contained":                       {`{"prefetch":{"coverage":` + partyCoverage(`"Contained":[`+exactParent+`]`) + `}}`, ""},
+		"the party under Contained, with the child":       {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"Contained":[`+exactParent+`]`) + `}}`, childs},
+		"the party under CONTAINED, in a searchset":       {`{"prefetch":{"coverage":{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + partyCoverage(`"CONTAINED":[`+exactParent+`]`) + `}]}}}`, ""},
+		"contained repeated":                              {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"contained":[`+exactParent+`],"contained":[]`) + `}}`, wantUnreadable},
+		"contained repeated in another case":              {`{"prefetch":{"patient":` + exactChild + `,"coverage":` + partyCoverage(`"contained":[],"Contained":[`+exactParent+`]`) + `}}`, wantUnreadable},
 		"the child naming its birth date in another case": {`{"prefetch":{"patient":` + strings.Replace(exactChild, `"birthDate"`, `"BirthDate"`, 1) + `}}`, none},
 		"the child naming its name in another case":       {`{"prefetch":{"patient":` + strings.Replace(exactChild, `"name"`, `"Name"`, 1) + `}}`, none},
 		"the child naming its family in another case":     {`{"prefetch":{"patient":` + strings.Replace(exactChild, `"family"`, `"Family"`, 1) + `}}`, none},
@@ -99,13 +112,19 @@ func TestSubjectDerivation_ReadsCarriedPatientsByExactNames(t *testing.T) {
 
 // wantNoParent checks that the derivation reads no parent's demographics from
 // payload, and derives want, or, with want "", refuses: the member cannot be
-// identified.
+// identified, or, with wantUnreadable, refuses: the request cannot be read.
 func wantNoParent(t *testing.T, g *Gateway, payload, want string) {
 	t.Helper()
 	if d, ok := carriedPatientDemographics([]byte(payload), strangerMember); ok && d.FamilyName == "Parentname" {
 		t.Fatalf("the parent's demographics were read: %+v", d)
 	}
 	pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, []byte(payload))
+	if want == wantUnreadable {
+		if !errors.Is(err, errRequestPatientsUnreadable) || pci != "" {
+			t.Fatalf("pci %q (found %v, err %v), want the request refused as unreadable", pci, found, err)
+		}
+		return
+	}
 	if want == "" {
 		if !errors.Is(err, errPatientUnidentifiable) || pci != "" {
 			t.Fatalf("pci %q (found %v, err %v), want the patient refused as unidentifiable", pci, found, err)

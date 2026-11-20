@@ -28,12 +28,30 @@ func safeSoRError(err error) *SoRReadError {
 	return &SoRReadError{Kind: SoRInvalidResponse}
 }
 
+// safeReadErr is safeSoRError for a read error its caller returns as its own:
+// a member that names no one stays errMemberNamesNoOne, the request's, refused
+// as such (SoRFailureResponse, subjectBindingFailure), never turned into the
+// system of record's invalid response.
+func safeReadErr(err error) error {
+	if errors.Is(err, errMemberNamesNoOne) {
+		return errMemberNamesNoOne
+	}
+	return safeSoRError(err)
+}
+
 // refuseSoRFailure answers a failed system-of-record read on an inbound leg as
 // this participant's answer: framed to the requester with the safe
 // status and message, never the read error's own text.
 func (g *Gateway) refuseSoRFailure(w http.ResponseWriter, r *http.Request, leg inboundLeg, env shnsdk.Envelope, tok shnsdk.Token, answerTok string, err error) bool {
 	if err == nil {
 		return false
+	}
+	// A member that names no one is the request's, refused on authority, never
+	// recorded as the system of record's failure.
+	if errors.Is(err, errMemberNamesNoOne) {
+		exchangeOf(r.Context()).refusing(RefusalAuthority)
+		g.refuseInbound(w, r, leg, env, tok, answerTok, http.StatusBadRequest, msgMemberNamesNoOne, nil)
+		return true
 	}
 	status, msg := SoRFailureResponse(err)
 	g.refuseInbound(w, r, leg, env, tok, answerTok, status, msg, nil)
@@ -47,7 +65,9 @@ func (g *Gateway) refuseSoRFailure(w http.ResponseWriter, r *http.Request, leg i
 // two Patients for one member). An outage or a failed authentication meets
 // every member's read alike, so it says nothing about any one patient.
 func memberRecordsUnreadable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// A member that names no one is the request's, refused as such
+	// (refuseSoRFailure), never read as its records being out of shape.
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errMemberNamesNoOne) {
 		return false
 	}
 	var readErr *SoRReadError

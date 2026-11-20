@@ -141,6 +141,13 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte) 
 		if srMember != "" || covMember != "" {
 			return nil, nil, "", http.StatusBadRequest, inconsistent
 		}
+		// A request that names its patient nowhere: an absent or empty
+		// context.patientId is missing, as order-dispatch answers it; a
+		// reference that names no one ("Patient/") is the binding's to refuse.
+		if req.Context.PatientID == "" {
+			exchangeOf(ctx).refusing(RefusalAuthority)
+			return nil, nil, "", http.StatusBadRequest, "missing context.patientId"
+		}
 	} else if (haveSR && srMember != ctxMember) || (haveCov && covMember != ctxMember) {
 		// With both references read (always so at strict) this is exactly
 		// srMember != covMember || srMember != ctxMember.

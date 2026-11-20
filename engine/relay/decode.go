@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
@@ -75,6 +76,32 @@ func (e *LimitError) Is(target error) bool { return target == ErrTooLarge }
 
 // Unwrap returns the scanner's error.
 func (e *LimitError) Unwrap() error { return e.err }
+
+// Limit says which of the relay's limits the body passed, in words a refusal
+// can carry: "nests deeper than 64 levels", "holds more than 1,000,000 JSON
+// tokens" or "is larger than 16 MiB".
+func (e *LimitError) Limit() string {
+	l := splice.DefaultLimits()
+	switch {
+	case errors.Is(e.err, splice.ErrDepthLimit):
+		return fmt.Sprintf("nests deeper than %d levels", l.MaxDepth)
+	case errors.Is(e.err, splice.ErrTokenLimit):
+		return fmt.Sprintf("holds more than %s JSON tokens", groupThousands(l.MaxTokens))
+	case errors.Is(e.err, splice.ErrSizeLimit):
+		return fmt.Sprintf("is larger than %d MiB", l.MaxBytes>>20)
+	default:
+		return "is past the relay's limits"
+	}
+}
+
+// groupThousands writes n with a comma between each group of three digits.
+func groupThousands(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
 
 // scanCount counts strict scans; tests use it to pin how often a body is
 // parsed.

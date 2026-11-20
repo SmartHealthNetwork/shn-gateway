@@ -147,7 +147,7 @@ func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, 
 func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request) {
 	w, scope := g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeAttachment) {
 		return
 	}
 	leg := legCDexSubmit
@@ -323,7 +323,7 @@ func (g *Gateway) cdexPayers() ([]cdexPayer, error) {
 // handleCDexPayers is GET /cdex/payers: the payers a provider's system can
 // address a submission to, each with its return path.
 func (g *Gateway) handleCDexPayers(w http.ResponseWriter, r *http.Request) {
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeCDexPayers) {
 		return
 	}
 	payers, err := g.cdexPayers()

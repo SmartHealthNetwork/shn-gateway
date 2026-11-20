@@ -55,6 +55,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 		line.RequesterBinding = &diagnostics.AccessRequesterBinding{
 			Binding: b.Binding, Involvement: b.Involvement, Unbound: b.Unbound,
 			Outcome: b.Outcome, RefusedBy: b.RefusedBy, Status: b.Status, NotSent: b.NotSent, Resent: b.Resent,
+			ResentConnection: b.ResentConnection,
 		}
 	}
 	return line

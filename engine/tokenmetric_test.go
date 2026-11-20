@@ -76,7 +76,7 @@ func TestTokenMetric_OneObservationPerAcquisition_MON_R26(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	tok := signTestToken(shnsdk.Token{Frame: "frame", Operation: "op", Subject: "pci", CorrelationID: "corr", PayloadHash: "h",
+	tok := signTestToken(shnsdk.Token{Frame: "frame", Operation: aPatientLegOp(t), Subject: "pci:token-metric", CorrelationID: "corr", PayloadHash: "h",
 		Holder: "h-token", Expiry: time.Date(2026, 10, 25, 13, 0, 0, 0, time.UTC)}, key)
 	answer, err := json.Marshal(authorizeResp{Token: &tok})
 	if err != nil {
@@ -122,7 +122,7 @@ func TestTokenMetric_OneObservationPerAcquisition_MON_R26(t *testing.T) {
 			g := &Gateway{cfg: Config{HolderID: "h-token", Identity: id, Clock: func() time.Time { return now },
 				AuthzURL: "https://authz.example", AuthzClient: client, AuthzPub: key.Public().(ed25519.PublicKey),
 				TokenMetric: func(outcome string, d time.Duration) { got, took = append(got, outcome), append(took, d) }}}
-			g.authorizeRequest(httptest.NewRequest(http.MethodPost, "/", nil), authorizeReq{Frame: "frame", Operation: "op", SubjectPCI: "pci", CorrelationID: "corr", PayloadHash: "h"})
+			g.authorizeRequest(httptest.NewRequest(http.MethodPost, "/", nil), authorizeReq{Frame: "frame", Operation: aPatientLegOp(t), SubjectPCI: "pci:token-metric", CorrelationID: "corr", PayloadHash: "h"})
 			if len(got) != 1 || got[0] != row.want || took[0] != row.took {
 				t.Fatalf("observations %v %v after %d attempts, want one %s taking %v", got, took, calls, row.want, row.took)
 			}
@@ -136,7 +136,30 @@ func TestTokenMetric_OneObservationPerAcquisition_MON_R26(t *testing.T) {
 			return nil, errors.New("sent")
 		})},
 		TokenMetric: func(outcome string, _ time.Duration) { got = append(got, outcome) }}}
-	if _, err := g.authorizeRequest(httptest.NewRequest(http.MethodPost, "/", nil), authorizeReq{Frame: "frame", Operation: "op", SubjectPCI: "pci", CorrelationID: "corr"}); err == nil || len(got) != 0 {
+	if _, err := g.authorizeRequest(httptest.NewRequest(http.MethodPost, "/", nil), authorizeReq{Frame: "frame", Operation: aPatientLegOp(t), SubjectPCI: "pci:token-metric", CorrelationID: "corr"}); err == nil || len(got) != 0 {
 		t.Fatalf("an unbuildable request: err %v, observations %v; want an error and none", err, got)
 	}
+}
+
+// aPatientLegOp is the request operation of a leg whose request names its
+// patient, among the workstreams this build compiles in (the toy alone in
+// the core-only profile), chosen by transaction type so the choice is stable:
+// a token for it binds a patient, as the rows here mint one.
+func aPatientLegOp(t *testing.T) string {
+	t.Helper()
+	best, op := "", ""
+	for _, w := range workstreams {
+		for tx, s := range w.catalog() {
+			if s.namesNoPatient() || s.fromAnswer() {
+				continue
+			}
+			if best == "" || tx < best {
+				best, op = tx, s.Op
+			}
+		}
+	}
+	if op == "" {
+		t.Fatal("the build compiles in no leg whose request names its patient")
+	}
+	return op
 }

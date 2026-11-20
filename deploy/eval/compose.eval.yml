@@ -114,8 +114,8 @@ services:
       # and they want opposite answers. It is SHN's own Definition-of-Done gate
       # (../eval/smoke.sh, which exports strict below) AND the bundle a partner
       # downloads and runs (README "docker compose -f compose.eval.yml up") AND
-      # the provider half of the partner's own payer self-test
-      # (payer/smoke.sh). Hardcoding `strict` served the first audience by
+      # the provider half of SHN's payer self-test (payer/smoke.sh), which
+      # drives a payer's own deployment. Hardcoding `strict` served the first audience by
       # getting the other two wrong: a partner would meet a refusal produced by
       # a value WE put in a bundle THEY operate, and read it as a verdict on
       # their own conformance. Absent means the release's default (none from

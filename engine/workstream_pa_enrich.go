@@ -74,12 +74,21 @@ type paGatewayState struct {
 	// otherwise, when the payer's Subscription interaction is refused as
 	// routing.
 	cdexSubscription *cdexSubscriptionState
-	// notifyDelivery is how a payer's gateway delivers a provider's
+	// pasSubscribe and pasSubscription are how the payer's gateway reaches
+	// its own Subscription endpoint for a provider, on a payer whose
+	// participant sets the subscription scope (Config.PayerSubscriptionScope);
+	// nil otherwise, when the provider's Subscription interaction is refused
+	// as routing.
+	pasSubscribe    *nativeResponder
+	pasSubscription *cdexSubscriptionState
+	// notifyDelivery is how a subscriber's gateway delivers a notifier's
 	// notification to the endpoint its own system wrote into its
-	// Subscription (workstream_pa_cdex_signal.go): the forward, with the
-	// checks every forward to the participant's own system takes, over
-	// Config.SubscriptionNotificationClient, with no credential of the
-	// gateway's own; nil on any other role.
+	// Subscription (workstream_pa_signal_delivery.go): a payer's, a
+	// provider's CDex Task notification, and a provider's whose participant
+	// sets PROVIDER_PAS_SUBSCRIPTION, a payer's PAS notification. The
+	// forward, with the checks every forward to the participant's own system
+	// takes, over Config.SubscriptionNotificationClient, with no credential
+	// of the gateway's own; nil on any other gateway.
 	notifyDelivery *nativeResponder
 	// subscriberKeys are the keys this gateway seals and restores its own
 	// participant's topic Subscriptions with (workstream_pa_subscriber.go):
@@ -114,6 +123,18 @@ func (paWorkstream) newGatewayState(g *Gateway) (gatewayState, error) {
 			client = &http.Client{}
 		}
 		st.notifyDelivery = NewNativeResponder(client, "", g.cfg.Clock, WithUpstreamParty("payer"), WithBackendDeadline(cdexTaskDeadline))
+		subscribe, sub, err := newPASSubscriptionState(g.cfg)
+		if err != nil {
+			return nil, err
+		}
+		st.pasSubscribe, st.pasSubscription = subscribe, sub
+	}
+	if g.cfg.ProviderPASSubscription && g.cfg.Role == "provider" {
+		client := g.cfg.SubscriptionNotificationClient
+		if client == nil {
+			client = &http.Client{}
+		}
+		st.notifyDelivery = NewNativeResponder(client, "", g.cfg.Clock, WithUpstreamParty("provider"), WithBackendDeadline(cdexTaskDeadline))
 	}
 	if url := strings.TrimSpace(g.cfg.ProviderCDexTaskURL); url != "" && g.cfg.Role == "provider" {
 		st.cdexTask = NewNativeResponder(g.cfg.ProviderCDexTaskClient, url, g.cfg.Clock, WithUpstreamParty("provider"),

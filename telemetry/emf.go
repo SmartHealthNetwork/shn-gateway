@@ -288,6 +288,11 @@ var emfLines = map[*Instrument]func(*EMF, Measurement){
 		e.em.EmitCount("TokenAcquisition", m.Value, map[string]string{"Service": e.service,
 			"outcome": closedDim(engine.TokenOutcomes, m.Attributes[0])})
 	},
+	NetworkRetries: func(e *EMF, m Measurement) {
+		e.em.EmitCount("NetworkRetry", m.Value, map[string]string{"Service": e.service,
+			"service": closedDim(engine.NetworkRetryServices, m.Attributes[0]),
+			"result":  closedDim(engine.NetworkRetryResults, m.Attributes[1])})
+	},
 }
 
 // emfRollups are the snapshot rollup lines (MON-R34): one line per sample

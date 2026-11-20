@@ -30,7 +30,7 @@ import (
 func (g *Gateway) homeOxygenAutoFillEvidenceContext(ctx context.Context, member string, qrJSON []byte) ([]FilledItem, error) {
 	cc, ok, readErr := ReadSystemOfRecord(g.cfg.SoR).ClinicalContextContext(ctx, member)
 	if readErr != nil {
-		return nil, safeSoRError(readErr)
+		return nil, safeReadErr(readErr)
 	}
 	if !ok {
 		return nil, nil

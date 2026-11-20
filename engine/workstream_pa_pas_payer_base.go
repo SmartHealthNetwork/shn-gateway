@@ -38,14 +38,14 @@ import (
 // (N8). Sending it to every payer is not done: it would tell payers the
 // provider never chose that it subscribes, and with what filter. The
 // Subscription interactions at a payer's base are the subscribe leg's
-// (legPASSubscriptionSubscribe), served once that leg's handler is mounted
-// beside the base's other routes; until then the base serves none.
+// (legPASSubscriptionSubscribe), served by handlePASSubscriptionBase
+// (workstream_pa_pas_subscriber.go) where the provider takes the PAS topic's
+// notifications.
 
 // legPASSubscriptionSubscribe is the PAS subscribe leg: the provider's
 // Subscription create, read, vread, update, delete, search and instance
 // $status, at a payer's base. A payer that takes it is listed at
-// PASPayersPath. Its taxonomy row is not yet published, so no payer declares
-// it and an exchange record names it other.
+// PASPayersPath.
 const legPASSubscriptionSubscribe = "pas-subscription-subscribe"
 
 // PASPayersPath is the provider gateway's listing of the payers' bases at
@@ -88,6 +88,12 @@ const (
 	// errPASSubscriptionNotFound: a Subscription searched for, read, updated
 	// or deleted at the plain base.
 	errPASSubscriptionNotFound = "Subscription not found at this base: a Subscription is at the base of the payer it was created at, which " + PASPayersPath + " lists; nothing was sent"
+	// errPASSubscriptionPlainBaseNotTaken and errPASSubscriptionNotFoundNotTaken
+	// are those refusals on a gateway without PROVIDER_PAS_SUBSCRIPTION, which
+	// takes no Subscription at any payer's base and lists none, so they name no
+	// listing.
+	errPASSubscriptionPlainBaseNotTaken = "the network cannot route a Subscription at this base (routing): this gateway takes no Subscription to the PAS topic at any payer's base (" + settingProviderPASSubscription + " is not set); nothing was sent"
+	errPASSubscriptionNotFoundNotTaken  = "Subscription not found at this base: this gateway takes no Subscription to the PAS topic at any payer's base (" + settingProviderPASSubscription + " is not set); nothing was sent"
 )
 
 // pasPayerNote is what a request at a payer's base records of the payer its
@@ -204,25 +210,33 @@ func (g *Gateway) handlePASBaseSmartConfig(w http.ResponseWriter, r *http.Reques
 // authenticated and its body read as every ingress route reads one, a create
 // is refused 422 (FHIR's answer to a create the server will not process), and
 // a search, read, vread, update or delete 404, each with this gateway's
-// OperationOutcome naming where the payers' bases are listed, recorded as
-// routing. Nothing is sent.
+// OperationOutcome naming where the payers' bases are listed or, on a gateway
+// without PROVIDER_PAS_SUBSCRIPTION, which lists none, that it takes no
+// Subscription at any payer's base, recorded as routing. Nothing is sent.
 func (g *Gateway) handlePASSubscriptionPlain(w http.ResponseWriter, r *http.Request) {
 	w, _ = g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	// The caller is held to a Subscription scope that permits the
+	// interaction, as a payer's Subscription routes hold theirs; the umbrella
+	// does not permit one (paScopedRoutes).
+	if g.routeScopeRefused(w, r, plainSubscriptionScope(subscriptionNeed(r.Method, subscriptionRest(r, 1)))) {
 		return
 	}
 	exchangeOf(r.Context()).leg(legPASSubscriptionSubscribe)
 	if _, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes); !ok {
 		return
 	}
+	plain, notFound := reasonPASSubscriptionPlainBase, reasonPASSubscriptionNotFound
+	if !g.cfg.ProviderPASSubscription {
+		plain, notFound = reasonPASSubscriptionPlainBaseNotTaken, reasonPASSubscriptionNotFoundNotTaken
+	}
 	if r.Method == http.MethodPost {
-		exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonPASSubscriptionPlainBase)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": errPASSubscriptionPlainBase})
+		exchangeOf(r.Context()).refusedFor(RefusalRouting, plain)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": string(plain)})
 		return
 	}
-	exchangeOf(r.Context()).refusedFor(RefusalRouting, reasonPASSubscriptionNotFound)
-	writeJSON(w, http.StatusNotFound, notFoundOutcome(errPASSubscriptionNotFound))
+	exchangeOf(r.Context()).refusedFor(RefusalRouting, notFound)
+	writeJSON(w, http.StatusNotFound, notFoundOutcome(string(notFound)))
 }
 
 // pasPayer is one entry of the provider gateway's PAS payer listing.
@@ -234,10 +248,15 @@ type pasPayer struct {
 
 // pasPayers lists every registered payer that takes the PAS subscribe leg, in
 // participant id order, with its base (pasroute.Base): a listed base takes a
-// Subscription, and none that always refuses one is advertised. A base that
-// cannot be built is an error, never a shorter list.
+// Subscription, and none that always refuses one is advertised. Without
+// PROVIDER_PAS_SUBSCRIPTION this gateway mounts no Subscription route at any
+// base, so it lists none: a true empty, never an unknown. A base that cannot
+// be built is an error, never a shorter list.
 func (g *Gateway) pasPayers() ([]pasPayer, error) {
 	out := []pasPayer{}
+	if !g.cfg.ProviderPASSubscription {
+		return out, nil
+	}
 	for _, id := range g.cfg.Reg.IDs() {
 		e, ok := g.cfg.Reg.Lookup(id)
 		if !ok || e.Role != "payer" || !slices.Contains(e.Legs, legPASSubscriptionSubscribe) {
@@ -256,7 +275,7 @@ func (g *Gateway) pasPayers() ([]pasPayer, error) {
 // handlePASPayers is GET /pas/payers: the payers at whose bases a provider's
 // system can create a Subscription, each with its base.
 func (g *Gateway) handlePASPayers(w http.ResponseWriter, r *http.Request) {
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, g.pasPayersScope()) {
 		return
 	}
 	payers, err := g.pasPayers()

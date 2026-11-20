@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -55,8 +57,9 @@ var cdexRecordsFaultHook func([]byte)
 // Before anything is sent, the member must have a Patient in the system of
 // record, and every record must be about that patient (the Patient
 // compartment fence); a record about anyone else, or a record returned twice,
-// is a 502. More records than one search may return is a 422. No record in
-// range is a 404.
+// is a 502. More records than one search may return, or records together
+// past the gateway's own carrying limits, is a 502 on the fidelity of its
+// own build. No record in range is a 404.
 func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, queries []shnsdk.CDexQuery, consentRef string) (records []byte, sealed relay.Payload, status int, msg string) {
 	fail := func(status int, msg string) ([]byte, relay.Payload, int, string) {
 		return nil, sealed, status, msg
@@ -64,7 +67,12 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 	sorFail := func(err error) ([]byte, relay.Payload, int, string) {
 		var bound *recordsBoundError
 		if errors.As(err, &bound) {
-			return fail(http.StatusUnprocessableEntity, "records exceed the per-answer bound for "+bound.resourceType)
+			// What the gateway read from its own participant's system that it
+			// cannot carry, as past its carrying limits: 502 on the fidelity
+			// of its own build, never a partial answer, naming the requested
+			// type and the bound, never a record.
+			exchangeOf(ctx).refusingFidelity(vocab.RefusalStageBuild)
+			return fail(http.StatusBadGateway, refusalCDexRecordsPastBound(bound.resourceType))
 		}
 		// The facility's own system failing to answer is an upstream
 		// failure on the exchange record, as on every other leg; one
@@ -92,7 +100,7 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 		return fail(http.StatusNotFound, "the facility's system of record holds no Patient for the member")
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
-	if !ok || !fhirIDRE.MatchString(sorID) {
+	if !ok || !fhirid.Valid(sorID) {
 		return badAnswer((&SoRReadError{Kind: SoRInvalidResponse}).Error())
 	}
 	fence := newPatientFence(shnsdk.MemberSystem, member, nil, sorID, member)
@@ -213,9 +221,26 @@ func (g *Gateway) facilityRecordsBundle(ctx context.Context, member string, quer
 		cdexRecordsFaultHook(b)
 	}
 	if sealed, err = relay.Authored(relay.BuilderCDexRecords, b, fhirJSON, embeds...); err != nil {
+		if errors.Is(err, relay.ErrTooLarge) {
+			// The facility's records, each within its own read, together
+			// past the gateway's own carrying limits: refused as a
+			// fulfillment past them is (cdexBuildPastLimits), its reason
+			// naming the records, since the Bundle holds nothing of the
+			// request (only the records and the Patient and Provenance
+			// written for them), with no record dropped to make it fit.
+			exchangeOf(ctx).refusingFidelity(vocab.RefusalStageBuild)
+			return fail(http.StatusBadGateway, refusalCDexRecordsPastLimits)
+		}
 		return fail(http.StatusInternalServerError, "build records bundle failed")
 	}
 	return b, sealed, 0, ""
+}
+
+// refusalCDexRecordsPastBound answers a federated query whose records of
+// resourceType, the type the request names, are past one search's per-answer
+// bound.
+func refusalCDexRecordsPastBound(resourceType string) string {
+	return "federated query refused: the facility's " + resourceType + " records are past the gateway's per-answer bound (10 pages, 200 entries or 4 MiB); it cannot be answered until the facility's records change"
 }
 
 // recordsBoundError: a record search exceeded a search bound.

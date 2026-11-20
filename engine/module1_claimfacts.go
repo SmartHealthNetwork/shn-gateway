@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -181,7 +183,10 @@ func claimInputOf(r *http.Request) (originationClaimInput, error) {
 // fallback: this gateway's own fault, not a refusal.
 func pasBuildFailure(w http.ResponseWriter, r *http.Request, err error, fallback string) {
 	if isPASBuildFidelity(err) {
-		refuseBuilder(w, withCarriedLegs(r.Context(), err.Error()))
+		// The status follows whose content it is (buildFidelityStatus): a record
+		// of the order's requester read from the system of record is 502.
+		exchangeOf(r.Context()).refusedFidelity(vocab.RefusalStageBuild)
+		writeJSON(w, buildFidelityStatus(err), map[string]string{"error": withCarriedLegs(r.Context(), err.Error())})
 		return
 	}
 	// This gateway's own failure, never a refusal.
@@ -558,7 +563,7 @@ func (g *Gateway) coveragePartyRecords(ctx context.Context, coverage []byte) ([]
 		}
 		seen[key] = true
 		id := strings.TrimPrefix(key, "Patient/")
-		if !fhirIDRE.MatchString(id) {
+		if !fhirid.Valid(id) {
 			// No record can carry this id: the builder refuses the slot.
 			continue
 		}

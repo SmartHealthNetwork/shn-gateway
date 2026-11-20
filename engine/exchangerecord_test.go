@@ -2598,12 +2598,12 @@ func TestExchangeClosedLists_Pinned(t *testing.T) {
 		return out
 	}
 	wantKinds := []string{"coverage-eligibility", "dtr-questionnaire-fetch", "federated-query", "patient-dtr",
-		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", "cdex-task-status", "cdex-task-subscribe", "cdex-task-signal", ExchangeOther}
+		"crd-order-select", "crd-order-dispatch", "pas-claim", "pas-claim-update", "pas-claim-inquire", "cdex-attachment-submit", "cdex-attachment-request", "cdex-task-status", "cdex-task-subscribe", "cdex-task-signal", "pas-subscription-subscribe", "pas-subscription-signal", "pas-subscription-notify", ExchangeOther}
 	wantKinds = append(wantKinds, profileLegs()...)
 	if got := asSet(ExchangeKinds); !slices.Equal(got, asSet(wantKinds)) {
 		t.Errorf("ExchangeKinds %v, want %v", got, asSet(wantKinds))
 	}
-	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteCDexSubscriptionBase, RouteCDexSubscription, RouteCDexNotify, RoutePASSubscription, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
+	wantRoutes := []string{RouteCRD, RouteDTR, RoutePAS, RoutePASInquire, RouteEligibility, RouteCDexSubmit, RouteCDexReturnSubmit, RouteCDexRequestBase, RouteCDexRequest, RouteCDexReadBase, RouteCDexRead, RouteCDexSubscriptionBase, RouteCDexSubscription, RouteCDexNotify, RoutePASSubscription, RoutePASSubscriptionBase, RoutePASNotify, RouteFederatedQuery, RouteSubstrateInbound, ExchangeOther,
 		// On-behalf building's origination routes, each recorded under its
 		// path's name (the local cancel, pending and reset routes record
 		// nothing).

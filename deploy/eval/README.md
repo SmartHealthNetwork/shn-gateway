@@ -249,6 +249,40 @@ is denied before it ever reaches your payer:
   registered under a public `baseURL` and running before you originate, or the Hub has nothing
   to dial. Run it with the payer evaluation bundle — see [`payer/README.md`](payer/README.md).
 
+## Keeping your keys on one volume
+
+The two smokes in this directory, `smoke.sh` and `payer/smoke.sh`, are SHN's own checks of this
+bundle. They run from SHN's source tree, and this module cannot run them as published yet: each
+starts from paths outside the module's own layout. To evaluate the bundle yourself, run it with
+`docker compose` as the steps above describe. What follows is what each smoke does with a bundle
+when it runs.
+
+Both smokes (`smoke.sh` and `payer/smoke.sh`) copy the bundle you give them, private keys
+included, into a new `0700` directory under `TMPDIR`, and remove it when they exit. To hold every
+copy to one volume, such as a RAM disk, set `SHN_EVAL_KEYS_VOLUME` to its mount point and point
+`TMPDIR` at a directory on it. Each smoke then refuses, before copying anything, unless its copy
+and your bundle are both on that volume.
+
+With it set, the gateway does not bind-mount the bundle, since Docker Desktop on macOS does not
+reliably do that from a freshly attached RAM disk. Each smoke instead makes a `ramfs` volume in
+Docker's VM (memory only, never swapped to its disk), fills it from its copy through a pipe, and
+adds `compose.eval.ramfs.yml`, which puts that volume at the gateway's `/etc/shn`. The volume,
+the container that fills it and the keeper container that keeps it mounted are labelled
+`org.shn.owner=eval` and `org.shn.run=<the work directory's name without its shn-eval- prefix>`
+(for example `provider.Ab12Cd`), with an
+`org.shn.expires` time, so you can find them with `docker ps -a --filter label=org.shn.owner=eval`
+and `docker volume ls --filter label=org.shn.owner=eval`. To label them yourself, set
+`SHN_EVAL_OWNER` and `SHN_EVAL_RUN`.
+
+The smoke refuses, before your keys leave the volume, unless it can check that the volume is
+mounted as `ramfs` and lists the same files as its copy; it never falls back to the bind. However
+it exits, it removes the volume and its containers. A run killed outright (`kill -9`) cannot. Its
+keeper ends on its own within 4 hours, but the gateway's stack keeps running and keeps the volume
+mounted, so the keys stay in Docker's memory until you stop that stack too (`docker compose -p
+<project> down -v`, with the project the run used). Once both have stopped the volume is empty,
+and `docker volume ls --filter label=org.shn.owner=eval` (or your `SHN_EVAL_OWNER`) finds it to
+remove.
+
 ## Pended decisions in this bundle
 
 A real payer **pends** a prior-authorization request it cannot decide at once, and the pend

@@ -151,6 +151,17 @@ func TestOrigination_RequesterUnavailableRefusedAtThePASBuild(t *testing.T) {
 	})
 }
 
+// REJECTION, at every level and every PAS site: an order whose requester is a
+// dot segment ("Practitioner/..") names no record the gateway reads, so the
+// PAS claim's build refuses it as no Type/id reference, never reading it.
+func TestOrigination_RequesterDotSegmentRefusedAtThePASBuild(t *testing.T) {
+	for _, ref := range []string{"Practitioner/..", "Practitioner/."} {
+		refusedAtThePASBuild(t, "the order's requester "+ref+" is not a Type/id reference into your system of record, so a prior-authorization request about this order cannot carry the clinician it names", func(t *testing.T, gw *Gateway) {
+			gw.cfg.SoR = orderRewrite{gw.cfg.SoR, requesterNamed(t, ref)}
+		})
+	}
+}
+
 // RELAY, at every level: the same order on a request the payer ends
 // not-covered at CRD needs no PAS leg, so the requester's records are never
 // read and the payer's answer reaches the caller.
@@ -1343,20 +1354,26 @@ func TestPAInquire_ReadFailureIsABackendFailure(t *testing.T) {
 }
 
 // failEvidenceLinkage answers a read of the participant's system that failed
-// to answer with that read's own status, and anything else with the gateway's
+// to answer with that read's own status, evidence the gateway's own edit
+// cannot carry as the fidelity of the build with buildFidelityStatus's status
+// (502 for a record read from the system of record, 422 for one the request
+// names that the system does not hold), and anything else with the gateway's
 // own 502, each saying which legs were carried, once.
 func TestFailEvidenceLinkage(t *testing.T) {
 	for _, row := range []struct {
-		name   string
-		err    error
-		status int
+		name     string
+		err      error
+		status   int
+		fidelity bool   // recorded as the fidelity of the build
+		want     string // in the answer's reason
 	}{
-		{"the system did not answer", &SoRReadError{Kind: SoRUnavailable}, http.StatusServiceUnavailable},
-		{"the system's answer was unusable", &SoRReadError{Kind: SoRInvalidResponse}, http.StatusBadGateway},
-		{"the gateway's own failure", errors.New("evidence graph too large"), http.StatusBadGateway},
-		{"evidence E-06 would re-point under a signature (D113)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusUnprocessableEntity},
-		{"the gateway could not prepare a record it read", errEvidencePrepare, http.StatusInternalServerError},
-		{"a record read the splice cannot carry as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusUnprocessableEntity},
+		{"the system did not answer", &SoRReadError{Kind: SoRUnavailable}, http.StatusServiceUnavailable, false, "PAS evidence linkage failed"},
+		{"the system's answer was unusable", &SoRReadError{Kind: SoRInvalidResponse}, http.StatusBadGateway, false, "PAS evidence linkage failed"},
+		{"the gateway's own failure", errors.New("evidence graph too large"), http.StatusBadGateway, false, "PAS evidence linkage failed"},
+		{"evidence E-06 would re-point under a signature (D113)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusBadGateway, true, "signed content cannot be edited (E-06, Signature in Condition)"},
+		{"the gateway could not prepare a record it read", errEvidencePrepare, http.StatusInternalServerError, false, "prepare evidence record failed"},
+		{"a record read the splice cannot carry as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusBadGateway, true, "a record read from the system of record cannot be carried as read: it is not UTF-8"},
+		{"a record the request references that the system does not hold", recordNotHeld("Condition/c1"), http.StatusUnprocessableEntity, true, "a record the request references cannot be filled: Condition/c1 is not held by the system of record"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			ctx := context.WithValue(context.Background(), legsCarriedKey{}, &legsCarried{legs: []string{"crd-order-select", "dtr-questionnaire-fetch"}})
@@ -1367,33 +1384,64 @@ func TestFailEvidenceLinkage(t *testing.T) {
 			w, req := mounted(rec, httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx))
 			legAnswered(req.Context())
 			failEvidenceLinkage(req.Context(), w, row.err)
-			switch row.status {
-			case http.StatusUnprocessableEntity:
+			switch {
+			case row.fidelity:
 				// The fidelity of SHN's own edit, at the build.
 				if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
 					t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
 				}
-			case http.StatusInternalServerError:
+			case row.status == http.StatusInternalServerError:
 				// This gateway's own failure, never a refusal.
 				if x.outcome != ExchangeOther {
 					t.Fatalf("recorded %s %s, want the gateway's own failure", x.outcome, x.rule)
 				}
 			}
-			want := "PAS evidence linkage failed"
-			switch row.status {
-			case http.StatusUnprocessableEntity:
-				want = "signed content cannot be edited (E-06, Signature in Condition)"
-				if errors.Is(row.err, errRecordNotCarried) {
-					want = "a record read from the system of record cannot be carried as read: it is not UTF-8"
-				}
-			case http.StatusInternalServerError:
-				want = "prepare evidence record failed"
+			if rec.Code != row.status || !strings.Contains(rec.Body.String(), row.want) {
+				t.Fatalf("%d %s, want %d %q", rec.Code, rec.Body, row.status, row.want)
 			}
-			if rec.Code != row.status || !strings.Contains(rec.Body.String(), want) {
-				t.Fatalf("%d %s, want %d", rec.Code, rec.Body, row.status)
+			if row.fidelity && rec.Header().Get("Retry-After") != "" {
+				t.Fatalf("Retry-After %q on a refusal a retry cannot change", rec.Header().Get("Retry-After"))
 			}
 			wantCarried(t, rec.Body.String(), "crd-order-select", "dtr-questionnaire-fetch")
 		})
+	}
+}
+
+// buildFidelityStatus follows whose content a refusal of the build is, by its
+// type: 502 for a record read from the system of record that the build cannot
+// carry as read, or that E-06 would re-point under a signature, wrapped or
+// not, the built request's spelling checks among them; 422 for a record the
+// request names that the system does not hold, for any other signed-content
+// refusal, and for the SDK builders' own refusals.
+func TestBuildFidelityStatus(t *testing.T) {
+	notCarried := fmt.Errorf("%w: Condition/c1 names no subject.reference", errRecordNotCarried)
+	spelled := builtEntriesNamed([]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Organization","ID":"o1"}}]}`), nil)
+	for name, row := range map[string]struct {
+		err  error
+		want int
+	}{
+		"a record not carried as read":                     {notCarried, http.StatusBadGateway},
+		"a record not carried as read, wrapped":            {fmt.Errorf("PAS requester: %w", notCarried), http.StatusBadGateway},
+		"E-06 under a signature":                           {&relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusBadGateway},
+		"E-06 under a signature, wrapped":                  {fmt.Errorf("evidence: %w", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Provenance.signature"}), http.StatusBadGateway},
+		"another edit under a signature":                   {&relay.SignedContentError{Edit: relay.EditFacilityReportSubjectRekey, Carrier: "Provenance.signature"}, http.StatusUnprocessableEntity},
+		"a record the system does not hold":                {recordNotHeld("Condition/c1"), http.StatusUnprocessableEntity},
+		"a record the system does not hold, wrapped":       {fmt.Errorf("evidence: %w", recordNotHeld("Condition/c1")), http.StatusUnprocessableEntity},
+		"an entry named in another spelling":               {spelled, http.StatusBadGateway},
+		"an entry named in another spelling, wrapped":      {fmt.Errorf("PAS build: %w", spelled), http.StatusBadGateway},
+		"a claim fact the request does not state":          {shnsdk.ErrPASClaimFactAbsent, http.StatusUnprocessableEntity},
+		"a claim fact stated invalidly":                    {shnsdk.ErrPASClaimFactInvalid, http.StatusUnprocessableEntity},
+		"a submitted Claim an amendment cannot carry":      {shnsdk.ErrPASPriorClaimNotCarried, http.StatusUnprocessableEntity},
+		"a Coverage person whose record cannot be carried": {shnsdk.ErrPASCoveragePartyNotCarried, http.StatusUnprocessableEntity},
+		"a report the SDK cannot carry":                    {shnsdk.ErrPASRecordNotCarried, http.StatusUnprocessableEntity},
+	} {
+		if got := buildFidelityStatus(row.err); got != row.want {
+			t.Errorf("%s: %d, want %d", name, got, row.want)
+		}
+	}
+	// The spelling checks keep the refusal's own message and kind.
+	if !errors.Is(spelled, errRecordNotCarried) || spelled.Error() != "a record read from the system of record cannot be carried as read: it states its resourceType or id only in another spelling" {
+		t.Errorf("builtEntriesNamed: Is %v, %v", errors.Is(spelled, errRecordNotCarried), spelled)
 	}
 }
 

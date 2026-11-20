@@ -450,7 +450,8 @@ func TestPartyBesideCoverage_Derivation(t *testing.T) {
 			entry("urn:uuid:k", renamedID(childPatient(), "kid"))), childs},
 		// The beneficiary is its own reference, as every reader reads it: a
 		// reference nested in it (an extension's, an identifier's assigner) ties
-		// nothing, and one spelled in another case ties nothing either.
+		// nothing. One spelled in another case ("Reference") is read as FHIR spells
+		// it (bindingView), so it ties the member's own Patient as "reference" does.
 		"a beneficiary's extension naming the parent": {bundle(
 			entry("urn:uuid:cov", map[string]any{"resourceType": "Coverage", "id": "cov", "status": "active",
 				"beneficiary": map[string]any{"reference": "Patient/" + strangerMember,
@@ -466,7 +467,7 @@ func TestPartyBesideCoverage_Derivation(t *testing.T) {
 		"a beneficiary's reference spelled in another case": {bundle(
 			entry("urn:uuid:cov", map[string]any{"resourceType": "Coverage", "id": "cov", "status": "active",
 				"beneficiary": map[string]any{"Reference": "Patient/kid"}, "subscriber": reference("Patient/" + partyParentID)}),
-			entry("urn:uuid:k", renamedID(childPatient(), "kid"))), ""},
+			entry("urn:uuid:k", renamedID(childPatient(), "kid"))), childs},
 		// A beneficiary resolves as a Bundle resolves it: an absolute reference
 		// names only the entry whose fullUrl it is, and a relative one resolves
 		// against the RESTful base of the Coverage's entry.
@@ -1135,13 +1136,12 @@ func TestPartyBesideCoverage_VendorObjectRepeatingANameBindsTheMember(t *testing
 }
 
 // The member's own Patient repeating a member name, exactly or in another case, is read
-// two ways: no demographics are read from the request, and the payer's gateway binds it by
-// the member id alone at every level. (The provider's CDS Hooks parser refuses such a body
-// before any subject is bound.)
+// two ways: the binding cannot decode the request, so it binds no one by the member id
+// alone, and refuses it 422 on authority at every level. No such request reaches a
+// binding: the CDS Hooks parser of each gateway refuses it first, 400, as it always has.
 func TestPartyBesideCoverage_ResourceRepeatingANameIsNotRead(t *testing.T) {
 	ctx := context.Background()
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
-	want := derivedPCI("example", "", "")
 	raw, err := os.ReadFile(filepath.Join("testdata", "relayfidelity", "valid", "crd-order-sign-request.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1164,8 +1164,11 @@ func TestPartyBesideCoverage_ResourceRepeatingANameIsNotRead(t *testing.T) {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
 				g.cfg.ConformanceEnforcement = level
-				if pci, status, msg := g.bindInboundSubject(ctx, "example", body); status != 0 || pci != want {
-					t.Fatalf("payer: status %d %q, pci %q, want the member id alone %q", status, msg, pci, want)
+				if pci, status, msg := g.bindInboundSubject(ctx, "example", body); status != http.StatusUnprocessableEntity || msg != msgRequestPatientsUnreadable || pci != "" {
+					t.Fatalf("payer binding: status %d %q, pci %q, want 422 %q", status, msg, pci, msgRequestPatientsUnreadable)
+				}
+				if _, _, _, status, msg := g.conformantCRDBindContext(ctx, body); status != http.StatusBadRequest || msg != "parse cds request failed" {
+					t.Fatalf("payer: status %d %q, want the CDS Hooks parser's refusal", status, msg)
 				}
 				if _, status, msg := g.ingressCRDSubjectPCIContext(ctx, body); status != http.StatusBadRequest || msg != "parse cds request failed" {
 					t.Fatalf("provider: status %d %q, want the CDS Hooks parser's refusal", status, msg)

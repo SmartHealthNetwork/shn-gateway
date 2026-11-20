@@ -29,28 +29,29 @@ type toyWorkstream struct {
 	ops     []string
 }
 
-func (w toyWorkstream) id() string                                        { return w.tag }
-func (w toyWorkstream) catalog() map[string]legSpec                       { return w.legs }
-func (w toyWorkstream) routes(*Gateway, string) []mountedRoute            { return nil }
-func (w toyWorkstream) ownershipRows() map[relay.Key]relay.Rule           { return w.rows }
-func (w toyWorkstream) certifiedBuilds() map[certifiedBuild]certification { return nil }
-func (w toyWorkstream) certification() certificationAdapter               { return nil }
-func (w toyWorkstream) involvement(string) (bool, bool)                   { return false, false }
-func (w toyWorkstream) requestMembers(string, []byte) []namedMember       { return nil }
-func (w toyWorkstream) ingressRoutes() map[string]ingressHandler          { return w.ingress }
-func (w toyWorkstream) canonicalContractVersion() string                  { return "" }
-func (w toyWorkstream) originatedAnswerCheck(string) legAnswerCheck       { return nil }
-func (w toyWorkstream) answer(leg string) answerHandler                   { return w.answers[leg] }
-func (w toyWorkstream) forward(string) forwardHandler                     { return nil }
-func (w toyWorkstream) contractVersions() ([]string, []string)            { return nil, nil }
-func (w toyWorkstream) newMemState() memState                             { return nil }
-func (w toyWorkstream) checkStore(Store) error                            { return nil }
-func (w toyWorkstream) newGatewayState(*Gateway) (gatewayState, error)    { return nil, nil }
-func (w toyWorkstream) newNativeState(*nativeResponder) nativeState       { return nil }
-func (w toyWorkstream) lineBridge() lineBridgeRows                        { return lineBridgeRows{} }
-func (w toyWorkstream) relayEdits() []relayEdit                           { return w.edits }
-func (w toyWorkstream) ingressOperations() []string                       { return w.ops }
-func (w toyWorkstream) refusalReasons() []refusalReason                   { return nil }
+func (w toyWorkstream) id() string                                           { return w.tag }
+func (w toyWorkstream) catalog() map[string]legSpec                          { return w.legs }
+func (w toyWorkstream) routes(*Gateway, string) []mountedRoute               { return nil }
+func (w toyWorkstream) routeScopes() []scopedPattern                         { return nil }
+func (w toyWorkstream) ownershipRows() map[relay.Key]relay.Rule              { return w.rows }
+func (w toyWorkstream) certifiedBuilds() map[certifiedBuild]certification    { return nil }
+func (w toyWorkstream) certification() certificationAdapter                  { return nil }
+func (w toyWorkstream) involvement(string) (bool, bool)                      { return false, false }
+func (w toyWorkstream) requestMembers(string, []byte) ([]namedMember, error) { return nil, nil }
+func (w toyWorkstream) ingressRoutes() map[string]ingressHandler             { return w.ingress }
+func (w toyWorkstream) canonicalContractVersion() string                     { return "" }
+func (w toyWorkstream) originatedAnswerCheck(string) legAnswerCheck          { return nil }
+func (w toyWorkstream) answer(leg string) answerHandler                      { return w.answers[leg] }
+func (w toyWorkstream) forward(string) forwardHandler                        { return nil }
+func (w toyWorkstream) contractVersions() ([]string, []string)               { return nil, nil }
+func (w toyWorkstream) newMemState() memState                                { return nil }
+func (w toyWorkstream) checkStore(Store) error                               { return nil }
+func (w toyWorkstream) newGatewayState(*Gateway) (gatewayState, error)       { return nil, nil }
+func (w toyWorkstream) newNativeState(*nativeResponder) nativeState          { return nil }
+func (w toyWorkstream) lineBridge() lineBridgeRows                           { return lineBridgeRows{} }
+func (w toyWorkstream) relayEdits() []relayEdit                              { return w.edits }
+func (w toyWorkstream) ingressOperations() []string                          { return w.ops }
+func (w toyWorkstream) refusalReasons() []refusalReason                      { return nil }
 
 // checkWorkstreamsUnique reports the first collision among compiled-in
 // workstreams: an empty or repeated WorkstreamType, a transaction type two

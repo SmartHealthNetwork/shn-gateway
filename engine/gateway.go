@@ -330,6 +330,42 @@ type Config struct {
 	// ProviderCDexSubscriptionScope. Required with
 	// ProviderCDexSubscriptionScope.
 	ProviderCDexSubscriptionClient *http.Client
+	// PayerSubscriptionScope is the scope the payer's gateway asks its own
+	// token endpoint for to reach its system's Subscription endpoint
+	// (PAYER_DAVINCI_SUBSCRIPTION_SCOPE, read trimmed). Set, a payer's gateway
+	// takes a provider's topic Subscription to the PAS topic
+	// (pas-subscription-subscribe: TakenLegs, the leg's TakenWhenSet), from the
+	// setting alone, at PayerSubscriptionBaseURL; the notification address it
+	// writes into each Subscription is under IngressBaseURL. Payer role only;
+	// requires PayerSubscriptionBaseURL, PayerSubscriptionClient and
+	// IngressBaseURL.
+	PayerSubscriptionScope string
+	// PayerSubscriptionBaseURL is the FHIR base the payer's system serves its
+	// Subscription endpoint at: its PAS base (PAYER_DAVINCI_PAS_BASE_URL, or
+	// PAYER_DAVINCI_BASE_URL when that is unset). Required with
+	// PayerSubscriptionScope.
+	PayerSubscriptionBaseURL string
+	// PayerSubscriptionClient is the client the payer's Subscription endpoint
+	// is reached with: the payer system's token endpoint and client
+	// credentials, its token asked for PayerSubscriptionScope. Required with
+	// PayerSubscriptionScope.
+	PayerSubscriptionClient *http.Client
+	// PayerSubscriptionOptions are the options every call to the payer's own
+	// system takes (its fixed backend headers, its deadline, whether the leg's
+	// id is sent, the diagnostic capture: PAYER_DAVINCI_BACKEND_*), applied to
+	// the Subscription endpoint's calls as to the payer's other forwards.
+	PayerSubscriptionOptions []NativeOption
+	// ProviderPASSubscription is a provider's ask that its gateway deliver
+	// the PAS topic's no-content notifications a payer's gateway sends it
+	// (PROVIDER_PAS_SUBSCRIPTION). Set, a provider's gateway takes the PAS
+	// topic's signal leg (pas-subscription-signal: TakenLegs, the leg's
+	// TakenWhenSet), declares it, mounts its inbound route and needs the
+	// Hub's transport key; unset, it takes none of that, so an upgrade never
+	// makes a provider take it unasked. With it, a provider takes the topic's
+	// decision notifications too (pas-subscription-notify), whose
+	// documentation return path is written under IngressBaseURL (E-22).
+	// Provider role only; requires the Da Vinci ingress and IngressBaseURL.
+	ProviderPASSubscription bool
 	// SubscriptionPredecessorKey is the signing key a rotation replaced, read
 	// from IDENTITY_PREDECESSOR_DIR for the rotation's overlap; nil when unset.
 	// It reaches only the topic Subscription keys, which the PA workstream
@@ -338,9 +374,10 @@ type Config struct {
 	// notifications design §6.3, §7.2) are made with them, and the
 	// predecessor's only verify.
 	SubscriptionPredecessorKey ed25519.PrivateKey
-	// SubscriptionNotificationClient is the client a payer's gateway delivers
-	// each notification with, to the endpoint its own system wrote into its
-	// Subscription (cdex-task-signal), presenting the header values that
+	// SubscriptionNotificationClient is the client a subscriber's gateway
+	// delivers each notification with, to the endpoint its own system wrote
+	// into its Subscription (a payer's on cdex-task-signal, a provider's on
+	// pas-subscription-signal), presenting the header values that
 	// system wrote and no credential of the gateway's own. The gateway sends
 	// through a copy that follows the rules of every forward to the
 	// participant's own system (smartauth.ParticipantClient). nil: a client
@@ -500,6 +537,16 @@ type Config struct {
 	// whose request could not even be built never reached the wire, and is
 	// not reported.
 	TokenMetric func(outcome string, d time.Duration)
+	// NetworkRetryMetric, when set, is called once per retry of a call to the
+	// Hub or the Authorization Framework refused by an instance that has not
+	// yet loaded the network's membership (notyetloaded.go), with the service
+	// (one of NetworkRetryServices) and the retry's result (one of
+	// NetworkRetryResults). The retry goes on a new connection only through a
+	// client whose base transport is an *http.Transport (Client, AuthzClient,
+	// directly or as endpointcert wraps one): with any other transport no new
+	// connection can be guaranteed, so the refusal is carried at once, as
+	// before, and nothing is reported.
+	NetworkRetryMetric func(service, result string)
 	// ActiveRequestMetric, when set, is called with +1 when a call arrives on
 	// an exchange route (a Da Vinci ingress route or /substrate/inbound) and
 	// with -1 once its answer is written, with the call's direction: the
@@ -559,6 +606,10 @@ type Config struct {
 // Gateway is a constructed holder gateway.
 type Gateway struct {
 	cfg Config
+
+	// waitForRetry replaces the wait before a not-yet-loaded retry (tests;
+	// retryWait).
+	waitForRetry func(ctx context.Context, d time.Duration) bool
 
 	// states is each compiled-in workstream's own state on this gateway, by
 	// workstream id, built once by New (workstream.newGatewayState). A
@@ -778,6 +829,34 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 		(!cfg.IngressEnabled || strings.TrimSpace(cfg.IngressBaseURL) == "") {
 		return nil, errors.New("gateway: ProviderCDexSubscriptionScope (PROVIDER_CDEX_SUBSCRIPTION_SCOPE) requires the Da Vinci ingress (IngressEnabled, PROVIDER_DAVINCI_INGRESS) and its IngressBaseURL (PROVIDER_DAVINCI_INGRESS_BASE_URL), the base the notification address each Subscription names is written under")
 	}
+	// A payer's topic Subscription leg writes its notification addresses
+	// under the ingress base, and reaches its system's Subscription endpoint
+	// at its base with its own client: each is required, so a payer that sets
+	// the scope never declares a leg it cannot deliver.
+	if strings.TrimSpace(cfg.PayerSubscriptionScope) != "" {
+		switch {
+		case cfg.Role != "payer":
+			return nil, fmt.Errorf("gateway: PayerSubscriptionScope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE) is a payer's; this gateway's role is %q", cfg.Role)
+		case !cfg.IngressEnabled || strings.TrimSpace(cfg.IngressBaseURL) == "":
+			return nil, errors.New("gateway: PayerSubscriptionScope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE) requires the Da Vinci ingress (IngressEnabled, PAYER_DAVINCI_INGRESS) and its IngressBaseURL (PAYER_DAVINCI_INGRESS_BASE_URL), the base the notification address each Subscription names is written under")
+		case strings.TrimSpace(cfg.PayerSubscriptionBaseURL) == "":
+			return nil, errors.New("gateway: PayerSubscriptionScope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE) requires PayerSubscriptionBaseURL, the FHIR base the payer's system serves its Subscription endpoint at (PAYER_DAVINCI_PAS_BASE_URL or PAYER_DAVINCI_BASE_URL)")
+		case cfg.PayerSubscriptionClient == nil:
+			return nil, errors.New("gateway: PayerSubscriptionScope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE) requires PayerSubscriptionClient, the client authorized to the payer's own system for that scope")
+		}
+	}
+	// The PAS topic's notifications are delivered to a provider's own
+	// system, a decision's payer-url re-keyed to the documentation return
+	// path under the ingress base (E-22): a provider's setting, with the Da
+	// Vinci ingress and its base.
+	if cfg.ProviderPASSubscription {
+		switch {
+		case cfg.Role != "provider":
+			return nil, fmt.Errorf("gateway: ProviderPASSubscription (PROVIDER_PAS_SUBSCRIPTION) is a provider's; this gateway's role is %q", cfg.Role)
+		case !cfg.IngressEnabled || strings.TrimSpace(cfg.IngressBaseURL) == "":
+			return nil, errors.New("gateway: ProviderPASSubscription (PROVIDER_PAS_SUBSCRIPTION) requires the Da Vinci ingress (IngressEnabled, PROVIDER_DAVINCI_INGRESS) and its IngressBaseURL (PROVIDER_DAVINCI_INGRESS_BASE_URL), the base a notified decision's documentation return path is written under")
+		}
+	}
 	if strings.TrimSpace(cfg.ProviderCDexTaskURL) != "" {
 		if cfg.Role != "provider" {
 			return nil, fmt.Errorf("gateway: ProviderCDexTaskURL (PROVIDER_CDEX_TASK_URL) is a provider's own Task endpoint; this gateway's role is %q", cfg.Role)
@@ -933,7 +1012,8 @@ func New(cfg Config, opts ...Option) (*Gateway, error) {
 			return nil, fmt.Errorf("gateway: ingress auth: %w", err)
 		}
 		ia.storeErr = g.noteStoreError
-		ia.scopes = ingressScopes(cfg.Role, cfg.IngressClients)
+		ia.scopes = ingressScopes(cfg.Role, cfg.IngressClients, cfg.ProviderPASSubscription)
+		ia.unnamedGrantsRegistered = cfg.Role != "payer"
 		g.ingressAuth = ia
 	}
 	// A responder that can take the finding emitter gets it now: it could not
@@ -1139,7 +1219,7 @@ func (g *Gateway) Handler() http.Handler {
 // compressed; one that states nothing is not, and fails
 // TestRoutes_EveryRouteStatesItsCredential.
 type mountedRoute struct {
-	pattern       string
+	pattern       routePattern
 	handler       http.HandlerFunc
 	operator      bool
 	exchangeRoute string
@@ -1148,6 +1228,15 @@ type mountedRoute struct {
 	// take that past the network's request limit; zero is that limit.
 	bodyLimit int64
 }
+
+// routePattern is a route's ServeMux pattern ("METHOD /path"). It has its own
+// type so that every pattern a gateway can mount can be followed by the type
+// checker to the constants it is made from: the HTTP metric's closed list of
+// routes is held to every routePattern constant in this package, under every
+// build (test/gatewayfence, TestHTTPRoutePatternsAreEveryRoutePatternConstant),
+// and that fence refuses each way of making one it cannot follow. Write a
+// route's pattern as a constant.
+type routePattern string
 
 // routeCredential is what a route states about its answers' credentials.
 type routeCredential uint8
@@ -1204,8 +1293,8 @@ func (g *Gateway) routes() *http.ServeMux {
 			if limit == 0 {
 				limit = shnsdk.MaxRequestBytes
 			}
-			mux.Handle(rt.pattern, codedRoute(limit, rt.credential, h))
-			patterns = append(patterns, rt.pattern)
+			mux.Handle(string(rt.pattern), codedRoute(limit, rt.credential, h))
+			patterns = append(patterns, string(rt.pattern))
 		}
 	}
 	g.routePatterns.Store(&patterns)
@@ -1226,7 +1315,7 @@ func (g *Gateway) RoutePatternsForTest() []string {
 // participant configures where the payer's attachment request goes, mounts
 // no inbound route and needs no Hub transport key.
 func (g *Gateway) coreRoutes(role string) []mountedRoute {
-	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL, g.cfg.ProviderCDexReadScope, g.cfg.ProviderCDexSubscriptionScope))) == 0 {
+	if len(TakenLegs(role, settingsSet(g.cfg.ProviderCDexTaskURL, g.cfg.ProviderCDexReadScope, g.cfg.ProviderCDexSubscriptionScope, g.cfg.PayerSubscriptionScope, g.cfg.ProviderPASSubscription))) == 0 {
 		return nil
 	}
 	return []mountedRoute{{pattern: "POST /substrate/inbound", handler: g.inboundRoute(), credential: noCredential, bodyLimit: int64(maxEnvelopeBytes)}}
@@ -1259,17 +1348,27 @@ const settingProviderCDexReadScope = "PROVIDER_CDEX_READ_SCOPE"
 // (legtaxonomy.TakenWhenSet), one setting per leg.
 const settingProviderCDexSubscriptionScope = "PROVIDER_CDEX_SUBSCRIPTION_SCOPE"
 
+// settingPayerSubscriptionScope is the setting that makes a payer take a
+// provider's topic Subscription to the PAS topic (legtaxonomy.TakenWhenSet),
+// one setting per leg.
+const settingPayerSubscriptionScope = "PAYER_DAVINCI_SUBSCRIPTION_SCOPE"
+
+// settingProviderPASSubscription is the setting that makes a provider take
+// the PAS topic's no-content notifications (legtaxonomy.TakenWhenSet), one
+// setting per leg.
+const settingProviderPASSubscription = "PROVIDER_PAS_SUBSCRIPTION"
+
 // settingSet reports whether the participant set the named setting, for a
 // leg taken only when configured (legSpec.TakenWhenSet). A setting this
 // engine does not hold reads as unset: unknown is never taken.
 func (cfg Config) settingSet(setting string) bool {
-	return settingsSet(cfg.ProviderCDexTaskURL, cfg.ProviderCDexReadScope, cfg.ProviderCDexSubscriptionScope)(setting)
+	return settingsSet(cfg.ProviderCDexTaskURL, cfg.ProviderCDexReadScope, cfg.ProviderCDexSubscriptionScope, cfg.PayerSubscriptionScope, cfg.ProviderPASSubscription)(setting)
 }
 
 // settingsSet is settingSet over the settings it reads, each passed as its
 // value, so a route declaration reads only those (coreRoutes). Each is read
-// trimmed: a blank value is unset.
-func settingsSet(providerCDexTaskURL, providerCDexReadScope, providerCDexSubscriptionScope string) func(setting string) bool {
+// trimmed: a blank value is unset; a flag is set when true.
+func settingsSet(providerCDexTaskURL, providerCDexReadScope, providerCDexSubscriptionScope, payerSubscriptionScope string, providerPASSubscription bool) func(setting string) bool {
 	return func(setting string) bool {
 		switch setting {
 		case settingProviderCDexTaskURL:
@@ -1278,6 +1377,10 @@ func settingsSet(providerCDexTaskURL, providerCDexReadScope, providerCDexSubscri
 			return strings.TrimSpace(providerCDexReadScope) != ""
 		case settingProviderCDexSubscriptionScope:
 			return strings.TrimSpace(providerCDexSubscriptionScope) != ""
+		case settingPayerSubscriptionScope:
+			return strings.TrimSpace(payerSubscriptionScope) != ""
+		case settingProviderPASSubscription:
+			return providerPASSubscription
 		}
 		return false
 	}
@@ -1290,7 +1393,7 @@ func settingsSet(providerCDexTaskURL, providerCDexReadScope, providerCDexSubscri
 //
 // unavailable says the refusal is a shared-store OUTAGE (the key store could not resolve
 // a well-formed kid), which the route answers with 503 instead of a 401 — see
-// ingressAuthRefused.
+// routeScopeRefused.
 func (g *Gateway) ingressAuthOK(r *http.Request) (ok bool, unavailable bool) {
 	_, ok, unavailable = g.ingressAuthClient(r)
 	return ok, unavailable
@@ -1308,11 +1411,12 @@ func (g *Gateway) ingressAuthClient(r *http.Request) (client string, ok bool, un
 // bearer carries (space-delimited): the one the token endpoint granted an
 // issued bearer, or the one a registered client's direct bearer states and
 // its registration allows; "" when it carries none. The test bypass verifies
-// no client and grants TaskWriteScope and TaskReadScope, so a route that
-// checks scope is reached as with a granted one.
+// no client and grants TaskWriteScope, TaskReadScope, every Subscription
+// interaction and ProviderUmbrellaScope, so a route that checks scope is
+// reached as with a granted one.
 func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bool, unavailable bool) {
 	if g.cfg.ingressAuthBypass {
-		return "", TaskWriteScope + " " + TaskReadScope + " " + ingressBypassSubscriptionScope, true, false
+		return "", TaskWriteScope + " " + TaskReadScope + " " + ingressBypassSubscriptionScope + " " + ProviderUmbrellaScope, true, false
 	}
 	if g.ingressAuth == nil {
 		return "", "", false, false // fail-closed: no inbound auth configured
@@ -1338,17 +1442,29 @@ func (g *Gateway) ingressAuthGrant(r *http.Request) (client, scope string, ok bo
 // for with (TaskWriteScope; each route takes any scope that permits create,
 // ingressScopeRefused), and each scope one of clients, the participant's own
 // systems, is registered for exactly that permits reading a Task with no
-// query (TaskReadScope, system/Task.*, a v2 scope with r), sorted: the token
+// query (TaskReadScope, system/Task.*, a v2 scope with r, or a wildcard that
+// grants r), sorted: the token
 // endpoint grants only a scope a client registered, string for string
 // (grantScope), so a read scope is named only as one some client can be
 // granted, and none when no client can be granted a bearer the read routes
 // take; then, appended and sorted, each Subscription scope with no query a
-// client is registered for, exactly as listed (listedSubscriptionScopes),
-// which the Subscription routes take (subscriptionScopeRefused); a
-// provider's the Da Vinci routes'.
-func ingressScopes(role string, clients map[string]IngressClientRegistration) []string {
+// client is registered for, exactly as listed, and each such wildcard
+// (listedSubscriptionScopes), which the Subscription routes take
+// (subscriptionScopeRefused), each once (a wildcard that grants r is both); a
+// provider's, the umbrella and the scopes its routes' challenges name
+// (providerScopes), then, where its own system manages its Subscription to
+// the PAS topic at a payer's base (pasSubscriptions, its participant's
+// PROVIDER_PAS_SUBSCRIPTION), each Subscription scope with no query a client
+// is registered for, exactly as listed, which those routes take; a wildcard
+// those routes take too, but a provider's configuration names no wildcard, as
+// its route scopes name none.
+func ingressScopes(role string, clients map[string]IngressClientRegistration, pasSubscriptions bool) []string {
 	if role != "payer" {
-		return []string{ingressScope}
+		scopes := providerScopes(compiledRouteScopes())
+		if role == "provider" && pasSubscriptions {
+			scopes = append(scopes, listedSubscriptionScopes(clients, false)...)
+		}
+		return scopes
 	}
 	var reads []string
 	for _, c := range clients {
@@ -1362,14 +1478,21 @@ func ingressScopes(role string, clients map[string]IngressClientRegistration) []
 		}
 	}
 	slices.Sort(reads)
-	return append(append([]string{TaskWriteScope}, reads...), listedSubscriptionScopes(clients)...)
+	out := append([]string{TaskWriteScope}, reads...)
+	for _, scope := range listedSubscriptionScopes(clients, true) {
+		if !slices.Contains(out, scope) {
+			out = append(out, scope)
+		}
+	}
+	return out
 }
 
-// ingressScopeRefused is ingressAuthRefused for a route that admits only a
-// bearer granted a scope that permits need on Task (taskScopesPermit): one that
-// authenticates but whose scopes permit no such thing, or that carries none,
-// is refused 403 insufficient_scope (RFC 6750 §3.1), recorded as authority. It
-// reports whether it wrote a refusal.
+// ingressScopeRefused writes the refusal a payer's ingress route that admits
+// only a bearer granted a scope that permits need on Task (taskScopesPermit)
+// owes a caller it does not admit, as routeScopeRefused does a provider's: one
+// that authenticates but whose scopes permit no such thing, or that carries
+// none, is refused 403 insufficient_scope (RFC 6750 §3.1), recorded as
+// authority. It reports whether it wrote a refusal.
 func (g *Gateway) ingressScopeRefused(w http.ResponseWriter, r *http.Request, need taskPermission) bool {
 	client, granted, ok, unavailable := g.ingressAuthGrant(r)
 	switch {
@@ -1419,24 +1542,58 @@ func (g *Gateway) subscriptionScopeRefused(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-// ingressAuthRefused writes the refusal an ingress route owes when the caller is not
-// admitted, and reports whether it wrote one (the handler must then stop). A key-store
-// outage answers the 503 every other shared-state refusal answers — the same shape the
-// token endpoint's oauthUnavailable uses — never the 401 that tells an honest partner its
-// credential is bad. The ingress client is the one that decides to retry; this call is
-// refused.
-func (g *Gateway) ingressAuthRefused(w http.ResponseWriter, r *http.Request) bool {
-	client, ok, unavailable := g.ingressAuthClient(r)
-	if ok {
-		noteIngressCaller(r.Context(), client)
-		return false
+// providerIngressGrant is ingressAuthGrant on a provider's ingress: a bearer
+// that names no scope, issued or direct, is granted every scope its client is
+// registered for, as the token endpoint grants a request that names none
+// there; one that names scopes keeps exactly the set it was granted, and a
+// direct bearer naming a scope its registration does not allow is granted
+// none.
+func (g *Gateway) providerIngressGrant(r *http.Request) (client, scope string, ok bool, unavailable bool) {
+	if g.cfg.ingressAuthBypass || g.ingressAuth == nil {
+		return g.ingressAuthGrant(r)
 	}
-	if unavailable {
+	if client, scope, ok, unavailable := g.ingressAuth.verifyBearerScope(r); ok {
+		if scope == "" {
+			scope = g.ingressAuth.registeredScope(client)
+		}
+		return client, scope, true, false
+	} else if client, scope, named, ok := g.ingressAuth.verifyDirectBearerNamed(r); ok {
+		if !named {
+			scope = g.ingressAuth.registeredScope(client)
+		}
+		return client, scope, true, false
+	} else {
+		return "", "", false, unavailable
+	}
+}
+
+// routeScopeRefused writes the refusal a provider ingress route that takes
+// scope owes a caller it does not admit, and reports whether it wrote one (the
+// handler must then stop). A key-store outage answers 503, never the 401 that
+// tells an honest partner its credential is bad; a caller not authenticated is
+// refused 401, recorded as authentication; and one that authenticates but
+// whose grant (providerIngressGrant) holds no scope that permits the route
+// (routeScopesPermit) is refused 403 insufficient_scope (RFC 6750 §3.1), with
+// a challenge naming the route's own scopes, recorded as authority, at every
+// conformance level.
+func (g *Gateway) routeScopeRefused(w http.ResponseWriter, r *http.Request, scope routeScope) bool {
+	client, granted, ok, unavailable := g.providerIngressGrant(r)
+	switch {
+	case unavailable:
 		writeStoreUnavailable(w, "ingress key store unavailable")
 		return true
+	case !ok:
+		exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonIngressAuthentication)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msgIngressAuthentication})
+		return true
 	}
-	exchangeOf(r.Context()).refusedFor(RefusalAuthentication, reasonIngressAuthentication)
-	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msgIngressAuthentication})
+	noteIngressCaller(r.Context(), client)
+	if routeScopesPermit(granted, scope) {
+		return false
+	}
+	exchangeOf(r.Context()).refusedFor(RefusalAuthority, scope.reason)
+	w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="`+scope.challenge()+`"`)
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": string(scope.reason)})
 	return true
 }
 
@@ -1849,6 +2006,20 @@ type hubRefusalError struct {
 	// (hubReasonRecipientRefusedAnswer); empty when the Hub named none or one
 	// outside the closed list.
 	rule string
+	// notYetLoaded says the answer is the refusal of a Hub instance that has
+	// not yet loaded the network's membership (notYetLoadedAnswer), which
+	// may be sent again.
+	notYetLoaded bool
+	// answer is that refusal as the Hub sent it, for the diagnostic capture,
+	// which roundTripInner writes once it knows whether the leg is sent again.
+	answer *hubAnswerCapture
+}
+
+// hubAnswerCapture is a Hub answer kept for its diagnostic capture.
+type hubAnswerCapture struct {
+	status int
+	header http.Header
+	body   []byte
 }
 
 func (e *hubRefusalError) Error() string {
@@ -1970,15 +2141,32 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 	if err != nil {
 		return shnsdk.Token{}, err
 	}
-	// One retry, and only for a call authz cannot have received: a connection
+	// One retry for a call authz cannot have received: a connection
 	// refused, reset or closed before the request was written. After
 	// the write authz may have decided and recorded the decision, and its
 	// decision record carries no correlation id a second decision could be
-	// attributed by, so that call is not repeated. An answer is never retried.
+	// attributed by, so that call is not repeated. The one answer sent again
+	// is an instance's refusal before it decided anything because it has not
+	// yet loaded the network's membership: at most notYetLoadedRetries times,
+	// each on a new connection and with a fresh assertion (notyetloaded.go).
 	start := g.exchangeClock()
-	tok, retry, outcome, err := g.authorizeOnce(r.Context(), body)
+	client := g.authzClient()
+	tok, retry, outcome, err := g.authorizeOnce(r.Context(), client, body)
 	if retry && r.Context().Err() == nil {
-		tok, _, outcome, err = g.authorizeOnce(r.Context(), body)
+		tok, _, outcome, err = g.authorizeOnce(r.Context(), client, body)
+	}
+	for n := 1; n <= notYetLoadedRetries; n++ {
+		var nyl *authzNotYetLoaded
+		if !errors.As(err, &nyl) {
+			break
+		}
+		fresh, ok := freshConnClient(client)
+		if !ok || !g.retryWait(r.Context(), notYetLoadedWaits[n-1]) {
+			break
+		}
+		retryingNotYetLoaded(RetryServiceAuthz, n, req.CorrelationID)
+		tok, _, outcome, err = g.authorizeOnce(r.Context(), fresh, body)
+		g.networkRetried(RetryServiceAuthz, authzRetryResult(err))
 	}
 	if err == nil {
 		if verr := g.verifyAuthorized(tok, req); verr != nil {
@@ -1999,7 +2187,11 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 func (g *Gateway) verifyAuthorized(tok shnsdk.Token, req authorizeReq) error {
 	now := g.cfg.Clock()
 	if req.Involvement == "" {
-		return shnsdk.VerifyBound(tok, g.cfg.AuthzPub, now, req.Frame, req.Operation, req.CorrelationID, g.cfg.HolderID, req.SubjectPCI, req.PayloadHash)
+		spec, answer, ok := legSpecForOp(req.Operation)
+		if !ok {
+			return errSubjectUnstated
+		}
+		return verifyBoundWant(tok, g.cfg.AuthzPub, now, req.Frame, req.Operation, req.CorrelationID, g.cfg.HolderID, spec.mintedSubjectWant(req.SubjectPCI, answer), req.PayloadHash)
 	}
 	if tok.Involvement != req.Involvement {
 		return nil
@@ -2012,7 +2204,7 @@ func (g *Gateway) verifyAuthorized(tok shnsdk.Token, req authorizeReq) error {
 // reports whether the call failed before its request was written in a way a
 // second attempt could clear, and the call's token outcome (TokenOutcomes),
 // empty when its request could not be built.
-func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token, bool, string, error) {
+func (g *Gateway) authorizeOnce(ctx context.Context, client *http.Client, body []byte) (shnsdk.Token, bool, string, error) {
 	// H1: authenticate to the Authorization Framework with a holder assertion for
 	// the "authz" audience so the policy can bind authority to THIS holder. The
 	// provider authorizes as "provider", the payer as "payer" (via cfg.HolderID).
@@ -2035,7 +2227,7 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Holder-Assertion", base64.StdEncoding.EncodeToString(assertionJSON))
-	resp, err := g.authzClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		retry := !wrote.Load() && (errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
 			errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
@@ -2056,9 +2248,15 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 	// service mesh sidecar, a load balancer) had no Framework to reach, or a
 	// Framework instance that has not yet read the network's membership
 	// refused before deciding (503 "registry not yet loaded", its only 503).
-	// Not retried: the request reached that proxy or instance.
+	// The instance's refusal alone may be sent again (authzNotYetLoaded,
+	// authorizeRequest); a proxy's answer is not retried: the request reached
+	// it.
 	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
-		return shnsdk.Token{}, false, TokenUnavailable, fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
+		err := fmt.Errorf("%w (the authorize call was answered %d)", errAuthzUnreachable, resp.StatusCode)
+		if notYetLoadedAnswer(resp.StatusCode, resp.Header, respBody) {
+			err = &authzNotYetLoaded{err: err}
+		}
+		return shnsdk.Token{}, false, TokenUnavailable, err
 	}
 	// A 429 is the Framework limiting this gateway: transient, as above, and
 	// not retried here; the caller is told when to resend only as the
@@ -2082,6 +2280,18 @@ func (g *Gateway) authorizeOnce(ctx context.Context, body []byte) (shnsdk.Token,
 		return shnsdk.Token{}, false, TokenFailed, errAuthzNoToken
 	}
 	return *out.Token, false, TokenOK, nil
+}
+
+// hubAssertion is a fresh holder assertion for the "hub" audience, encoded
+// for the X-Holder-Assertion header: one per POST to the Hub, so a POST sent
+// again carries a jti of its own.
+func (g *Gateway) hubAssertion() (string, error) {
+	assertion := shnsdk.IssueAssertion(g.cfg.HolderID, "hub", g.cfg.Identity.SignPriv, g.cfg.Clock(), time.Hour)
+	assertionJSON, err := json.Marshal(assertion)
+	if err != nil {
+		return "", fmt.Errorf("assertion marshal failed")
+	}
+	return base64.StdEncoding.EncodeToString(assertionJSON), nil
 }
 
 // postEnvelope POSTs an encoded envelope and the holder assertion header to url,
@@ -2134,8 +2344,15 @@ func (g *Gateway) postEnvelope(ctx context.Context, client *http.Client, url str
 		return shnsdk.Envelope{}, &answerLostError{cause: "the Hub's answer could not be read"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		g.diagnosticHubRefusal(ctx, resp, respBody)
-		return shnsdk.Envelope{}, withHubWait(withNotActed(hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader)), resp.Header), resp.Header)
+		refused := hubRefusal(resp.StatusCode, respBody, resp.Header.Get(HubDeliveredHeader))
+		refused.notYetLoaded = notYetLoadedAnswer(resp.StatusCode, resp.Header, respBody)
+		if refused.notYetLoaded {
+			// Captured by roundTripInner, which says whether it is sent again.
+			refused.answer = &hubAnswerCapture{status: resp.StatusCode, header: resp.Header.Clone(), body: respBody}
+		} else {
+			g.diagnosticHubRefusal(ctx, resp.StatusCode, resp.Header, respBody, "Hub response")
+		}
+		return shnsdk.Envelope{}, withHubWait(withNotActed(refused, resp.Header), resp.Header)
 	}
 	env, err := shnsdk.DecodeEnvelope(respBody)
 	if err != nil {
@@ -2583,12 +2800,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		return nil, &envelopeTooLargeError{limit: envelopeLimit}
 	}
 
-	assertion := shnsdk.IssueAssertion(g.cfg.HolderID, "hub", g.cfg.Identity.SignPriv, g.cfg.Clock(), time.Hour)
-	assertionJSON, err := json.Marshal(assertion)
+	assertionHeader, err := g.hubAssertion()
 	if err != nil {
-		return nil, fmt.Errorf("assertion marshal failed")
+		return nil, err
 	}
-	assertionHeader := base64.StdEncoding.EncodeToString(assertionJSON)
 
 	// The gateway owns the leg's deadline: the client's Timeout is applied as
 	// a context deadline on this POST (the client itself is used without its
@@ -2605,6 +2820,43 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		hubClient = &untimed
 	}
 	respEnv, err := g.postEnvelope(legCtx, hubClient, g.cfg.HubURL+"/route", body, assertionHeader)
+	// left says the request's bytes have left this gateway on some attempt
+	// (below): a refused attempt sent them, whatever a retry then met.
+	left := hubBytesLeft(err)
+	// A Hub instance that has not yet loaded the network's membership refused
+	// before it verified, recorded or forwarded anything: the same envelope is
+	// sent again, at most notYetLoadedRetries times, each on a new connection
+	// and with a fresh assertion (notyetloaded.go). Each such refusal is
+	// captured once, saying whether it was sent again.
+	for n := 1; ; n++ {
+		var refused *hubRefusalError
+		if !errors.As(err, &refused) || !refused.notYetLoaded {
+			break
+		}
+		retry := func() bool {
+			if n > notYetLoadedRetries {
+				return false
+			}
+			fresh, ok := freshConnClient(hubClient)
+			if !ok || !g.retryWait(legCtx, notYetLoadedWaits[n-1]) {
+				return false
+			}
+			retryHeader, aerr := g.hubAssertion()
+			if aerr != nil {
+				return false
+			}
+			g.captureHubAnswer(ctx, refused.answer, fmt.Sprintf("Hub response: refused before acting; sent again on a new connection (retry %d of %d)", n, notYetLoadedRetries))
+			retryingNotYetLoaded(RetryServiceHub, n, correlationID)
+			respEnv, err = g.postEnvelope(legCtx, fresh, g.cfg.HubURL+"/route", body, retryHeader)
+			left = left || hubBytesLeft(err)
+			g.networkRetried(RetryServiceHub, hubRetryResult(err))
+			return true
+		}()
+		if !retry {
+			g.captureHubAnswer(ctx, refused.answer, "Hub response")
+			break
+		}
+	}
 	// The registered edits the request was sent with are recorded once the
 	// bytes have left this gateway: the Hub answered (any answer, a refusal or
 	// one that could not be read included), or the connection failed after
@@ -2616,7 +2868,10 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	var sent *hubSentError
 	var redirected *hubRedirectError
 	wasSent := errors.As(err, &sent)
-	if err == nil || errors.As(err, &refused) || errors.As(err, &lost) || wasSent || errors.As(err, &redirected) {
+	_ = errors.As(err, &refused)
+	_ = errors.As(err, &lost)
+	_ = errors.As(err, &redirected)
+	if left {
 		exchangeOf(ctx).sent(content.Payload)
 	}
 	if redirected != nil {
@@ -2669,8 +2924,7 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	// this REQUEST with is pinned as the response token's subject: a payer-coverage
 	// response token for a DIFFERENT patient under the same correlation is rejected
 	// (H1).
-	if err := shnsdk.VerifyBound(respTok, g.cfg.AuthzPub, g.cfg.Clock(),
-		respFrame, respOp, correlationID, respEnv.Metadata.Sender, pci, sha256hex(respEnv.Ciphertext)); err != nil {
+	if err := g.verifyAnswerToken(respTok, txType, respFrame, respOp, correlationID, respEnv.Metadata.Sender, pci, sha256hex(respEnv.Ciphertext)); err != nil {
 		return nil, &answerLostError{cause: "response leg authorization failed"}
 	}
 	// VerifyBound bound the token to the envelope's own stated sender: until

@@ -369,7 +369,7 @@ func Rows() []relay.Edit {
 		{
 			ID:        relay.EditSubscriptionHeaderSeal,
 			Name:      "subscription-header-seal",
-			Legs:      []string{"cdex-task-subscribe"},
+			Legs:      []string{"cdex-task-subscribe", "pas-subscription-subscribe"},
 			Role:      relay.RoleRequester,
 			Direction: relay.DirectionRequest,
 			Paths:     []string{"Subscription.channel.endpoint", "Subscription.channel.header"},
@@ -393,7 +393,7 @@ func Rows() []relay.Edit {
 		{
 			ID:        relay.EditSubscriptionEndpointRekey,
 			Name:      "subscription-endpoint-rekey",
-			Legs:      []string{"cdex-task-subscribe"},
+			Legs:      []string{"cdex-task-subscribe", "pas-subscription-subscribe"},
 			Role:      relay.RoleRecipient,
 			Direction: relay.DirectionRequest,
 			Paths:     []string{"Subscription.channel.endpoint", "Subscription.channel.header"},
@@ -420,7 +420,7 @@ func Rows() []relay.Edit {
 		{
 			ID:        relay.EditSubscriptionEndpointRestore,
 			Name:      "subscription-endpoint-restore",
-			Legs:      []string{"cdex-task-subscribe"},
+			Legs:      []string{"cdex-task-subscribe", "pas-subscription-subscribe"},
 			Role:      relay.RoleRequester,
 			Direction: relay.DirectionResponse,
 			Paths: []string{"Subscription.channel.endpoint", "Subscription.channel.header",
@@ -464,7 +464,7 @@ func Rows() []relay.Edit {
 		{
 			ID:        relay.EditSubscriptionURLSearchRekey,
 			Name:      "subscription-url-search-rekey",
-			Legs:      []string{"cdex-task-subscribe"},
+			Legs:      []string{"cdex-task-subscribe", "pas-subscription-subscribe"},
 			Role:      relay.RoleRecipient,
 			Direction: relay.DirectionRequest,
 			Paths:     []string{"the url search parameter of GET [base]/Subscription"},
@@ -484,9 +484,33 @@ func Rows() []relay.Edit {
 				"the edit in a header.",
 		},
 		{
+			ID:        relay.EditPASNotifiedReturnRekey,
+			Name:      "pas-notified-return-rekey",
+			Legs:      []string{"pas-subscription-notify"},
+			Role:      relay.RoleRecipient,
+			Direction: relay.DirectionRequest,
+			Paths:     []string{"Task.input[i].valueUrl (the input whose type is PASTempCodes#payer-url)"},
+			Kind:      relay.EditKindReplaceValue,
+			Precondition: "Always (not an opt-in), on a payer's PAS notification with content the provider's gateway delivers " +
+				"to its own system's notification endpoint, for each Task in the notified decision with a payer-url input " +
+				"written as a valueUrl, decided by structure (the input's type coding, never text), when the payer that sent " +
+				"it takes the documentation submission. Made even where an in-payload signature covers the payer-url; that " +
+				"signature then no longer verifies in the provider's copy, and the delivery says so. A payer-url in any other " +
+				"form, or a payer that does not take the submission, is carried as sent and the exchange records that it was " +
+				"not re-keyed.",
+			Authority: "The provider gateway's own network return path for the authenticated payer that sent the notification: " +
+				"a fixed address under its Da Vinci ingress base, rebuilt from that payer's network identity. Nothing is " +
+				"read from the notification and nothing is stored per Subscription or notification.",
+			Disclosure: "When a payer's notification of a prior-authorization decision carries a Task whose payer-url names " +
+				"where to send documentation, the provider's gateway replaces that address with its own return path for the " +
+				"same payer, as it does on the payer's answer, so the documentation the provider sends there reaches that " +
+				"payer through the network. The delivery names the edit in a header, and names any signature that covered " +
+				"the address.",
+		},
+		{
 			ID:           relay.EditSubscriptionLocationRekey,
 			Name:         "subscription-location-rekey",
-			Legs:         []string{"cdex-task-subscribe"},
+			Legs:         []string{"cdex-task-subscribe", "pas-subscription-subscribe"},
 			Role:         relay.RoleRequester,
 			Direction:    relay.DirectionResponse,
 			Kind:         relay.EditKindSetHeader,

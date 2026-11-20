@@ -623,7 +623,7 @@ func (x *exchangeRecorder) requesterBindingAborted() {
 	x.with(func() {
 		rec := RequesterBindingRecord{Binding: shnsdk.RequesterBindingUnavailable}
 		if x.binding != nil {
-			rec = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent}
+			rec = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent, ResentConnection: x.binding.ResentConnection}
 		}
 		rec.Outcome = ExchangeOther
 		x.binding, x.bindingFinal = &rec, true
@@ -642,7 +642,7 @@ func (x *exchangeRecorder) settledRequesterBinding() *RequesterBindingRecord {
 	case x.binding != nil && x.bindingFinal:
 		b = *x.binding
 	case x.binding != nil:
-		b = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent, Outcome: ExchangeOther}
+		b = RequesterBindingRecord{Binding: x.binding.Binding, Involvement: x.binding.Involvement, Unbound: x.binding.Unbound, Resent: x.binding.Resent, ResentConnection: x.binding.ResentConnection, Outcome: ExchangeOther}
 		if x.bindingMaySend {
 			b.Outcome = RequesterBindingUnknown
 		}
@@ -655,6 +655,9 @@ func (x *exchangeRecorder) settledRequesterBinding() *RequesterBindingRecord {
 	}
 	if b.NotSent != "" {
 		b.NotSent = closed(RequesterNotSentReasons, b.NotSent)
+	}
+	if b.ResentConnection != "" {
+		b.ResentConnection = closed(RequesterResentConnections, b.ResentConnection)
 	}
 	return &b
 }
@@ -979,6 +982,15 @@ const (
 	EditNotMadeNotificationNoStatedBase = "E-17:no-stated-base"
 	EditNotMadeNotificationNotUnderBase = "E-17:not-under-base"
 	EditNotMadeNotificationNoBase       = "E-17:no-provider-base"
+	// The provider's gateway re-keyed (E-22) no payer-url in a PAS content
+	// notification it delivers, and carried it as sent, because a PAS Task
+	// in it names a payer-url input that is not a string valueUrl
+	// (no-structural-payer-url), or because the payer that sent it is not
+	// known to take the documentation submission (payer-does-not-take). A
+	// notification E-22 cannot read one way only is refused, never carried
+	// (the fidelity of SHN's own edit).
+	EditNotMadeNotifiedNoStructuralPayerURL = "E-22:no-structural-payer-url"
+	EditNotMadeNotifiedPayerDoesNotTake     = "E-22:payer-does-not-take"
 )
 
 // EditNotMadeValues is the closed list ExchangeRecord.EditsNotMade draws from.
@@ -994,7 +1006,8 @@ var EditNotMadeValues = []string{EditNotMadeNoStructuralPayerURL, EditNotMadeUnr
 	EditNotMadeRestoreNoSealedHeaders, EditNotMadeRestoreKeyRetired, EditNotMadeRestoreSealInvalid, EditNotMadeRestoreNoStatedBase,
 	EditNotMadeRestoreUnreadableBundle, EditNotMadeRestoreLinkURL, EditNotMadeLocationNoTail, EditNotMadeLocationUnreadableTail,
 	EditNotMadeSubscriptionLocationNotUnderBase, EditNotMadeSubscriptionLocationNoLocation,
-	EditNotMadeNotificationNoStatedBase, EditNotMadeNotificationNotUnderBase, EditNotMadeNotificationNoBase}
+	EditNotMadeNotificationNoStatedBase, EditNotMadeNotificationNotUnderBase, EditNotMadeNotificationNoBase,
+	EditNotMadeNotifiedNoStructuralPayerURL, EditNotMadeNotifiedPayerDoesNotTake}
 
 // answerHeaderNotCarried records a header of an answer that was left out, and
 // why (one of AnswerHeaderNotCarriedValues).

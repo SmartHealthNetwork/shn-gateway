@@ -22,7 +22,9 @@ import (
 // It is recording only. Nothing here refuses a leg, judges its content or
 // changes its bytes: a patient that cannot be named is left out, on the call's
 // exchange record, with an observer event and a count, and the leg is sent as
-// usual.
+// usual. A request whose patients the leg's strict readers cannot read at all
+// (errRequestPatientsUnreadable) is sent with no list, and the omission is
+// recorded once, as unreadable, never as a request naming no one.
 //
 // It runs only when the network's Hub reads the list (Config.HubAcceptsInvolved),
 // at every conformance level: it is the network's audit, not an optional
@@ -69,6 +71,13 @@ const (
 	// involvedOmitUnreadable: the system of record could not be read for the
 	// member.
 	involvedOmitUnreadable = "system-of-record-unavailable"
+	// involvedOmitRequestUnreadable: the request's patients could not be read
+	// at all, as the leg's deciding readers read it (errRequestPatientsUnreadable),
+	// once for the request: the request is sent with no list. On coverage
+	// eligibility it is also counted once for each request in it whose own
+	// patient cannot be read (namedMember.unreadable), beside the patients the
+	// others name.
+	involvedOmitRequestUnreadable = "request-unreadable"
 	// involvedOmitUnknown: the member has no identifier this gateway can stand
 	// behind: not held, and either this participant requires known members
 	// (Config.RequireKnownMembers), or the request names it by an id alone
@@ -92,7 +101,7 @@ const (
 
 // InvolvedOmitReasons is the closed list of reasons InvolvedMetric and
 // ExchangeRecord.InvolvedOmitted report.
-var InvolvedOmitReasons = []string{involvedOmitOverflow, involvedOmitUnreadable, involvedOmitUnknown, involvedOmitRefused, involvedOmitFailed, involvedOmitUnlabelled, involvedOmitBudget}
+var InvolvedOmitReasons = []string{involvedOmitOverflow, involvedOmitUnreadable, involvedOmitRequestUnreadable, involvedOmitUnknown, involvedOmitRefused, involvedOmitFailed, involvedOmitUnlabelled, involvedOmitBudget}
 
 func (g *Gateway) involvedBudget() time.Duration {
 	if g.cfg.InvolvedBudget > 0 {
@@ -251,12 +260,36 @@ func (g *Gateway) mintInvolved(r *http.Request, frame, op, corrID, payloadHash s
 // the leg's own patient resolves to legSubject and is not named. Each other
 // patient is named request-named; one that cannot be identified is left out.
 // It reads nothing unless the Hub reads the list and the leg's request names
-// the other patients it carries (legInvolvement).
+// the other patients it carries (legInvolvement). A request whose patients
+// the leg's strict readers cannot read (errRequestPatientsUnreadable) names
+// none, and that is recorded once as an omission, unreadable: the leg's own
+// readers refuse such a body first on every route but an embedder's direct
+// OriginateLeg, which carries it as sent, and the network's record must not
+// read as a request naming no other patient. So is each request within it
+// whose own patient the leg cannot read (namedMember.unreadable): one omission
+// each, beside every member the other requests name. A member whose own binding
+// cannot read the request is omitted as any read that fails is (identifyNamed).
 func (g *Gateway) requestNamedPatients(ctx context.Context, leg, corrID string, payload []byte, legSubject string) []involvedPatient {
 	if request, _ := legInvolvement(leg); !g.cfg.HubAcceptsInvolved || !request {
 		return nil
 	}
-	members := namedMembers(payload, leg)
+	members, err := namedMembersIn(ctx, payload, leg)
+	if err != nil {
+		g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitRequestUnreadable)
+		return nil
+	}
+	// A request within this one whose own patient cannot be read is one
+	// omission, request-unreadable, before the cut: it takes no member's
+	// place, and nothing below reads it.
+	var readable []namedMember
+	for _, m := range members {
+		if m.unreadable {
+			g.omitInvolved(ctx, "originate", leg, corrID, involvedOmitRequestUnreadable)
+			continue
+		}
+		readable = append(readable, m)
+	}
+	members = readable
 	var cut []namedMember
 	if len(members) > maxInvolvedMembers {
 		cut = members[maxInvolvedMembers:]
@@ -528,11 +561,14 @@ type carriedSite struct {
 // "Patient" in any case, by its id and every identifier's value, in any
 // system, each member name taken in any case, and, as the resource of an
 // object with a fullUrl, by that fullUrl and the id it names (fullURLNames).
-// Reading more names than a binding does only counts more.
+// Reading more names than a binding does only counts more. The request is
+// read from its canonical view, as carriedMembers reads it (numbers kept as
+// written, so a decimal past float64's range reads); one no view can be made
+// of indexes none, and requestMembers has refused it before this reads it.
 func indexCarriedPatients(payload []byte) *carriedIndex {
 	idx := &carriedIndex{byName: map[string][]int{}}
-	var doc any
-	if len(payload) == 0 || json.Unmarshal(payload, &doc) != nil {
+	doc := viewOf(payload).doc
+	if doc == nil {
 		return idx
 	}
 	add := func(p map[string]any, fullURLs []string) {
@@ -684,7 +720,12 @@ const (
 //
 // Never under an identifier derived from an id alone: that identifier names no
 // one the network knows, and the same person named by another id would be
-// recorded under another. A read the system fails to answer is returned as is.
+// recorded under another. A read the system fails to answer is returned as is,
+// and so is a binding that cannot read the member's request
+// (errRequestPatientsUnreadable): the member is then omitted as unreadable,
+// never read as unknown. That binding reads the bytes the strict view of the
+// request has already read (requestMembers), or, on coverage eligibility, a
+// value its reader parsed, so it does not fail there today.
 func (g *Gateway) identifyNamed(ctx context.Context, m namedMember, legSubject string) (string, int, error) {
 	switch {
 	case m.subject:
@@ -694,7 +735,7 @@ func (g *Gateway) identifyNamed(ctx context.Context, m namedMember, legSubject s
 	}
 	pci, held, found, err := g.resolveBinding(ctx, m.member, m.scope, true)
 	switch {
-	case errors.Is(err, errPatientUnidentifiable):
+	case notProvablyThePatient(err):
 		return "", namedUnknown, nil
 	case err != nil:
 		return "", 0, err
@@ -739,16 +780,41 @@ type namedMember struct {
 	// may differ (identifyNamed reads a Patient under the member's id as its
 	// own record though a Coverage names it as its party; the binding does not).
 	legName bool
+	// unreadable is a request the leg's reader found within the whole request
+	// whose own patient it cannot read (a coverage-eligibility request whose
+	// member eligibilitySubmissionMember cannot read): member and scope are
+	// empty, and the entry names no one. requestNamedPatients counts each once,
+	// request-unreadable, and drops it before anything else reads the members,
+	// so its patient is never read as absent, while every other member is
+	// still named.
+	unreadable bool
 }
 
 // namedMembers is every member a request on leg names, with the bytes its
 // patient is bound from, as the workstream that declares the leg reads them
 // (its adapter's requestMembers); none for a leg no compiled-in workstream
-// declares.
-func namedMembers(payload []byte, leg string) []namedMember {
+// declares. A request whose patients the adapter cannot read is its error
+// (errRequestPatientsUnreadable).
+func namedMembers(payload []byte, leg string) ([]namedMember, error) {
+	return namedMembersIn(context.Background(), payload, leg)
+}
+
+// contextMembers is a workstream whose reading of a request's members needs
+// what the leg's context carries (requestMembersIn), as requestMembers reads
+// them otherwise.
+type contextMembers interface {
+	requestMembersIn(ctx context.Context, leg string, payload []byte) ([]namedMember, error)
+}
+
+// namedMembersIn is namedMembers, read with ctx by a workstream that reads
+// it (contextMembers).
+func namedMembersIn(ctx context.Context, payload []byte, leg string) ([]namedMember, error) {
 	w, ok := workstreamFor(leg)
 	if !ok {
-		return nil
+		return nil, nil
+	}
+	if cw, ok := w.(contextMembers); ok {
+		return cw.requestMembersIn(ctx, leg, payload)
 	}
 	return w.requestMembers(leg, payload)
 }

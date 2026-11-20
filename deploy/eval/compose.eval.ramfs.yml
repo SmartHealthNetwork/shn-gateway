@@ -1,0 +1,17 @@
+# gateway/deploy/eval/compose.eval.ramfs.yml — added to compose.eval.yml by the evaluation smokes,
+# never used on its own. With SHN_EVAL_KEYS_VOLUME set, the gateway's /etc/shn is the ramfs volume
+# the smoke made and filled from its bundle copy (workdir.sh, eval_bundle_volume), in place of
+# compose.eval.yml's bind of SHN_SECRETS: Compose merges a service's volumes by target, so this
+# one replaces that bind. The smoke removes the volume itself (`down -v` leaves an external one).
+services:
+  gateway:
+    stop_grace_period: 45s   # compose.eval.yml's, as gateway/docs/DEPLOYMENT.md gives the gateway
+    volumes:
+      - type: volume
+        source: shnbundle
+        target: /etc/shn
+        read_only: true
+volumes:
+  shnbundle:
+    external: true
+    name: ${SHN_EVAL_BUNDLE_VOLUME:?set by the evaluation smoke (workdir.sh, eval_bundle_volume)}

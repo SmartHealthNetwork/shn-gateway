@@ -365,39 +365,86 @@ func TestProviderData_EvidenceAtTheRelayDepthRides(t *testing.T) {
 	}
 }
 
-// The order-dispatch route reaches the PAS tail with no leg sent before it:
-// a record the completion will not read (past the request graph's own bound)
-// is refused 502 PAS evidence linkage failed, recorded as the provider
-// gateway's own refusal under no named rule with no leg before it, under
-// either record id and at every level.
+// The order-dispatch route reaches the PAS tail with no leg sent before it,
+// so its refusals of the build are answered there (submitClaimAndFollow,
+// answerFollowFailure), never re-decided as 422. What the gateway read from
+// its own participant's system and cannot carry is refused 502, with no
+// Retry-After, recorded as the provider gateway's refusal on the fidelity of
+// its own build at the build stage with no leg before it, under either record
+// id and at every level:
+//   - evidence past the gateway's own carrying limits, naming the record and
+//     the limit;
+//   - evidence about another patient, evidence whose bytes cannot be carried
+//     as read, and evidence E-06 would re-point under a signature.
+//
+// Evidence the order names that the system does not hold stays 422, recorded
+// the same way: the request named it.
 func TestProviderData_TheDispatchRecordsItsOwnEvidenceRefusal(t *testing.T) {
 	t.Parallel() // each row builds its own gateway, keys, substrate and system of record
 	const member = "MBR-PD-UC03"
 	const performerRef = "Organization/org-dme-uc03"
 	demo := Demo{BirthDate: "1962-03-02", FamilyName: "Delgado-Dispatch"}
 	deep := strings.Repeat("[", 70) + strings.Repeat("]", 70)
-	for _, recordID := range []string{"pat-55", member} {
-		for _, level := range allLevels {
-			t.Run("record "+recordID+"/"+level.String(), func(t *testing.T) {
-				t.Parallel()
-				order, err := buildDispatchDeviceRequest("dr-uc03", "Patient/"+member, performerRef, "E1390", "Stationary oxygen concentrator", "J96.10")
-				if err != nil {
-					t.Fatal(err)
-				}
-				order = withReason(t, order)
-				supplier, err := buildHomeOxygenSupplier("org-dme-uc03")
-				if err != nil {
-					t.Fatal(err)
-				}
-				fix := newDispatchFixture(t, member, demo, order, performerRef, supplier)
-				fix.gw.cfg.ConformanceEnforcement = level
-				useRecordIDSoRHolding(t, fix.gw, member, recordID, demo, "member's own Coverage", heldBytes(recordID, `"code":`, `"note":`+deep+`,"code":`))
-				rec, recs := serveRecorded(t, fix.gw, "POST /scenario/dispatch", testRouteBody(fix.gw, "/scenario/dispatch", `"member":"`+member+`"`))
-				if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "PAS evidence linkage failed") || legAttempted(fix.stub.legTypes, "pas-claim") {
-					t.Fatalf("dispatch = %d %s legs %v, want 502 PAS evidence linkage failed and no PAS claim", rec.Code, rec.Body, fix.stub.legTypes)
-				}
-				wantRefusal(t, onlyRecord(t, recs), http.StatusBadGateway, RefusedByProviderGateway, ExchangeOther)
-			})
+	for _, row := range []struct {
+		name            string
+		ownRecordIDOnly bool
+		evidence        func(recordID string) []byte // the record held; returning nil, the system holds none
+		status          int
+		want            string
+	}{
+		{"evidence past the graph's bound", false, func(id string) []byte { return heldBytes(id, `"code":`, `"note":`+deep+`,"code":`) }, http.StatusBadGateway,
+			"PAS evidence Condition/cond-reason read from the provider's system is past the gateway's own carrying limits: it nests deeper than the request graph's 64 levels; the request cannot be sent until that record changes"},
+		{"evidence about another patient", false, func(string) []byte { return evidenceCondition("Patient/someone-else") }, http.StatusBadGateway,
+			"a record read from the system of record cannot be carried as read: Condition/cond-reason's subject is not exactly the request's patient"},
+		{"evidence that is not UTF-8", false, func(id string) []byte { return heldBytes(id, `"J44.9"`, "\"J44.9\xff\"") }, http.StatusBadGateway,
+			"a record read from the system of record cannot be carried as read: Condition/cond-reason is not UTF-8"},
+		{"evidence E-06 would re-point under a signature", true, func(id string) []byte { return signedCondition("Patient/" + id) }, http.StatusBadGateway,
+			"signed content cannot be edited (E-06, Signature in Condition)"},
+		{"evidence the system does not hold", false, func(string) []byte { return nil }, http.StatusUnprocessableEntity,
+			"a record the request references cannot be filled: Condition/cond-reason is not held by the system of record"},
+	} {
+		ids := []string{"pat-55", member}
+		if row.ownRecordIDOnly {
+			ids = ids[:1]
+		}
+		for _, recordID := range ids {
+			for _, level := range allLevels {
+				t.Run(row.name+"/record "+recordID+"/"+level.String(), func(t *testing.T) {
+					t.Parallel()
+					order, err := buildDispatchDeviceRequest("dr-uc03", "Patient/"+member, performerRef, "E1390", "Stationary oxygen concentrator", "J96.10")
+					if err != nil {
+						t.Fatal(err)
+					}
+					order = withReason(t, order)
+					supplier, err := buildHomeOxygenSupplier("org-dme-uc03")
+					if err != nil {
+						t.Fatal(err)
+					}
+					fix := newDispatchFixture(t, member, demo, order, performerRef, supplier)
+					fix.gw.cfg.ConformanceEnforcement = level
+					condition := evidenceCondition("Patient/" + recordID)
+					if row.evidence != nil {
+						condition = row.evidence(recordID)
+					}
+					useRecordIDSoRHolding(t, fix.gw, member, recordID, demo, "member's own Coverage", condition)
+					held := fix.gw.cfg.SoR.(*recordIDSoR).evidence
+					if condition == nil {
+						delete(held, "Condition/cond-reason")
+					}
+					rec, recs := serveRecorded(t, fix.gw, "POST /scenario/dispatch", testRouteBody(fix.gw, "/scenario/dispatch", `"member":"`+member+`"`))
+					if rec.Code != row.status || !strings.Contains(rec.Body.String(), row.want) || legAttempted(fix.stub.legTypes, "pas-claim") {
+						t.Fatalf("dispatch = %d %s legs %v, want %d %s and no PAS claim", rec.Code, rec.Body, fix.stub.legTypes, row.status, row.want)
+					}
+					if ra := rec.Header().Get("Retry-After"); ra != "" {
+						t.Fatalf("Retry-After %q, want none: a retry cannot succeed until the record changes", ra)
+					}
+					r := onlyRecord(t, recs)
+					wantRefusal(t, r, row.status, RefusedByProviderGateway, RefusalFidelity)
+					if r.RefusalStage != vocab.RefusalStageBuild {
+						t.Fatalf("stage %q, want %s", r.RefusalStage, vocab.RefusalStageBuild)
+					}
+				})
+			}
 		}
 	}
 }
@@ -492,14 +539,13 @@ type evidenceSubjectRow struct {
 	mutate          func(c map[string]any, recordID string) any
 	status          int
 	body            string
-	rule            string // evidenceFidelity, evidenceUpstream or evidenceOther
+	rule            string // evidenceFidelity, evidenceUpstream or evidenceIntegrity
 }
 
 const (
 	evidenceFidelity  = "fidelity"
 	evidenceUpstream  = "upstream"
 	evidenceIntegrity = "integrity"
-	evidenceOther     = "other"
 )
 
 // heldEvidence is the control each evidenceSubjectRow mutates: the record as
@@ -546,12 +592,14 @@ func mutatedEvidence(t *testing.T, row evidenceSubjectRow, recordID string) ([]b
 		return nil, nil
 	}
 	if raw, ok := m.([]byte); ok {
+		atScaleAt(t, len(raw))
 		return raw, fails // bytes as the system answers them, not re-encoded
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
+	atScaleAt(t, len(b))
 	return b, fails
 }
 
@@ -563,7 +611,11 @@ func heldBytes(recordID, old, new string) []byte {
 }
 
 // evidenceSubjectRows is every shape of the evidence record a PAS completion
-// decides, for member, each one mutation of heldEvidence.
+// decides, for member, each one mutation of heldEvidence. A record read from
+// the system of record that the build cannot carry (its subject, its bytes, a
+// signature E-06 would break, or its size) is refused 502 as the fidelity of
+// the build, what the gateway read from its own participant's system; a record
+// the request names that the system does not hold stays 422.
 func evidenceSubjectRows(member string) []evidenceSubjectRow {
 	const (
 		notExactly = "Condition/cond-reason's subject is not exactly the request's patient"
@@ -571,62 +623,67 @@ func evidenceSubjectRows(member string) []evidenceSubjectRow {
 		unreadable = "PAS evidence linkage failed: Condition/cond-reason as the system answered it is not that resource"
 		notHeld    = "Condition/cond-reason is not held by the system of record"
 		linkage    = "PAS evidence linkage failed"
+		// A record past the gateway's own carrying limits: 502, naming the
+		// record and the limit, the fidelity of the build.
+		pastLimits = "PAS evidence Condition/cond-reason read from the provider's system is past the gateway's own carrying limits: it "
+		cannotSend = "; the request cannot be sent until that record changes"
 	)
 	requestsPat := "https://shn.example/fhir/Patient/" + member
 	subjectRef := func(ref any) func(map[string]any, string) any {
 		return func(c map[string]any, _ string) any { c["subject"] = map[string]any{"reference": ref}; return c }
 	}
 	return []evidenceSubjectRow{
-		{"another patient", false, subjectRef("Patient/someone-else"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"the member id under a record id of its own", true, subjectRef("Patient/" + member), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
+		{"another patient", false, subjectRef("Patient/someone-else"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"the member id under a record id of its own", true, subjectRef("Patient/" + member), http.StatusBadGateway, notExactly, evidenceFidelity},
 		{"a versioned reference to the record id", false, func(c map[string]any, id string) any {
 			c["subject"] = map[string]any{"reference": "Patient/" + id + "/_history/2"}
 			return c
-		}, http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
+		}, http.StatusBadGateway, notExactly, evidenceFidelity},
 		{"an absolute reference to the record id on another base", false, func(c map[string]any, id string) any {
 			c["subject"] = map[string]any{"reference": "https://ehr.example/fhir/Patient/" + id}
 			return c
-		}, http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"the request's Patient fullUrl, under a record id of its own", true, subjectRef(requestsPat), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a Group", false, subjectRef("Group/cohort-1"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a Device", false, subjectRef("Device/pump-1"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a Location", false, subjectRef("Location/ward-3"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a contained reference", false, subjectRef("#p1"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a urn reference", false, subjectRef("urn:uuid:9d6c1f0e-4b7a-4c2e-9a51-3f0d8e2b7c11"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"a malformed reference", false, subjectRef("Patient/"), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"an empty reference", false, subjectRef(""), http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
-		{"no subject", false, func(c map[string]any, _ string) any { delete(c, "subject"); return c }, http.StatusUnprocessableEntity, noSubject, evidenceFidelity},
+		}, http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"the request's Patient fullUrl, under a record id of its own", true, subjectRef(requestsPat), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a Group", false, subjectRef("Group/cohort-1"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a Device", false, subjectRef("Device/pump-1"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a Location", false, subjectRef("Location/ward-3"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a contained reference", false, subjectRef("#p1"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a urn reference", false, subjectRef("urn:uuid:9d6c1f0e-4b7a-4c2e-9a51-3f0d8e2b7c11"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"a malformed reference", false, subjectRef("Patient/"), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"an empty reference", false, subjectRef(""), http.StatusBadGateway, notExactly, evidenceFidelity},
+		{"no subject", false, func(c map[string]any, _ string) any { delete(c, "subject"); return c }, http.StatusBadGateway, noSubject, evidenceFidelity},
 		{"a subject with no reference", false, func(c map[string]any, _ string) any {
 			c["subject"] = map[string]any{"display": "the member"}
 			return c
-		}, http.StatusUnprocessableEntity, noSubject, evidenceFidelity},
-		{"a reference that is not a string", false, subjectRef(42), http.StatusUnprocessableEntity, noSubject, evidenceFidelity},
+		}, http.StatusBadGateway, noSubject, evidenceFidelity},
+		{"a reference that is not a string", false, subjectRef(42), http.StatusBadGateway, noSubject, evidenceFidelity},
 		{"signed, about the record id", true, func(_ map[string]any, id string) any {
 			return json.RawMessage(signedCondition("Patient/" + id))
-		}, http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Signature in Condition)", evidenceFidelity},
+		}, http.StatusBadGateway, "signed content cannot be edited (E-06, Signature in Condition)", evidenceFidelity},
 		{"not a JSON object", false, func(map[string]any, string) any { return []any{} }, http.StatusBadGateway, unreadable, evidenceUpstream},
 		{"another resourceType", false, func(c map[string]any, _ string) any { c["resourceType"] = "Observation"; return c }, http.StatusBadGateway, unreadable, evidenceUpstream},
 		{"another id", false, func(c map[string]any, _ string) any { c["id"] = "cond-other"; return c }, http.StatusBadGateway, unreadable, evidenceUpstream},
 		// Bytes the build cannot carry as read (the splice's own rule), decided
-		// before the subject is read, the same on every path.
+		// before the subject is read, the same on every path: 502, as every
+		// record read from the system that the build cannot carry is.
 		{"bytes that are not UTF-8", false, func(_ map[string]any, id string) any {
 			return heldBytes(id, `"J44.9"`, "\"J44.9\xff\"")
-		}, http.StatusUnprocessableEntity, "Condition/cond-reason is not UTF-8", evidenceFidelity},
+		}, http.StatusBadGateway, "Condition/cond-reason is not UTF-8", evidenceFidelity},
 		{"a lone surrogate escape", false, func(_ map[string]any, id string) any {
 			return heldBytes(id, `"J44.9"`, `"J44.9\ud800"`)
-		}, http.StatusUnprocessableEntity, "Condition/cond-reason holds a lone surrogate escape", evidenceFidelity},
+		}, http.StatusBadGateway, "Condition/cond-reason holds a lone surrogate escape", evidenceFidelity},
 		{"a member named twice", false, func(_ map[string]any, id string) any {
 			return heldBytes(id, `"id":"cond-reason"`, `"id":"cond-reason","id":"cond-reason"`)
-		}, http.StatusUnprocessableEntity, "Condition/cond-reason names a member twice, or in another case", evidenceFidelity},
+		}, http.StatusBadGateway, "Condition/cond-reason names a member twice, or in another case", evidenceFidelity},
 		{"a member named again in another case", false, func(_ map[string]any, id string) any {
 			return heldBytes(id, `"code":`, `"Code":{},"code":`)
-		}, http.StatusUnprocessableEntity, "Condition/cond-reason names a member twice, or in another case", evidenceFidelity},
+		}, http.StatusBadGateway, "Condition/cond-reason names a member twice, or in another case", evidenceFidelity},
 		// The request graph's own bound: the gateway's limit, never blamed on
-		// the system.
+		// the system, refused 502 as the fidelity of its own build.
 		{"nested past the request graph's bound", false, func(_ map[string]any, id string) any {
 			deep := strings.Repeat("[", 70) + strings.Repeat("]", 70)
 			return heldBytes(id, `"code":`, `"note":`+deep+`,"code":`)
-		}, http.StatusBadGateway, linkage, evidenceOther},
+		}, http.StatusBadGateway, pastLimits + "nests deeper than the request graph's 64 levels" + cannotSend, evidenceFidelity},
 		// Within the graph's bound, past the relay's limits on the record as
 		// the request carries it (its depth in the Bundle, its token count).
 		{"nested past the relay's depth as carried", false, func(_ map[string]any, id string) any {
@@ -634,25 +691,25 @@ func evidenceSubjectRows(member string) []evidenceSubjectRow {
 			// (TestProviderData_EvidenceAtTheRelayDepthRides).
 			deep := strings.Repeat("[", 61) + strings.Repeat("]", 61)
 			return heldBytes(id, `"code":`, `"note":`+deep+`,"code":`)
-		}, http.StatusBadGateway, linkage, evidenceOther},
+		}, http.StatusBadGateway, pastLimits + "nests deeper than 64 levels as the request carries it" + cannotSend, evidenceFidelity},
 		{"more tokens than the relay carries", false, func(_ map[string]any, id string) any {
 			many := "[" + strings.Repeat("0,", 1_000_000) + "0]"
 			return heldBytes(id, `"code":`, `"note":`+many+`,"code":`)
-		}, http.StatusBadGateway, linkage, evidenceOther},
+		}, http.StatusBadGateway, pastLimits + "holds more than 1,000,000 JSON tokens as the request carries it" + cannotSend, evidenceFidelity},
 		// The request's size bound is the gateway's own, decided after the
-		// record's shape on both paths: alone, the gateway's own 502; with a
-		// shape the build refuses, that refusal.
+		// record's shape on both paths: alone, 502 naming the record and the
+		// bound; with a shape the build refuses, that refusal.
 		{"over the request's size bound", false, func(c map[string]any, _ string) any {
 			c["note"] = strings.Repeat("x", 9<<20)
 			return c
-		}, http.StatusBadGateway, linkage, evidenceOther},
+		}, http.StatusBadGateway, pastLimits + "takes the request past its 8 MiB bound" + cannotSend, evidenceFidelity},
 		{"over the request's size bound, about another patient", false, func(c map[string]any, _ string) any {
 			c["note"] = strings.Repeat("x", 9<<20)
 			c["subject"] = map[string]any{"reference": "Patient/someone-else"}
 			return c
-		}, http.StatusUnprocessableEntity, notExactly, evidenceFidelity},
+		}, http.StatusBadGateway, notExactly, evidenceFidelity},
 		// A record the system definitely does not hold cannot be filled: the
-		// build's fidelity. A read that fails to answer is not absence: it is
+		// build's fidelity, 422, since the request named it. A read that fails to answer is not absence: it is
 		// the system's failure, answered with its own status.
 		{"not held", false, func(map[string]any, string) any { return nil }, http.StatusUnprocessableEntity, notHeld, evidenceFidelity},
 		{"the system unavailable", false, func(map[string]any, string) any { return failingRead{&SoRReadError{Kind: SoRUnavailable}} }, http.StatusServiceUnavailable, linkage, evidenceUpstream},
@@ -667,15 +724,11 @@ func evidenceSubjectRows(member string) []evidenceSubjectRow {
 }
 
 // wantEvidenceAnswer fails unless the answer is row's: its status and
-// message, and for a refusal under no named rule, the bare message, naming no
-// record.
+// message.
 func wantEvidenceAnswer(t *testing.T, route string, status int, body string, row evidenceSubjectRow) {
 	t.Helper()
 	if status != row.status || !strings.Contains(body, row.body) {
 		t.Fatalf("%s = %d %s, want %d %s", route, status, body, row.status, row.body)
-	}
-	if row.rule == evidenceOther && strings.Contains(body, "Condition/cond-reason") {
-		t.Fatalf("%s = %d %s, want the bare %q, naming no record", route, status, body, row.body)
 	}
 }
 
@@ -683,13 +736,11 @@ func wantEvidenceAnswer(t *testing.T, route string, status int, body string, row
 // SHN's own build at the build stage, whatever legs came before it; the
 // system's failure (an invalid answer, or a read that failed to answer) as the
 // upstream error it is, or as message integrity for an answer repeating a
-// member; or, past the gateway's own limits, the provider gateway's own
-// refusal under no named rule.
+// member. A record past the gateway's own carrying limits is the fidelity of
+// the build too.
 func wantEvidenceRecorded(t *testing.T, r ExchangeRecord, row evidenceSubjectRow) {
 	t.Helper()
 	switch row.rule {
-	case evidenceOther:
-		wantRefusal(t, r, row.status, RefusedByProviderGateway, ExchangeOther)
 	case evidenceUpstream:
 		if r.Outcome != ExchangeUpstreamError || r.Status != row.status {
 			t.Fatalf("record = %s %s/%s status %d, want %s status %d", r.Outcome, r.RefusedBy, r.Rule, r.Status, ExchangeUpstreamError, row.status)
@@ -718,25 +769,28 @@ func wantEvidenceRecorded(t *testing.T, r ExchangeRecord, row evidenceSubjectRow
 //     under a record id of its own, the member id itself, a versioned
 //     reference to the record id, an absolute one; a Group or other
 //     non-Patient reference; a contained, urn, malformed, empty or other-base
-//     reference) is refused 422 naming the record;
+//     reference) is refused 502 naming the record;
 //   - a record naming no subject.reference (no subject, a subject with no
-//     reference, a reference that is not a string) is refused 422 naming the
+//     reference, a reference that is not a string) is refused 502 naming the
 //     record: one that does not say whose it is cannot be filled as this
 //     patient's;
 //   - each is recorded as the fidelity of SHN's own build at the build stage,
 //     whatever the request sent before it, as a record E-06 would re-point
-//     that a signature covers is (D113);
-//   - bytes the build cannot carry as read, and a record the system
-//     definitely does not hold (it cannot be filled), are refused 422 the
-//     same way;
+//     that a signature covers is (D113, 502 too): what cannot be carried is
+//     what the gateway read from its own participant's system;
+//   - bytes the build cannot carry as read are refused 502 the same way;
+//   - a record the system definitely does not hold (it cannot be filled) is
+//     refused 422 the same way: the request named it;
 //   - an answer that is not the resource the reference names (not a JSON
 //     object, another resourceType or id) is the system's invalid answer,
 //     502 naming the record, and a read the system fails to answer is the
 //     system's failure, 503 or 502, each recorded as the upstream error it
 //     is (one repeating a member as message integrity);
-//   - past the gateway's own limits (the request graph's bound, the relay's
-//     on the record as carried, the request's size) it is the gateway's own
-//     502 PAS evidence linkage failed, under no named rule.
+//   - past the gateway's own carrying limits (the request graph's bound, the
+//     relay's on the record as carried, the request's size) it is refused 502
+//     naming the record and the limit, recorded as the fidelity of the build
+//     too: what cannot be carried is what the gateway read from its own
+//     participant's system.
 //
 // Each row is the carried control with one mutation of the record or of its
 // read (evidenceSubjectRows); the deployed connector's own reading of each

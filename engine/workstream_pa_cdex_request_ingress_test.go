@@ -471,7 +471,8 @@ func TestCDexRequestIngress_TakesAScopeThatPermitsCreate(t *testing.T) {
 // cdexCreateScopeRows are the scope sets a bearer is granted in the rows of
 // TestCDexRequestIngress_ScopeSetAtEveryLevel, and whether each permits the
 // create routes: some scope in the set that permits create (v1 write or *, v2
-// with c), never a granular one, whose query the gateway cannot enforce.
+// with c), on Task or as a wildcard (system/*.), never a granular one, whose
+// query the gateway cannot enforce.
 var cdexCreateScopeRows = []struct {
 	name, scope string
 	admitted    bool
@@ -489,6 +490,17 @@ var cdexCreateScopeRows = []struct {
 	{"a granular create with read", "system/Task.c?status=requested system/Task.r", false},
 	{"none", "", false},
 	{"the provider ingress's scope", ingressScope, false},
+	// SMART's wildcard, read as the provider's routes read it: it permits
+	// the create routes for the permissions it grants, and a read wildcard
+	// or a granular one permits nothing here.
+	{"a v1 write wildcard", "system/*.write", true},
+	{"a v1 star wildcard", "system/*.*", true},
+	{"a v2 c wildcard", "system/*.c", true},
+	{"a v2 cruds wildcard", "system/*.cruds", true},
+	{"a v1 read wildcard", "system/*.read", false},
+	{"a v2 rs wildcard", "system/*.rs", false},
+	{"a granular create wildcard", "system/*.c?status=requested", false},
+	{"a patient-context wildcard", "patient/*.write", false},
 }
 
 // cdexCreateScopesRegistered registers payer-system for every scope the
@@ -708,7 +720,7 @@ func TestCDexRequestIngress_MountedOnlyOnAPayerWithItsIngress(t *testing.T) {
 	g.cfg.IngressEnabled = true
 	var patterns []string
 	for _, r := range g.paRoutes("payer") {
-		patterns = append(patterns, r.pattern)
+		patterns = append(patterns, string(r.pattern))
 	}
 	for _, want := range []string{"POST " + cdexroute.ProviderPrefix + "{provider}/Task", "POST /Task", "GET " + CDexProvidersPath} {
 		if !slices.Contains(patterns, want) {

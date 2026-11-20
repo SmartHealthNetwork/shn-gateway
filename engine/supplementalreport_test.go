@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -72,7 +73,8 @@ func reportGateway(sor SystemOfRecord) *Gateway { return &Gateway{cfg: Config{So
 func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/pat-7")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-	got, edits, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+	got, edits, refusal := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+	status, msg, _ := refusalParts(refusal)
 	if status != 0 {
 		t.Fatalf("refused: %d %s", status, msg)
 	}
@@ -91,15 +93,28 @@ func TestSupplementalReport_SubjectRekeyedOnly(t *testing.T) {
 func TestSupplementalReport_MemberNamedReportExact(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/MBR-UC04")
 	g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "MBR-UC04", report: []byte(held)})
-	got, edits, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
+	got, edits, refusal := g.supplementalReport(context.Background(), "MBR-UC04", "MBR-UC04")
+	status, msg, _ := refusalParts(refusal)
 	if status != 0 || string(got) != held || edits != nil {
 		t.Fatalf("want the report exactly as held, no edit: %d %s edits %v\n got %s", status, msg, edits, got)
 	}
 }
 
+// refusalParts is a supplementalReport refusal's status, reason and fidelity
+// (0, "", false when there is none).
+func refusalParts(r *supplementalRefusal) (int, string, bool) {
+	if r == nil {
+		return 0, "", false
+	}
+	return r.status, r.msg, r.fidelity
+}
+
 // TestSupplementalReport_Refusals: E-06 re-points only a report that names
 // the member's patient in subject.reference; everything else is refused,
-// with the reason and without a patient in it.
+// with the reason and without a patient in it. A report naming no subject or
+// another, or one a signature covers where E-06 would re-point it, is the
+// fidelity of the build of what the gateway read from its own participant's
+// system: 502. One that is not a resource is 502 as a read it cannot use.
 func TestSupplementalReport_Refusals(t *testing.T) {
 	held := supplementalReportAsHeld("Patient/pat-7")
 	for _, tc := range []struct {
@@ -108,40 +123,47 @@ func TestSupplementalReport_Refusals(t *testing.T) {
 		status int
 		msg    string
 	}{
-		{"another patient", supplementalReportAsHeld("Patient/pat-8"), http.StatusUnprocessableEntity, msgSupplementalOtherSubject},
-		{"the member id, where the system names the patient otherwise", supplementalReportAsHeld("Patient/MBR-UC04"), http.StatusUnprocessableEntity, msgSupplementalOtherSubject},
-		{"an absolute reference", supplementalReportAsHeld("https://ehr.example/fhir/Patient/pat-7"), http.StatusUnprocessableEntity, msgSupplementalOtherSubject},
-		{"a Group", supplementalReportAsHeld("Group/pat-7"), http.StatusUnprocessableEntity, msgSupplementalOtherSubject},
-		{"no subject", `{"resourceType":"DiagnosticReport","id":"dr-7","status":"final"}`, http.StatusUnprocessableEntity, msgSupplementalNoSubject},
-		{"a subject with no reference", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":{"identifier":{"system":"urn:shn:member","value":"MBR-UC04"}}}`, http.StatusUnprocessableEntity, msgSupplementalNoSubject},
-		{"a reference that is not a string", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":{"reference":7}}`, http.StatusUnprocessableEntity, msgSupplementalNoSubject},
-		{"a subject that is not an object", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":["Patient/pat-7"]}`, http.StatusUnprocessableEntity, msgSupplementalNoSubject},
+		{"another patient", supplementalReportAsHeld("Patient/pat-8"), http.StatusBadGateway, msgSupplementalOtherSubject},
+		{"the member id, where the system names the patient otherwise", supplementalReportAsHeld("Patient/MBR-UC04"), http.StatusBadGateway, msgSupplementalOtherSubject},
+		{"an absolute reference", supplementalReportAsHeld("https://ehr.example/fhir/Patient/pat-7"), http.StatusBadGateway, msgSupplementalOtherSubject},
+		{"a Group", supplementalReportAsHeld("Group/pat-7"), http.StatusBadGateway, msgSupplementalOtherSubject},
+		{"no subject", `{"resourceType":"DiagnosticReport","id":"dr-7","status":"final"}`, http.StatusBadGateway, msgSupplementalNoSubject},
+		{"a subject with no reference", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":{"identifier":{"system":"urn:shn:member","value":"MBR-UC04"}}}`, http.StatusBadGateway, msgSupplementalNoSubject},
+		{"a reference that is not a string", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":{"reference":7}}`, http.StatusBadGateway, msgSupplementalNoSubject},
+		{"a subject that is not an object", `{"resourceType":"DiagnosticReport","id":"dr-7","subject":["Patient/pat-7"]}`, http.StatusBadGateway, msgSupplementalNoSubject},
 		{"not a resource", `["Patient/pat-7"]`, http.StatusBadGateway, msgSupplementalUnreadable},
 		{"not JSON", `{"resourceType":`, http.StatusBadGateway, msgSupplementalUnreadable},
 		{"a repeated member", strings.Replace(held, `"status":"final"`, `"status":"final","status":"final"`, 1), http.StatusBadGateway, msgSupplementalUnreadable},
 		{"a signature over the report", strings.Replace(held, `"status":"final"`,
 			`"status":"final","modifierExtension":[{"url":"urn:x","valueSignature":{"type":[{"system":"urn:iso-astm:E1762-95:2013","code":"1.2.840.10065.1.12.1.1"}],"when":"2026-01-01T00:00:00Z","who":{"display":"a clinician"}}}]`, 1),
-			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Signature in DiagnosticReport)"},
+			http.StatusBadGateway, "signed content cannot be edited (E-06, Signature in DiagnosticReport)"},
 		{"a contained signed Provenance that targets the report", strings.Replace(held, `"status":"final"`,
 			`"status":"final","contained":[`+signedProvenance("DiagnosticReport/dr-7")+`]`, 1),
-			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+			http.StatusBadGateway, "signed content cannot be edited (E-06, Provenance.signature)"},
 		{"a contained Provenance that targets the report, signed under Signature", strings.Replace(held, `"status":"final"`,
 			`"status":"final","contained":[`+strings.Replace(signedProvenance("DiagnosticReport/dr-7"), `"signature"`, `"Signature"`, 1)+`]`, 1),
-			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+			http.StatusBadGateway, "signed content cannot be edited (E-06, Provenance.signature)"},
 		// "#" in a contained resource names its container: the report.
 		{"a contained signed Provenance that targets its container (#)", strings.Replace(held, `"status":"final"`,
 			`"status":"final","contained":[`+signedProvenance("#")+`]`, 1),
-			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+			http.StatusBadGateway, "signed content cannot be edited (E-06, Provenance.signature)"},
 		{"a contained Provenance that targets its container (#), signed under SIGNATURE", strings.Replace(held, `"status":"final"`,
 			`"status":"final","contained":[`+strings.Replace(signedProvenance("#"), `"signature"`, `"SIGNATURE"`, 1)+`]`, 1),
-			http.StatusUnprocessableEntity, "signed content cannot be edited (E-06, Provenance.signature)"},
+			http.StatusBadGateway, "signed content cannot be edited (E-06, Provenance.signature)"},
 		{"a repeated subject", strings.Replace(held, `"status":"final"`, `"subject":{"reference":"Patient/pat-7"}`, 1), http.StatusBadGateway, msgSupplementalUnreadable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(tc.report)})
-			got, _, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
-			if status != tc.status || msg != tc.msg || got != nil {
-				t.Fatalf("got %d %q %s, want %d %q", status, msg, got, tc.status, tc.msg)
+			got, _, refusal := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			status, msg, fidelity := refusalParts(refusal)
+			if status != tc.status || msg != tc.msg || got != nil || fidelity != (tc.status == http.StatusBadGateway && tc.msg != msgSupplementalUnreadable) {
+				t.Fatalf("got %d %q fidelity %v %s, want %d %q", status, msg, fidelity, got, tc.status, tc.msg)
+			}
+			// A report that cannot be read is the system-of-record read
+			// failure it is, never the build's fidelity.
+			var read *SoRReadError
+			if unreadable := tc.msg == msgSupplementalUnreadable; unreadable != errors.As(refusal.err, &read) || unreadable && read.Kind != SoRInvalidResponse {
+				t.Fatalf("read error %v, want an invalid response exactly for an unreadable report", refusal.err)
 			}
 			if strings.Contains(msg, "pat-") || strings.Contains(msg, "MBR-") {
 				t.Fatalf("a refusal names no patient: %q", msg)
@@ -172,8 +194,8 @@ func TestSupplementalReport_SignatureCoveringOnlyAContainedResource(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			held := strings.Replace(supplementalReportAsHeld("Patient/pat-7"), `"status":"final"`, `"status":"final","contained":[`+tc.contained+`]`, 1)
 			g := reportGateway(&renamedReportSoR{censusSoR: newCensusSoR(), member: "MBR-UC04", sorID: "pat-7", report: []byte(held)})
-			got, _, status, msg, _ := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
-			if status != 0 {
+			got, _, refusal := g.supplementalReport(context.Background(), "MBR-UC04", "pat-7")
+			if status, msg, _ := refusalParts(refusal); status != 0 {
 				t.Fatalf("refused: %d %s", status, msg)
 			}
 			if want := strings.Replace(held, `"Patient/pat-7"`, `"Patient/MBR-UC04"`, 1); string(got) != want {
@@ -188,18 +210,21 @@ func TestSupplementalReport_SignatureCoveringOnlyAContainedResource(t *testing.T
 func TestSupplementalReport_SystemOfRecordFailures(t *testing.T) {
 	unavailable := &SoRReadError{Kind: SoRUnavailable}
 	for _, tc := range []struct {
-		name   string
-		sor    *failingReportSoR
-		status int
-		msg    string
+		name     string
+		sor      *failingReportSoR
+		status   int
+		msg      string
+		fidelity bool
 	}{
-		{"report read fails", &failingReportSoR{prefetchSoR: newPrefetchSoR(), reportErr: unavailable}, http.StatusServiceUnavailable, unavailable.Error()},
-		{"no report", &failingReportSoR{prefetchSoR: newPrefetchSoR(), noReport: true}, http.StatusInternalServerError, "no supplemental report"},
+		{"report read fails", &failingReportSoR{prefetchSoR: newPrefetchSoR(), reportErr: unavailable}, http.StatusServiceUnavailable, unavailable.Error(), false},
+		// Unknown, never empty: the system holds none, and the build has
+		// nothing to carry (502, the fidelity of the build).
+		{"no report", &failingReportSoR{prefetchSoR: newPrefetchSoR(), noReport: true}, http.StatusBadGateway, "no supplemental report", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, status, msg, _ := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
-			if status != tc.status || msg != tc.msg {
-				t.Fatalf("got %d %q, want %d %q", status, msg, tc.status, tc.msg)
+			_, _, refusal := reportGateway(tc.sor).supplementalReport(context.Background(), prefetchMember, prefetchSoRID)
+			if status, msg, fidelity := refusalParts(refusal); status != tc.status || msg != tc.msg || fidelity != tc.fidelity {
+				t.Fatalf("got %d %q fidelity %v, want %d %q fidelity %v", status, msg, fidelity, tc.status, tc.msg, tc.fidelity)
 			}
 		})
 	}

@@ -288,17 +288,27 @@ func TestFederatedQueryIngress_BindsThePatientAsTheOtherLegs(t *testing.T) {
 
 // The facility's refusal (a consent refusal among them) is relayed exactly.
 func TestFederatedQueryIngress_RelaysTheFacilitysRefusal(t *testing.T) {
-	oo := []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"forbidden"}]}`)
-	for _, level := range allLevels {
-		t.Run(level.String(), func(t *testing.T) {
-			env := newFQExchange(t, level)
-			env.payerReturns(LegResult{Status: http.StatusForbidden, Response: testResponse(oo)})
-			rec := httptest.NewRecorder()
-			env.originator.ingressRoute(RouteFederatedQuery)(rec, fqIngressPost(fqTask(t, "MBR-UC05", "facility")))
-			if rec.Code != http.StatusForbidden || !bytes.Equal(rec.Body.Bytes(), oo) {
-				t.Fatalf("answer %d %s, want the facility's 403 relayed exactly", rec.Code, rec.Body)
-			}
-		})
+	for _, row := range []struct {
+		name   string
+		status int
+		oo     []byte
+	}{
+		{"the facility's refusal", http.StatusForbidden, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"forbidden"}]}`)},
+		// The facility's decline of a Task whose status does not allow it to
+		// be fulfilled is its own answer, relayed as every other is.
+		{"the facility's decline", http.StatusUnprocessableEntity, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"the Task's status (cancelled) does not allow it to be fulfilled"}]}`)},
+	} {
+		for _, level := range allLevels {
+			t.Run(row.name+"/"+level.String(), func(t *testing.T) {
+				env := newFQExchange(t, level)
+				env.payerReturns(LegResult{Status: row.status, Response: testResponse(row.oo)})
+				rec := httptest.NewRecorder()
+				env.originator.ingressRoute(RouteFederatedQuery)(rec, fqIngressPost(fqTask(t, "MBR-UC05", "facility")))
+				if rec.Code != row.status || !bytes.Equal(rec.Body.Bytes(), row.oo) {
+					t.Fatalf("answer %d %s, want the facility's %d relayed exactly", rec.Code, rec.Body, row.status)
+				}
+			})
+		}
 	}
 }
 

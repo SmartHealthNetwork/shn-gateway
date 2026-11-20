@@ -19,7 +19,8 @@
       "observe": false,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "fhir"
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "crd-order-select",
@@ -33,7 +34,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "json"
+      "answerEnvelope": "json",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "crd-order-dispatch",
@@ -47,7 +49,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "json"
+      "answerEnvelope": "json",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "dtr-questionnaire-fetch",
@@ -61,7 +64,8 @@
       "observe": true,
       "frameOperations": ["questionnaire-package", "next-question"],
       "advertise": true,
-      "answerEnvelope": "fhir"
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "pas-claim",
@@ -75,7 +79,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "fhir"
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "pas-claim-update",
@@ -89,7 +94,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "fhir"
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "pas-claim-inquire",
@@ -103,7 +109,8 @@
       "observe": true,
       "frameOperations": [],
       "advertise": true,
-      "answerEnvelope": "fhir"
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": true}
     },
     {
       "transactionType": "patient-dtr",
@@ -196,6 +203,54 @@
       "since": "1.13.0",
       "answerEnvelope": "fhir",
       "subject": "none"
+    },
+    {
+      "transactionType": "pas-subscription-subscribe",
+      "stagedName": "pa.pas-subscription-subscribe",
+      "physics": "request-response",
+      "request": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-subscribe"},
+      "response": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-subscribe-response"},
+      "scope": "pas-subscription",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.16.0",
+      "answerEnvelope": "fhir",
+      "subject": "none"
+    },
+    {
+      "transactionType": "pas-subscription-signal",
+      "stagedName": "pa.pas-subscription-signal",
+      "physics": "request-response",
+      "request": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-signal"},
+      "response": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-signal-response"},
+      "scope": "pas-notification",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.16.0",
+      "answerEnvelope": "fhir",
+      "subject": "none"
+    },
+    {
+      "transactionType": "pas-subscription-notify",
+      "stagedName": "pa.pas-subscription-notify",
+      "physics": "request-response",
+      "request": {"frame": "payer-coverage", "roles": ["payer"], "operation": "pas-notify"},
+      "response": {"frame": "provider-tpo", "roles": ["provider"], "operation": "pas-notify-response"},
+      "scope": "pas-notification-bundle",
+      "payloadBinding": "required",
+      "consent": null,
+      "observe": true,
+      "frameOperations": [],
+      "advertise": true,
+      "since": "1.16.0",
+      "answerEnvelope": "fhir",
+      "involved": {"request": true, "answer": false}
     }
   ]
 }

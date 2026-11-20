@@ -121,10 +121,17 @@ var paIngressRoutes = map[string]ingressHandler{
 	// the notification address its gateway wrote into the payer's
 	// Subscription.
 	RouteCDexNotify: {"cdex-notify-ingress", func(g *Gateway) http.HandlerFunc { return g.handleCDexNotifyIngress }},
+	// A payer system's notification of a provider's Subscription to the PAS
+	// topic, at the notification address its gateway wrote into that
+	// Subscription.
+	RoutePASNotify: {"pas-notify-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASNotifyIngress }},
 	// A Subscription at the provider's plain base, which names no payer:
 	// answered with where the payers' bases are listed
 	// (workstream_pa_pas_payer_base.go).
 	RoutePASSubscription: {"pas-subscription-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASSubscriptionPlain }},
+	// The provider system's Subscription to the PAS topic at a payer's base
+	// (workstream_pa_pas_subscriber.go).
+	RoutePASSubscriptionBase: {"pas-subscription-ingress", func(g *Gateway) http.HandlerFunc { return g.handlePASSubscriptionBase }},
 }
 
 // paCatalog is the PA workstream's leg catalog, keyed by legType (= envelope
@@ -195,6 +202,31 @@ var paLegs = map[string]legDetail{
 	// from the release that brings it. Its request frame carries the sealed
 	// endpoint and headers and the provider's FHIR base.
 	"cdex-task-signal": {Physics: paMutating, Contract: "", Seam: paSeamPayer, Signal: true},
+	// A provider's topic Subscription to the PAS topic, at the payer's own
+	// Subscription endpoint: create, read, vread, update, delete, search and
+	// instance $status of a Subscription that names its provider's own
+	// attested identifiers in its filter, carried whatever the two sides' PA
+	// lines. The interaction is its request frame's subscriptionRequest, and
+	// the payer takes it once its gateway is configured with the scope it
+	// reaches its own Subscription endpoint with, from that setting alone.
+	"pas-subscription-subscribe": {Physics: paMutating, Contract: "", Seam: paSeamPayer, TakenWhenSet: settingPayerSubscriptionScope, Subscribe: true},
+	// A payer's notification of a provider's Subscription to the PAS topic,
+	// which its system posts to the notification address its gateway wrote
+	// into that Subscription, delivered to the provider's own endpoint: a
+	// handshake, a heartbeat or an id-only event, each disclosing no
+	// patient's data. Carried whatever the two sides' PA lines; a provider
+	// takes it once its participant asks its gateway to deliver them. Its
+	// request frame carries the sealed endpoint and headers and the payer's
+	// PAS base.
+	"pas-subscription-signal": {Physics: paMutating, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderPASSubscription, Signal: true},
+	// A payer's notification of a decision on a provider's Subscription to
+	// the PAS topic, carrying the decision (a full-resource notification),
+	// which names its patient, delivered to the provider's own endpoint with
+	// E-22 made. Carried whatever the two sides' PA lines; a provider takes
+	// it under the same setting as the signal leg. Its request frame carries
+	// the sealed endpoint and headers and the payer's PAS base, as a signal
+	// leg's does.
+	"pas-subscription-notify": {Physics: paMutating, Contract: "", Seam: paSeamProvider, TakenWhenSet: settingProviderPASSubscription, Signal: true},
 }
 
 // paSeamPayer is the seam a payer's inbound PA request is judged at.
@@ -221,12 +253,12 @@ func (paWorkstream) originatedAnswerCheck(leg string) legAnswerCheck {
 // and the payer's, which carries its participant's attachment-request Tasks.
 func (g *Gateway) paRoutes(role string) []mountedRoute {
 	var out []mountedRoute
-	route := func(pattern string, credential routeCredential, h http.HandlerFunc) {
+	route := func(pattern routePattern, credential routeCredential, h http.HandlerFunc) {
 		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: credential})
 	}
 	// A documentation attachment submission is read to this gateway's ceiling,
 	// coded or not.
-	attachment := func(pattern string, h http.HandlerFunc) {
+	attachment := func(pattern routePattern, h http.HandlerFunc) {
 		out = append(out, mountedRoute{pattern: pattern, handler: h, credential: noCredential, bodyLimit: g.attachmentCeiling()})
 	}
 	switch role {
@@ -260,8 +292,8 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		// (TestPASPayerBase_MountedOnTheProviderIngressOnly). The base serves
 		// no CapabilityStatement until its own is built: the plain ingress's
 		// declares operations the base does not serve. The base's
-		// Subscription routes are the subscribe leg's, mounted here with its
-		// handler; until then the base serves no Subscription.
+		// Subscription routes are the subscribe leg's, mounted below where
+		// the provider takes the PAS topic's notifications.
 		route("POST /pas/payer/{payer}/Claim/$submit", noCredential, g.ingressRoute(RoutePAS))
 		route("POST /pas/payer/{payer}/Claim/$inquire", noCredential, g.ingressRoute(RoutePASInquire))
 		route("GET /pas/payers", noCredential, g.withIngressCorrelation(g.handlePASPayers))
@@ -294,6 +326,19 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		// subscription scope), and so writes such addresses.
 		if strings.TrimSpace(g.cfg.ProviderCDexSubscriptionScope) != "" {
 			route("POST /notify/cdex-task/{subscriber}/{kid}/{sealed}", noCredential, g.ingressRoute(RouteCDexNotify))
+		}
+		// The provider's own system manages its Subscription to the PAS
+		// topic at a payer's base: mounted where the gateway takes the
+		// topic's notifications (its participant sets
+		// PROVIDER_PAS_SUBSCRIPTION), and so can deliver what it subscribes
+		// to.
+		if g.cfg.ProviderPASSubscription {
+			route("POST /pas/payer/{payer}/Subscription", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
+			route("GET /pas/payer/{payer}/Subscription", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
+			route("GET /pas/payer/{payer}/Subscription/{rest...}", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
+			route("PUT /pas/payer/{payer}/Subscription/{rest...}", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
+			route("DELETE /pas/payer/{payer}/Subscription/{rest...}", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
+			route("PATCH /pas/payer/{payer}/Subscription/{rest...}", noCredential, g.ingressRoute(RoutePASSubscriptionBase))
 		}
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
@@ -347,6 +392,14 @@ func (g *Gateway) paRoutes(role string) []mountedRoute {
 		// them, at a provider's.
 		route("GET /metadata", noCredential, g.handleCDexMetadata)
 		route("GET /cdex/provider/{provider}/metadata", noCredential, g.handleCDexBaseMetadata)
+		// The payer's own system posts each notification of a provider's
+		// Subscription to the PAS topic to the notification address this
+		// gateway wrote into it (E-19): mounted only where the gateway takes
+		// the provider's Subscription (its participant sets the subscription
+		// scope), and so writes such addresses.
+		if strings.TrimSpace(g.cfg.PayerSubscriptionScope) != "" {
+			route("POST /notify/pas/{subscriber}/{kid}/{sealed}", noCredential, g.ingressRoute(RoutePASNotify))
+		}
 		if g.ingressAuth != nil {
 			route("POST /oauth/token", carriesCredential, g.ingressAuth.handleToken)
 			route("GET /.well-known/smart-configuration", noCredential, g.ingressAuth.handleSmartConfig)

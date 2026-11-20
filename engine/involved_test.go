@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -152,6 +153,19 @@ func involvedGateway(t *testing.T, hubAccepts bool) (*Gateway, *fakeAuthz, *coun
 	return g, authz, sor, omitted
 }
 
+// mustMembers is a leg's request members over a request it can read: one it
+// cannot (errRequestPatientsUnreadable) fails the test.
+func mustMembers(t *testing.T) func([]namedMember, error) []namedMember {
+	t.Helper()
+	return func(members []namedMember, err error) []namedMember {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("the leg could not read the request's members: %v", err)
+		}
+		return members
+	}
+}
+
 func heldPCI(t *testing.T, member string) string {
 	t.Helper()
 	pci, _, ok := newCensusSoR().ResolvePatient(member)
@@ -197,7 +211,9 @@ func TestCarriedMembers_ReadsMembersAsEachLegsSubjectBindingDoes(t *testing.T) {
 
 // The involved list reads a request as the leg's deciding readers do: a
 // request that repeats a member name, exactly or in another case, can be
-// read two ways, so it names no member, as an unreadable request names none.
+// read two ways, so it names no member, as an unreadable request names none,
+// and the leg's request members are errRequestPatientsUnreadable: the request
+// is refused, never sent as naming no one.
 // A lax reading would keep the last of two repeated names, or read a
 // case-variant name as another member, and so name a patient the strict
 // readers never saw. Each row's control, the same request without the
@@ -236,8 +252,8 @@ func TestCarriedMembers_ARequestThatRepeatsANameNamesNoMember(t *testing.T) {
 				if got := carriedMembers([]byte(tc.repeated), leg); got != nil {
 					t.Errorf("%s: a request that repeats a name names %v, want no member", leg, got)
 				}
-				if got := (paWorkstream{}).requestMembers(leg, []byte(tc.repeated)); got != nil {
-					t.Errorf("%s: the leg names %d members of a request that repeats a name, want none", leg, len(got))
+				if got, err := (paWorkstream{}).requestMembers(leg, []byte(tc.repeated)); got != nil || !errors.Is(err, errRequestPatientsUnreadable) {
+					t.Errorf("%s: the leg names %d members of a request that repeats a name (%v), want none and that its patients cannot be read", leg, len(got), err)
 				}
 				if got := carriedMembers([]byte(tc.control), leg); !slices.Contains(got, tc.member) {
 					t.Errorf("%s: control names %v, want %s among them", leg, got, tc.member)

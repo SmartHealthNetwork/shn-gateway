@@ -642,3 +642,20 @@ func TestModuleOnePAS_SupplierAmongTheRequesterRecords(t *testing.T) {
 		t.Fatal("a different supplier under the carried identity was accepted")
 	}
 }
+
+// requesterCarryRef reads a relative reference as Type/id with a FHIR id that
+// is no dot segment: "." and ".." are a FHIR id's characters, but a server
+// reading the path takes them as a step out of the type, so they name no
+// resource to carry.
+func TestRequesterCarryRef_ADotSegmentNamesNoResource(t *testing.T) {
+	for _, ref := range []string{"Organization/.", "Organization/..", "Organization/", "/o1", "Organization", "urn:x/o1", "Organization/o 1"} {
+		if typ, id, ok := requesterCarryRef(ref); ok {
+			t.Errorf("reference %q: read as %q/%q; want no resource", ref, typ, id)
+		}
+	}
+	for ref, want := range map[string]string{"Organization/o1": "o1", "Organization/o.1": "o.1", "Practitioner/...": "..."} {
+		if typ, id, ok := requesterCarryRef(ref); !ok || id != want || typ == "" {
+			t.Errorf("reference %q: %q/%q ok=%v; want id %q", ref, typ, id, ok, want)
+		}
+	}
+}

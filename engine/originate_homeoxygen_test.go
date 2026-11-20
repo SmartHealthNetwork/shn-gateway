@@ -91,8 +91,9 @@ func (s *homeOxygenSoR) OpenOrder(memberID string) ([]byte, bool) {
 }
 
 // SearchPatientContext answers the member's DeviceRequest search with the open order
-// (the device history an order-dispatch request carries); other searches are the
-// census's.
+// (the device history an order-dispatch request carries) and, as a real search does
+// (searchIncludes, DeviceRequest:performer), the supplier it names as an included
+// entry; other searches are the census's.
 func (s *homeOxygenSoR) SearchPatientContext(ctx context.Context, resourceType, id string, dates ...SearchDateRange) (SearchResult, error) {
 	if resourceType == "Coverage" && id == s.member && s.coverages != nil {
 		entries := make([]string, 0, len(s.coverages))
@@ -109,7 +110,11 @@ func (s *homeOxygenSoR) SearchPatientContext(ctx context.Context, resourceType, 
 	if resourceType != "DeviceRequest" || id != s.member || s.orderJSON == nil {
 		return s.censusSoR.SearchPatientContext(ctx, resourceType, id, dates...)
 	}
-	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + string(s.orderJSON) + `,"search":{"mode":"match"}}]}`)
+	entries := `{"resource":` + string(s.orderJSON) + `,"search":{"mode":"match"}}`
+	if s.supplierJSON != nil {
+		entries += `,{"resource":` + string(s.supplierJSON) + `,"search":{"mode":"include"}}`
+	}
+	page := []byte(`{"resourceType":"Bundle","type":"searchset","entry":[` + entries + `]}`)
 	parsed, err := ParseSearchPage(page, resourceType)
 	if err != nil {
 		return SearchResult{}, err

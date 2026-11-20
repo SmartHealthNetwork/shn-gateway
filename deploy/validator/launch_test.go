@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -121,6 +122,32 @@ func TestOwnedLaunchFiniteLexicalBoundariesPreserveBytes(t *testing.T) {
 			got, err := launchArgs(args, env)
 			if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(env, before) || !reflect.DeepEqual(args, literalJava) {
 				t.Fatalf("finite lexical boundary changed literal inputs: argv=%q env=%q err=%v", got, env, err)
+			}
+		})
+	}
+}
+
+// The JVM switch that turns off HotSpot's Base64 intrinsics, which a lane may set in
+// any JVM option source, with or without a heap pin, is a JVM option the launcher
+// does not own: admitted in each source, and the launch is unchanged by it. It opens
+// nothing the launcher owns: an owned setting beside it is still judged.
+func TestOwnedLaunchAdmitsTheBase64IntrinsicSwitch(t *testing.T) {
+	want := append(append([]string{}, literalJava...), "--server.address=127.0.0.1", "--server.port=18080")
+	for _, source := range []string{"JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS"} {
+		for _, value := range []string{"-XX:-UseBASE64Intrinsics", "-Xmx1024m -XX:-UseBASE64Intrinsics", "-XX:-UseBASE64Intrinsics -Dserver.port=18080"} {
+			t.Run(source+"="+value, func(t *testing.T) {
+				env := []string{source + "=" + value}
+				before := append([]string{}, env...)
+				got, err := launchArgs(append([]string{}, literalJava...), env)
+				if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(env, before) {
+					t.Fatalf("launch=%q err=%v env=%q", got, err, env)
+				}
+			})
+		}
+		t.Run(source+" with a conflicting endpoint beside it", func(t *testing.T) {
+			_, err := launchArgs(append([]string{}, literalJava...), []string{source + "=-XX:-UseBASE64Intrinsics -Dserver.port=9090"})
+			if err == nil || !strings.Contains(err.Error(), "server.port") {
+				t.Fatalf("a conflicting owned setting beside the switch: err=%v, want a refusal naming server.port", err)
 			}
 		})
 	}

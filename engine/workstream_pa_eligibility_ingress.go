@@ -25,7 +25,7 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 	w, scope := g.withScope(w, relay.RoleRequester)
 	scope.leg = legType
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeEligibility) {
 		return
 	}
 	exchangeOf(r.Context()).leg(legType)

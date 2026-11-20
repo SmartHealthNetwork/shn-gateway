@@ -195,6 +195,14 @@ const (
 	// urn:uuid (the CDex design §15.7, D129). It is made even where a
 	// signature covers what it changes (signedExempt), as E-12 is.
 	EditCDexTaskNotificationAddressRekey EditID = "E-17"
+	// EditPASNotifiedReturnRekey makes EditPASPendReturnRekey's change on a
+	// payer's PAS content notification the provider's gateway delivers to its
+	// own system's notification endpoint: each PAS Task's payer-url input in
+	// the notified decision re-keyed to the gateway's network return path for
+	// the payer that sent it, so documentation sent there stays on the
+	// network (the notifications design §6.4, D127 decision 10). It is made
+	// even where a signature covers the payer-url (signedExempt, D127).
+	EditPASNotifiedReturnRekey EditID = "E-22"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered
 	// compatibility steps between the two lines. It rewrites the whole body,
@@ -204,7 +212,7 @@ const (
 )
 
 var editIDs = []EditID{EditCDSCallbackStrip, EditCDSPrefetchObtain, EditDTRCoverageObtain, EditDTRPatientObtain, EditEvidenceSubjectRekey, EditCDSCoverageCarry, EditDTRAnswerLineNames, EditRegisteredTransform, EditPASPendReturnRekey, EditCDexTaskReturnRekey, EditDTRAdaptiveAddressRekey, EditDTRAdaptiveAddressRestore, EditFacilityReportSubjectRekey, EditCDexTaskLocationRekey,
-	EditCDexTaskNotificationAddressRekey, EditSubscriptionHeaderSeal, EditSubscriptionEndpointRekey, EditSubscriptionEndpointRestore, EditSubscriptionURLSearchRekey, EditSubscriptionLocationRekey}
+	EditCDexTaskNotificationAddressRekey, EditSubscriptionHeaderSeal, EditSubscriptionEndpointRekey, EditSubscriptionEndpointRestore, EditSubscriptionURLSearchRekey, EditPASNotifiedReturnRekey, EditSubscriptionLocationRekey}
 
 // transformEdits are the registered edits made by Transformed, never by
 // ApplyChanges: whole-body rewrites of the gateway's own message, each kept
@@ -518,7 +526,7 @@ func ApplyChanges(body Body, contentType string, changes ...Change) (Payload, er
 	if bytes.Equal(out, src) {
 		return Exact(body, contentType), nil
 	}
-	cov := coverage(doc)
+	cov := coverage(src)
 	var applied []EditID
 	var signed []string
 	inSigned := map[string]bool{} // signed's carriers, so many carriers cost no more than their number

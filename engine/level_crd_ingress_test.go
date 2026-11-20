@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -159,6 +160,29 @@ func TestLevelCRDIngress_KeptPrefetchForAnotherPatient(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, findings := levelIngressRow(t, newPrefetchSoR(), level, ehrRequest(supported+`,"serviceHistory":`+value))
+			wantLevelOutcome(t, level, env, rec, findings, RulePatientMixed, http.StatusForbidden, "prefetch serviceHistory refused")
+			if !refusesAt(level, RulePatientMixed) {
+				if got, _ := valueOf(t, sentRequest(t, env), "prefetch", "serviceHistory"); got != value {
+					t.Fatalf("the EHR's value must be carried exactly, got %s", got)
+				}
+			}
+		})
+	}
+}
+
+// The same row's folded twin: the other patient's reference spelled
+// "Reference" is refused where the exact one is, and carried exactly below
+// strict, and on the involved list it names the other patient as the exact
+// spelling does.
+func TestLevelCRDIngress_KeptPrefetchForAnotherPatientFolded(t *testing.T) {
+	value := `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":{"resourceType":"ServiceRequest","id":"x","status":"active","intent":"order","subject":{"Reference":"Patient/other"}}}]}`
+	body := ehrRequest(supported + `,"serviceHistory":` + value)
+	if !slices.Contains(carriedMembers(body, "crd-order-select"), "other") {
+		t.Fatalf("the involved list does not name the other patient: %v", carriedMembers(body, "crd-order-select"))
+	}
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env, rec, findings := levelIngressRow(t, newPrefetchSoR(), level, body)
 			wantLevelOutcome(t, level, env, rec, findings, RulePatientMixed, http.StatusForbidden, "prefetch serviceHistory refused")
 			if !refusesAt(level, RulePatientMixed) {
 				if got, _ := valueOf(t, sentRequest(t, env), "prefetch", "serviceHistory"); got != value {

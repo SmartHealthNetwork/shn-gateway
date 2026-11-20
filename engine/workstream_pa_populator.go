@@ -143,7 +143,7 @@ func (m *managedPopulator) Populate(ctx context.Context, packageJSON []byte, pc 
 	}
 	cc, ok, readErr := ReadSystemOfRecord(m.sor).ClinicalContextContext(ctx, pc.Member)
 	if readErr != nil {
-		return nil, nil, safeSoRError(readErr)
+		return nil, nil, safeReadErr(readErr)
 	}
 	if !ok {
 		return nil, nil, errNoClinicalContext

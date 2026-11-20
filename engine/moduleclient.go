@@ -69,14 +69,48 @@ func ModuleIDs() []string {
 func ModuleBuilders(id string) []relay.BuilderID { return slices.Clone(moduleBuilders[id]) }
 
 // checkModuleRegistrations refuses, at boot, an ingress client marked as a
-// module this build does not compile in.
+// module this build does not compile in, and a module client registered for a
+// Subscription scope: no module builds a Subscription interaction, so every
+// Subscription route refuses its requests (serveSubscriptions, ingressBuilder)
+// and the scope could be granted for nothing. A registration that grants a
+// scope no route takes from its client is a configuration error, named here,
+// never a client that starts and fails on each call. A wildcard scope is kept:
+// it permits the module's own routes too.
 func checkModuleRegistrations(clients map[string]IngressClientRegistration) error {
-	for id, reg := range clients {
+	ids := make([]string, 0, len(clients))
+	for id := range clients {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		reg := clients[id]
 		if reg.Module == "" {
 			continue
 		}
 		if _, ok := moduleBuilders[reg.Module]; !ok {
 			return fmt.Errorf("ingress auth: registration %q: unknown module %q (this build compiles in %s)", id, reg.Module, strings.Join(ModuleIDs(), ", "))
+		}
+		if err := CheckModuleClientScopes(reg.Module, reg.Scopes); err != nil {
+			return fmt.Errorf("ingress auth: registration %q: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// CheckModuleClientScopes is the boot rule for the scopes a module ingress
+// client of module registers (checkModuleRegistrations): none may name
+// Subscription, in any spelling or case, since no module builds a
+// Subscription interaction and every Subscription route refuses a module's
+// request. A client of no module (module "") is not held to it. SHN Cloud
+// calls it for a hosted tenant's clients, so a save admits exactly the
+// clients the gateway starts with.
+func CheckModuleClientScopes(module string, scopes []string) error {
+	if module == "" {
+		return nil
+	}
+	for _, scope := range scopes {
+		if namesSubscription(scope) {
+			return fmt.Errorf("module %q is registered for %q, a Subscription scope, but no module builds a Subscription interaction, so no route takes it from this client: remove the scope", module, scope)
 		}
 	}
 	return nil

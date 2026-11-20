@@ -54,7 +54,9 @@ openssl x509 -in "$SECRETS/provider-cert.pem" -pubkey -noout > "$SECRETS/provide
 # Field names (client_id/alg/public_key_pem/scopes) match gateway/app/app.go's
 # loadIngressClients json tags exactly.
 PUB=$(awk '{printf "%s\\n", $0}' "$SECRETS/provider-pub.pem")
-printf '[{"client_id":"%s","alg":"RS384","public_key_pem":"%s","scopes":["system/*.read"]}]\n' \
+# br-provider calls the CDS services, DTR, PAS and attachments: the provider ingress's umbrella
+# scope, system/Davinci.write, permits each, beside the read it registers.
+printf '[{"client_id":"%s","alg":"RS384","public_key_pem":"%s","scopes":["system/*.read","system/Davinci.write"]}]\n' \
   "$CLIENT_ID" "$PUB" > "$SECRETS/ingress-clients.json"
 
 echo "generated conformant-lane crypto in $SECRETS"

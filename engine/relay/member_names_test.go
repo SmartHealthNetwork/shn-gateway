@@ -263,7 +263,7 @@ func TestProvenanceMembersExactCaseAsInV114(t *testing.T) {
 }
 
 // TestCoverageAgreesOnProvenanceMembersInAnyCase holds the indexed coverage
-// to the reference (coverageEach) on every effect in every document above,
+// to the reference (hitsEach over the reading's regions) on every effect in every document above,
 // each member under every case given, at the root and in a Bundle entry.
 func TestCoverageAgreesOnProvenanceMembersInAnyCase(t *testing.T) {
 	var docs []string
@@ -312,7 +312,8 @@ func TestCoverageAgreesOnProvenanceMembersInAnyCase(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v\n%s", err, src)
 		}
-		ref, cov := coverageEach(d), coverage(d)
+		cov := coverage([]byte(src))
+		ref := cov.regions
 		for i := 0; i < d.Len(); i++ {
 			s, e := d.Span(splice.NodeID(i))
 			for _, eff := range []effect{{start: s, end: e}, {start: s, end: e, inside: true}} {

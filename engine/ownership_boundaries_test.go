@@ -114,6 +114,8 @@ var transmitBoundaries = map[string]boundaryRule{
 		reason: "the consent check request: subject, purpose, custodian and recipient, never the payload"},
 	"DiscoverCDSServices": {kind: excluded,
 		reason: "a CDS Services discovery read that sends no body"},
+	"pasSubscriptionSupport": {kind: excluded,
+		reason: "a payer gateway's startup read of its own system's CapabilityStatement, for its operator: a metadata read that sends no body; never an exchange"},
 	"fhirServerReader.get": {kind: excluded,
 		reason: "a Coverage search, and at most one payor Organization read, on the CDS client's own fhirServer, to route by: it sends no body, only the client's own token back to the server that issued it; what routing used is carried only inside the CDS Hooks request's registered edit E-07"},
 	"nativePopulator.post": {kind: excluded,

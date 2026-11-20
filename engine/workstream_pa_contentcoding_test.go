@@ -33,11 +33,11 @@ func TestRoutes_EveryRouteStatesItsCredential(t *testing.T) {
 			g := routeGateway(role, c)
 			for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 				for _, rt := range declared {
-					seen[rt.pattern] = true
+					seen[string(rt.pattern)] = true
 					if rt.operator {
 						operators++
 					}
-					switch want := slices.Contains(credentialRoutes, rt.pattern) || rt.operator; {
+					switch want := slices.Contains(credentialRoutes, string(rt.pattern)) || rt.operator; {
 					case rt.credential == credentialUnstated:
 						t.Errorf("%s (%s, %s) does not state whether it carries a credential", rt.pattern, role, c)
 					case want && rt.credential != carriesCredential:
@@ -132,7 +132,7 @@ func TestIngress_AnUnauthenticatedCallerIsRefusedBeforeTheCoding(t *testing.T) {
 	g := gatewayWithAuth(t, "br-provider", pub)
 	posts := 0
 	for _, rt := range g.workstreamRoutes("provider") {
-		method, path, _ := strings.Cut(rt.pattern, " ")
+		method, path, _ := strings.Cut(string(rt.pattern), " ")
 		if method != http.MethodPost || rt.credential == carriesCredential {
 			continue
 		}

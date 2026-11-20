@@ -440,6 +440,40 @@ func TestPASBuildFailure_NamesTheFidelityRefusal(t *testing.T) {
 	if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
 		t.Fatalf("an unstated fact settled %s/%s stage %q, want refused fidelity at the build stage", x.outcome, x.rule, x.refusalStage)
 	}
+
+	// A record of the order's requester, read from the system of record, that
+	// the build's own splice cannot carry as read (carryOrderRequester's own
+	// refusal): what the gateway read from its own participant's system, 502,
+	// the fidelity of the build. So are the built request's spelling checks,
+	// whose entries are all read from that system (builtEntriesNamed).
+	_, err = carryOrderRequester([]byte(`{"resourceType":"Bundle","type":"collection","entry":[`+
+		`{"fullUrl":"https://example.test/fhir/ServiceRequest/s","resource":{"id":"s","resourceType":"ServiceRequest","requester":{"reference":"PractitionerRole/r"}}}]}`),
+		[][]byte{[]byte(`{"resourceType":"PractitionerRole","id":"r","practitioner":{"display":"A name\ud800"}}`)})
+	if !errors.Is(err, errRecordNotCarried) {
+		t.Fatalf("carryOrderRequester = %v, want the splice's refusal", err)
+	}
+	for _, row := range []struct {
+		name   string
+		err    error
+		status int
+		want   string
+	}{
+		{"the requester's record", err, http.StatusBadGateway, "a record read from the system of record cannot be carried as read: it holds a lone surrogate escape"},
+		{"an entry spelled another way", builtEntriesNamed([]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"Organization","ID":"o1"}}]}`), nil), http.StatusBadGateway,
+			"a record read from the system of record cannot be carried as read: it states its resourceType or id only in another spelling"},
+		{"an entry the build re-ids that spells its id another way", builtEntriesNamed([]byte(`{"resourceType":"Bundle","entry":[{"resource":{"resourceType":"QuestionnaireResponse","id":"q1","ID":"x"}}]}`), map[string]bool{"QuestionnaireResponse": true}), http.StatusBadGateway,
+			"a record read from the system of record cannot be carried as read: the build's own id for it cannot be set beside the id it spells another way"},
+	} {
+		x = &exchangeRecorder{}
+		rec = httptest.NewRecorder()
+		pasBuildFailure(&exchangeWriter{ResponseWriter: rec, x: x}, recorded(x), row.err, "build bundle failed")
+		if rec.Code != row.status || !strings.Contains(rec.Body.String(), row.want) || rec.Header().Get("Retry-After") != "" {
+			t.Fatalf("%s: %d %s (Retry-After %q), want %d %q", row.name, rec.Code, rec.Body.String(), rec.Header().Get("Retry-After"), row.status, row.want)
+		}
+		if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+			t.Fatalf("%s settled %s/%s stage %q, want refused fidelity at the build stage", row.name, x.outcome, x.rule, x.refusalStage)
+		}
+	}
 }
 
 // amendmentLinkPend is a payer's pended answer at line whose Task asks item

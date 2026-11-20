@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -109,7 +110,13 @@ const internalTokenPattern = `S5b|Task[ -][0-9]|(?i:\btask-[0-9])|per the plan|M
 	// RoundTrip, roundTripFunc and "one round trip per amendment, 2 legs" do not match
 	// (boundary rows below). File names are swept too: TestNoInternalTokens matches
 	// every file's module-relative path as well as its content.
-	`|(?i:round[0-9])`
+	`|(?i:round[0-9])` +
+	// A decision ledger's ids past one digit ("D127", "D47(2)", "D132 N2"): a partner
+	// cannot read the ledger, so the fix is to state what the decision says. A dot and a
+	// digit after the digits make it no id, since "D57.1" is an ICD-10-CM diagnosis code a
+	// fixture names; a letter, a digit or an underscore after them make it none too, as \b would. Ids
+	// already in the module are pinned per file (decisionIDPins) until they are reworded.
+	`|\bD[0-9]{2,4}(?:[^.0-9A-Za-z_]|\.[^0-9]|\.?$)`
 
 // sweepSkipFiles are the two module-root test files excluded from the sweep.
 //
@@ -164,6 +171,315 @@ var sweepAllowlist = map[string][]string{
 	"internal/pasgraph/graph.go": {
 		"if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.') {",
 	},
+}
+
+// decisionIDArm is internalTokenPattern's decision-id arm, on its own, so the
+// pins below can count it (TestDecisionIDArmIsThePatterns holds the two together).
+const decisionIDArm = `\bD[0-9]{2,4}(?:[^.0-9A-Za-z_]|\.[^0-9]|\.?$)`
+
+// decisionIDPins holds the decision ids this module already carries, per file: the
+// number of decisionIDArm matches in the file's content. The list only shrinks. A
+// file not on it fails at any count, a file over its pin fails, and a file under
+// its pin fails until the pin is lowered to match (to zero: the entry removed), so
+// a rewording is recorded in the same change. Rewording each id to what its
+// decision says empties the list. The release cut applies the same pins
+// (tools/release/sweepallow reads this literal).
+var decisionIDPins = map[string]int{
+	"app/app.go":                                             3,
+	"app/app_test.go":                                        2,
+	"app/certify_test.go":                                    1,
+	"app/levelnone_test.go":                                  1,
+	"app/testdouble_test.go":                                 1,
+	"engine/carried_request_check.go":                        1,
+	"engine/conformance.go":                                  2,
+	"engine/finding.go":                                      1,
+	"engine/gateway.go":                                      4,
+	"engine/inquire_test.go":                                 1,
+	"engine/leg_stages_test.go":                              1,
+	"engine/module1_consuming_leg_test.go":                   1,
+	"engine/module1_origin_refusals.go":                      1,
+	"engine/module1_originate.go":                            2,
+	"engine/originate_test.go":                               2,
+	"engine/payeranswer_flows_test.go":                       1,
+	"engine/payeranswer_ingress_test.go":                     1,
+	"engine/relay/payload.go":                                10,
+	"engine/relay/signed_rekey_test.go":                      5,
+	"engine/relay/signed_subscriber_test.go":                 2,
+	"engine/relay/signed_subscription_test.go":               1,
+	"engine/relay/subscriber.go":                             2,
+	"engine/relay/tasklocation_test.go":                      1,
+	"engine/relay/verify.go":                                 8,
+	"engine/species.go":                                      3,
+	"engine/workstream_fqs_ingress.go":                       1,
+	"engine/workstream_pa_cdex.go":                           3,
+	"engine/workstream_pa_cdex_ingress_test.go":              2,
+	"engine/workstream_pa_cdex_payer_test.go":                1,
+	"engine/workstream_pa_cdex_read.go":                      8,
+	"engine/workstream_pa_cdex_read_ingress.go":              4,
+	"engine/workstream_pa_cdex_read_ingress_test.go":         1,
+	"engine/workstream_pa_cdex_read_test.go":                 5,
+	"engine/workstream_pa_cdex_rekey.go":                     1,
+	"engine/workstream_pa_cdex_rekey_test.go":                1,
+	"engine/workstream_pa_cdex_request.go":                   1,
+	"engine/workstream_pa_cdex_request_byowner_test.go":      1,
+	"engine/workstream_pa_cdex_request_carry_test.go":        1,
+	"engine/workstream_pa_cdex_request_ingress.go":           2,
+	"engine/workstream_pa_cdex_request_ingress_test.go":      3,
+	"engine/workstream_pa_cdex_request_test.go":              1,
+	"engine/workstream_pa_cdex_subscriber.go":                3,
+	"engine/workstream_pa_cdex_subscription_test.go":         1,
+	"engine/workstream_pa_cdex_task.go":                      2,
+	"engine/workstream_pa_conformance_species.go":            2,
+	"engine/workstream_pa_d47_answer_test.go":                1,
+	"engine/workstream_pa_d47_request_test.go":               3,
+	"engine/workstream_pa_dtr_address.go":                    1,
+	"engine/workstream_pa_dtr_ingress_check_test.go":         1,
+	"engine/workstream_pa_dtr_next_question_ingress.go":      2,
+	"engine/workstream_pa_dtr_next_question_ingress_test.go": 2,
+	"engine/workstream_pa_evidence_record_id_test.go":        1,
+	"engine/workstream_pa_ingress.go":                        1,
+	"engine/workstream_pa_inquire.go":                        2,
+	"engine/workstream_pa_involved.go":                       1,
+	"engine/workstream_pa_notify_delivery.go":                1,
+	"engine/workstream_pa_pas_inbound.go":                    3,
+	"engine/workstream_pa_pas_notify.go":                     3,
+	"engine/workstream_pa_pas_payer_base.go":                 1,
+	"engine/workstream_pa_pasrequestgraph.go":                1,
+	"engine/workstream_pa_pendrekey.go":                      1,
+	"engine/workstream_pa_pendrekey_test.go":                 5,
+	"internal/legtaxonomy/legtaxonomy_test.go":               1,
+	"pa/cdextopic/topic.go":                                  3,
+	"pa/dtraddress/dtraddress.go":                            1,
+	"pa/dtraddress/dtraddress_test.go":                       1,
+}
+
+// decisionIDCounts counts decisionIDArm's matches in the content of each file
+// sweepTree reads under root, keyed as sweepTree keys a file. A file with none
+// is absent.
+func decisionIDCounts(root string) (map[string]int, []string, error) {
+	counts := map[string]int{}
+	var names []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata-cache":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		relPath, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel := filepath.ToSlash(relPath)
+		if sweepSkipFiles[rel] {
+			return nil
+		}
+		if len(findDecisionIDs(rel)) > 0 {
+			names = append(names, rel)
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if info.Size() > 4<<20 {
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.IndexByte(b, 0) >= 0 {
+			return nil
+		}
+		if n := len(findDecisionIDs(string(b))); n > 0 {
+			counts[rel] = n
+		}
+		return nil
+	})
+	return counts, names, err
+}
+
+// decisionIDStart is a decision id's start, a D and its digits; findDecisionIDs
+// reads what follows it without consuming it.
+var decisionIDStart = regexp.MustCompile(`\bD[0-9]{2,4}`)
+
+// findDecisionIDs is decisionIDArm's matches in s, each the D and its digits
+// alone, so an id never hides the character after it: two ids side by side are
+// two ("D127.D129"), and a token glued to an id is still the token's
+// ("D127#4022"). A letter, a digit or an underscore after the digits, or a dot
+// and a digit (an ICD-10-CM code such as D57.1), make it no id.
+func findDecisionIDs(s string) [][2]int {
+	var out [][2]int
+	for _, m := range decisionIDStart.FindAllStringIndex(s, -1) {
+		end := m[1]
+		if end < len(s) {
+			c := s[end]
+			if c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_' {
+				continue
+			}
+			if c == '.' && end+1 < len(s) && s[end+1] >= '0' && s[end+1] <= '9' {
+				continue
+			}
+		}
+		out = append(out, [2]int{m[0], end})
+	}
+	return out
+}
+
+// patternLessDecisionIDs is internalTokenPattern without its decision-id arm.
+func patternLessDecisionIDs() string {
+	return strings.TrimSuffix(internalTokenPattern, "|"+decisionIDArm)
+}
+
+// decisionIDPinProblems is what counts break of pins: a file holding decision ids
+// with no pin, a file over its pin, and a pin over its file's count.
+func decisionIDPinProblems(counts, pins map[string]int) []string {
+	var out []string
+	for rel, n := range counts {
+		switch pin, ok := pins[rel]; {
+		case !ok:
+			out = append(out, fmt.Sprintf("%s: %d decision ids, and no pin: state what each decision says instead", rel, n))
+		case n > pin:
+			out = append(out, fmt.Sprintf("%s: %d decision ids, over its pin of %d: state what each new one's decision says instead", rel, n, pin))
+		}
+	}
+	for rel, pin := range pins {
+		if n := counts[rel]; n < pin {
+			out = append(out, fmt.Sprintf("%s: pinned at %d decision ids, holds %d: lower its pin in decisionIDPins (remove it at 0)", rel, pin, n))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestNoInternalTokens_DecisionIDPins holds the module's decision ids to their pins.
+func TestNoInternalTokens_DecisionIDPins(t *testing.T) {
+	counts, names, err := decisionIDCounts(".")
+	if err != nil {
+		t.Fatalf("walk module tree: %v", err)
+	}
+	for _, p := range decisionIDPinProblems(counts, decisionIDPins) {
+		t.Error(p)
+	}
+	for _, rel := range names {
+		t.Errorf("%s: a decision id in a FILE NAME: name the file for what it tests", rel)
+	}
+}
+
+// The pins' rejection rows, on a seeded tree: a new file with an id fails, a pinned
+// file over its pin fails, a pin over its file's count fails, and the tree as
+// pinned passes.
+func TestDecisionIDPinRows(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"engine/a.go": "package engine\n\n// carried as the owner ruled (D127), and D47(2) too.\n",
+		"README.md":   "A diagnosis code D57.1 is no decision id.\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counts, names, err := decisionIDCounts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int{"engine/a.go": 2}; !reflect.DeepEqual(counts, want) || names != nil {
+		t.Fatalf("counts %v and names %v, want %v and none", counts, names, want)
+	}
+	for _, row := range []struct {
+		name string
+		pins map[string]int
+		want int
+	}{
+		{"the tree as pinned", map[string]int{"engine/a.go": 2}, 0},
+		{"a file with ids and no pin", map[string]int{}, 1},
+		{"a file over its pin", map[string]int{"engine/a.go": 1}, 1},
+		{"a pin over its file's count", map[string]int{"engine/a.go": 3}, 1},
+		{"a pin on a file holding none", map[string]int{"engine/a.go": 2, "README.md": 1}, 1},
+	} {
+		if got := decisionIDPinProblems(counts, row.pins); len(got) != row.want {
+			t.Errorf("%s: %q, want %d problems", row.name, got, row.want)
+		}
+	}
+}
+
+// The decision-id arm's rows: a decision id in each form it is written is caught,
+// and so is any bare D-number; an ICD-10-CM code in its dotted form, a single digit
+// (the \bD[0-9]\b arm's), and digits inside a word or a longer number are not.
+func TestDecisionIDArmRows(t *testing.T) {
+	re := regexp.MustCompile(decisionIDArm)
+	// A bare D-number, a diagnosis code's category among them ("D57"), reads as a
+	// decision id: only the dotted code form ("D57.1") is excluded.
+	for _, s := range []string{"D132", "D57", "the D57 category", "(D116)", "D47(2)", "D132 N2", "owner decision D47", "D127 decision 10", "as D128.", "D129, D121"} {
+		if !re.MatchString(s) {
+			t.Errorf("%q: not caught", s)
+		}
+	}
+	for _, s := range []string{"D57.1", "code D10.2", "D0", "5010 - D0", "D7", "ISO-8859-1", "a3D132f0", "MD123", "D12345", "_D132", "d132"} {
+		if re.MatchString(s) {
+			t.Errorf("%q: caught, want not", s)
+		}
+	}
+}
+
+// findDecisionIDs' rows: it finds what the arm finds, one per id even side by side,
+// and never the character after an id, so the rest of the pattern still sees a
+// token glued to one. A decision id in a file name is reported.
+func TestFindDecisionIDsRows(t *testing.T) {
+	for s, want := range map[string]int{
+		"D127": 1, "D127,D129": 2, "D127 D129": 2, "D127.D129": 2, "D127\r\n": 1, "(D47(2))": 1,
+		"D57.1": 0, "D57": 1, "D12345": 0, "MD123": 0, "D132N2": 0, "see D127#4022": 1,
+	} {
+		if got := len(findDecisionIDs(s)); got != want {
+			t.Errorf("%q: %d ids, want %d", s, got, want)
+		}
+	}
+	re := regexp.MustCompile(decisionIDArm)
+	for _, s := range []string{"D132", "D57", "(D116)", "D47(2)", "D132 N2", "D129, D121", "as D128.", "D57.1", "D0", "MD123", "D12345"} {
+		if (len(findDecisionIDs(s)) > 0) != re.MatchString(s) {
+			t.Errorf("%q: findDecisionIDs and decisionIDArm disagree", s)
+		}
+	}
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"engine/a.go":       "package engine\n\n// see D127#4022\n",
+		"docs/D132-note.md": "clean\n",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var hits []string
+	if err := sweepTree(root, regexp.MustCompile(patternLessDecisionIDs()), func(rel string, line int, token, _ string) {
+		hits = append(hits, fmt.Sprintf("%s:%d:%s", rel, line, token))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"engine/a.go:3:#4022"}; !reflect.DeepEqual(hits, want) {
+		t.Errorf("sweep reported %v, want %v: a token glued to a decision id is still reported", hits, want)
+	}
+	if _, names, err := decisionIDCounts(root); err != nil || !reflect.DeepEqual(names, []string{"docs/D132-note.md"}) {
+		t.Errorf("names %v (%v), want the file named with a decision id", names, err)
+	}
+}
+
+// TestDecisionIDArmIsThePatterns: the arm the pins count is internalTokenPattern's.
+func TestDecisionIDArmIsThePatterns(t *testing.T) {
+	if !strings.HasSuffix(internalTokenPattern, "|"+decisionIDArm) {
+		t.Fatalf("internalTokenPattern does not end with the decision-id arm %q", decisionIDArm)
+	}
 }
 
 func TestSweepAllowanceRequiresExactLine(t *testing.T) {
@@ -367,7 +683,10 @@ func TestInternalTokenPattern_DesignDocRefForms(t *testing.T) {
 // sweep covers Dockerfiles, shell scripts and docs too — and fails naming
 // file:line for every non-allowlisted match.
 func TestNoInternalTokens(t *testing.T) {
-	re := regexp.MustCompile(internalTokenPattern)
+	// Less the decision-id arm: a decision id is held by its file's pin instead
+	// (TestNoInternalTokens_DecisionIDPins), and the arm, which consumes the
+	// character after the id, would hide a token glued to it ("D127#4022").
+	re := regexp.MustCompile(patternLessDecisionIDs())
 	err := sweepTree(".", re, func(rel string, line int, token, excerpt string) {
 		if line == 0 {
 			t.Errorf("%s: internal-vocabulary token %q in a FILE NAME leaks into the published module — a name is published as surely as its contents; name the file for what it tests.", rel, token)

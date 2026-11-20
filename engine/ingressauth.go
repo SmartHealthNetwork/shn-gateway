@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,8 +47,8 @@ const (
 	// attachment-request Task routes (POST <per-provider base>/Task, POST /Task,
 	// GET /cdex/providers) take a bearer granted it or any other scope that
 	// permits creating a Task (ingressscope.go), checked on every call
-	// (ingressScopeRefused), unlike the provider ingress's routes, which take
-	// any bearer the token endpoint issued.
+	// (ingressScopeRefused), as a provider's routes take their own
+	// (routeScopeRefused).
 	TaskWriteScope = "system/Task.write"
 	// TaskReadScope is SMART v1's system-level read of the Task resource: the
 	// scope the payer's read and vread of a Task at a provider's base
@@ -95,6 +96,24 @@ type ingressAuthServer struct {
 	// routes of this gateway's ingress take. Set by New (ingressScopes); a
 	// bare-constructed server advertises the provider ingress's.
 	scopes []string
+	// unnamedGrantsRegistered is set on a provider's ingress (by New): a token
+	// request that names no scope is granted every scope the client is
+	// registered for, where a payer's grants none.
+	unnamedGrantsRegistered bool
+}
+
+// registeredScope is the scope set client is registered for, space-delimited
+// as a grant is: every scope a bearer naming none is granted on a provider's
+// ingress. A registered entry that is empty or holds a space is no one scope
+// a request could name (grantScope), so it is not granted this way either.
+func (s *ingressAuthServer) registeredScope(client string) string {
+	var set []string
+	for _, scope := range s.clients[client].Scopes {
+		if scope != "" && !strings.Contains(scope, " ") && !slices.Contains(set, scope) {
+			set = append(set, scope)
+		}
+	}
+	return strings.Join(set, " ")
 }
 
 // noteStoreError counts one store failure on the token endpoint. Nil-safe.
@@ -303,7 +322,13 @@ func (s *ingressAuthServer) handleToken(w http.ResponseWriter, r *http.Request) 
 	}
 	// The requested scope is a space-delimited set (RFC 6749 §3.3), each one the
 	// client is registered for; the bearer and the answer state the set granted.
-	scope, granted := grantScope(r.FormValue("scope"), reg.Scopes)
+	requested := r.FormValue("scope")
+	if requested == "" && s.unnamedGrantsRegistered {
+		// A provider's: a request that names no scope is granted the client's
+		// registration (providerIngressGrant reads a bearer naming none so).
+		requested = s.registeredScope(clientID)
+	}
+	scope, granted := grantScope(requested, reg.Scopes)
 	if !granted {
 		// A bad request, not a spent credential: the client fixes the scope and retries
 		// with the assertion it already holds.
@@ -464,9 +489,9 @@ func audUnder(aud, base string) bool {
 // from verifyBearer (the gateway's OWN ephemeral ES384 bearer); the two are token-shape
 // DISJOINT (an issued bearer carries no iss), so the OR in ingressAuthOK cannot fail open.
 // It touches no shared store, so it keeps answering through a key-store outage.
-// Authority is edge-only (never reaches authorize()); org-level TPO. Scope is not
-// enforced on a provider's ingress routes, by either path; a payer's Task routes
-// require a scope that permits creating a Task on both (ingressScopeRefused). A
+// Authority is edge-only (never reaches authorize()); org-level TPO. Each route
+// takes its own scope on both paths: a provider's (routeScopeRefused), a
+// payer's Task routes one that permits creating a Task (ingressScopeRefused). A
 // registered client implicitly gains both auth modes.
 func (s *ingressAuthServer) verifyDirectBearer(r *http.Request) (string, bool) {
 	client, _, ok := s.verifyDirectBearerScope(r)
@@ -488,6 +513,31 @@ func (s *ingressAuthServer) verifyDirectBearerScope(r *http.Request) (client, sc
 		}
 	}
 	return client, scope, true
+}
+
+// verifyDirectBearerNamed is verifyDirectBearerScope with whether the token
+// names a scope at all: a direct bearer that names none is told apart from one
+// whose stated scope its registration does not allow, which is granted none
+// (providerIngressGrant).
+func (s *ingressAuthServer) verifyDirectBearerNamed(r *http.Request) (client, scope string, named, ok bool) {
+	client, claims, ok := s.verifyDirectBearerClaims(r)
+	if !ok {
+		return "", "", false, false
+	}
+	claim, present := claims["scope"]
+	stated, isString := claim.(string)
+	if !present || (isString && stated == "") {
+		return client, "", false, true
+	}
+	if !isString {
+		// A scope claim that is not a string names a scope this gateway
+		// cannot read: granted none.
+		return client, "", true, true
+	}
+	if granted, allowed := grantScope(stated, s.clients[client].Scopes); allowed {
+		scope = granted
+	}
+	return client, scope, true, true
 }
 
 // verifyDirectBearerClaims is verifyDirectBearer with the token's verified

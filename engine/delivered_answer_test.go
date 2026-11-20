@@ -390,11 +390,13 @@ func moduleSources(t *testing.T, extra map[string]string) []*ast.File {
 // system answered (attestAnswerRefused), and a requester's gateway reading
 // the Hub's mark on its 503 to POST /requester-binding, where "no" is the
 // Hub's statement that it took none of the record, so it is sent again once
-// (resendRequesterBinding). Another would be a delivered answer
+// (resendRequesterBinding), and the reading of a Hub or Authorization
+// Framework instance's not-yet-loaded refusal, where "no" makes sending the
+// call again safe (notYetLoadedAnswer). Another would be a delivered answer
 // that does not carry the problem members or the OperationOutcome coding, or
 // a mark set past the writer.
 var deliveredHeaderAllowed = []string{"engine.Gateway.postEnvelope", "engine.attestAnswerRefused",
-	"engine.deliveryWriter.WriteHeader", "engine.deliveryWriter.WriteHeader", "engine.resendRequesterBinding", "engine.writeRefusal"}
+	"engine.deliveryWriter.WriteHeader", "engine.deliveryWriter.WriteHeader", "engine.notYetLoadedAnswer", "engine.resendRequesterBinding", "engine.writeRefusal"}
 
 func TestDeliveredHeader_UsedOnlyByItsReaderAndWriters(t *testing.T) {
 	t.Parallel()

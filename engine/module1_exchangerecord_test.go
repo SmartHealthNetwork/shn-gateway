@@ -64,9 +64,9 @@ func onlyRecord(t *testing.T, recs []ExchangeRecord) ExchangeRecord {
 // ingress, the route's closed name, this gateway the sender.
 func wantOrigination(t *testing.T, r ExchangeRecord, pattern string, status int) {
 	t.Helper()
-	if r.Direction != DirectionIngress || r.Route != originationExchangeRoute(pattern) || r.Sender != "provider" || r.Status != status {
+	if r.Direction != DirectionIngress || r.Route != originationExchangeRoute(routePattern(pattern)) || r.Sender != "provider" || r.Status != status {
 		t.Fatalf("record direction %q route %q sender %q status %d, want ingress %q from provider, status %d",
-			r.Direction, r.Route, r.Sender, r.Status, originationExchangeRoute(pattern), status)
+			r.Direction, r.Route, r.Sender, r.Status, originationExchangeRoute(routePattern(pattern)), status)
 	}
 }
 
@@ -290,9 +290,9 @@ func TestOriginationRecord_EveryOriginatingRouteAndNoLocalOne(t *testing.T) {
 	var originating, local []string
 	for _, rt := range originationRouteTable {
 		if rt.originates {
-			originating = append(originating, rt.pattern)
+			originating = append(originating, string(rt.pattern))
 		} else {
-			local = append(local, rt.pattern)
+			local = append(local, string(rt.pattern))
 		}
 	}
 	if len(originating) == 0 || len(local) == 0 {
@@ -302,13 +302,13 @@ func TestOriginationRecord_EveryOriginatingRouteAndNoLocalOne(t *testing.T) {
 		t.Fatalf("the table declares %v and %v, the classified routes are %v", originating, local, want)
 	}
 	for _, p := range originating {
-		if !slices.Contains(ExchangeRoutes, originationExchangeRoute(p)) {
-			t.Errorf("%s: its exchange route %q is not one of ExchangeRoutes", p, originationExchangeRoute(p))
+		if !slices.Contains(ExchangeRoutes, originationExchangeRoute(routePattern(p))) {
+			t.Errorf("%s: its exchange route %q is not one of ExchangeRoutes", p, originationExchangeRoute(routePattern(p)))
 		}
 	}
 	for _, p := range local {
-		if slices.Contains(ExchangeRoutes, originationExchangeRoute(p)) {
-			t.Errorf("%s is local, but ExchangeRoutes names %q", p, originationExchangeRoute(p))
+		if slices.Contains(ExchangeRoutes, originationExchangeRoute(routePattern(p))) {
+			t.Errorf("%s is local, but ExchangeRoutes names %q", p, originationExchangeRoute(routePattern(p)))
 		}
 	}
 	for _, authenticated := range []bool{false, true} {

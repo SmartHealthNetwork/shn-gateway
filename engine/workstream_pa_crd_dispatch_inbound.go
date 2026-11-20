@@ -10,7 +10,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -115,7 +114,10 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	if err := decodeContent(reqJSON, &req, &core, func() bool { return refuses(RuleRequestShape) }); err != nil {
 		return nil, nil, "", http.StatusBadRequest, "parse cds request failed"
 	}
+	// No patient named: refused on the leg's authority, as order-select
+	// refuses a request that names its patient nowhere.
 	if req.Context.PatientID == "" {
+		exchangeOf(ctx).refusing(RefusalAuthority)
 		return nil, nil, "", http.StatusBadRequest, "missing context.patientId"
 	}
 	if len(req.Context.DispatchedOrders) == 0 && refuses(RuleRequestShape) {
@@ -138,7 +140,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	// (the second return is then true, with no refusal).
 	sameSubject := func(ref string) (bool, int, string) {
 		rp, ok, readErr := g.resolveSubjectPCI(ctx, strings.TrimPrefix(ref, "Patient/"), reqJSON)
-		if errors.Is(readErr, errPatientUnidentifiable) {
+		if notProvablyThePatient(readErr) {
 			readErr, ok = nil, false // not provably the leg's patient
 		}
 		if readErr != nil {

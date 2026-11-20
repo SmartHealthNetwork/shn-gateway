@@ -42,6 +42,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -110,7 +111,7 @@ func (g *Gateway) originCRDRecords(ctx context.Context, leg, member string) (crd
 		return out, http.StatusUnprocessableEntity, "patient not found in system of record", nil
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
-	if !ok || !fhirIDRE.MatchString(sorID) {
+	if !ok || !fhirid.Valid(sorID) {
 		bad := &SoRReadError{Kind: SoRInvalidResponse}
 		status, msg := SoRFailureResponse(bad)
 		return out, status, msg, bad
@@ -932,7 +933,7 @@ func (g *Gateway) draftOrderContext(ctx context.Context, member string) ([]byte,
 		return nil, http.StatusUnprocessableEntity, "patient not found in system of record", nil
 	}
 	sorID, ok := strings.CutPrefix(ref, "Patient/")
-	if !ok || !fhirIDRE.MatchString(sorID) {
+	if !ok || !fhirid.Valid(sorID) {
 		bad := &SoRReadError{Kind: SoRInvalidResponse}
 		status, msg := SoRFailureResponse(bad)
 		return nil, status, msg, bad

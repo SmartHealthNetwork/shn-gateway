@@ -193,7 +193,7 @@ func TestEligibility_DeclaredTokenSubjectDifferenceIsForwarded(t *testing.T) {
 	}
 	answer := payersEligibilityAnswer("Patient/" + dtrFrameMember)
 	p.partner.respByPath[eligibilityPath] = answer
-	got := p.sendAs(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember), "pci-of-another-patient")
+	got := p.sendAs(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember), "pci:of-another-patient")
 	if got.status != http.StatusOK || !bytes.Equal(got.body, answer) {
 		t.Fatalf("answer %d %s, want the payer's answer relayed", got.status, got.body)
 	}

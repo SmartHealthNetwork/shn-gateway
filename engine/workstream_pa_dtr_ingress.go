@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -402,7 +403,7 @@ func (g *Gateway) obtainDTRCoverage(ctx context.Context, out *dtrIngressRequest,
 	sorID := ""
 	if found {
 		id, ok := strings.CutPrefix(ref, "Patient/")
-		if !ok || !fhirIDRE.MatchString(id) {
+		if !ok || !fhirid.Valid(id) {
 			status, msg := SoRFailureResponse(&SoRReadError{Kind: SoRInvalidResponse})
 			return nil, nil, status, msg
 		}

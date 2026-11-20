@@ -183,6 +183,13 @@ type AccessRequesterBinding struct {
 	// never took it); Outcome is then the second send's. Absent when it was
 	// sent once, or not at all.
 	Resent bool `json:"resent,omitempty"`
+	// ResentConnection is the connection the resend went on
+	// (engine.RequesterResentConnections), present exactly with Resent:
+	// "new" (a connection of its own, so it could not reach the instance that
+	// refused the first send on the connection that instance answered on), or
+	// "pooled" (the Hub client's own, which may: an embedding program's
+	// transport, where no new connection can be guaranteed).
+	ResentConnection string `json:"resentConnection,omitempty"`
 }
 
 // AccessStages is an inbound leg's time in each stage of its answer, in

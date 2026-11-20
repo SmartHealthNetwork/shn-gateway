@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -189,7 +190,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		}
 		m := strings.TrimPrefix(ref, "Patient/")
 		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, body)
-		if errors.Is(readErr, errPatientUnidentifiable) {
+		if notProvablyThePatient(readErr) {
 			readErr, ok = nil, false // not provably the leg's patient
 		}
 		if readErr != nil {
@@ -470,7 +471,7 @@ func (g *Gateway) ingressEnsureSelfContainedContext(ctx context.Context, leg str
 	ref, found, err := sor.PatientFHIRRefContext(ctx, member)
 	if err == nil && found {
 		id, ok := strings.CutPrefix(ref, "Patient/")
-		if !ok || !fhirIDRE.MatchString(id) {
+		if !ok || !fhirid.Valid(id) {
 			err = &SoRReadError{Kind: SoRInvalidResponse}
 		} else {
 			sorID = id
@@ -1238,7 +1239,7 @@ func absoluteOrganizationRef(ref string) bool {
 	}
 	parts := strings.Split(path, "/")
 	n := len(parts)
-	if n < 2 || parts[n-2] != "Organization" || !fhirIDRE.MatchString(parts[n-1]) {
+	if n < 2 || parts[n-2] != "Organization" || !fhirid.Valid(parts[n-1]) {
 		return false
 	}
 	for _, seg := range parts {

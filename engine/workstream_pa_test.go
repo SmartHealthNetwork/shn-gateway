@@ -12,19 +12,22 @@ import (
 
 func TestPACatalog_Ops(t *testing.T) {
 	want := map[string]string{
-		"coverage-eligibility":    "eligibility-inquiry",
-		"crd-order-select":        "crd-order-select",
-		"crd-order-dispatch":      "crd-order-dispatch",
-		"dtr-questionnaire-fetch": "dtr-questionnaire-fetch",
-		"patient-dtr":             "patient-dtr-request",
-		"pas-claim":               "pas-submit",
-		"pas-claim-update":        "pas-update-submit",
-		"pas-claim-inquire":       "pas-inquire",
-		"cdex-attachment-submit":  "cdex-attachment-submit",
-		"cdex-attachment-request": "cdex-attachment-request",
-		"cdex-task-status":        "cdex-task-read",
-		"cdex-task-subscribe":     "cdex-task-subscribe",
-		"cdex-task-signal":        "cdex-task-signal",
+		"coverage-eligibility":       "eligibility-inquiry",
+		"crd-order-select":           "crd-order-select",
+		"crd-order-dispatch":         "crd-order-dispatch",
+		"dtr-questionnaire-fetch":    "dtr-questionnaire-fetch",
+		"patient-dtr":                "patient-dtr-request",
+		"pas-claim":                  "pas-submit",
+		"pas-claim-update":           "pas-update-submit",
+		"pas-claim-inquire":          "pas-inquire",
+		"cdex-attachment-submit":     "cdex-attachment-submit",
+		"cdex-attachment-request":    "cdex-attachment-request",
+		"cdex-task-status":           "cdex-task-read",
+		"cdex-task-subscribe":        "cdex-task-subscribe",
+		"cdex-task-signal":           "cdex-task-signal",
+		"pas-subscription-subscribe": "pas-subscribe",
+		"pas-subscription-signal":    "pas-signal",
+		"pas-subscription-notify":    "pas-notify",
 	}
 	if len(paCatalog) != len(want) {
 		t.Fatalf("paCatalog has %d entries, want %d", len(paCatalog), len(want))
@@ -43,9 +46,9 @@ func TestPACatalog_Ops(t *testing.T) {
 
 // TestPACatalog_ReqFrames pins each PA leg's request frame: every leg a
 // provider originates is framed provider-tpo, but its notification of a
-// payer's Tasks' changes, provider-disclosure, and the payer's attachment
-// request, its read of that Task and its Subscription, the legs a payer
-// originates, payer-payment. The inbound
+// payer's Tasks' changes, provider-disclosure; the payer's attachment
+// request, its read of that Task and its Subscription, payer-payment; and the
+// payer's notifications of a provider's PAS Subscription, payer-coverage. The inbound
 // side binds the token to the catalog row's frame (handleInbound), so a frame
 // changes only here and in the taxonomy together.
 func TestPACatalog_ReqFrames(t *testing.T) {
@@ -56,6 +59,8 @@ func TestPACatalog_ReqFrames(t *testing.T) {
 			want = "payer-payment"
 		case legCDexTaskSignal:
 			want = "provider-disclosure"
+		case legPASSubscriptionSignal, legPASSubscriptionNotify:
+			want = "payer-coverage"
 		}
 		if spec.ReqFrame != want {
 			t.Errorf("paCatalog[%q].ReqFrame = %q, want %s", legType, spec.ReqFrame, want)
@@ -134,19 +139,22 @@ func TestPACatalog_Pinned(t *testing.T) {
 	readOnly := LegPhysics{Kind: KindRequestResponse, Effect: EffectReadOnly, Timing: TimingSync, Locality: LocalitySubstrate}
 	mutating := LegPhysics{Kind: KindRequestResponse, Effect: EffectMutating, Timing: TimingSync, Locality: LocalitySubstrate}
 	want := map[string]legSpec{
-		"coverage-eligibility":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native", WireName: "pa.coverage-eligibility", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"dtr-questionnaire-fetch": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", FrameOperations: []string{"questionnaire-package", "next-question"}, Seam: "payer-native", WireName: "pa.dtr-questionnaire-fetch", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"patient-dtr":             {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound", WireName: "pa.patient-dtr", RecipientRoles: []string{"phg"}, AnswerEnvelope: "json"},
-		"crd-order-select":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-select", RecipientRoles: []string{"payer"}, AnswerEnvelope: "json"},
-		"crd-order-dispatch":      {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-dispatch", RecipientRoles: []string{"payer"}, AnswerEnvelope: "json"},
-		"pas-claim":               {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"pas-claim-update":        {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-update", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"pas-claim-inquire":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"cdex-attachment-submit":  {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "cdex-attachment-submit", RespOp: "cdex-attachment-submit-response", Scope: "attachment-only", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-attachment-submit", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
-		"cdex-attachment-request": {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-attachment-request", RespOp: "cdex-attachment-request-response", Scope: "attachment-request-only", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-attachment-request", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexTaskURL, AnswerEnvelope: "fhir"},
-		"cdex-task-status":        {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-read", RespOp: "cdex-task-read-response", Scope: "task-status-only", Physics: readOnly, Seam: "provider-native", WireName: "pa.cdex-task-status", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true, AnswerEnvelope: "fhir"},
-		"cdex-task-subscribe":     {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-subscribe", RespOp: "cdex-task-subscribe-response", Scope: "task-subscription", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-task-subscribe", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexSubscriptionScope, Subscribe: true, AnswerEnvelope: "fhir"},
-		"cdex-task-signal":        {ReqFrame: "provider-disclosure", RespFrame: "payer-payment", Op: "cdex-task-signal", RespOp: "cdex-task-signal-response", Scope: "task-notification", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-task-signal", RecipientRoles: []string{"payer"}, Signal: true, AnswerEnvelope: "fhir"},
+		"coverage-eligibility":       {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "eligibility-inquiry", RespOp: "eligibility-response", Scope: "eligibility-only", Physics: readOnly, Seam: "payer-native", WireName: "pa.coverage-eligibility", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"dtr-questionnaire-fetch":    {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "dtr-questionnaire-fetch", RespOp: "dtr-questionnaire", Scope: "questionnaire-only", Physics: readOnly, Contract: "pa.dtr", FrameOperations: []string{"questionnaire-package", "next-question"}, Seam: "payer-native", WireName: "pa.dtr-questionnaire-fetch", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"patient-dtr":                {ReqFrame: "provider-tpo", RespFrame: "patient-authorship", Op: "patient-dtr-request", RespOp: "patient-dtr-response", Scope: "patient-authorship-only", Physics: readOnly, Seam: "phg-inbound", WireName: "pa.patient-dtr", RecipientRoles: []string{"phg"}, AnswerEnvelope: "json"},
+		"crd-order-select":           {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-select", RespOp: "crd-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-select", RecipientRoles: []string{"payer"}, AnswerEnvelope: "json"},
+		"crd-order-dispatch":         {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "crd-order-dispatch", RespOp: "crd-dispatch-cards", Scope: "crd-context", Physics: readOnly, Contract: "pa.crd", Seam: "payer-native", WireName: "pa.crd-order-dispatch", RecipientRoles: []string{"payer"}, AnswerEnvelope: "json"},
+		"pas-claim":                  {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-submit", RespOp: "pas-response", Scope: "pas-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"pas-claim-update":           {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-update-submit", RespOp: "pas-update-response", Scope: "pas-update-bundle", Physics: mutating, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-update", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"pas-claim-inquire":          {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-inquire", RespOp: "pas-inquire-response", Scope: "pas-inquire-bundle", Physics: readOnly, Contract: "pa.pas", Seam: "payer-native", WireName: "pa.pas-claim-inquire", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"cdex-attachment-submit":     {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "cdex-attachment-submit", RespOp: "cdex-attachment-submit-response", Scope: "attachment-only", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-attachment-submit", RecipientRoles: []string{"payer"}, AnswerEnvelope: "fhir"},
+		"cdex-attachment-request":    {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-attachment-request", RespOp: "cdex-attachment-request-response", Scope: "attachment-request-only", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-attachment-request", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexTaskURL, AnswerEnvelope: "fhir"},
+		"cdex-task-status":           {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-read", RespOp: "cdex-task-read-response", Scope: "task-status-only", Physics: readOnly, Seam: "provider-native", WireName: "pa.cdex-task-status", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexReadScope, ReadPath: true, AnswerEnvelope: "fhir", Subject: "from-answer"},
+		"cdex-task-subscribe":        {ReqFrame: "payer-payment", RespFrame: "provider-disclosure", Op: "cdex-task-subscribe", RespOp: "cdex-task-subscribe-response", Scope: "task-subscription", Physics: mutating, Seam: "provider-native", WireName: "pa.cdex-task-subscribe", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderCDexSubscriptionScope, Subscribe: true, AnswerEnvelope: "fhir", Subject: "none"},
+		"cdex-task-signal":           {ReqFrame: "provider-disclosure", RespFrame: "payer-payment", Op: "cdex-task-signal", RespOp: "cdex-task-signal-response", Scope: "task-notification", Physics: mutating, Seam: "payer-native", WireName: "pa.cdex-task-signal", RecipientRoles: []string{"payer"}, Signal: true, AnswerEnvelope: "fhir", Subject: "none"},
+		"pas-subscription-subscribe": {ReqFrame: "provider-tpo", RespFrame: "payer-coverage", Op: "pas-subscribe", RespOp: "pas-subscribe-response", Scope: "pas-subscription", Physics: mutating, Seam: "payer-native", WireName: "pa.pas-subscription-subscribe", RecipientRoles: []string{"payer"}, TakenWhenSet: settingPayerSubscriptionScope, Subscribe: true, AnswerEnvelope: "fhir", Subject: "none"},
+		"pas-subscription-signal":    {ReqFrame: "payer-coverage", RespFrame: "provider-tpo", Op: "pas-signal", RespOp: "pas-signal-response", Scope: "pas-notification", Physics: mutating, Seam: "provider-native", WireName: "pa.pas-subscription-signal", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderPASSubscription, Signal: true, AnswerEnvelope: "fhir", Subject: "none"},
+		"pas-subscription-notify":    {ReqFrame: "payer-coverage", RespFrame: "provider-tpo", Op: "pas-notify", RespOp: "pas-notify-response", Scope: "pas-notification-bundle", Physics: mutating, Seam: "provider-native", WireName: "pa.pas-subscription-notify", RecipientRoles: []string{"provider"}, TakenWhenSet: settingProviderPASSubscription, Signal: true, AnswerEnvelope: "fhir"},
 	}
 	if !reflect.DeepEqual(paCatalog, want) {
 		for tx := range want {
@@ -188,6 +196,10 @@ func TestAnsweredLegs_AttachmentRequestNotDeclared(t *testing.T) {
 				want = settingProviderCDexReadScope
 			case legCDexTaskSubscribe:
 				want = settingProviderCDexSubscriptionScope
+			case "pas-subscription-subscribe":
+				want = settingPayerSubscriptionScope
+			case legPASSubscriptionSignal, legPASSubscriptionNotify:
+				want = settingProviderPASSubscription
 			}
 			if spec.TakenWhenSet != want {
 				t.Errorf("%s: TakenWhenSet = %q, want %q", leg, spec.TakenWhenSet, want)
@@ -258,11 +270,14 @@ func TestFQSCatalog_Pinned(t *testing.T) {
 // request names no member.
 func TestPAInvolvement_Pinned(t *testing.T) {
 	both := []string{"coverage-eligibility", "crd-order-select", "crd-order-dispatch", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-update", "pas-claim-inquire"}
+	// The PAS content notification's request names the other patients its
+	// decision names; its answer is the provider endpoint's, naming none.
+	requestOnly := []string{"pas-subscription-notify"}
 	for _, leg := range networkLegs() {
 		request, answer := legInvolvement(leg)
-		want := slices.Contains(both, leg)
-		if request != want || answer != want {
-			t.Errorf("%s: involvement (request %v, answer %v), want (%v, %v)", leg, request, answer, want, want)
+		wantRequest, wantAnswer := slices.Contains(both, leg) || slices.Contains(requestOnly, leg), slices.Contains(both, leg)
+		if request != wantRequest || answer != wantAnswer {
+			t.Errorf("%s: involvement (request %v, answer %v), want (%v, %v)", leg, request, answer, wantRequest, wantAnswer)
 		}
 	}
 	payload := []byte(`{"resourceType":"Patient","id":"m1"}`)
@@ -270,11 +285,11 @@ func TestPAInvolvement_Pinned(t *testing.T) {
 		if request, answer := legInvolvement(leg); request || answer {
 			t.Errorf("%q: involvement (%v, %v), want neither", leg, request, answer)
 		}
-		if got := namedMembers(payload, leg); got != nil {
+		if got := mustMembers(t)(namedMembers(payload, leg)); got != nil {
 			t.Errorf("%q: members %v, want none", leg, got)
 		}
 	}
-	if got := namedMembers(payload, "crd-order-select"); len(got) != 1 || got[0].member != "m1" || string(got[0].scope) != string(payload) {
+	if got := mustMembers(t)(namedMembers(payload, "crd-order-select")); len(got) != 1 || got[0].member != "m1" || string(got[0].scope) != string(payload) {
 		t.Errorf("crd-order-select: members %+v, want [m1] bound from the whole request, through the PA adapter", got)
 	}
 }

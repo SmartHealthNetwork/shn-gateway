@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 )
@@ -751,14 +752,12 @@ func checkParams(q url.Values, allowed []string, what string) *Refusal {
 	return nil
 }
 
-var fhirID = regexp.MustCompile(`^[A-Za-z0-9\-.]{1,64}$`)
-
 // CheckID is §6.1's id rule, at both gateways: a Subscription id or version
 // outside [A-Za-z0-9\-\.]{1,64}, or the dot segment "." or "..", which a
 // server reading the path below its base would take as a step out of it, is
 // refused 400, recorded routing.
 func CheckID(id string) *Refusal {
-	if len(id) > maxFHIRIDLen || !fhirID.MatchString(id) || id == "." || id == ".." {
+	if len(id) > maxFHIRIDLen || !fhirid.Valid(id) {
 		return refuse(http.StatusBadRequest, recording.RefusalRouting, "a Subscription id or version must be a FHIR id ([A-Za-z0-9-.]{1,64}) and not \".\" or \"..\"")
 	}
 	return nil

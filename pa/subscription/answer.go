@@ -436,6 +436,106 @@ func CheckErrorAnswer(body []byte) *Refusal {
 	return outcomeShape(root)
 }
 
+// ackBundleTypes are the Bundle types a FHIR server answers a transaction or
+// a batch with, which a rest-hook notification is delivered as.
+var ackBundleTypes = []string{"transaction-response", "batch-response"}
+
+// CheckSignalAnswer is the check of a subscriber's answer to a notification
+// on a leg that names no patient (a no-content notification, N5), at every
+// status, before it is carried to the notifier: a network rule at every
+// level, the body read by its structure alone. It is CheckErrorAnswer's rule,
+// an answer that holds no resource, and passes too the acknowledgement a FHIR
+// server gives the transaction a rest-hook notification is delivered as: a
+// transaction-response or batch-response Bundle whose entries hold only their
+// response, a response's outcome passing when it is an OperationOutcome
+// holding no resource, and the Bundle holding no resource outside its
+// entries. Any other Bundle, and one holding a resource anywhere else, is
+// refused 502, recorded authority, as any other FHIR is.
+func CheckSignalAnswer(body []byte) *Refusal {
+	kind, rt, err := ClassifyBody(body)
+	if rt != "Bundle" || (kind != BodyFHIRJSON && kind != BodyFHIRXML) {
+		return CheckErrorAnswer(body)
+	}
+	trimmed := bytes.TrimLeft(bytes.TrimPrefix(body, utf8BOM), " \t\r\n")
+	if kind == BodyFHIRXML {
+		if err != nil {
+			return badAnswer("its answer is FHIR XML this network cannot read one way only")
+		}
+		x, xerr := readXML(trimmed)
+		if xerr != nil || !x.fhir || x.root != "Bundle" {
+			return badAnswer("its answer is FHIR XML this network cannot read one way only")
+		}
+		if !slices.Contains(ackBundleTypes, x.bundleType) {
+			return badAnswer("the Bundle is not of type " + strings.Join(ackBundleTypes, " or "))
+		}
+		if x.notAck {
+			return badAnswer("the Bundle holds a resource, or an entry holds more than its response")
+		}
+		return nil
+	}
+	if err != nil {
+		return badAnswer("its answer is FHIR JSON this network cannot read unambiguously")
+	}
+	// The Bundle is the body's first JSON value; what follows it holds no
+	// FHIR JSON, or the body would be unreadable (ClassifyBody).
+	root, err := scanJSON(firstJSONValue(trimmed))
+	if err != nil {
+		return badAnswer("its answer is FHIR JSON this network cannot read unambiguously")
+	}
+	return ackBundle(root)
+}
+
+// ackBundle is CheckSignalAnswer's rule on a FHIR JSON Bundle.
+func ackBundle(root *jnode) *Refusal {
+	typ, _ := root.memberFolded("type").stringOf()
+	if !slices.Contains(ackBundleTypes, typ) {
+		return badAnswer("the Bundle is not of type " + strings.Join(ackBundleTypes, " or "))
+	}
+	// A contained member is a resource whatever it holds, as holdsResource
+	// reads one anywhere below a member.
+	for _, m := range root.members {
+		f := jsonmember.FoldedName(m.name)
+		if f != foldedEntry && (f == foldedContained || holdsResource(m.val, false)) {
+			return badAnswer("the Bundle holds a resource outside its entries")
+		}
+	}
+	entries := root.memberFolded("entry")
+	if entries == nil {
+		return nil
+	}
+	if entries.kind != '[' {
+		return badAnswer("the Bundle's entry is not an array")
+	}
+	for _, e := range entries.elems {
+		if e.kind != '{' {
+			return badAnswer("an entry is not an object")
+		}
+		for _, m := range e.members {
+			if jsonmember.FoldedName(m.name) != foldedResponse {
+				return badAnswer("an entry holds more than its response")
+			}
+			if m.val.kind != '{' {
+				return badAnswer("an entry's response is not an object")
+			}
+			for _, r := range m.val.members {
+				if f := jsonmember.FoldedName(r.name); f != foldedOutcome {
+					if f == foldedContained || holdsResource(r.val, false) {
+						return badAnswer("an entry's response holds a resource")
+					}
+					continue
+				}
+				if rt, _ := r.val.memberFolded("resourceType").stringOf(); r.val.kind != '{' || rt != "OperationOutcome" {
+					return badAnswer("an entry's response outcome is not an OperationOutcome")
+				}
+				if holdsResource(r.val, true) {
+					return badAnswer("an entry's response outcome holds a resource")
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // CheckNoResource is the network's rule on a Subscription a subscribe leg
 // carries, at the notifier's gateway on a create or update, a rule at every
 // level: the leg names no patient on either side, so the Subscription holds no
@@ -452,6 +552,8 @@ func CheckNoResource(s *Subscription) *Refusal {
 var (
 	foldedEntry        = jsonmember.FoldedName("entry")
 	foldedResource     = jsonmember.FoldedName("resource")
+	foldedResponse     = jsonmember.FoldedName("response")
+	foldedOutcome      = jsonmember.FoldedName("outcome")
 	foldedResourceType = jsonmember.FoldedName("resourceType")
 	foldedContained    = jsonmember.FoldedName("contained")
 )

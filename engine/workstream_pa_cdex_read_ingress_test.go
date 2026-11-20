@@ -845,10 +845,12 @@ func TestCDexReadIngress_RefusesOnTheNetworksPrimitives(t *testing.T) {
 // create scope is refused 403 insufficient_scope naming the read scope,
 // recorded as the payer gateway's authority refusal, with nothing sent; no
 // bearer is 401; one granted the v1 read, a v2 r, both scopes in one token, or
-// v1 *, is admitted. A granular read permits nothing.
+// v1 *, on Task or as a wildcard (system/*.), is admitted. A granular read, or
+// a create wildcard, permits nothing.
 func TestCDexReadIngress_TakesAScopeThatPermitsRead(t *testing.T) {
 	priv, pub := newTestClientKey(t)
-	scopes := []string{TaskWriteScope, TaskReadScope, "system/Task.r", "system/Task.cr", "system/Task.*", "system/Task.r?status=requested"}
+	scopes := []string{TaskWriteScope, TaskReadScope, "system/Task.r", "system/Task.cr", "system/Task.*", "system/Task.r?status=requested",
+		"system/*.read", "system/*.rs", "system/*.*", "system/*.write", "system/*.c", "system/*.r?status=requested"}
 	for _, level := range allLevels {
 		for _, row := range []struct {
 			scope  string
@@ -862,6 +864,12 @@ func TestCDexReadIngress_TakesAScopeThatPermitsRead(t *testing.T) {
 			{"system/Task.cr", http.StatusOK},
 			{TaskWriteScope + " " + TaskReadScope, http.StatusOK},
 			{"system/Task.*", http.StatusOK},
+			{"system/*.read", http.StatusOK},
+			{"system/*.rs", http.StatusOK},
+			{"system/*.*", http.StatusOK},
+			{"system/*.write", http.StatusForbidden},
+			{"system/*.c", http.StatusForbidden},
+			{"system/*.r?status=requested", http.StatusForbidden},
 		} {
 			for _, base := range []string{"/cdex/provider/" + readProviderID, "/cdex/provider/" + readProviderID + "/Task/t-1/_history/2", ""} {
 				t.Run(fmt.Sprintf("%q at %q/%s", row.scope, base, level), func(t *testing.T) {
@@ -1034,7 +1042,7 @@ func checkCDexReadDiscovery(t *testing.T, level ConformanceEnforcement) {
 // which is why it is not advertised.
 func TestCDexReadIngress_AnAdvertisedReadScopeIsGranted(t *testing.T) {
 	priv, pub := newTestClientKey(t)
-	for _, scopes := range [][]string{{"system/Task.*"}, {TaskWriteScope, TaskReadScope}, {TaskWriteScope, "system/Task.rs"}} {
+	for _, scopes := range [][]string{{"system/Task.*"}, {TaskWriteScope, TaskReadScope}, {TaskWriteScope, "system/Task.rs"}, {"system/*.*"}, {TaskWriteScope, "system/*.rs"}} {
 		p := newReadPayer(t, EnforcementNone, func(c *Config) {
 			c.IngressClients = map[string]IngressClientRegistration{"payer-system": {Alg: "ES384", PublicKeyPEM: pub, Scopes: scopes}}
 			c.ingressAuthBypass = false
@@ -1350,6 +1358,8 @@ func TestRequesterBindingAborted(t *testing.T) {
 			RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterHeld, Outcome: ExchangeOther}},
 		{"unbound", &RequesterBindingRecord{Binding: shnsdk.RequesterBindingUnavailable, Unbound: RequesterUnboundNoMember},
 			RequesterBindingRecord{Binding: shnsdk.RequesterBindingUnavailable, Unbound: RequesterUnboundNoMember, Outcome: ExchangeOther}},
+		{"resent", &RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterHeld, Resent: true, ResentConnection: RequesterResentPooled},
+			RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterHeld, Resent: true, ResentConnection: RequesterResentPooled, Outcome: ExchangeOther}},
 	} {
 		x := &exchangeRecorder{}
 		if row.pending != nil {

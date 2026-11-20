@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -143,7 +144,9 @@ func (g *Gateway) orderRequesterRecords(ctx context.Context, order []byte) ([][]
 // requesterCarryRef splits a relative "Type/id" reference.
 func requesterCarryRef(ref string) (typ, id string, ok bool) {
 	typ, id, ok = strings.Cut(ref, "/")
-	if !ok || typ == "" || strings.ContainsAny(typ, ":/") || !fhirIDRE.MatchString(id) {
+	// "." and ".." are a FHIR id's characters but a dot segment in a path,
+	// where a server reads them as a step out of the type: no resource.
+	if !ok || typ == "" || strings.ContainsAny(typ, ":/") || !fhirid.Valid(id) {
 		return "", "", false
 	}
 	return typ, id, true

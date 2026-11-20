@@ -70,7 +70,7 @@ func driveTelemetryFixture(reg *telemetry.Registry) {
 		se(s)
 	}
 	io := involvedOmittedMetricHook(reg)
-	for _, r := range []string{"overflow", "system-of-record-unavailable", "unknown-member", "authorization-refused", "authorization-failed", "involvement-not-carried", "budget"} {
+	for _, r := range []string{"overflow", "system-of-record-unavailable", "request-unreadable", "unknown-member", "authorization-refused", "authorization-failed", "involvement-not-carried", "budget"} {
 		io(r)
 	}
 	emitStorePool(reg, storePoolStat{TotalConns: 7, AcquiredConns: 3, IdleConns: 4, EmptyAcquireCount: 11})
@@ -92,6 +92,13 @@ func driveTelemetryFixture(reg *telemetry.Registry) {
 	for i, o := range []string{engine.TokenOK, engine.TokenDenied, engine.TokenUnavailable, engine.TokenFailed, "novel"} {
 		tok(o, time.Duration(i+1)*120*time.Millisecond)
 	}
+	nr := networkRetryMetricHook(reg)
+	for _, svc := range engine.NetworkRetryServices {
+		for _, r := range engine.NetworkRetryResults {
+			nr(svc, r)
+		}
+	}
+	nr("novel", "novel")
 	now := time.Unix(1_761_350_400, 0).UTC()
 	clock := func() time.Time { return now }
 	certs := endpointcert.NewWithClock(clock)
@@ -281,19 +288,19 @@ func TestEMFMetricCombinations_MON_R47(t *testing.T) {
 		}
 		combos[key] = true
 	}
-	// 69 of the 18 existing metrics, 18 of the operational additions' lines,
-	// and 24 of the exchange additions' (ActiveRequests writes only when
-	// sampled).
-	if len(combos) != 111 {
-		t.Errorf("the fixture writes %d distinct metric-and-dimension combinations, pinned 111", len(combos))
+	// 70 of the 18 existing metrics, 25 of the operational additions' lines
+	// (NetworkRetry's 7 among them), and 24 of the exchange additions'
+	// (ActiveRequests writes only when sampled).
+	if len(combos) != 119 {
+		t.Errorf("the fixture writes %d distinct metric-and-dimension combinations, pinned 119", len(combos))
 	}
 	// The most the exchange record's, conformance and in-flight metrics can
 	// write for one gateway, at today's lists in a release build: the
-	// exchange record's 466 series before the additions, and the additions'
-	// 641 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
+	// exchange record's 559 series before the additions, and the additions'
+	// 689 (TestExchangeMetricBound and TestConformanceMetricBound drive them).
 	// The gateway's other EMF metrics have series of their own.
-	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 466+641 {
-		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 466+641)
+	if !toyProfileBuild && exchangeSeriesBound+conformanceSeriesBound != 559+689 {
+		t.Errorf("the exchange, conformance and in-flight EMF series bound is %d, pinned %d", exchangeSeriesBound+conformanceSeriesBound, 559+689)
 	}
 }
 

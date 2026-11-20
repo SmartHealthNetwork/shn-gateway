@@ -40,13 +40,21 @@ func ingressSurface(role string) []string {
 		// The notification route is mounted only where the gateway takes the
 		// payer's Subscription.
 		cfg.ProviderCDexTaskURL, cfg.ProviderCDexSubscriptionScope = "https://ehr.example.test/fhir/Task", "system/Subscription.cruds"
+		// The PAS topic's Subscription routes at each payer's base are
+		// mounted only where the gateway takes the topic's notifications.
+		cfg.ProviderPASSubscription = true
+	}
+	if role == "payer" {
+		// The PAS notification route is mounted only where the gateway takes
+		// a provider's Subscription to the PAS topic.
+		cfg.PayerSubscriptionScope = "system/Subscription.cruds"
 	}
 	g := &Gateway{cfg: cfg, ingressAuth: &ingressAuthServer{}}
 	var out []string
 	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 		for _, rt := range declared {
 			if !rt.operator {
-				out = append(out, rt.pattern)
+				out = append(out, string(rt.pattern))
 			}
 		}
 	}
@@ -96,7 +104,7 @@ func TestProviderIngressSurfaceIsTheMountedRoutes(t *testing.T) {
 		t.Fatal("control: a provider with an origination profile declares no operator route; the check below would be vacuous")
 	}
 	for _, rt := range operator.moduleRoutes("provider") {
-		if slices.Contains(got, rt.pattern) {
+		if slices.Contains(got, string(rt.pattern)) {
 			t.Errorf("operator route %s is on the public surface", rt.pattern)
 		}
 	}

@@ -58,9 +58,15 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// relayed exactly (it has no body), and a create or update with its
 		// channel sealed (E-18).
 		k("cdex-task-subscribe", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): paSubscriptionSealed,
-		// A provider's CDex Task notification, which its own system posts to
-		// the notification address its gateway wrote, is relayed exactly.
-		k("cdex-task-signal", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		// A provider's Subscription interaction on the PAS topic, sealed as a
+		// payer's on the HRex Task topic is (E-18).
+		k("pas-subscription-subscribe", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): paSubscriptionSealed,
+		// A provider's CDex Task notification, and a payer's PAS
+		// notification, which its own system posts to the notification
+		// address its gateway wrote, is relayed exactly.
+		k("cdex-task-signal", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried):        {Allowed: paRelayed},
+		k("pas-subscription-signal", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		k("pas-subscription-notify", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
 
 		// Requester to the network, with a request its own workflow makes.
 		k("coverage-eligibility", relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated):    {Allowed: paAuthored, Builders: []relay.BuilderID{relay.BuilderSDKEligibility}},
@@ -106,9 +112,16 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// restored and its addresses re-keyed (E-20), and a create's or
 		// update's Location written (E-23).
 		k("cdex-task-subscribe", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): paSubscriptionRestored,
+		// The payer's answer to a provider's Subscription interaction, relayed
+		// to the provider's system exactly, with its Subscriptions restored and
+		// its addresses re-keyed (E-20), and a create's or update's Location
+		// written (E-23).
+		k("pas-subscription-subscribe", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): paSubscriptionRestored,
 		// The payer endpoint's answer to a notification, relayed to the
 		// provider's system exactly.
-		k("cdex-task-signal", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		k("cdex-task-signal", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):        {Allowed: paRelayed},
+		k("pas-subscription-signal", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		k("pas-subscription-notify", relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 
 		// Recipient to its participant's system, carrying the network's
 		// request. A CDS Hooks request is relayed exactly. A
@@ -156,6 +169,18 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		// provider's server re-keyed to this gateway's base for the provider
 		// (E-17).
 		k("cdex-task-signal", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): paNotificationRekeyed,
+		// A PAS notification is delivered as the payer's system sent it: no
+		// gateway edits one.
+		k("pas-subscription-signal", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): {Allowed: paRelayed},
+		// A PAS content notification is delivered with E-22 made on its
+		// decision's payer-url, as E-10 is made on the payer's answer.
+		k("pas-subscription-notify", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): paNotifiedRekeyed,
+		// A provider's Subscription interaction on the PAS topic goes to the
+		// payer's own system exactly, or with its channel (E-19) or its
+		// search's url (E-21) re-keyed, as a payer's on the HRex Task topic
+		// does at a provider. The subscriber's half comes with the release
+		// that serves it.
+		k("pas-subscription-subscribe", relay.RoleRecipient, relay.DirectionRequest, relay.OutcomeCarried): paSubscriptionRekeyed,
 
 		// Recipient to the network, answering. Patient-authored answers are
 		// the gateway's own messages; eligibility is the
@@ -190,7 +215,13 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 		k("cdex-task-subscribe", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 		// The payer endpoint's answer to a notification is its own message,
 		// relayed; nothing may author one.
-		k("cdex-task-signal", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		k("cdex-task-signal", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered):        {Allowed: paRelayed},
+		k("pas-subscription-signal", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		k("pas-subscription-notify", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
+		// The payer's answer on a provider's Subscription interaction is its
+		// own message, relayed; nothing may author one. The network's 404 for
+		// a Subscription not the provider's is this gateway's refusal.
+		k("pas-subscription-subscribe", relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered): {Allowed: paRelayed},
 	}
 	// An application error from the participant's system is relayed exactly
 	// as it answered (for coverage-eligibility, from a payer that declares its
@@ -198,7 +229,7 @@ var paLegOwnership = func() map[relay.Key]relay.Rule {
 	// frame. A requester that did not cannot receive it: the gateway checks
 	// the error under this key, then answers with its own refusal under the
 	// refused key, so the participant's bytes never leave it unsealed.
-	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
+	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "crd-order-dispatch", "crd-order-select", "dtr-questionnaire-fetch", "pas-claim", "pas-claim-inquire", "pas-claim-update", "pas-subscription-notify", "pas-subscription-signal", "pas-subscription-subscribe"} {
 		m[k(leg, relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeUpstreamError)] = relay.Rule{Allowed: paRelayed}
 	}
 	return m
@@ -251,6 +282,11 @@ var (
 	// into the provider's server re-keyed (E-17).
 	paNotificationRekeyed = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
 		Edits: []relay.EditID{relay.EditCDexTaskNotificationAddressRekey}}
+	// paNotifiedRekeyed is a payer's PAS content notification delivered to
+	// the provider's system exactly, or with its decision's payer-url
+	// re-keyed to the network return path (E-22).
+	paNotifiedRekeyed = relay.Rule{Allowed: []relay.Ownership{relay.OwnershipRelayed, relay.OwnershipEdited},
+		Edits: []relay.EditID{relay.EditPASNotifiedReturnRekey}}
 	// paSubscriptionRestored is the notifier's answer on a Subscription
 	// interaction relayed to the subscriber's system exactly, restored
 	// (E-20), with a Location (E-23), or both.

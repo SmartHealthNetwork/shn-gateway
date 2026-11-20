@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -427,15 +428,14 @@ func TestResolveSubjectPCI_UnheldMemberBindsFromRequestPatientByDefault(t *testi
 func TestResolveSubjectPCI_RequestWithoutDemographicsBindsByIDByDefault(t *testing.T) {
 	g := &Gateway{cfg: Config{SoR: newCensusSoR()}}
 	for name, payload := range map[string][]byte{
-		"no payload":          nil,
-		"no patient":          []byte(`{"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1"}}}`),
-		"id only":             []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `"}}}`),
-		"birthDate only":      []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `","birthDate":"1962-03-11"}}}`),
-		"family only":         []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `","name":[{"family":"Nakamura"}]}}}`),
-		"another member's":    []byte(`{"prefetch":{"patient":` + requestPatient("eOTHER", "1962-03-11", "Nakamura") + `}}`),
-		"not a Patient":       []byte(`{"prefetch":{"patient":{"resourceType":"RelatedPerson","id":"` + strangerMember + `","name":[{"family":"Nakamura"}],"birthDate":"1962-03-11"}}}`),
-		"two that disagree":   []byte(`{"prefetch":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `},"other":{"patient":` + requestPatient(strangerMember, "1962-03-12", "Nakamura") + `}}`),
-		"unparseable payload": []byte(`{"prefetch":`),
+		"no payload":        nil,
+		"no patient":        []byte(`{"prefetch":{"coverage":{"resourceType":"Coverage","id":"c1"}}}`),
+		"id only":           []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `"}}}`),
+		"birthDate only":    []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `","birthDate":"1962-03-11"}}}`),
+		"family only":       []byte(`{"prefetch":{"patient":{"resourceType":"Patient","id":"` + strangerMember + `","name":[{"family":"Nakamura"}]}}}`),
+		"another member's":  []byte(`{"prefetch":{"patient":` + requestPatient("eOTHER", "1962-03-11", "Nakamura") + `}}`),
+		"not a Patient":     []byte(`{"prefetch":{"patient":{"resourceType":"RelatedPerson","id":"` + strangerMember + `","name":[{"family":"Nakamura"}],"birthDate":"1962-03-11"}}}`),
+		"two that disagree": []byte(`{"prefetch":{"patient":` + requestPatient(strangerMember, "1962-03-11", "Nakamura") + `},"other":{"patient":` + requestPatient(strangerMember, "1962-03-12", "Nakamura") + `}}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, payload)
@@ -443,6 +443,13 @@ func TestResolveSubjectPCI_RequestWithoutDemographicsBindsByIDByDefault(t *testi
 				t.Fatalf("got (%q, found=%v, err=%v), want bound by id alone %q", pci, found, err, strangerPCI())
 			}
 		})
+	}
+	// A payload the binding cannot decode at all is not one carrying no
+	// Patient: it is refused, never bound by the id alone. No leg's binding
+	// meets one, its own readers refusing it first
+	// (TestBinding_AnUndecodableBodyIsRefusedFirstOnEveryLeg).
+	if pci, found, err := g.resolveSubjectPCI(context.Background(), strangerMember, []byte(`{"prefetch":`)); pci != "" || found || !errors.Is(err, errRequestPatientsUnreadable) {
+		t.Fatalf("unparseable payload: got (%q, found=%v, err=%v), want errRequestPatientsUnreadable", pci, found, err)
 	}
 }
 

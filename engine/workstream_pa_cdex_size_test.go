@@ -267,7 +267,7 @@ func TestCDex_ACodedSubmissionHasTheBoundsOfAnUncodedOne(t *testing.T) {
 		out := map[string]int64{}
 		for _, rt := range append(g.paRoutes("provider"), g.coreRoutes("payer")...) {
 			if rt.bodyLimit != 0 {
-				out[rt.pattern] = rt.bodyLimit
+				out[string(rt.pattern)] = rt.bodyLimit
 			}
 		}
 		return out

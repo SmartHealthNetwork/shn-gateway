@@ -63,7 +63,13 @@ func (s *Scaffold) ResolvePatient(memberID string) (pci string, demo engine.Demo
 		return "", engine.Demo{}, false
 	}
 	demo = engine.Demo{BirthDate: scaffoldBirthDate, FamilyName: scaffoldFamily}
-	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true
+	// ResolvePCIStrict refuses a member id that names no one (blank, or a bare
+	// "Patient/"): such a member is not found, never a patient.
+	pci, err := shnsdk.ResolvePCIStrict(memberID, demo.BirthDate, demo.FamilyName)
+	if err != nil {
+		return "", engine.Demo{}, false
+	}
+	return pci, demo, true
 }
 
 // PatientFHIRRef returns the FHIR Patient ref for an operated $populate subject.

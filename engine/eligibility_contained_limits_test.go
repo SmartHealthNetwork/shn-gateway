@@ -196,6 +196,7 @@ func containedPatientPastTheTokenBound(t *testing.T, level ConformanceEnforcemen
 	t.Parallel()
 	t.Run("resolved", func(t *testing.T) {
 		t.Parallel()
+		atScaleAt(t, len(pastTheTokenBound)) // every row here sends it
 		p := eligibilityPayer(t, level, false)
 		body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#pat", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
 		run := runObserved(t, p, "coverage-eligibility", body, p.pci)
@@ -205,6 +206,7 @@ func containedPatientPastTheTokenBound(t *testing.T, level ConformanceEnforcemen
 	})
 	t.Run("unresolved", func(t *testing.T) {
 		t.Parallel()
+		atScaleAt(t, len(pastTheTokenBound)) // every row here sends it
 		p := eligibilityPayer(t, level, false)
 		body := withNoteMember(eligibilityWithPatient(t, dtrFrameMember, "#nobody", containedMember("pat", dtrFrameMember)), pastTheTokenBound)
 		ans := p.sendAs(t, "coverage-eligibility", "", body, p.pci)

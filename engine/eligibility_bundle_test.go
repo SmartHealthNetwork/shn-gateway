@@ -211,6 +211,11 @@ func TestEligibilityBundle_UnroutableSubmissionIsRefused(t *testing.T) {
 		"batch naming two payers": {eligBatch(t, eligibilityRequest(t, "MBR-COVERED"), eligFAIS(t, anotherHeldMember, "99999")),
 			eligibilityBatchTwoPayers + " (request 0 names " + shnsdk.CMSPayerIdentity.System + "|00001, request 1 names " + shnsdk.CMSPayerIdentity.System + "|99999)"},
 		"a request of the batch naming none": {eligBatch(t, eligibilityRequest(t, "MBR-COVERED"), noPayer), "request 1 of the batch: " + eligibilityNoPayer},
+		// A request naming no insurer at all is answered too.
+		"a request of the batch with no insurer": {eligBatch(t, eligibilityRequest(t, "MBR-COVERED"), eligibilityWith(t, anotherHeldMember, map[string]any{"insurer": nil})),
+			"request 1 of the batch: " + eligibilityNoPayer},
+		"a Bundle's request with no insurer": {eligFAISBundle(t, [2]any{"", map[string]any{"resourceType": "CoverageEligibilityRequest", "status": "active",
+			"patient": map[string]any{"reference": "urn:uuid:patient"}}}, [2]any{"urn:uuid:patient", patient}), eligibilityNoPayer},
 		"references no entry answers": {eligFAISBundle(t, [2]any{"", request}, [2]any{"urn:uuid:patient", patient}, [2]any{"urn:uuid:other", coverage}),
 			eligibilityCoverageUnresolved + remedyEntryCoverage + `: insurance[0].coverage "urn:uuid:coverage"`},
 		"insurer naming a Coverage entry": {eligFAISBundle(t, [2]any{"", map[string]any{"resourceType": "CoverageEligibilityRequest", "status": "active",
@@ -287,8 +292,9 @@ func TestEligibilityBundle_RefusesWhatIsNeitherForm(t *testing.T) {
 			`eligibility request names \"PATIENT\" for \"patient\": member names are case-sensitive, so the request names no patient to bind`},
 		"reference named in another case": {bytes.Replace(eligFAIS(t, "MBR-COVERED", "00001"), []byte(`"patient":{"reference":"urn:uuid:patient"}`), []byte(`"patient":{"Reference":"urn:uuid:patient"}`), 1),
 			`eligibility request names \"Reference\" for \"reference\": member names are case-sensitive, so the request names no patient to bind`},
+		// A reference that names no one is refused as a request sent alone is.
 		"empty patient reference": {eligFAISBundle(t, [2]any{"", withPatientRef(request, "")}, [2]any{"urn:uuid:patient", patient},
-			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), "parse member failed"},
+			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), errEligibilityNamesNoOne},
 		// A request alone in a batch carries no entries: a reference that is
 		// neither Patient/<id> nor #id names no patient.
 		"a batch's request naming its patient by urn:uuid": {eligBatch(t, cer, mustJSON(t, withPatientRef(request, "urn:uuid:patient"))),
@@ -539,6 +545,8 @@ func TestEligibilityBundle_PayerReadsBundledPatientsExactly(t *testing.T) {
 		"patient named in another case":                          "member names are case-sensitive, so the request names no patient to bind",
 		"reference named in another case":                        "member names are case-sensitive, so the request names no patient to bind",
 		"a batch's request with contained named in another case": "member names are case-sensitive, so the request names no patient to bind",
+		// A reference that names no one is refused as a request sent alone is.
+		"empty patient reference": errEligibilityNamesNoOne,
 	}
 	for name, body := range map[string][]byte{
 		"patient named in another case":   bytes.Replace(eligFAIS(t, dtrFrameMember, "00001"), []byte(`"patient":{"reference":"urn:uuid:patient"}`), []byte(`"PATIENT":{"reference":"urn:uuid:patient"}`), 1),

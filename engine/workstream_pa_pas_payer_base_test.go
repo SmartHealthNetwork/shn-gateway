@@ -5,6 +5,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -413,8 +414,9 @@ func TestPASPayers_ListsEachPayersBase(t *testing.T) {
 	env := newInProcessExchange(t)
 	g := env.originator
 	g.cfg.IngressBaseURL = "https://provider.example.test/fhir"
+	g.cfg.ProviderPASSubscription = true
 	reg := g.cfg.Reg
-	// Today's registrar: no payer can declare the leg, so none is listed.
+	// A registry in which no payer takes the leg lists none.
 	if code, payers := pasPayersOf(t, g); code != http.StatusOK || len(payers) != 0 {
 		t.Fatalf("listing %d %+v, want none", code, payers)
 	}
@@ -466,6 +468,36 @@ func TestPASPayers_ListsEachPayersBase(t *testing.T) {
 	}
 }
 
+// A provider gateway without PROVIDER_PAS_SUBSCRIPTION mounts no Subscription
+// route at any payer's base, so GET /pas/payers lists none, whatever payers
+// take the leg: {"payers":[]}, a true empty (each base still takes claims,
+// which the listing does not describe). With the setting, the same registry
+// lists them.
+func TestPASPayers_NoneWithoutTheSetting(t *testing.T) {
+	env := newInProcessExchange(t)
+	g := env.originator
+	g.cfg.IngressBaseURL = "https://provider.example.test/fhir"
+	payer, _ := g.cfg.Reg.Lookup(env.payerID)
+	payer.Legs = append(slices.Clone(payer.Legs), legPASSubscriptionSubscribe)
+	g.cfg.Reg.Set(env.payerID, payer)
+	for _, takes := range []bool{false, true} {
+		g.cfg.ProviderPASSubscription = takes
+		code, payers := pasPayersOf(t, g)
+		if code != http.StatusOK {
+			t.Fatalf("setting %v: listing %d, want 200", takes, code)
+		}
+		if want := map[bool]int{false: 0, true: 1}[takes]; len(payers) != want {
+			t.Fatalf("setting %v: listed %+v, want %d", takes, payers, want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	g.cfg.ProviderPASSubscription = false
+	g.handlePASPayers(rec, httptest.NewRequest(http.MethodGet, PASPayersPath, nil))
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"payers":[]}` {
+		t.Fatalf("listing %s, want {\"payers\":[]}", body)
+	}
+}
+
 // GET /pas/payers takes the ingress's own authentication, as every route its
 // system calls does: a caller with no bearer is refused 401.
 func TestPASPayers_RefusesAnUnauthenticatedCaller(t *testing.T) {
@@ -481,10 +513,12 @@ func TestPASPayers_RefusesAnUnauthenticatedCaller(t *testing.T) {
 // A Subscription names no payer, so the plain base cannot route one (N8): a
 // create is refused 422, and a search, read, vread, history, instance
 // $status, update, patch or delete 404,
-// each with an OperationOutcome naming where the payers' bases are listed,
-// recorded as the provider gateway's routing refusal on its own route, at
-// every level, and nothing is sent. A claim at the plain base is the control:
-// carried as before.
+// each with an OperationOutcome naming where the payers' bases are listed or,
+// on a gateway without PROVIDER_PAS_SUBSCRIPTION, whose listing is empty, that
+// it takes no Subscription at any payer's base (never pointing at the empty
+// listing), recorded as the provider gateway's routing refusal on its own
+// route, at every level, and nothing is sent. A claim at the plain base is
+// the control: carried as before.
 func TestPASSubscription_ThePlainBaseNamesNoPayer(t *testing.T) {
 	calls := []struct {
 		method, path string
@@ -504,27 +538,38 @@ func TestPASSubscription_ThePlainBaseNamesNoPayer(t *testing.T) {
 		{http.MethodDelete, "/Subscription/sub-1", http.StatusNotFound, "not-found", errPASSubscriptionNotFound},
 	}
 	subscription := `{"resourceType":"Subscription","status":"requested","channel":{"type":"rest-hook","endpoint":"https://ehr.example/notify"}}`
+	notTaken := map[string]string{errPASSubscriptionPlainBase: errPASSubscriptionPlainBaseNotTaken, errPASSubscriptionNotFound: errPASSubscriptionNotFoundNotTaken}
 	for _, c := range calls {
 		for _, level := range allLevels {
-			t.Run(c.method+" "+c.path+"/"+level.String(), func(t *testing.T) {
-				env, got, _ := pasBaseExchange(t, level)
-				var body string
-				if c.method == http.MethodPost || c.method == http.MethodPut || c.method == http.MethodPatch {
-					body = subscription
-				}
-				rec := httptest.NewRecorder()
-				req := httptest.NewRequest(c.method, c.path, strings.NewReader(body))
-				req.Header.Set("Content-Type", "application/fhir+json")
-				env.originator.Handler().ServeHTTP(rec, req)
-				refusedBeforeTheNetwork(t, env, rec, c.status, PASPayersPath)
-				wantOutcome(t, rec, c.status, c.code, c.msg)
-				x := got.only(t)
-				wantRefusal(t, x, c.status, RefusedByProviderGateway, RefusalRouting)
-				wantReasonInAnswer(t, x, rec.Body.String())
-				if x.Route != RoutePASSubscription {
-					t.Fatalf("recorded on route %q, want %q", x.Route, RoutePASSubscription)
-				}
-			})
+			for _, takes := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s %s/%s/setting %v", c.method, c.path, level, takes), func(t *testing.T) {
+					env, got, _ := pasBaseExchange(t, level)
+					env.originator.cfg.ProviderPASSubscription = takes
+					msg, names := c.msg, PASPayersPath
+					if !takes {
+						msg, names = notTaken[c.msg], "takes no Subscription to the PAS topic at any payer's base"
+					}
+					var body string
+					if c.method == http.MethodPost || c.method == http.MethodPut || c.method == http.MethodPatch {
+						body = subscription
+					}
+					rec := httptest.NewRecorder()
+					req := httptest.NewRequest(c.method, c.path, strings.NewReader(body))
+					req.Header.Set("Content-Type", "application/fhir+json")
+					env.originator.Handler().ServeHTTP(rec, req)
+					refusedBeforeTheNetwork(t, env, rec, c.status, names)
+					wantOutcome(t, rec, c.status, c.code, msg)
+					if !takes && strings.Contains(rec.Body.String(), PASPayersPath) {
+						t.Fatalf("answer %s names %s, which lists none on this gateway", rec.Body, PASPayersPath)
+					}
+					x := got.only(t)
+					wantRefusal(t, x, c.status, RefusedByProviderGateway, RefusalRouting)
+					wantReasonInAnswer(t, x, rec.Body.String())
+					if x.Route != RoutePASSubscription {
+						t.Fatalf("recorded on route %q, want %q", x.Route, RoutePASSubscription)
+					}
+				})
+			}
 		}
 	}
 	// The control: a claim at the plain base is routed by its Coverage and

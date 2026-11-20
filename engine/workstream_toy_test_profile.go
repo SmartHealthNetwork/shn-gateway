@@ -37,22 +37,23 @@ var toyLegs = map[string]legDetail{
 // in: the toy.
 func profileWorkstreams() []workstream { return []workstream{toyAdapter} }
 
-func (toyProfileWorkstream) id() string                                     { return toyWorkstreamTag }
-func (w toyProfileWorkstream) catalog() map[string]legSpec                  { return w.legs }
-func (toyProfileWorkstream) routes(g *Gateway, role string) []mountedRoute  { return nil }
-func (toyProfileWorkstream) ingressRoutes() map[string]ingressHandler       { return nil }
-func (toyProfileWorkstream) involvement(string) (bool, bool)                { return false, false }
-func (toyProfileWorkstream) requestMembers(string, []byte) []namedMember    { return nil }
-func (toyProfileWorkstream) canonicalContractVersion() string               { return "" }
-func (toyProfileWorkstream) originatedAnswerCheck(string) legAnswerCheck    { return nil }
-func (toyProfileWorkstream) newMemState() memState                          { return nil }
-func (toyProfileWorkstream) checkStore(Store) error                         { return nil }
-func (toyProfileWorkstream) newGatewayState(*Gateway) (gatewayState, error) { return nil, nil }
-func (toyProfileWorkstream) newNativeState(*nativeResponder) nativeState    { return nil }
-func (toyProfileWorkstream) lineBridge() lineBridgeRows                     { return lineBridgeRows{} }
-func (toyProfileWorkstream) relayEdits() []relayEdit                        { return nil }
-func (toyProfileWorkstream) ingressOperations() []string                    { return nil }
-func (toyProfileWorkstream) refusalReasons() []refusalReason                { return nil }
+func (toyProfileWorkstream) id() string                                           { return toyWorkstreamTag }
+func (w toyProfileWorkstream) catalog() map[string]legSpec                        { return w.legs }
+func (toyProfileWorkstream) routes(g *Gateway, role string) []mountedRoute        { return nil }
+func (toyProfileWorkstream) ingressRoutes() map[string]ingressHandler             { return nil }
+func (toyProfileWorkstream) involvement(string) (bool, bool)                      { return false, false }
+func (toyProfileWorkstream) requestMembers(string, []byte) ([]namedMember, error) { return nil, nil }
+func (toyProfileWorkstream) canonicalContractVersion() string                     { return "" }
+func (toyProfileWorkstream) originatedAnswerCheck(string) legAnswerCheck          { return nil }
+func (toyProfileWorkstream) newMemState() memState                                { return nil }
+func (toyProfileWorkstream) checkStore(Store) error                               { return nil }
+func (toyProfileWorkstream) newGatewayState(*Gateway) (gatewayState, error)       { return nil, nil }
+func (toyProfileWorkstream) newNativeState(*nativeResponder) nativeState          { return nil }
+func (toyProfileWorkstream) lineBridge() lineBridgeRows                           { return lineBridgeRows{} }
+func (toyProfileWorkstream) relayEdits() []relayEdit                              { return nil }
+func (toyProfileWorkstream) ingressOperations() []string                          { return nil }
+func (toyProfileWorkstream) refusalReasons() []refusalReason                      { return nil }
+func (toyProfileWorkstream) routeScopes() []scopedPattern                         { return nil }
 
 // forward: the toy has no native responder send; its recipient answers
 // through the Responder (answer).

@@ -147,7 +147,7 @@ func (g *Gateway) handleIngressMetadata(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeCDSService) {
 		return
 	}
 	body, err := g.cdsDiscoveryJSON()
@@ -173,7 +173,7 @@ func (g *Gateway) handleCDSDiscovery(w http.ResponseWriter, r *http.Request) {
 // once it meets the CDS Hooks response rules.
 func (g *Gateway) handleCRDIngress(w http.ResponseWriter, r *http.Request) {
 	w, scope := g.withScope(w, relay.RoleRequester)
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeCDSService) {
 		return
 	}
 	svc, offered, known := g.advertisedCDSServiceByID(r.PathValue("id"))
@@ -377,7 +377,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 	w, scope := g.withScope(w, relay.RoleRequester)
 	scope.leg = legType
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeDTR) {
 		return
 	}
 	// Named once the caller is authenticated, as on the other routes.
@@ -515,7 +515,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) handlePASIngress(w http.ResponseWriter, r *http.Request) {
 	w, scope := g.withScope(w, relay.RoleRequester)
 	w = &fhirOperationWriter{w}
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopePASSubmit) {
 		return
 	}
 	body, ok := readIngressBody(w, r, shnsdk.MaxRequestBytes)

@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -347,6 +348,12 @@ type xmlBody struct {
 	hidden    bool
 	encoding  bool
 	dtd       bool
+	// bundleType is the value of the root's own type child; notAck is set
+	// when the document is no acknowledgement Bundle's shape (xmlAckBundle):
+	// a resource anywhere but the one OperationOutcome of an entry's
+	// response's outcome, or an entry holding more than its response.
+	bundleType string
+	notAck     bool
 }
 
 // namedXMLNS reports whether e is an element named xmlns with no prefix,
@@ -546,6 +553,11 @@ prolog:
 			return x, errors.New("not a document")
 		}
 	}
+	// path is the names of the elements open below the root, each in the
+	// FHIR namespace (one in another namespace is named so that no FHIR path
+	// matches it); types counts the root's own type children.
+	var path []string
+	types := 0
 	for depth := 1; depth > 0; {
 		tok, err := d.Token()
 		if err != nil {
@@ -556,14 +568,39 @@ prolog:
 			if repeatsAttribute(t) || namedXMLNS(t) {
 				return x, errors.New("an attribute named twice, or an element named xmlns")
 			}
-			if strings.EqualFold(t.Name.Local, "contained") || fhirResourceTypes[t.Name.Local] {
+			isResource := strings.EqualFold(t.Name.Local, "contained") || fhirResourceTypes[t.Name.Local]
+			if isResource {
 				x.resource = true
 			}
+			name := t.Name.Local
+			if t.Name.Space != FHIRNamespace {
+				name = "\x00" + name
+			}
+			switch {
+			case len(path) == 0 && name == "type":
+				if types++; types > 1 {
+					x.notAck = true
+				}
+				for _, a := range t.Attr {
+					if a.Name.Local == "value" && a.Name.Space == "" {
+						x.bundleType = a.Value
+					}
+				}
+			case len(path) == 1 && path[0] == "entry" && name != "response":
+				x.notAck = true
+			}
+			if isResource && !(name == "OperationOutcome" && slices.Equal(path, []string{"entry", "response", "outcome"})) {
+				x.notAck = true
+			}
+			path = append(path, name)
 			depth++
 			if depth > maxDepth {
 				return x, errors.New("nested past the depth bound")
 			}
 		case xml.EndElement:
+			if len(path) > 0 {
+				path = path[:len(path)-1]
+			}
 			depth--
 		}
 	}

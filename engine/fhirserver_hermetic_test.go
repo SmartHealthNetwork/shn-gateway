@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -27,7 +28,9 @@ func noteLiveFHIRServer(what string) error {
 }
 
 // TestMain replaces the fhirServer read's system resolver and dial for every
-// test in the package, and fails the run when any read used them.
+// test in the package, and fails the run when any read used them, or when a
+// run of gateway-at-scale left a listed test's leaves at scale unrun
+// (atScaleRunCheck).
 func TestMain(m *testing.M) {
 	fhirServerSystemResolve = func(_ context.Context, host string) ([]netip.Addr, error) {
 		return nil, noteLiveFHIRServer("resolve " + host)
@@ -42,6 +45,10 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	if hits := takeLiveFHIRServer(); len(hits) > 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: a test read a fhirServer through the real network (give it a resolver and dial): %v\n", hits)
+		code = 1
+	}
+	if p := atScaleRunCheck(); len(p) > 0 {
+		fmt.Fprintf(os.Stderr, "FAIL: the run at scale (%s=1):\n%s\n", atScaleEnv, strings.Join(p, "\n"))
 		code = 1
 	}
 	os.Exit(code)

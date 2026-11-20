@@ -9,10 +9,12 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 	fhir "github.com/samply/golang-fhir-models/fhir-models/fhir"
 
@@ -64,8 +66,16 @@ func (s *SoR) FHIRBase() string { return s.fc.BaseURL() }
 //
 // Request context reaches each nested read. Reads are not cached.
 func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patient, raw json.RawMessage, id string, ok bool, readErr error) {
+	// A member id that names no one is never searched: an identifier search
+	// with an empty value matches any member of the system, so a system of
+	// record holding one member would answer with that member. It is
+	// a read the caller refuses on, never "not found", which can send a leg
+	// on as an unknown member.
+	if memberNamesNoOne(memberID) {
+		return fhir.Patient{}, nil, "", false, invalidResponse()
+	}
 	b, err := s.fc.Search(ctx, "Patient", url.Values{
-		"identifier": {shnsdk.MemberSystem + "|" + memberID},
+		"identifier": {shnsdk.MemberSystem + "|" + escapeTokenValue(memberID)},
 	})
 	if err != nil {
 		return fhir.Patient{}, nil, "", false, safeReadError(err)
@@ -86,14 +96,56 @@ func (s *SoR) resolvePatient(ctx context.Context, memberID string) (p fhir.Patie
 	if err := json.Unmarshal(b.Entry[0].Resource, &p); err != nil {
 		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
-	if p.Id == nil || *p.Id == "" {
+	// The Patient's id scopes every later search for the member's records
+	// (patient=, beneficiary=): one that is not a FHIR id would be read there
+	// as another search's value, so the answer is out of shape.
+	if p.Id == nil || !isFHIRID(*p.Id) {
 		return fhir.Patient{}, nil, "", false, invalidResponse()
 	}
 	return p, b.Entry[0].Resource, *p.Id, true, nil
 }
 
-// ResolvePatient turns a member id into a substrate PCI via the SAME shnsdk.ResolvePCI
-// the stub uses, reading birthDate + family from the US Core Patient through
+// resourceTypeShape is a resource type's name, and readTarget a read's target.
+var (
+	resourceTypeShape = regexp.MustCompile(`^[A-Z][A-Za-z]{1,63}$`)
+	// readTarget is what a read names after its type: an id, or an id and a
+	// version id.
+	readTarget = regexp.MustCompile(`^[A-Za-z0-9\-.]{1,64}(/_history/[A-Za-z0-9\-.]{1,64})?$`)
+)
+
+// isFHIRID reports whether id is a FHIR id that is no dot segment: "." and
+// ".." match a FHIR id's characters, but a server or proxy that cleans a
+// request's path reads them as a step in it, so a read or search naming one
+// could answer for another resource.
+func isFHIRID(id string) bool { return fhirid.Valid(id) }
+
+// isReadTarget reports whether target is what a read names after its type (an
+// id, or an id and a version id), with neither a dot segment.
+func isReadTarget(target string) bool {
+	if !readTarget.MatchString(target) {
+		return false
+	}
+	id, version, versioned := strings.Cut(target, "/_history/")
+	return isFHIRID(id) && (!versioned || isFHIRID(version))
+}
+
+// escapeTokenValue escapes a value for a FHIR token search parameter: a
+// backslash, comma, dollar sign or bar is a search delimiter there, and an
+// unescaped value can match other members, so each is escaped with a
+// backslash and the value is matched as written.
+func escapeTokenValue(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `,`, `\,`, `$`, `\$`, `|`, `\|`).Replace(v)
+}
+
+// memberNamesNoOne reports whether memberID names no member: it is blank, or
+// a Patient reference's type with a blank id ("Patient/").
+func memberNamesNoOne(memberID string) bool {
+	id, _ := strings.CutPrefix(memberID, "Patient/")
+	return strings.TrimSpace(id) == ""
+}
+
+// ResolvePatient turns a member id into a substrate PCI via shnsdk.ResolvePCIStrict
+// (patientContext), reading birthDate + family from the US Core Patient through
 // engine.PatientDemographics, the read a Patient carried in a request gets too.
 func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (string, engine.Demo, bool, error) {
 	_, raw, _, ok, err := s.resolvePatient(ctx, memberID)
@@ -108,7 +160,21 @@ func (s *SoR) ResolvePatientContext(ctx context.Context, memberID string) (strin
 		// Unreadable, and when it repeats a member name, saying so.
 		return "", engine.Demo{}, false, engine.SoRInvalidAnswer(raw)
 	}
-	return shnsdk.ResolvePCI(memberID, demo.BirthDate, demo.FamilyName), demo, true, nil
+	return patientContext(memberID, demo)
+}
+
+// patientContext is the member's network identifier, derived by
+// shnsdk.ResolvePCIStrict, and its demographics. A member id that names no one
+// derives no identifier: resolvePatient refuses it before any search, and
+// ResolvePCIStrict refuses it again here (shnsdk.ErrBlankMember), so neither
+// returns a patient. Either is a read the caller refuses on, the same error,
+// never "not found", which can send a leg on as an unknown member.
+func patientContext(memberID string, demo engine.Demo) (string, engine.Demo, bool, error) {
+	pci, err := shnsdk.ResolvePCIStrict(memberID, demo.BirthDate, demo.FamilyName)
+	if err != nil {
+		return "", engine.Demo{}, false, invalidResponse()
+	}
+	return pci, demo, true, nil
 }
 
 // PatientFHIRRef returns "Patient/<store-id>" — the FHIR store's resource id for the member
@@ -504,8 +570,12 @@ func (s *SoR) OpenCoverageContext(ctx context.Context, memberID string) ([][]byt
 // Used to resolve an order's performer (the DME supplier Organization) for headless
 // order-dispatch origination.
 func (s *SoR) ResolveByReferenceContext(ctx context.Context, ref string) ([]byte, bool, error) {
+	// A reference is read only as the relative reference it is, Type/id or
+	// Type/id/_history/vid (a version read): a type or id of another shape (a
+	// path, a query, a fragment) would be sent as another request, so it names
+	// nothing this connector reads.
 	parts := strings.SplitN(ref, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 || !resourceTypeShape.MatchString(parts[0]) || !isReadTarget(parts[1]) {
 		return nil, false, nil
 	}
 	body, found, err := s.fc.Read(ctx, parts[0], parts[1])

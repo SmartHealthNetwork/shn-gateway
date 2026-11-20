@@ -125,11 +125,11 @@ func TestMONR25TokenRequestUsesItsOwnClient(t *testing.T) {
 	}
 	refuse := &http.Client{Transport: certRoundTrip(func(*http.Request) (*http.Response, error) { return nil, fmt.Errorf("the Hub client was used") })}
 	g := &Gateway{cfg: Config{HolderID: "h-authz", Identity: id, Clock: time.Now, AuthzURL: authz.URL, Client: refuse, AuthzClient: authz.Client()}}
-	if _, _, _, err := g.authorizeOnce(t.Context(), []byte(`{}`)); !errors.Is(err, errAuthorizationDenied) {
+	if _, _, _, err := g.authorizeOnce(t.Context(), g.authzClient(), []byte(`{}`)); !errors.Is(err, errAuthorizationDenied) {
 		t.Fatalf("authorizeOnce = %v; want the Framework's denial through AuthzClient", err)
 	}
 	g.cfg.AuthzClient = nil
-	if _, _, _, err := g.authorizeOnce(t.Context(), []byte(`{}`)); !errors.Is(err, errAuthzUnreachable) {
+	if _, _, _, err := g.authorizeOnce(t.Context(), g.authzClient(), []byte(`{}`)); !errors.Is(err, errAuthzUnreachable) {
 		t.Fatalf("with no AuthzClient = %v; want the Hub client's failure", err)
 	}
 }

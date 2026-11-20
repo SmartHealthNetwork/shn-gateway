@@ -106,8 +106,8 @@ func TestHTTPServerBound_MON_R18(t *testing.T) {
 	if got := HTTPServerRequestDuration.SeriesBound(); got != want || HTTPStatusErrorPairs() != pairs {
 		t.Errorf("bound %d with %d status and error pairs, want %d with %d", got, HTTPStatusErrorPairs(), want, pairs)
 	}
-	if routes != 93 || len(HTTPStatusCodes) != 900 || want != 893544 {
-		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 93, 900 and 893544", routes, len(HTTPStatusCodes), want)
+	if routes != 128 || len(HTTPStatusCodes) != 900 || want != 1229824 {
+		t.Errorf("%d method-route pairs, %d status codes, bound %d: pinned 128, 900 and 1229824", routes, len(HTTPStatusCodes), want)
 	}
 }
 
@@ -168,6 +168,7 @@ var allowedKeys = map[string]bool{
 	KeyEndpointKind: true, KeyCertRole: true, KeyDependency: true,
 	KeyRefusalRule: true, KeyRefusalBy: true, KeyRefusalStage: true, KeyStage: true, KeyFindingKind: true,
 	KeyAction: true, KeyTolerated: true, KeyListener: true, KeyBound: true,
+	KeyService: true, KeyRetryResult: true,
 }
 
 // semconvKeys are http.server.request.duration's attribute keys, the
@@ -212,7 +213,7 @@ func TestCatalogue_ClosedAndFreeOfIdentifiers_MON_R19_R20(t *testing.T) {
 			t.Errorf("%s: bound %d", inst.Name, inst.SeriesBound())
 		}
 	}
-	if len(seen) != 35 {
+	if len(seen) != 36 {
 		t.Errorf("%d instruments; the catalogue's count is part of MONITORING.md's and STABILITY's", len(seen))
 	}
 }

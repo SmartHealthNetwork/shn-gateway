@@ -1,5 +1,6 @@
 [
   "DELETE /Subscription/{id}",
+  "DELETE /pas/payer/{payer}/Subscription/{rest...}",
   "GET /.well-known/davinci-configuration",
   "GET /.well-known/smart-configuration",
   "GET /Subscription",
@@ -8,8 +9,11 @@
   "GET /cds-services",
   "GET /metadata",
   "GET /pas/payer/{payer}/.well-known/smart-configuration",
+  "GET /pas/payer/{payer}/Subscription",
+  "GET /pas/payer/{payer}/Subscription/{rest...}",
   "GET /pas/payers",
   "PATCH /Subscription/{id}",
+  "PATCH /pas/payer/{payer}/Subscription/{rest...}",
   "POST /$submit-attachment",
   "POST /Claim/$inquire",
   "POST /Claim/$submit",
@@ -27,6 +31,8 @@
   "POST /oauth/token",
   "POST /pas/payer/{payer}/Claim/$inquire",
   "POST /pas/payer/{payer}/Claim/$submit",
+  "POST /pas/payer/{payer}/Subscription",
   "POST /substrate/inbound",
-  "PUT /Subscription/{id}"
+  "PUT /Subscription/{id}",
+  "PUT /pas/payer/{payer}/Subscription/{rest...}"
 ]

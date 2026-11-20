@@ -20,19 +20,22 @@ func zoneOwnership() map[Key]Rule {
 	refusal := Rule{Allowed: own(A), Builders: b("gateway-refusal")}
 	relayOnly := Rule{Allowed: own(R)}
 	m := map[Key]Rule{
-		{"crd-order-dispatch", rq, req, OutcomeCarried}:      {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
-		{"crd-order-select", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
-		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-04", "E-05"}},
-		{"pas-claim", rq, req, OutcomeCarried}:               relayOnly,
-		{"pas-claim-inquire", rq, req, OutcomeCarried}:       relayOnly,
-		{"coverage-eligibility", rq, req, OutcomeCarried}:    relayOnly,
-		{"federated-query", rq, req, OutcomeCarried}:         relayOnly,
-		{"pas-claim-update", rq, req, OutcomeCarried}:        relayOnly,
-		{"cdex-attachment-submit", rq, req, OutcomeCarried}:  relayOnly,
-		{"cdex-attachment-request", rq, req, OutcomeCarried}: relayOnly,
-		{"cdex-task-status", rq, req, OutcomeCarried}:        relayOnly,
-		{"cdex-task-subscribe", rq, req, OutcomeCarried}:     {Allowed: own(R, E), Edits: []EditID{"E-18"}},
-		{"cdex-task-signal", rq, req, OutcomeCarried}:        relayOnly,
+		{"crd-order-dispatch", rq, req, OutcomeCarried}:         {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
+		{"crd-order-select", rq, req, OutcomeCarried}:           {Allowed: own(R, E), Edits: []EditID{"E-01", "E-02", "E-07"}},
+		{"dtr-questionnaire-fetch", rq, req, OutcomeCarried}:    {Allowed: own(R, E), Edits: []EditID{"E-04", "E-05"}},
+		{"pas-claim", rq, req, OutcomeCarried}:                  relayOnly,
+		{"pas-claim-inquire", rq, req, OutcomeCarried}:          relayOnly,
+		{"coverage-eligibility", rq, req, OutcomeCarried}:       relayOnly,
+		{"federated-query", rq, req, OutcomeCarried}:            relayOnly,
+		{"pas-claim-update", rq, req, OutcomeCarried}:           relayOnly,
+		{"cdex-attachment-submit", rq, req, OutcomeCarried}:     relayOnly,
+		{"cdex-attachment-request", rq, req, OutcomeCarried}:    relayOnly,
+		{"cdex-task-status", rq, req, OutcomeCarried}:           relayOnly,
+		{"cdex-task-subscribe", rq, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-18"}},
+		{"pas-subscription-subscribe", rq, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-18"}},
+		{"pas-subscription-signal", rq, req, OutcomeCarried}:    relayOnly,
+		{"pas-subscription-notify", rq, req, OutcomeCarried}:    relayOnly,
+		{"cdex-task-signal", rq, req, OutcomeCarried}:           relayOnly,
 
 		{"coverage-eligibility", rq, req, OutcomeOriginated}:    {Allowed: own(A), Builders: b("sdk-eligibility")},
 		{"crd-order-dispatch", rq, req, OutcomeOriginated}:      {Allowed: own(A), Builders: b("sdk-crd-request")},
@@ -44,19 +47,22 @@ func zoneOwnership() map[Key]Rule {
 		{"pas-claim-inquire", rq, req, OutcomeOriginated}:       {Allowed: own(A), Builders: b("sdk-pas-inquiry")},
 		{"pas-claim-update", rq, req, OutcomeOriginated}:        {Allowed: own(A, E), Edits: []EditID{"E-09"}, Builders: b("sdk-pas-update")},
 
-		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:      relayOnly,
-		{"crd-order-select", rq, resp, OutcomeAnswered}:        relayOnly,
-		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-08", "E-12"}},
-		{"pas-claim", rq, resp, OutcomeAnswered}:               {Allowed: own(R, E), Edits: []EditID{"E-10"}},
-		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:       {Allowed: own(R, E), Edits: []EditID{"E-10"}},
-		{"coverage-eligibility", rq, resp, OutcomeAnswered}:    relayOnly,
-		{"federated-query", rq, resp, OutcomeAnswered}:         relayOnly,
-		{"pas-claim-update", rq, resp, OutcomeAnswered}:        {Allowed: own(R, E), Edits: []EditID{"E-10"}},
-		{"cdex-attachment-submit", rq, resp, OutcomeAnswered}:  relayOnly,
-		{"cdex-attachment-request", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-16"}},
-		{"cdex-task-status", rq, resp, OutcomeAnswered}:        relayOnly,
-		{"cdex-task-subscribe", rq, resp, OutcomeAnswered}:     {Allowed: own(R, E), Edits: []EditID{"E-20", "E-23"}},
-		{"cdex-task-signal", rq, resp, OutcomeAnswered}:        relayOnly,
+		{"crd-order-dispatch", rq, resp, OutcomeAnswered}:         relayOnly,
+		{"crd-order-select", rq, resp, OutcomeAnswered}:           relayOnly,
+		{"dtr-questionnaire-fetch", rq, resp, OutcomeAnswered}:    {Allowed: own(R, E), Edits: []EditID{"E-08", "E-12"}},
+		{"pas-claim", rq, resp, OutcomeAnswered}:                  {Allowed: own(R, E), Edits: []EditID{"E-10"}},
+		{"pas-claim-inquire", rq, resp, OutcomeAnswered}:          {Allowed: own(R, E), Edits: []EditID{"E-10"}},
+		{"coverage-eligibility", rq, resp, OutcomeAnswered}:       relayOnly,
+		{"federated-query", rq, resp, OutcomeAnswered}:            relayOnly,
+		{"pas-claim-update", rq, resp, OutcomeAnswered}:           {Allowed: own(R, E), Edits: []EditID{"E-10"}},
+		{"cdex-attachment-submit", rq, resp, OutcomeAnswered}:     relayOnly,
+		{"cdex-attachment-request", rq, resp, OutcomeAnswered}:    {Allowed: own(R, E), Edits: []EditID{"E-16"}},
+		{"cdex-task-status", rq, resp, OutcomeAnswered}:           relayOnly,
+		{"cdex-task-subscribe", rq, resp, OutcomeAnswered}:        {Allowed: own(R, E), Edits: []EditID{"E-20", "E-23"}},
+		{"pas-subscription-subscribe", rq, resp, OutcomeAnswered}: {Allowed: own(R, E), Edits: []EditID{"E-20", "E-23"}},
+		{"pas-subscription-signal", rq, resp, OutcomeAnswered}:    relayOnly,
+		{"pas-subscription-notify", rq, resp, OutcomeAnswered}:    relayOnly,
+		{"cdex-task-signal", rq, resp, OutcomeAnswered}:           relayOnly,
 
 		{"coverage-eligibility", rq, resp, OutcomeUpstreamError}:    relayOnly,
 		{"crd-order-dispatch", rq, resp, OutcomeUpstreamError}:      relayOnly,
@@ -71,55 +77,109 @@ func zoneOwnership() map[Key]Rule {
 		{"cdex-attachment-request", rq, resp, OutcomeUpstreamError}: relayOnly,
 		{"cdex-task-status", rq, resp, OutcomeUpstreamError}:        relayOnly,
 
-		{"coverage-eligibility", rc, req, OutcomeCarried}:    relayOnly,
-		{"crd-order-dispatch", rc, req, OutcomeCarried}:      relayOnly,
-		{"crd-order-select", rc, req, OutcomeCarried}:        relayOnly,
-		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-13"}},
-		{"pas-claim", rc, req, OutcomeCarried}:               {Allowed: own(R, E), Edits: []EditID{"E-13"}},
-		{"pas-claim-inquire", rc, req, OutcomeCarried}:       {Allowed: own(R, E), Edits: []EditID{"E-13"}},
-		{"pas-claim-update", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-13"}},
-		{"cdex-attachment-submit", rc, req, OutcomeCarried}:  {Allowed: own(R, E), Edits: []EditID{"E-13"}},
-		{"cdex-attachment-request", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-11"}},
-		{"cdex-task-status", rc, req, OutcomeCarried}:        relayOnly,
-		{"cdex-task-subscribe", rc, req, OutcomeCarried}:     {Allowed: own(R, E), Edits: []EditID{"E-19", "E-21"}},
-		{"cdex-task-signal", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-17"}},
+		{"coverage-eligibility", rc, req, OutcomeCarried}:       relayOnly,
+		{"crd-order-dispatch", rc, req, OutcomeCarried}:         relayOnly,
+		{"crd-order-select", rc, req, OutcomeCarried}:           relayOnly,
+		{"dtr-questionnaire-fetch", rc, req, OutcomeCarried}:    {Allowed: own(R, E), Edits: []EditID{"E-13"}},
+		{"pas-claim", rc, req, OutcomeCarried}:                  {Allowed: own(R, E), Edits: []EditID{"E-13"}},
+		{"pas-claim-inquire", rc, req, OutcomeCarried}:          {Allowed: own(R, E), Edits: []EditID{"E-13"}},
+		{"pas-claim-update", rc, req, OutcomeCarried}:           {Allowed: own(R, E), Edits: []EditID{"E-13"}},
+		{"cdex-attachment-submit", rc, req, OutcomeCarried}:     {Allowed: own(R, E), Edits: []EditID{"E-13"}},
+		{"cdex-attachment-request", rc, req, OutcomeCarried}:    {Allowed: own(R, E), Edits: []EditID{"E-11"}},
+		{"cdex-task-status", rc, req, OutcomeCarried}:           relayOnly,
+		{"cdex-task-subscribe", rc, req, OutcomeCarried}:        {Allowed: own(R, E), Edits: []EditID{"E-19", "E-21"}},
+		{"pas-subscription-subscribe", rc, req, OutcomeCarried}: {Allowed: own(R, E), Edits: []EditID{"E-19", "E-21"}},
+		{"pas-subscription-signal", rc, req, OutcomeCarried}:    relayOnly,
+		{"pas-subscription-notify", rc, req, OutcomeCarried}:    {Allowed: own(R, E), Edits: []EditID{"E-22"}},
+		{"cdex-task-signal", rc, req, OutcomeCarried}:           {Allowed: own(R, E), Edits: []EditID{"E-17"}},
 
-		{"coverage-eligibility", rc, resp, OutcomeAnswered}:    {Allowed: own(A, R), Builders: b("sdk-eligibility")},
-		{"crd-order-dispatch", rc, resp, OutcomeAnswered}:      relayOnly,
-		{"crd-order-select", rc, resp, OutcomeAnswered}:        relayOnly,
-		{"dtr-questionnaire-fetch", rc, resp, OutcomeAnswered}: relayOnly,
-		{"federated-query", rc, resp, OutcomeAnswered}:         {Allowed: own(A), Builders: b("cdex-fulfillment")},
-		{"patient-dtr", rc, resp, OutcomeAnswered}:             {Allowed: own(A), Builders: b("sdk-patient-dtr")},
-		{"pas-claim", rc, resp, OutcomeAnswered}:               {Allowed: own(R)},
-		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:       relayOnly,
-		{"pas-claim-update", rc, resp, OutcomeAnswered}:        {Allowed: own(R)},
-		{"cdex-attachment-submit", rc, resp, OutcomeAnswered}:  relayOnly,
-		{"cdex-attachment-request", rc, resp, OutcomeAnswered}: relayOnly,
-		{"cdex-task-status", rc, resp, OutcomeAnswered}:        relayOnly,
-		{"cdex-task-subscribe", rc, resp, OutcomeAnswered}:     relayOnly,
-		{"cdex-task-signal", rc, resp, OutcomeAnswered}:        relayOnly,
+		{"coverage-eligibility", rc, resp, OutcomeAnswered}:       {Allowed: own(A, R), Builders: b("sdk-eligibility")},
+		{"crd-order-dispatch", rc, resp, OutcomeAnswered}:         relayOnly,
+		{"crd-order-select", rc, resp, OutcomeAnswered}:           relayOnly,
+		{"dtr-questionnaire-fetch", rc, resp, OutcomeAnswered}:    relayOnly,
+		{"federated-query", rc, resp, OutcomeAnswered}:            {Allowed: own(A), Builders: b("cdex-fulfillment")},
+		{"patient-dtr", rc, resp, OutcomeAnswered}:                {Allowed: own(A), Builders: b("sdk-patient-dtr")},
+		{"pas-claim", rc, resp, OutcomeAnswered}:                  {Allowed: own(R)},
+		{"pas-claim-inquire", rc, resp, OutcomeAnswered}:          relayOnly,
+		{"pas-claim-update", rc, resp, OutcomeAnswered}:           {Allowed: own(R)},
+		{"cdex-attachment-submit", rc, resp, OutcomeAnswered}:     relayOnly,
+		{"cdex-attachment-request", rc, resp, OutcomeAnswered}:    relayOnly,
+		{"cdex-task-status", rc, resp, OutcomeAnswered}:           relayOnly,
+		{"cdex-task-subscribe", rc, resp, OutcomeAnswered}:        relayOnly,
+		{"pas-subscription-subscribe", rc, resp, OutcomeAnswered}: relayOnly,
+		{"pas-subscription-signal", rc, resp, OutcomeAnswered}:    relayOnly,
+		{"pas-subscription-notify", rc, resp, OutcomeAnswered}:    relayOnly,
+		{"cdex-task-signal", rc, resp, OutcomeAnswered}:           relayOnly,
 
-		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:    relayOnly,
-		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:      relayOnly,
-		{"crd-order-select", rc, resp, OutcomeUpstreamError}:        relayOnly,
-		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}: relayOnly,
-		{"pas-claim", rc, resp, OutcomeUpstreamError}:               relayOnly,
-		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:       relayOnly,
-		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:        relayOnly,
-		{"cdex-attachment-submit", rc, resp, OutcomeUpstreamError}:  relayOnly,
-		{"cdex-attachment-request", rc, resp, OutcomeUpstreamError}: relayOnly,
-		{"cdex-task-status", rc, resp, OutcomeUpstreamError}:        relayOnly,
-		{"cdex-task-subscribe", rc, resp, OutcomeUpstreamError}:     relayOnly,
-		{"cdex-task-subscribe", rq, resp, OutcomeUpstreamError}:     relayOnly,
-		{"cdex-task-signal", rc, resp, OutcomeUpstreamError}:        relayOnly,
-		{"cdex-task-signal", rq, resp, OutcomeUpstreamError}:        relayOnly,
+		{"coverage-eligibility", rc, resp, OutcomeUpstreamError}:       relayOnly,
+		{"federated-query", rc, resp, OutcomeUpstreamError}:            {Allowed: own(A), Builders: b("cdex-decline")},
+		{"crd-order-dispatch", rc, resp, OutcomeUpstreamError}:         relayOnly,
+		{"crd-order-select", rc, resp, OutcomeUpstreamError}:           relayOnly,
+		{"dtr-questionnaire-fetch", rc, resp, OutcomeUpstreamError}:    relayOnly,
+		{"pas-claim", rc, resp, OutcomeUpstreamError}:                  relayOnly,
+		{"pas-claim-inquire", rc, resp, OutcomeUpstreamError}:          relayOnly,
+		{"pas-claim-update", rc, resp, OutcomeUpstreamError}:           relayOnly,
+		{"cdex-attachment-submit", rc, resp, OutcomeUpstreamError}:     relayOnly,
+		{"cdex-attachment-request", rc, resp, OutcomeUpstreamError}:    relayOnly,
+		{"cdex-task-status", rc, resp, OutcomeUpstreamError}:           relayOnly,
+		{"cdex-task-subscribe", rc, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-task-subscribe", rq, resp, OutcomeUpstreamError}:        relayOnly,
+		{"cdex-task-signal", rc, resp, OutcomeUpstreamError}:           relayOnly,
+		{"cdex-task-signal", rq, resp, OutcomeUpstreamError}:           relayOnly,
+		{"pas-subscription-subscribe", rc, resp, OutcomeUpstreamError}: relayOnly,
+		{"pas-subscription-subscribe", rq, resp, OutcomeUpstreamError}: relayOnly,
+		{"pas-subscription-signal", rc, resp, OutcomeUpstreamError}:    relayOnly,
+		{"pas-subscription-signal", rq, resp, OutcomeUpstreamError}:    relayOnly,
+		{"pas-subscription-notify", rc, resp, OutcomeUpstreamError}:    relayOnly,
+		{"pas-subscription-notify", rq, resp, OutcomeUpstreamError}:    relayOnly,
 	}
 	for _, leg := range []string{"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "crd-order-dispatch", "crd-order-select",
-		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update"} {
+		"dtr-questionnaire-fetch", "federated-query", "patient-dtr", "pas-claim", "pas-claim-inquire", "pas-claim-update", "pas-subscription-notify", "pas-subscription-signal", "pas-subscription-subscribe"} {
 		m[Key{leg, rq, resp, OutcomeRefused}] = refusal
 		m[Key{leg, rc, resp, OutcomeRefused}] = refusal
 	}
 	return m
+}
+
+// The facility's decline of a data request (cdex-decline) is admitted only as
+// its gateway's error answer on the federated query: a payload claiming it on
+// any other transmit, the federated query's successful answer and its
+// requester's side included, is refused, and nothing is sent.
+func TestCDexDeclineOnlyOnTheFederatedQueryErrorAnswer(t *testing.T) {
+	decline, err := Authored(BuilderCDexDecline, []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"business-rule","diagnostics":"x"}]}`), "application/fhir+json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errorAnswer := Key{"federated-query", RoleRecipient, DirectionResponse, OutcomeUpstreamError}
+	admitted := 0
+	for k := range LegOwnership() {
+		err := Check(k)(decline)
+		switch {
+		case k == errorAnswer && err != nil:
+			t.Errorf("%s refused the facility's decline: %v", k, err)
+		case k == errorAnswer:
+			admitted++
+		case err == nil:
+			t.Errorf("%s admitted the facility's decline", k)
+		}
+	}
+	if admitted != 1 {
+		t.Fatalf("admitted on %d transmits, want the federated query's error answer alone", admitted)
+	}
+	for _, k := range []Key{
+		{"federated-query", RoleRecipient, DirectionResponse, OutcomeAnswered},
+		{"federated-query", RoleRequester, DirectionResponse, OutcomeUpstreamError},
+		{"federated-query", RoleRecipient, DirectionResponse, OutcomeRefused},
+		{"coverage-eligibility", RoleRecipient, DirectionResponse, OutcomeUpstreamError},
+	} {
+		var oe *OwnershipError
+		if err := Check(k)(decline); !errors.As(err, &oe) || oe.Key != k {
+			t.Fatalf("%s: want an *OwnershipError, got %v", k, err)
+		}
+		if _, err := Transmit(decline, Check(k)); err == nil {
+			t.Fatalf("%s: Transmit sent the refused payload", k)
+		}
+	}
 }
 
 // The coverage carry (E-07) is admitted only where a provider's gateway

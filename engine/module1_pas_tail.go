@@ -130,6 +130,18 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 		}
 		requester, coverageParties = read.requester, read.coverageParties
 	}
+	// The dispatched supplier, read from the participant's own system, is
+	// checked by the splice's own rule whether the Claim names it as its
+	// provider (the build places it) or the request carries it beside the
+	// Claim's provider (retainPASSubmitSupplier's splice). One that cannot be
+	// carried as read is the fidelity of the build, refused before the
+	// provider is chosen from it or anything is built (502), with the leg it
+	// does not send observed, as the provider's own refusal below is.
+	if err := dispatchedSupplierNotCarried(orderJSON, supplierJSON); err != nil {
+		g.observeOwnBuildRefused(recipient, "pas-claim", err.Error())
+		status, msg, err := supplierLinkageAnswer(ctx, err)
+		return out, status, msg, err
+	}
 	providerJSON, refusal := g.pasProviderOf(ctx, orderJSON, append([][]byte{supplierJSON}, requester...)...)
 	if refusal != nil {
 		status, msg := g.pasTailRefusal(ctx, recipient, refusal)
@@ -152,9 +164,10 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 			return out, status, msg, nil
 		}
 		if isPASBuildFidelity(err) {
-			// The fidelity refusal pasBuildFailure answers, at the build stage.
+			// The fidelity refusal pasBuildFailure answers, at the build stage,
+			// with its status (buildFidelityStatus).
 			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-			return out, http.StatusUnprocessableEntity, withCarriedLegs(ctx, err.Error()), nil
+			return out, buildFidelityStatus(err), withCarriedLegs(ctx, err.Error()), nil
 		}
 		// This gateway's own failure, never a refusal (pasBuildFailure).
 		exchangeOf(ctx).ownFailure()
@@ -169,7 +182,10 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, in.sorID, member)
 	if err != nil {
 		// Answered as failEvidenceLinkage answers it: evidence the gateway's
-		// own edit cannot carry 422, a record it could not prepare 500, a
+		// own edit cannot carry with buildFidelityStatus's status (502, or 422
+		// for a record the system does not hold), a record read past the gateway's own
+		// carrying limits 502 (each the fidelity of the build), a record it
+		// could not prepare 500, a
 		// record the system answered as something else 502 naming it, a read
 		// the system failed to answer with its own status and reason, anything
 		// else 502.
@@ -192,9 +208,10 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 			status, why = SoRFailureResponse(err)
 			msg += ": " + why
 		}
-		// Anything else is recorded as the provider gateway's own refusal
-		// under no named rule, whatever legs came before it
-		// (TestProviderData_TheDispatchRecordsItsOwnEvidenceRefusal).
+		// Anything else (a request graph the completion will not read that
+		// no record read takes past a limit) is recorded as the provider
+		// gateway's own refusal under no named rule, whatever legs came
+		// before it.
 		return out, status, msg, err
 	}
 	// This helper owns the pas-claim leg wholesale — a single-shot submit+resolve —
@@ -255,16 +272,44 @@ func sameJSONResource(a, b []byte) bool {
 }
 
 // supplierLinkageAnswer answers a dispatched supplier retainPASSubmitSupplier
-// could not carry: a record the splice cannot carry as read is the fidelity of
-// the gateway's own edit at the build (422, errRecordNotCarried), saying which
+// could not carry: a record read from the system of record that the splice
+// cannot carry as read is the fidelity of the gateway's own edit at the build
+// (errRecordNotCarried), 502 as buildFidelityStatus answers it, saying which
 // legs were carried; anything else is the gateway's own failure (500), its
 // error returned to the caller.
 func supplierLinkageAnswer(ctx context.Context, err error) (int, string, error) {
 	if errors.Is(err, errRecordNotCarried) {
 		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
-		return http.StatusUnprocessableEntity, withCarriedLegs(ctx, err.Error()), nil
+		return buildFidelityStatus(err), withCarriedLegs(ctx, err.Error()), nil
 	}
 	return http.StatusInternalServerError, "PAS supplier linkage failed", err
+}
+
+// dispatchedSupplierNotCarried is errRecordNotCarried for a dispatched
+// supplier record (supplier, read from the system of record for order) that
+// a request cannot carry as read, by the splice's own rule
+// (uncarriableRecordBytes): not exactly one JSON object, not UTF-8, holding a
+// lone surrogate escape, or naming a member twice under case folding. It names
+// the record by the order's own performer reference (or as the dispatched
+// supplier, where the order names none exactly). nil when there is no
+// supplier.
+func dispatchedSupplierNotCarried(order, supplier []byte) error {
+	if len(supplier) == 0 {
+		return nil
+	}
+	why := uncarriableRecordBytes(bytes.Trim(supplier, " \t\r\n"))
+	if why == "" {
+		return nil
+	}
+	name := "the dispatched supplier"
+	if m, err := exactMembers(order); err == nil {
+		if performer, err := exactMembers(m["performer"]); err == nil {
+			if ref := exactString(performer, "reference"); ref != "" {
+				name += " " + ref
+			}
+		}
+	}
+	return fmt.Errorf("%w: %s %s", errRecordNotCarried, name, why)
 }
 
 // retainPASSubmitSupplier carries the actual dispatched supplier into the PAS

@@ -269,7 +269,9 @@ and a Coverage naming another payer, or one the gateway cannot resolve, is noted
 refused. The payer's base serves no CapabilityStatement yet (see
 [A payer's PAS base](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)).
 A Subscription sent to the plain base names no payer, so it is refused, naming
-`/pas/payers`, where the payers' bases that take one are listed.
+`/pas/payers`, where the payers' bases that take one are listed; from v1.16.0, without
+`PROVIDER_PAS_SUBSCRIPTION`, it says instead that the gateway takes no Subscription to the PAS
+topic at any payer's base.
 
 See [`PROVIDER_DAVINCI_INGRESS` and related variables in
 CONFIGURATION.md](CONFIGURATION.md#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)
@@ -342,7 +344,10 @@ Four steps, all on your side:
 
    `scope` is optional; if you send one it must be among the client's registered
    `scopes`. From shn-gateway v1.10.0 it may be a set, separated by single spaces, each one
-   registered for the client; the answer's `scope` states the set granted. Bearers live
+   registered for the client; the answer's `scope` states the set granted. From shn-gateway
+   v1.16.0 a request that names no `scope` is granted every scope the client is registered for
+   (a client registered with no `scopes` is registered for `system/Davinci.write`), and the
+   answer's `scope` says which; earlier releases granted it none. Bearers live
    **5 minutes**. Without `SHN_STORE_DATABASE_URL` they are
    signed with a key the gateway generates at startup, so a restart invalidates
    outstanding bearers — fetch one per run rather than caching across sessions; with
@@ -372,6 +377,17 @@ Four steps, all on your side:
    `Bearer`. A missing or rejected bearer returns `401` with the body
    FHIR `OperationOutcome`, whose issue diagnostic is
    `ingress authentication required`.
+
+   From shn-gateway v1.16.0 each route takes a bearer granted a scope that permits it:
+   `system/Davinci.write` permits every route but a `Subscription`, and each route's own scope (such as
+   `system/Claim.write` for `$submit`, or `system/Questionnaire.read` for DTR) permits that
+   route. A bearer granted neither is refused `403` with `WWW-Authenticate: Bearer
+   error="insufficient_scope", scope="<the route's own scope>"`. A client registered as in step 2,
+   or with no `scopes`, holds `system/Davinci.write` and reaches every Da Vinci route as before;
+   a `Subscription` at the plain base, or with `PROVIDER_PAS_SUBSCRIPTION` at a payer's PAS base,
+   takes a Subscription scope instead. The routes, their scopes and the wildcard and DTR
+   spellings the ingress reads are listed in
+   [CONFIGURATION.md](CONFIGURATION.md#each-routes-own-scope).
 
    `$submit` and `$questionnaire-package` return a relayed success with the media
    type the payer's system stated from v1.10.0 (`application/fhir+json` before, and
@@ -431,7 +447,8 @@ Task Attachment Request.
   (`PAYER_DAVINCI_INGRESS_BASE_URL`) and your system's registered clients
   (`INGRESS_CLIENTS_FILE`). Your system gets a bearer from the gateway's own token endpoint
   (SMART Backend Services, `system/Task.write`, or from shn-gateway v1.10.0 any `system/Task`
-  scope that permits creating a Task with no query, such as `system/Task.c`), lists the providers that take
+  scope that permits creating a Task with no query, such as `system/Task.c`, and from v1.16.0 a
+  wildcard that does, such as `system/*.write`), lists the providers that take
   the request with `GET /cdex/providers`, and creates the Task at a provider's base,
   `POST {base}/Task`. The base
   names the provider, so the network routes the Task by the address alone. From shn-gateway
@@ -482,7 +499,8 @@ FHIR read or vread of the Task it created.
   (`FHIR_DATA_URL`) when `Task.for` becomes a reference to your own `Patient`. See
   [the payer's read of its Task in CONFIGURATION.md](CONFIGURATION.md#take-a-payers-read-of-its-task-provider-optional).
 - **On the payer's side,** register a scope that permits reading a Task (`system/Task.read`,
-  `system/Task.*`, or a v2 scope with `r`) for your system's client, beside its create scope, and
+  `system/Task.*`, a v2 scope with `r`, or from shn-gateway v1.16.0 a wildcard that does, such
+  as `system/*.rs`) for your system's client, beside its create scope, and
   ask for both in one token. Your system reads the Task where it created it: at the provider's
   base, `GET {base}/Task/{id}`, or a version with `GET {base}/Task/{id}/_history/{vid}`, as at a
   provider's own FHIR server (the direct-integration shape: create and read at one base, every
@@ -704,6 +722,17 @@ supply through `engine.Config.SoR` keeps its own behaviour.
 The gateway's own 503 does not promise an automatic retry or make repeating a clinical
 write safe.
 
+A member id your connector is given is an opaque value that names exactly one patient. Match it
+exactly, never as a pattern, a prefix or one of several alternatives. A connector that searches a
+FHIR server by identifier escapes the value as FHIR token search requires (a backslash, comma,
+dollar sign or bar, each with a backslash); an unescaped value can match other members. The
+gateway never asks for a member that names no one (empty, only whitespace, or `Patient/` with no
+id), and your connector refuses one too: as a failed read (an `engine.SoRReadError`; the built-in
+FHIR connector answers `SoRInvalidResponse`), never as a member it does not hold, which a leg can
+carry on as an unknown member. The gateway cannot escape a value for your connector's own query
+language. The built-in FHIR connector escapes every value it searches by, and reads a reference
+only as `Type/id` (or `Type/id/_history/vid`) with FHIR ids that are no `.` or `..` segment.
+
 Custom connectors can additionally implement `engine.ContextSystemOfRecord`. Its nine
 `Context`-suffixed read methods accept the request context and return an error as their
 last result. Return a nil error for actual absence and an `engine.SoRReadError` with
@@ -787,8 +816,13 @@ A facility gateway answers a clinical data request (CDex) from the same search:
   instants never drops an edge-day record); the gateway still selects each record by its
   own date. Both record types a request may name have that parameter.
 - **Bounds.** Each type's search is held to the bounds above (10 pages, 200 entries,
-  4 MiB, 5 seconds). More records than that is answered `422 records exceed the per-answer
-  bound for <type>`, never a partial answer; a search that runs out of time is `503`.
+  4 MiB, 5 seconds). From shn-gateway v1.16.0, more records than that is refused `502
+  federated query refused: the facility's <type> records are past the gateway's per-answer
+  bound (10 pages, 200 entries or 4 MiB); it cannot be answered until the facility's records
+  change`, recorded with rule `fidelity` at stage `build`, never a partial answer (earlier
+  releases refused it `422 records exceed the per-answer bound for <type>`). An answer past the
+  gateway's own carrying limits is refused `502` too ("Carrying limits" in `STABILITY.md`). A
+  search that runs out of time is `503`.
 - **Identity binding.** The gateway reads the member's `Patient` (`PatientFHIRRef`, then
   `ResolveByReference`) to confirm it exists and is that member, but does not send it. It
   sends only a `Patient` it writes itself, with your server's Patient id and the
@@ -930,9 +964,8 @@ request). What the FHIR check covers, per leg:
   answer it relays through its Da Vinci ingress already is.
 - A PAS request carried from your own system (the `$submit` ingress) is not
   `$validate`d by your gateway; only the content checks and the network rules
-  apply to it there. From v1.13.0, the release planned to carry it (no published
-  release carries it yet), a payer's gateway at `structural` or `strict` checks
-  the request it receives, at its own level, before its system sees it: against
+  apply to it there. From v1.13.0, a payer's gateway at `structural` or `strict`
+  checks the request it receives, at its own level, before its system sees it: against
   what the request declares, or its line's request Bundle profile when it
   declares none, valid when any candidate line accepts it. A refusal reaches
   you as a `422` OperationOutcome naming `ingress validation failed` with the

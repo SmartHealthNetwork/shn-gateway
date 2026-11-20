@@ -274,15 +274,25 @@ type config struct {
 	// serves DTR and PAS from different bases. Empty ⇒ that operation uses
 	// PayerDavinciBaseURL (co-located default). Either set without the shared base is
 	// a boot error: the fallback must always exist.
-	PayerDavinciDTRBaseURL   string
-	PayerDavinciPASBaseURL   string
-	PayerDavinciTokenURL     string
-	PayerDavinciClientID     string
-	PayerDavinciClientKey    string
-	PayerDavinciClientAlg    string
-	PayerDavinciScope        string
-	PayerDavinciClientKID    string
-	PayerDavinciClientSecret string // value, not a path (unlike *ClientKey)
+	PayerDavinciDTRBaseURL string
+	PayerDavinciPASBaseURL string
+	// PayerDavinciSubscriptionScope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE) is the
+	// scope the gateway asks the payer's token endpoint, with its Da Vinci
+	// client, for to reach the payer system's own Subscription endpoint, at its
+	// PAS base (PayerDavinciPASBaseURL, or PayerDavinciBaseURL when that is
+	// unset). Set, the payer takes a provider's topic Subscription to the PAS
+	// topic (pas-subscription-subscribe), from shn-gateway v1.16.0, from that
+	// setting alone; it requires PAYER_DAVINCI_INGRESS and its base, under
+	// which each Subscription's notification address is written, and
+	// PAYER_DAVINCI_TOKEN_URL. Read trimmed: a blank value is unset.
+	PayerDavinciSubscriptionScope string
+	PayerDavinciTokenURL          string
+	PayerDavinciClientID          string
+	PayerDavinciClientKey         string
+	PayerDavinciClientAlg         string
+	PayerDavinciScope             string
+	PayerDavinciClientKID         string
+	PayerDavinciClientSecret      string // value, not a path (unlike *ClientKey)
 	// PayerCDSAuth is how CDS calls to the payer (CRD: the service listing
 	// and each hook) authenticate: a CDS Hooks client JWT signed with the
 	// payer client key, or the payer client's access token
@@ -385,6 +395,18 @@ type config struct {
 	// PROVIDER_DAVINCI_INGRESS_BASE_URL, under which each Subscription's
 	// notification address is written. Read trimmed: a blank value is unset.
 	ProviderCDexSubscriptionScope string
+	// ProviderPASSubscription (PROVIDER_PAS_SUBSCRIPTION) is the provider's
+	// ask that its gateway deliver the PAS topic's no-content notifications a
+	// payer's gateway sends it, to the endpoint the provider's own system
+	// wrote into its Subscription. Set, from shn-gateway v1.16.0, the
+	// provider takes them (pas-subscription-signal) and the decision
+	// notifications (pas-subscription-notify), and its gateway serves its
+	// own system's Subscription at each payer's PAS base
+	// (/pas/payer/{payer}/Subscription). Provider role
+	// only. On at 1 or true, off at 0, false or unset; any other value
+	// refuses the start, as every on/off setting the gateway reads strictly
+	// does (REQUIRE_SHARED_LINE).
+	ProviderPASSubscription bool
 
 	// ProviderDavinciIngress mounts the Da Vinci ingress routes (CRD /cds-services,
 	// DTR $questionnaire-package, PAS $submit) on the provider role. Set by
@@ -861,6 +883,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		PayerDavinciCDSBaseURL:            getenv("PAYER_DAVINCI_CDS_BASE_URL"),
 		PayerDavinciDTRBaseURL:            getenv("PAYER_DAVINCI_DTR_BASE_URL"),
 		PayerDavinciPASBaseURL:            getenv("PAYER_DAVINCI_PAS_BASE_URL"),
+		PayerDavinciSubscriptionScope:     strings.TrimSpace(getenv("PAYER_DAVINCI_SUBSCRIPTION_SCOPE")),
 		PayerDavinciTokenURL:              getenv("PAYER_DAVINCI_TOKEN_URL"),
 		PayerDavinciClientID:              getenv("PAYER_DAVINCI_CLIENT_ID"),
 		PayerDavinciClientKey:             getenv("PAYER_DAVINCI_CLIENT_KEY"),
@@ -1296,8 +1319,64 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if len(clients) == 0 {
 			return config{}, fmt.Errorf("gateway: PROVIDER_DAVINCI_INGRESS requires INGRESS_CLIENTS_FILE with >=1 registered client (a mounted-but-universally-401 ingress is a footgun)")
 		}
+		// Each route the provider ingress mounts takes its own scope, or the
+		// umbrella (engine.ProviderUmbrellaScope): a client registering a
+		// scope on one of their resource types that SMART does not spell is
+		// a registration error (engine.CheckProviderIngressScopes). One that
+		// can be granted no scope any route takes starts, and is refused
+		// 403 on each route; it is said once here.
+		resources := engine.RouteScopeResources()
+		for id, c := range clients {
+			if err := engine.CheckProviderIngressScopes(c.Scopes, resources); err != nil {
+				return config{}, fmt.Errorf("gateway: ingress client %q: %w", id, err)
+			}
+			if !engine.ProviderScopesReachARoute(c.Scopes) {
+				log.Printf("gateway: ingress client %q is registered for no scope a provider ingress route takes (%s, or a route's own scope): each route will refuse it 403 insufficient_scope", id, engine.ProviderUmbrellaScope)
+			}
+		}
 		cfg.IngressBaseURL = cfg.ProviderDavinciIngressBaseURL
 		cfg.IngressClients = clients
+	}
+	// The PAS topic's notifications are delivered to a provider's own
+	// system: a provider's setting alone. Only 1 and true set it, and 0,
+	// false and unset leave it off: SHN Cloud writes 1, a self-hosted
+	// participant may write true as for the other on/off settings, and a
+	// value that is neither never reads as on.
+	switch raw := getenv("PROVIDER_PAS_SUBSCRIPTION"); raw {
+	case "", "0", "false":
+	case "1", "true":
+		cfg.ProviderPASSubscription = true
+	default:
+		return config{}, fmt.Errorf("gateway: PROVIDER_PAS_SUBSCRIPTION must be 1 or true to set it, or 0, false or empty to leave it unset, got %q", raw)
+	}
+	if cfg.ProviderPASSubscription && role != "provider" {
+		return config{}, fmt.Errorf("gateway: PROVIDER_PAS_SUBSCRIPTION is provider-only (role=%q): only a provider takes the PAS topic's notifications", role)
+	}
+	if cfg.ProviderPASSubscription && (!cfg.ProviderDavinciIngress || cfg.ProviderDavinciIngressBaseURL == "") {
+		return config{}, fmt.Errorf("gateway: PROVIDER_PAS_SUBSCRIPTION set requires PROVIDER_DAVINCI_INGRESS and PROVIDER_DAVINCI_INGRESS_BASE_URL: a notified decision's documentation return path is written under that base")
+	}
+	// A provider's Subscription to the PAS topic at the payer: the payer's
+	// setting, with the ingress its notification addresses are written under
+	// and the authorized Da Vinci forward its Subscription endpoint is reached
+	// through.
+	if cfg.PayerDavinciSubscriptionScope != "" {
+		switch {
+		case role != "payer":
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE is payer-only (role=%q)", role)
+		case !cfg.PayerDavinciIngress || cfg.PayerDavinciIngressBaseURL == "":
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_INGRESS and PAYER_DAVINCI_INGRESS_BASE_URL: each Subscription's notification address is written under that base, where the payer's system delivers its notifications")
+		case cfg.PayerDavinciBaseURL == "":
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_BASE_URL: the payer's Subscription endpoint is reached at its PAS base")
+		case cfg.PayerDavinciTokenURL == "":
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires PAYER_DAVINCI_TOKEN_URL: the scope is asked of the payer's token endpoint")
+		}
+		base, name := cfg.PayerDavinciBaseURL, "PAYER_DAVINCI_BASE_URL"
+		if cfg.PayerDavinciPASBaseURL != "" {
+			base, name = cfg.PayerDavinciPASBaseURL, "PAYER_DAVINCI_PAS_BASE_URL"
+		}
+		if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE set requires %s, the base the payer's Subscription endpoint is at, to be an absolute http or https URL with a host and no query or fragment (%q)", name, base)
+		}
 	}
 	// The payer's ingress, by the same all-or-nothing rule (FR-G13).
 	if cfg.PayerDavinciIngress {
@@ -1336,9 +1415,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("gateway: PAYER_DAVINCI_INGRESS requires INGRESS_CLIENTS_FILE with >=1 registered client (a mounted-but-universally-401 ingress is a footgun)")
 		}
 		// Every route the payer ingress mounts takes a bearer granted a
-		// system/Task scope that permits it: a client that can be granted
-		// none, or that registers a Task scope SMART does not spell, is a
-		// registration error, not a client (engine.CheckPayerIngressScopes).
+		// system/Task scope, or a wildcard, that permits it: a client that
+		// can be granted none that permits create, or that registers a Task
+		// scope, a Subscription scope or a wildcard SMART does not spell, is
+		// a registration error, not a client (engine.CheckPayerIngressScopes).
 		for id, c := range clients {
 			if err := engine.CheckPayerIngressScopes(c.Scopes); err != nil {
 				return config{}, fmt.Errorf("gateway: ingress client %q: %w", id, err)
@@ -1466,13 +1546,19 @@ func loadScenarioCallers(path string) (map[string]ed25519.PublicKey, error) {
 // declare are its module's, so an entry that lists builders is refused.
 // Returns nil (not error) when path is empty — the caller then enforces the
 // must-have->=1-client invariant.
+//
+// A client that lists no scopes is registered for engine.ProviderUmbrellaScope,
+// system/Davinci.write, which permits every provider ingress route: the
+// documented default, an explicit registration and never an empty one, so a
+// bearer naming no scope is granted it (engine.providerIngressGrant).
 func loadIngressClients(path string) (map[string]engine.IngressClientRegistration, error) {
-	return loadIngressClientsScoped(path, "system/Davinci.write")
+	return loadIngressClientsScoped(path, engine.ProviderUmbrellaScope)
 }
 
 // loadIngressClientsScoped is loadIngressClients with the scope a client that
-// lists none is registered for: the provider ingress's system/Davinci.write,
-// or, on a payer's, the attachment-request Task routes' engine.TaskWriteScope.
+// lists none is registered for: the provider ingress's
+// engine.ProviderUmbrellaScope, or, on a payer's, the attachment-request Task
+// routes' engine.TaskWriteScope.
 func loadIngressClientsScoped(path, defaultScope string) (map[string]engine.IngressClientRegistration, error) {
 	if path == "" {
 		return nil, nil
@@ -2036,6 +2122,16 @@ type built struct {
 	cdexSubscriptionScope   string
 	cdexSubscriptionClient  bool
 	subscriptionPredecessor bool
+	// payerSubscriptionScope, payerSubscriptionClient, payerSubscriptionBase
+	// and payerSubscriptionOptions are what build handed engine.New for a
+	// provider's Subscription to the PAS topic, recorded for the same reason.
+	payerSubscriptionScope   string
+	payerSubscriptionClient  bool
+	payerSubscriptionBase    string
+	payerSubscriptionOptions int
+	// providerPASSubscription is whether build asked engine.New to take the
+	// PAS topic's notifications, recorded for the same reason.
+	providerPASSubscription bool
 	// subscriptionKeys are the topic Subscription keys build() derived from
 	// the identity and, when IDENTITY_PREDECESSOR_DIR is set, its
 	// predecessor; the subscription legs take them from here once they are
@@ -2610,24 +2706,28 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			// must reach none on this path too, not just the in-process Gateway.
 			engine.WithConformancePolicy(engine.NewConformancePolicy(cfg.ConformanceEnforcement)),
 		}
+		// backendOpts are what every call to the payer's own system takes,
+		// the Subscription endpoint's among them.
+		var backendOpts []engine.NativeOption
 		if len(cfg.PayerDavinciBackendHeaders) > 0 {
-			nativeOpts = append(nativeOpts, engine.WithBackendHeaders(cfg.PayerDavinciBackendHeaders))
+			backendOpts = append(backendOpts, engine.WithBackendHeaders(cfg.PayerDavinciBackendHeaders))
 			fmt.Fprintf(stdout, "gateway: partner requests carry %d fixed header(s) (PAYER_DAVINCI_BACKEND_HEADERS)\n", len(cfg.PayerDavinciBackendHeaders))
 		}
 		// Every call to the payer's own system has a deadline under the
 		// requester's leg budget, so a slow system is answered, and recorded,
 		// as its own timeout rather than cut short when the requester leaves.
-		nativeOpts = append(nativeOpts, engine.WithBackendDeadline(cfg.PayerDavinciBackendTimeout))
+		backendOpts = append(backendOpts, engine.WithBackendDeadline(cfg.PayerDavinciBackendTimeout))
 		if cfg.payerDavinciBackendTimeoutRaw != "" {
 			fmt.Fprintf(stdout, "gateway: partner requests time out after %s (PAYER_DAVINCI_BACKEND_TIMEOUT)\n", cfg.PayerDavinciBackendTimeout)
 		}
 		if cfg.PayerDavinciBackendCorrelationOff {
-			nativeOpts = append(nativeOpts, engine.WithoutBackendCorrelation())
+			backendOpts = append(backendOpts, engine.WithoutBackendCorrelation())
 			fmt.Fprintf(stdout, "gateway: partner requests carry no X-Correlation-Id (PAYER_DAVINCI_BACKEND_CORRELATION=off)\n")
 		}
 		if cfg.diagnostic != nil {
-			nativeOpts = append(nativeOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
+			backendOpts = append(backendOpts, engine.WithNativeDiagnostic(cfg.diagnostic.emit))
 		}
+		nativeOpts = append(nativeOpts, backendOpts...)
 		// Stated in every state, so a deployment's eligibility posture can be read
 		// from its boot line.
 		if cfg.PayerEligibilityURL != "" {
@@ -2648,6 +2748,23 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 		evidenceSink = native
 		gwCfg.Responder = native
+		// A provider's Subscription to the PAS topic: a token asked for the
+		// subscription scope, from the payer's token endpoint and client, at
+		// the PAS base (loadConfig requires the ingress, the base and the
+		// token endpoint with the scope).
+		if cfg.PayerDavinciSubscriptionScope != "" {
+			sc, err := payerSubscriptionHTTPClient(cfg)
+			if err != nil {
+				return b, fmt.Errorf("gateway: PAYER_DAVINCI_SUBSCRIPTION_SCOPE: %w", err)
+			}
+			gwCfg.PayerSubscriptionScope = cfg.PayerDavinciSubscriptionScope
+			gwCfg.PayerSubscriptionClient = sc
+			gwCfg.PayerSubscriptionOptions = backendOpts
+			gwCfg.PayerSubscriptionBaseURL = cfg.PayerDavinciBaseURL
+			if cfg.PayerDavinciPASBaseURL != "" {
+				gwCfg.PayerSubscriptionBaseURL = cfg.PayerDavinciPASBaseURL
+			}
+		}
 		// The native-forward DTR response is a foreign Da Vinci package SHN can't $validate
 		// (R-8 near-relay): tell the engine to skip the DTR egress foreign-$validate (FR-G28).
 		gwCfg.PayerDavinciNative = true
@@ -2711,6 +2828,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		}
 	}
 	gwCfg.SubscriptionPredecessorKey = subPred
+	gwCfg.ProviderPASSubscription = cfg.ProviderPASSubscription
 	gwCfg.IngressEnabled = cfg.ProviderDavinciIngress || cfg.PayerDavinciIngress
 	gwCfg.IngressBaseURL = cfg.IngressBaseURL
 	gwCfg.IngressClients = cfg.IngressClients
@@ -2855,6 +2973,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		gwCfg.StoreErrorMetric = storeErr
 		gwCfg.InvolvedMetric = involvedOmittedMetricHook(metricsReg)
 		gwCfg.TokenMetric = tokenMetricHook(metricsReg)
+		gwCfg.NetworkRetryMetric = networkRetryMetricHook(metricsReg)
 		// The exchange additions (MON-R23, MON-R24).
 		gwCfg.ActiveRequestMetric = activeRequestHook(metricsReg)
 		gwCfg.FindingMetric = findingMetricHook(metricsReg)
@@ -2916,6 +3035,14 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 			_ = gw.Close()
 		}
 	}()
+	// A payer that takes a provider's Subscription to the PAS topic reads its
+	// system's CapabilityStatement once, as a signal for its operator only:
+	// the leg is declared from the setting whatever it shows.
+	if gwCfg.PayerSubscriptionScope != "" {
+		mctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		gw.CheckPASSubscriptionSupport(mctx)
+		cancel()
+	}
 	var obsHandler http.Handler
 	if hub != nil {
 		obsHandler = composeObserverHandler(hub.HandlerWithBarrier(gw.WaitObserverCompletion), gw, cfg.DemoEdgeCapture)
@@ -3031,11 +3158,16 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		cdexReadScope:        gwCfg.ProviderCDexReadScope,
 		cdexReadClient:       gwCfg.ProviderCDexReadClient != nil,
 
-		cdexSubscriptionScope:   gwCfg.ProviderCDexSubscriptionScope,
-		cdexSubscriptionClient:  gwCfg.ProviderCDexSubscriptionClient != nil,
-		subscriptionPredecessor: gwCfg.SubscriptionPredecessorKey != nil,
-		responder:               gwCfg.Responder,
-		subscriptionKeys:        subKeys,
+		cdexSubscriptionScope:    gwCfg.ProviderCDexSubscriptionScope,
+		cdexSubscriptionClient:   gwCfg.ProviderCDexSubscriptionClient != nil,
+		payerSubscriptionScope:   gwCfg.PayerSubscriptionScope,
+		payerSubscriptionClient:  gwCfg.PayerSubscriptionClient != nil,
+		payerSubscriptionBase:    gwCfg.PayerSubscriptionBaseURL,
+		payerSubscriptionOptions: len(gwCfg.PayerSubscriptionOptions),
+		providerPASSubscription:  gwCfg.ProviderPASSubscription,
+		subscriptionPredecessor:  gwCfg.SubscriptionPredecessorKey != nil,
+		responder:                gwCfg.Responder,
+		subscriptionKeys:         subKeys,
 
 		diagnostic:      cfg.diagnostic,
 		gateway:         gw,
@@ -3580,13 +3712,15 @@ const (
 // network's legs it compiles for its role, and each one its role takes only
 // once its participant configures it whose setting is set (engine.TakenLegs:
 // the payer's attachment request, with PROVIDER_CDEX_TASK_URL, the payer's
-// read of its Task, with PROVIDER_CDEX_READ_SCOPE, and the payer's Subscription
-// to its Tasks' changes, with PROVIDER_CDEX_SUBSCRIPTION_SCOPE); and the
-// request frames it
+// read of its Task, with PROVIDER_CDEX_READ_SCOPE, the payer's Subscription to
+// its Tasks' changes, with PROVIDER_CDEX_SUBSCRIPTION_SCOPE, and a provider's
+// Subscription to the PAS topic, with PAYER_DAVINCI_SUBSCRIPTION_SCOPE, and a
+// payer's notification of the provider's own, with PROVIDER_PAS_SUBSCRIPTION);
+// and the request frames it
 // serves of its own (declaredRequestFrames).
 func capabilityDeclaration(cfg config) shnsdk.CapabilityDeclaration {
 	return shnsdk.CapabilityDeclaration{
-		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL, ProviderCDexReadScope: cfg.ProviderCDexReadScope, ProviderCDexSubscriptionScope: cfg.ProviderCDexSubscriptionScope}.TakenLegs()),
+		Legs:               networkLegs(engine.Config{Role: cfg.Role, ProviderCDexTaskURL: cfg.ProviderCDexTaskURL, ProviderCDexReadScope: cfg.ProviderCDexReadScope, ProviderCDexSubscriptionScope: cfg.ProviderCDexSubscriptionScope, PayerSubscriptionScope: cfg.PayerDavinciSubscriptionScope, ProviderPASSubscription: cfg.ProviderPASSubscription}.TakenLegs()),
 		AttachmentMaxBytes: cfg.PayerAttachmentMaxBytes,
 		RequestFrames:      declaredRequestFrames(cfg.Role, cfg.ProviderCDexTaskURL != ""),
 	}
@@ -3852,6 +3986,25 @@ func payerDavinciHTTPClient(cfg config) (*http.Client, error) {
 	hc, err := smartauth.NewHTTPClient(sc)
 	if err != nil {
 		return nil, fmt.Errorf("payer-davinci smartauth client: %w", err)
+	}
+	return hc, nil
+}
+
+// payerSubscriptionHTTPClient is the client the payer's gateway reaches the
+// payer's own Subscription endpoint with: the Da Vinci forward's SMART config
+// (its token endpoint, client and credential), its token asked for
+// PAYER_DAVINCI_SUBSCRIPTION_SCOPE. It holds its own token, so no other
+// scope's token is sent for its calls.
+func payerSubscriptionHTTPClient(cfg config) (*http.Client, error) {
+	sc, err := payerDavinciSmartConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sc.Scope = cfg.PayerDavinciSubscriptionScope
+	cfg.diagnostic.smart(&sc)
+	hc, err := smartauth.NewHTTPClient(sc)
+	if err != nil {
+		return nil, fmt.Errorf("Subscription smartauth client: %w", err)
 	}
 	return hc, nil
 }

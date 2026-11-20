@@ -394,6 +394,16 @@ func (o observingSoR) emit(op, detail string, payload []byte) {
 	o.observer(e)
 }
 
+// emitReadErr emits a failed read's safe class. A member that names no one is
+// refused before any read (errMemberNamesNoOne), so nothing was read: no
+// event, never one blaming the system of record.
+func (o observingSoR) emitReadErr(op string, err error) {
+	if errors.Is(err, errMemberNamesNoOne) {
+		return
+	}
+	o.emit(op, string(safeSoRError(err).Kind), nil)
+}
+
 func sorFoundDetail(found bool) string {
 	if found {
 		return "found"
@@ -408,7 +418,7 @@ func (o observingSoR) ResolvePatient(key string) (string, Demo, bool) {
 func (o observingSoR) ResolvePatientContext(ctx context.Context, key string) (string, Demo, bool, error) {
 	a, b, found, err := ReadSystemOfRecord(o.inner).ResolvePatientContext(ctx, key)
 	if err != nil {
-		o.emit("ResolvePatient", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("ResolvePatient", err)
 	} else {
 		o.emit("ResolvePatient", sorFoundDetail(found), nil)
 	}
@@ -422,7 +432,7 @@ func (o observingSoR) PatientFHIRRef(key string) (string, bool) {
 func (o observingSoR) PatientFHIRRefContext(ctx context.Context, key string) (string, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).PatientFHIRRefContext(ctx, key)
 	if err != nil {
-		o.emit("PatientFHIRRef", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("PatientFHIRRef", err)
 	} else {
 		o.emit("PatientFHIRRef", sorFoundDetail(found), nil)
 	}
@@ -436,7 +446,7 @@ func (o observingSoR) CoverageInforce(key string) (bool, string) {
 func (o observingSoR) CoverageInforceContext(ctx context.Context, key string) (bool, string, error) {
 	found, a, err := ReadSystemOfRecord(o.inner).CoverageInforceContext(ctx, key)
 	if err != nil {
-		o.emit("CoverageInforce", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("CoverageInforce", err)
 	} else {
 		detail := "inforce"
 		if !found {
@@ -457,7 +467,7 @@ func (o observingSoR) ClinicalContext(key string) (shnsdk.ClinicalContext, bool)
 func (o observingSoR) ClinicalContextContext(ctx context.Context, key string) (shnsdk.ClinicalContext, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).ClinicalContextContext(ctx, key)
 	if err != nil {
-		o.emit("ClinicalContext", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("ClinicalContext", err)
 	} else {
 		o.emit("ClinicalContext", sorFoundDetail(found), nil)
 	}
@@ -471,7 +481,7 @@ func (o observingSoR) SupplementalReport(key string) ([]byte, bool) {
 func (o observingSoR) SupplementalReportContext(ctx context.Context, key string) ([]byte, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).SupplementalReportContext(ctx, key)
 	if err != nil {
-		o.emit("SupplementalReport", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("SupplementalReport", err)
 	} else {
 		o.emit("SupplementalReport", sorFoundDetail(found), a)
 	}
@@ -485,7 +495,7 @@ func (o observingSoR) FacilityRecords(key string) (map[string][]byte, bool) {
 func (o observingSoR) FacilityRecordsContext(ctx context.Context, key string) (map[string][]byte, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).FacilityRecordsContext(ctx, key)
 	if err != nil {
-		o.emit("FacilityRecords", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("FacilityRecords", err)
 	} else {
 		o.emit("FacilityRecords", sorFoundDetail(found), nil)
 	}
@@ -499,7 +509,7 @@ func (o observingSoR) OpenOrder(key string) ([]byte, bool) {
 func (o observingSoR) OpenOrderContext(ctx context.Context, key string) ([]byte, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).OpenOrderContext(ctx, key)
 	if err != nil {
-		o.emit("OpenOrder", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("OpenOrder", err)
 	} else {
 		o.emit("OpenOrder", sorFoundDetail(found), a)
 	}
@@ -519,7 +529,7 @@ func (o observingSoR) OpenCoverageContext(ctx context.Context, key string) ([][]
 	covs, err := ReadSystemOfRecord(o.inner).OpenCoverageContext(ctx, key)
 	switch {
 	case err != nil:
-		o.emit("OpenCoverage", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("OpenCoverage", err)
 	case len(covs) <= 1:
 		var one []byte
 		if len(covs) == 1 {
@@ -571,7 +581,7 @@ func (o observingSoR) ResolveByReference(key string) ([]byte, bool) {
 func (o observingSoR) ResolveByReferenceContext(ctx context.Context, key string) ([]byte, bool, error) {
 	a, found, err := ReadSystemOfRecord(o.inner).ResolveByReferenceContext(ctx, key)
 	if err != nil {
-		o.emit("ResolveByReference", string(safeSoRError(err).Kind), nil)
+		o.emitReadErr("ResolveByReference", err)
 	} else {
 		o.emit("ResolveByReference", sorFoundDetail(found), a)
 	}

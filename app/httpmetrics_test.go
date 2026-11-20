@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"sort"
 	"testing"
 	"time"
 
@@ -136,18 +135,20 @@ func TestHTTPStatusErrorPairs_MON_R18(t *testing.T) {
 	}
 }
 
-// MON-R29: the HTTP metric's routes are exactly the routes a gateway can
-// mount, whatever its role and configuration, and the main listener's own:
-// a route a gateway mounts that the list does not name would record as
-// _OTHER, and a name no gateway mounts inflates the bound.
+// MON-R29: each role, the provider built with its ingress and module 1, the
+// payer with its own Da Vinci endpoint, mounts only routes the HTTP metric
+// names. That every route any role, configuration and
+// build can mount is named, and nothing else, is the source fence's
+// (test/gatewayfence, TestHTTPRoutePatternsAreEveryRoutePatternConstant);
+// this row holds the router to the list for the routes it really mounts.
 func TestHTTPRoutePatternsAreTheMountedRoutes(t *testing.T) {
-	mounted := map[string]bool{"GET /health": true, "/internal/checks": true, "/internal/stats": true}
 	full := map[string]string{
 		"PROVIDER_DTR_POPULATE_URL":         "https://populate.test/fhir/Questionnaire/$populate",
 		"PROVIDER_DAVINCI_INGRESS":          "1",
 		"PROVIDER_DAVINCI_INGRESS_BASE_URL": "https://gw.test",
 		"INGRESS_CLIENTS_FILE":              writeClientsFile(t, moduleClientsJSON(t, map[string]any{"module": engine.ModuleOnBehalf})),
 	}
+	mounted := 0
 	for _, role := range []string{"provider", "payer", "facility", "phg"} {
 		env := map[string]string{}
 		switch role {
@@ -164,21 +165,14 @@ func TestHTTPRoutePatternsAreTheMountedRoutes(t *testing.T) {
 			t.Fatalf("%s: build: %v", role, err)
 		}
 		for _, p := range b.gateway.RoutePatternsForTest() {
+			mounted++
 			if !slices.Contains(telemetry.HTTPRoutePatterns, p) {
 				t.Errorf("%s mounts %q, which the HTTP metric's routes do not name", role, p)
 			}
-			mounted[p] = true
 		}
 	}
-	var unmounted []string
-	for _, p := range telemetry.HTTPRoutePatterns {
-		if !mounted[p] {
-			unmounted = append(unmounted, p)
-		}
-	}
-	sort.Strings(unmounted)
-	if len(unmounted) > 0 || len(mounted) != len(telemetry.HTTPRoutePatterns) {
-		t.Errorf("routes no gateway mounted: %q; %d mounted, %d listed", unmounted, len(mounted), len(telemetry.HTTPRoutePatterns))
+	if mounted == 0 {
+		t.Fatal("no role mounted a route")
 	}
 }
 

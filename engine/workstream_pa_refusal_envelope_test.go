@@ -49,7 +49,7 @@ func TestRefusalEnvelope_LegsSplitAsTheTaxonomySays(t *testing.T) {
 	keys := func(m map[string]legSpec) []string { return slices.Sorted(maps.Keys(m)) }
 	if got, want := keys(legsByAnswerEnvelope(t, legtaxonomy.AnswerEnvelopeFHIR)), []string{
 		"cdex-attachment-request", "cdex-attachment-submit", "cdex-task-signal", "cdex-task-status", "cdex-task-subscribe", "coverage-eligibility", "dtr-questionnaire-fetch",
-		"federated-query", "pas-claim", "pas-claim-inquire", "pas-claim-update",
+		"federated-query", "pas-claim", "pas-claim-inquire", "pas-claim-update", "pas-subscription-notify", "pas-subscription-signal", "pas-subscription-subscribe",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("FHIR legs = %v, want %v", got, want)
 	}
@@ -86,7 +86,7 @@ func TestRespondLegError_AGatewayRefusalOnAFHIRLegIsAnOperationOutcome(t *testin
 				g, requester := newInboundTestGateway(t, true)
 				rec := httptest.NewRecorder()
 				g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), spec.RespFrame, spec.RespOp, tx,
-					"corr-1", LegResult{Status: status, Message: msg}, "pci-1", requester.ID, "", "")
+					"corr-1", LegResult{Status: status, Message: msg}, legPatient(spec), requester.ID, "", "")
 				if rec.Code != http.StatusOK {
 					t.Fatalf("to-Hub status = %d, want 200 (framed)", rec.Code)
 				}
@@ -105,7 +105,7 @@ func TestRespondLegError_AGatewayRefusalOnAFHIRLegIsAnOperationOutcome(t *testin
 				g, requester := newInboundTestGateway(t, false)
 				rec := httptest.NewRecorder()
 				g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), spec.RespFrame, spec.RespOp, tx,
-					"corr-1", LegResult{Status: status, Message: msg}, "pci-1", requester.ID, "", "")
+					"corr-1", LegResult{Status: status, Message: msg}, legPatient(spec), requester.ID, "", "")
 				if rec.Code != status || rec.Header().Get("Content-Type") != "application/fhir+json" {
 					t.Fatalf("bare %d %q, want %d application/fhir+json", rec.Code, rec.Header().Get("Content-Type"), status)
 				}
@@ -173,7 +173,7 @@ func TestRespondLegError_AParticipantsOwnErrorIsCarriedAsSent(t *testing.T) {
 					rec := httptest.NewRecorder()
 					p := relay.Exact(relay.NewBody([]byte(row.body), relay.OriginUpstreamResponse), row.ct)
 					g.respondLegError(rec, newSignedInboundRequest(t, g, requester.ID), spec.RespFrame, spec.RespOp, tx,
-						"corr-1", LegResult{Status: http.StatusConflict, Response: p}, "pci-1", requester.ID, "", "")
+						"corr-1", LegResult{Status: http.StatusConflict, Response: p}, legPatient(spec), requester.ID, "", "")
 					hdr, body, err := shnsdk.DecodeHTTPFrame(openResponseLeg(t, requester, rec.Body.Bytes()))
 					if err != nil {
 						t.Fatal(err)
@@ -324,10 +324,14 @@ var ingressRouteLegs = map[string][]string{
 	RouteCDexSubscriptionBase: {"cdex-task-subscribe"},
 	RouteCDexSubscription:     {"cdex-task-subscribe"},
 	RouteCDexNotify:           {"cdex-task-signal"},
-	// The plain base's Subscription refusals originate no leg: the subscribe
-	// leg's taxonomy row is not yet published, so it has no answer envelope.
-	RoutePASSubscription: {},
-	RouteFederatedQuery:  {"federated-query"},
+	// The plain base's Subscription refusals are the subscribe leg's: a
+	// Subscription there names no payer, so nothing is originated, and the
+	// refusal is the leg's FHIR answer.
+	RoutePASSubscription: {"pas-subscription-subscribe"},
+	// The provider's Subscription at a payer's base originates the leg.
+	RoutePASSubscriptionBase: {"pas-subscription-subscribe"},
+	RoutePASNotify:           {"pas-subscription-signal", "pas-subscription-notify"},
+	RouteFederatedQuery:      {"federated-query"},
 }
 
 // noIngressRouteYet are the legs with an answer envelope that no ingress
@@ -379,4 +383,14 @@ func TestAnswerEnvelope_IsTheIngressRoutesEnvelope(t *testing.T) {
 			t.Errorf("leg %s has an ingress route now: drop it from noIngressRouteYet", leg)
 		}
 	}
+}
+
+// legPatient is the patient a leg's request token names, as the Framework
+// mints it: one on a leg whose request names its patient, none on a leg whose
+// row says its request names none.
+func legPatient(spec legSpec) string {
+	if spec.namesNoPatient() || spec.fromAnswer() {
+		return ""
+	}
+	return "pci:1"
 }

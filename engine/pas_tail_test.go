@@ -309,47 +309,118 @@ func TestSubmitPASClaim_InternalBuildFailureIsNoRefusal(t *testing.T) {
 	}
 }
 
-// A dispatched supplier, spliced beside the provider the order's requester
-// names, whose record the splice cannot carry as read (a member named in two
-// cases) is refused 422 by the waiting tail: the fidelity of the gateway's own
-// edit at the build, saying so, never the gateway's own 500, and no claim is sent.
+// A dispatched supplier, carried beside the provider the order's requester
+// names, whose record cannot be carried as read by the splice's own rule (a
+// member named in two cases) is refused 502 by the waiting tail, naming the
+// record, before anything is built: what cannot be carried is what the
+// gateway read from its own participant's system. It is the fidelity of the
+// gateway's own edit at the build, saying so, never the gateway's own 500, and
+// no claim is sent. TestDispatch_SupplierNotCarriedAsReadIsRefused502 is the
+// route's, where the supplier is the Claim's provider.
 func TestSubmitPASClaim_SupplierNotCarriedAsReadIsAFidelityRefusal(t *testing.T) {
-	env := newInProcessExchange(t)
-	const (
-		member      = "MBR-COVERED"
-		patientRef  = "Patient/" + member
-		coverageRef = "Coverage/" + member
-	)
-	recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
-	if status != 0 {
-		t.Fatalf("originCRDRecords: %d %s", status, msg)
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			const (
+				member      = "MBR-COVERED"
+				patientRef  = "Patient/" + member
+				coverageRef = "Coverage/" + member
+			)
+			recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+			if status != 0 {
+				t.Fatalf("originCRDRecords: %d %s", status, msg)
+			}
+			realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
+			if status != 0 || !found {
+				t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
+			}
+			pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
+			if !routed {
+				t.Fatal("the member's coverage routes to no payer")
+			}
+			realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
+			if status != 0 {
+				t.Fatalf("memberPayerOrganization: %d %s", status, msg)
+			}
+			order, err := buildDispatchDeviceRequest("dr-tail", patientRef, "Organization/supplier-tail", "E1390", "Stationary oxygen concentrator", "J96.10")
+			if err != nil {
+				t.Fatal(err)
+			}
+			order = bytes.Replace(order, []byte(`"resourceType":"DeviceRequest"`), []byte(`"requester":{"reference":"`+OrderingProviderRef+`"},"resourceType":"DeviceRequest"`), 1)
+			supplier := []byte(`{"resourceType":"Organization","id":"supplier-tail","Name":"Another supplier","name":"Tail supplier"}`)
+			x := &exchangeRecorder{}
+			ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
+			req := claimRequest(testOrderBody(order, "")).WithContext(ctx)
+			_, status, msg, err = env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: order, supplierJSON: supplier, coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
+			if err != nil || status != http.StatusBadGateway || !strings.Contains(msg, "cannot be carried as read: the dispatched supplier Organization/supplier-tail names a member twice, or in another case") {
+				t.Fatalf("submitPASClaim = %d %q %v, want the 502 fidelity refusal", status, msg, err)
+			}
+			if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+				t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
+			}
+
+		})
 	}
-	realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
-	if status != 0 || !found {
-		t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
-	}
-	pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
-	if !routed {
-		t.Fatal("the member's coverage routes to no payer")
-	}
-	realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
-	if status != 0 {
-		t.Fatalf("memberPayerOrganization: %d %s", status, msg)
-	}
-	order, err := buildDispatchDeviceRequest("dr-tail", patientRef, "Organization/supplier-tail", "E1390", "Stationary oxygen concentrator", "J96.10")
-	if err != nil {
-		t.Fatal(err)
-	}
-	order = bytes.Replace(order, []byte(`"resourceType":"DeviceRequest"`), []byte(`"requester":{"reference":"`+OrderingProviderRef+`"},"resourceType":"DeviceRequest"`), 1)
-	supplier := []byte(`{"resourceType":"Organization","id":"supplier-tail","Name":"Another supplier","name":"Tail supplier"}`)
-	x := &exchangeRecorder{}
-	ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
-	req := claimRequest(testOrderBody(order, "")).WithContext(ctx)
-	_, status, msg, err = env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: order, supplierJSON: supplier, coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
-	if err != nil || status != http.StatusUnprocessableEntity || !strings.Contains(msg, "cannot be carried as read: it names a member twice, or in another case") {
-		t.Fatalf("submitPASClaim = %d %q %v, want the 422 fidelity refusal", status, msg, err)
-	}
-	if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
-		t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
+}
+
+// The order's requester leads to a record, read from the system of record,
+// that the build's own splice cannot carry as read (a lone surrogate escape):
+// the waiting tail's build refuses it 502, the fidelity of the gateway's own
+// build, at every level, never the gateway's own 500, and no claim is sent.
+// (On today's routes the requester's own read refuses such a record first,
+// as the system's invalid answer, 502; this row drives the build's guard.)
+func TestSubmitPASClaim_RequesterNotCarriedAsReadIsAFidelityRefusal(t *testing.T) {
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			const (
+				member      = "MBR-COVERED"
+				patientRef  = "Patient/" + member
+				coverageRef = "Coverage/" + member
+			)
+			recs, status, msg, _ := env.originator.originCRDRecords(env.ctx, "crd-order-select", member)
+			if status != 0 {
+				t.Fatalf("originCRDRecords: %d %s", status, msg)
+			}
+			realCov, found, status, msg := env.originator.memberCoverage(env.ctx, member)
+			if status != 0 || !found {
+				t.Fatalf("memberCoverage: status=%d found=%v %s", status, found, msg)
+			}
+			pid, routed, _, _, _ := env.originator.routedPayerIdentifier(env.ctx, realCov)
+			if !routed {
+				t.Fatal("the member's coverage routes to no payer")
+			}
+			realPayerOrg, _, status, msg, _ := env.originator.memberPayerOrganization(env.ctx, realCov, pid)
+			if status != 0 {
+				t.Fatalf("memberPayerOrganization: %d %s", status, msg)
+			}
+			order, err := buildDispatchDeviceRequest("dr-tail", patientRef, "Organization/supplier-tail", "E1390", "Stationary oxygen concentrator", "J96.10")
+			if err != nil {
+				t.Fatal(err)
+			}
+			order = bytes.Replace(order, []byte(`"resourceType":"DeviceRequest"`), []byte(`"requester":{"reference":"`+OrderingProviderRef+`"},"resourceType":"DeviceRequest"`), 1)
+			supplier := []byte(`{"resourceType":"Organization","id":"supplier-tail","name":"Tail supplier"}`)
+			// The order's requester leads to its Organization, the Claim's
+			// provider (which the build carries itself), and to a Practitioner
+			// holding a lone surrogate escape: read from the system of record,
+			// the splice cannot carry it.
+			requester := [][]byte{
+				[]byte(`{"resourceType":"Organization","id":"org-ordering-provider","name":"Ordering provider"}`),
+				[]byte(`{"resourceType":"Practitioner","id":"pr-1","name":[{"text":"A clinician\ud800"}]}`),
+			}
+			x := &exchangeRecorder{}
+			ctx := context.WithValue(env.ctx, exchangeRecorderKey{}, x)
+			req := claimRequest(testOrderBody(order, "")).WithContext(ctx)
+			_, status, msg, err = env.originator.submitPASClaim(ctx, req, pasFollowInputs{pci: "pci-1", orderJSON: order, supplierJSON: supplier, requester: requester, sourcesRead: true, coverage: realCov, insurer: realPayerOrg, patientRef: patientRef, coverageRef: coverageRef, member: member, memberSystem: recs.memberSystem, payer: shnsdk.CMSPayerIdentity, recipient: env.payerID})
+			if err != nil || status != http.StatusBadGateway || !strings.Contains(msg, "cannot be carried as read: it holds a lone surrogate escape") {
+				t.Fatalf("submitPASClaim = %d %q %v, want the 502 fidelity refusal", status, msg, err)
+			}
+			if x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
+				t.Fatalf("recorded %s %s/%s, want refused fidelity/build", x.outcome, x.rule, x.refusalStage)
+			}
+
+		})
 	}
 }

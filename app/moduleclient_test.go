@@ -89,3 +89,29 @@ func TestBuild_ModuleClientAtBoot(t *testing.T) {
 		})
 	}
 }
+
+// REJECTION, through the configuration a deployment uses: a module client
+// registered for a Subscription scope refuses boot, naming the client and the
+// scope; the same module client with the umbrella scope alone boots.
+func TestBuild_AModuleClientsSubscriptionScopeRefusesBoot(t *testing.T) {
+	for name, scopes := range map[string][]string{"a Subscription scope": {"system/Davinci.write", "system/Subscription.cruds"}, "the umbrella alone": {"system/Davinci.write"}} {
+		t.Run(name, func(t *testing.T) {
+			extra := map[string]string{
+				"PROVIDER_DTR_POPULATE_URL":         "https://populate.test/fhir/Questionnaire/$populate",
+				"PROVIDER_DAVINCI_INGRESS":          "1",
+				"PROVIDER_DAVINCI_INGRESS_BASE_URL": "https://gw.test",
+				"INGRESS_CLIENTS_FILE":              writeClientsFile(t, moduleClientsJSON(t, map[string]any{"module": engine.ModuleOnBehalf, "scopes": scopes})),
+			}
+			_, _, err := buildProviderForPopulate(t, extra)
+			if len(scopes) == 1 {
+				if err != nil {
+					t.Fatalf("build: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "no module builds a Subscription interaction") || !strings.Contains(err.Error(), "system/Subscription.cruds") {
+				t.Fatalf("err = %v, want the module's Subscription scope refused", err)
+			}
+		})
+	}
+}

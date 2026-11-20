@@ -178,8 +178,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// Sender) must match the envelope it arrived in. This stops a valid token being
 	// lifted into a different envelope/operation and replayed, and stops one holder
 	// routing using another holder's token.
-	if err := shnsdk.VerifyBound(tok, g.cfg.AuthzPub, g.cfg.Clock(),
-		spec.ReqFrame, spec.Op, env.Metadata.CorrelationID, env.Metadata.Sender, "", sha256hex(env.Ciphertext)); err != nil {
+	// The token's patient is held to the leg's row (requestSubjectWant): some
+	// patient on a leg whose request names one, which this gateway binds
+	// afterwards, and none on a leg that names none or takes its patient from
+	// the answer.
+	if err := g.verifyInboundToken(tok, spec, env.Metadata.CorrelationID, env.Metadata.Sender, sha256hex(env.Ciphertext)); err != nil {
 		exchangeOf(r.Context()).refused(RefusalAuthority)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "authz verification failed"})
 		return

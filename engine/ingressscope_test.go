@@ -89,6 +89,19 @@ func TestTaskScopesPermit(t *testing.T) {
 		{"system/Patient.write system/Davinci.write", false, false},
 		{"system/Task.rc", false, false},
 		{"", false, false},
+		// A wildcard permits the routes for the permissions it grants.
+		{"system/*.write", true, false},
+		{"system/*.read", false, true},
+		{"system/*.*", true, true},
+		{"system/*.c", true, false},
+		{"system/*.rs", false, true},
+		{"system/*.cruds", true, true},
+		{"system/*.uds", false, false},
+		{"system/*.c?status=requested", false, false},
+		{"system/*.c?status=requested system/*.r", false, true},
+		{"system/*.rc", false, false},
+		{"SYSTEM/*.write", false, false},
+		{"patient/*.write", false, false},
 	} {
 		if got := taskScopesPermit(row.granted, taskCreate); got != row.create {
 			t.Errorf("%q: create %v, want %v", row.granted, got, row.create)
@@ -146,6 +159,16 @@ func TestCheckPayerIngressScopes(t *testing.T) {
 		{TaskWriteScope, "system/Task.c?status=requested"},
 		{TaskWriteScope, "system/Task.read"},
 		{"system/Davinci.write", TaskWriteScope},
+		// A wildcard that permits create is a client's create scope, as a
+		// Task scope is; one for another context is kept and permits nothing.
+		{"system/*.write"},
+		{"system/*.*"},
+		{"system/*.c"},
+		{"system/*.cruds"},
+		{"system/*.rs", "system/*.c"},
+		{TaskWriteScope, "system/*.rs"},
+		{TaskWriteScope, "system/*.c?status=requested"},
+		{TaskWriteScope, "patient/*.x"},
 	} {
 		if err := CheckPayerIngressScopes(scopes); err != nil {
 			t.Errorf("%v: refused, want taken: %v", scopes, err)
@@ -155,17 +178,32 @@ func TestCheckPayerIngressScopes(t *testing.T) {
 		scopes []string
 		want   string
 	}{
-		{nil, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Davinci.write"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Patient.read"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Task.c?status=requested"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Task.uds"}, "lists no system/Task scope that permits creating a Task"},
+		{nil, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Davinci.write"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Patient.read"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Task.c?status=requested"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Task.uds"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		// A wildcard that does not permit create, or a granular one, is not
+		// a create scope.
+		{[]string{"system/*.read"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/*.rs"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/*.c?status=requested"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"patient/*.write"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		// A misspelled wildcard would be granted and permit nothing, so it
+		// is a registration error, as it is on the provider's ingress.
+		{[]string{"system/*.rc"}, `"system/*.rc" is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "system/*.x"}, `"system/*.x" is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "system/*."}, `"system/*." is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "system/*"}, `"system/*" is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "System/*.read"}, `"System/*.read" is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "system/*.read?x=1"}, `"system/*.read?x=1" is not a SMART wildcard scope`},
+		{[]string{TaskWriteScope, "system/*.c?"}, `"system/*.c?" is not a SMART wildcard scope`},
 		// Registered only to read: a payer's ingress is for creating its Task,
 		// and its read routes read one its system created.
-		{[]string{"system/Task.read"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Task.rs"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Task.read", "system/Task.c?status=requested"}, "lists no system/Task scope that permits creating a Task"},
-		{[]string{"system/Davinci.write", "system/Task.u"}, "lists no system/Task scope that permits creating a Task"},
+		{[]string{"system/Task.read"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Task.rs"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Task.read", "system/Task.c?status=requested"}, "lists no system/Task scope or wildcard that permits creating a Task"},
+		{[]string{"system/Davinci.write", "system/Task.u"}, "lists no system/Task scope or wildcard that permits creating a Task"},
 		{[]string{"system/task.read"}, `"system/task.read" is not a SMART system/Task scope`},
 		{[]string{TaskWriteScope, "System/Task.read"}, `"System/Task.read" is not a SMART system/Task scope`},
 		{[]string{"system/Task.rc"}, `"system/Task.rc" is not a SMART system/Task scope`},
@@ -207,5 +245,150 @@ func TestScopeReason_Create(t *testing.T) {
 	}
 	if scopeReason(taskUpdate) != "" || challengeScope(taskUpdate) != "" {
 		t.Fatalf("a permission no route takes: reason %q, challenge %q", scopeReason(taskUpdate), challengeScope(taskUpdate))
+	}
+}
+
+// TestRouteScopesPermit: a provider route's scope check, on test routes: a
+// resource scope on one of the route's resources (v1 or v2) with no query
+// that permits what the route needs; a wildcard for the permissions it
+// grants, never on a route that names no resource; the umbrella on every
+// route; the DTR IG's own spellings; and nothing else.
+func TestRouteScopesPermit(t *testing.T) {
+	create := routeScope{resources: []string{"Claim"}, need: taskCreate}
+	read := routeScope{resources: []string{"Questionnaire"}, need: taskRead}
+	either := routeScope{resources: []string{"DocumentReference", "QuestionnaireResponse"}, need: taskCreate}
+	anyOf := routeScope{resources: []string{"Claim"}, need: taskCreate | taskRead, any: true}
+	none := routeScope{}
+	for _, row := range []struct {
+		granted string
+		route   routeScope
+		want    bool
+	}{
+		{"system/Claim.c", create, true},
+		{"system/Claim.write", create, true},
+		{"system/Claim.*", create, true},
+		{"system/Claim.cruds", create, true},
+		{"system/Claim.r", create, false},
+		{"system/Claim.c?patient=1", create, false},
+		{"system/claim.c", create, false},
+		{"user/Claim.c", create, false},
+		{"system/Task.c", create, false},
+		{"system/*.c", create, true},
+		{"system/*.write", create, true},
+		{"system/*.rs", create, false},
+		{"system/*.c?patient=1", create, false},
+		{ProviderUmbrellaScope, create, true},
+		{"system/davinci.write", create, false},
+		{"SYSTEM/Davinci.write", none, false},
+		{"system/Davinci.read", create, false},
+		{"", create, false},
+		{"system/Questionnaire.rs system/Claim.c", read, true},
+		{"system/questionnaire.rs", read, true},
+		{"system/questionnaire.r", read, false},
+		{"system/valueset.rs", read, false},
+		{"system/DocumentReference.c", either, true},
+		{"system/QuestionnaireResponse.c", either, true},
+		{"system/DocumentReference.r", either, false},
+		{"system/Claim.r", anyOf, true},
+		{"system/Claim.c", anyOf, true},
+		{"system/Claim.u", anyOf, false},
+		{ProviderUmbrellaScope, none, true},
+		{"system/*.*", none, false},
+		{"system/Claim.*", none, false},
+	} {
+		if got := routeScopesPermit(row.granted, row.route); got != row.want {
+			t.Errorf("routeScopesPermit(%q, %+v) = %v, want %v", row.granted, row.route, got, row.want)
+		}
+	}
+}
+
+// TestRouteScopeChallenge: the 403's challenge names SMART v1's scope on each
+// of the route's resources, write for a create and read for a read, and the
+// umbrella for a route that names none; the SMART configuration advertises
+// the umbrella and each challenge's scopes, sorted, once.
+func TestRouteScopeChallenge(t *testing.T) {
+	create := routeScope{resources: []string{"DocumentReference", "QuestionnaireResponse"}, need: taskCreate}
+	read := routeScope{resources: []string{"Claim"}, need: taskRead}
+	for _, row := range []struct {
+		route routeScope
+		want  string
+	}{
+		{create, "system/DocumentReference.write system/QuestionnaireResponse.write"},
+		{read, "system/Claim.read"},
+		{routeScope{}, ProviderUmbrellaScope},
+	} {
+		if got := row.route.challenge(); got != row.want {
+			t.Errorf("challenge %+v = %q, want %q", row.route, got, row.want)
+		}
+	}
+	want := []string{ProviderUmbrellaScope, "system/Claim.read", "system/DocumentReference.write", "system/QuestionnaireResponse.write"}
+	if got := providerScopes([]routeScope{routeScope{}, create, read, read}); !slices.Equal(got, want) {
+		t.Errorf("providerScopes = %q, want %q", got, want)
+	}
+}
+
+// TestCheckProviderIngressScopes: the provider's boot rule refuses a scope
+// naming the umbrella, a wildcard, Subscription or one of the routes'
+// resource types that SMART does not spell, the resource type in its own case,
+// but the DTR IG's own scopes; a scope on another resource or context is kept.
+func TestCheckProviderIngressScopes(t *testing.T) {
+	resources := []string{"Claim", "Questionnaire"}
+	for _, scope := range []string{
+		ProviderUmbrellaScope, "system/Claim.c", "system/Claim.write", "system/Claim.c?patient=1", "system/*.rs",
+		"system/*.write", "system/Subscription.*", "system/Questionnaire.rs", "system/questionnaire.rs",
+		"system/valueset.rs", "system/library.rs", "system/Patient.read", "user/claim.read", "openid",
+	} {
+		if err := CheckProviderIngressScopes([]string{scope}, resources); err != nil {
+			t.Errorf("%q refused: %v", scope, err)
+		}
+	}
+	for _, scope := range []string{
+		"system/davinci.write", "system/DAVINCI.WRITE", "system/claim.c", "system/Claim.wrote", "system/Claim.rc",
+		"system/*.wrte", "system/*.", "system/subscription.*", "system/Subscription.wrte", "system/questionnaire.r",
+		"SYSTEM/Claim.x",
+	} {
+		if err := CheckProviderIngressScopes([]string{ProviderUmbrellaScope, scope}, resources); err == nil {
+			t.Errorf("%q started", scope)
+		}
+	}
+}
+
+// TestListingScope: a listing of bases takes any scope that some route under
+// those bases takes (a pattern whose path is the base or below it), and no
+// other: a route added under the bases widens it, and one beside them does
+// not. The umbrella permits it through any alternative that takes the
+// umbrella.
+func TestListingScope(t *testing.T) {
+	submit := routeScope{resources: []string{"Claim"}, need: taskCreate}
+	subscribe := routeScope{resources: []string{"Subscription"}, need: taskCreate, noUmbrella: true}
+	routes := []scopedPattern{
+		{"POST /base/{id}/Claim/$submit", submit},
+		{"POST /base/{id}/Subscription", subscribe},
+		{"POST /base/{id}", submit},
+		{"POST /based/{id}/Task", routeScope{resources: []string{"Task"}, need: taskCreate}},
+		{"POST /base/{id}s/Task", routeScope{resources: []string{"Task"}, need: taskCreate}},
+		{"GET /base/{id}s", routeScope{resources: []string{"Task"}, need: taskCreate}},
+		{"POST /Questionnaire/$next-question", routeScope{resources: []string{"Questionnaire"}, need: taskRead}},
+	}
+	listing := listingScope("/base/{id}", routes, "")
+	if len(listing.alternatives) != 3 {
+		t.Fatalf("alternatives %+v, want the three routes under /base/{id}", listing.alternatives)
+	}
+	for _, row := range []struct {
+		granted string
+		want    bool
+	}{
+		{"system/Claim.c", true}, {"system/Subscription.c", true}, {"system/*.c", true}, {ProviderUmbrellaScope, true},
+		{"system/Task.c", false}, {"system/Questionnaire.r", false}, {"system/Claim.r", false}, {"", false},
+	} {
+		if got := routeScopesPermit(row.granted, listing); got != row.want {
+			t.Errorf("listing permits %q = %v, want %v", row.granted, got, row.want)
+		}
+	}
+	if got, want := listing.challenge(), "system/Claim.write system/Subscription.write"; got != want {
+		t.Errorf("challenge %q, want %q", got, want)
+	}
+	if got := listingScope("/nothing", routes, ""); routeScopesPermit(ProviderUmbrellaScope, got) {
+		t.Error("a listing over no route permits the umbrella")
 	}
 }

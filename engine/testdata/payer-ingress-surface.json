@@ -18,6 +18,7 @@
   "POST /Task",
   "POST /cdex/provider/{provider}/Subscription",
   "POST /cdex/provider/{provider}/Task",
+  "POST /notify/pas/{subscriber}/{kid}/{sealed}",
   "POST /oauth/token",
   "POST /substrate/inbound",
   "PUT /cdex/provider/{provider}/Subscription/{rest...}"

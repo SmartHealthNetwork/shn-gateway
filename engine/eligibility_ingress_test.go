@@ -203,7 +203,14 @@ func TestEligibilityIngress_UnroutableRequestIsRefused(t *testing.T) {
 		body []byte
 		msg  string
 	}{
-		"no payer named":       {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": map[string]any{"display": "the plan"}}), eligibilityNoPayer},
+		"no payer named": {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": map[string]any{"display": "the plan"}}), eligibilityNoPayer},
+		// A request naming no insurer, and no coverage that names a payer, is
+		// answered, never read through an insurer it does not carry.
+		"no insurer":                {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": nil}), eligibilityNoPayer},
+		"insurer null":              {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": json.RawMessage("null")}), eligibilityNoPayer},
+		"insurer with no reference": {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": map[string]any{}}), eligibilityNoPayer},
+		"no insurer, an insurance entry naming no coverage": {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": nil,
+			"insurance": []any{map[string]any{"focal": true}}}), eligibilityNoPayer},
 		"insurer not resolved": {insurer("Organization/elsewhere"), eligibilityInsurerUnresolved + remedyRelativeInsurer + `: insurer \"Organization/elsewhere\"`},
 		"payer not registered": {eligibilityWith(t, "MBR-COVERED", map[string]any{"insurer": map[string]any{"identifier": eligibilityPayorIdentifier("99999")}}), "no registered payer for identifier " + shnsdk.CMSPayerIdentity.System + "|99999"},
 		// A reference resolves to one contained resource of the type it names.

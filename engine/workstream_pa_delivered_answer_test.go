@@ -371,7 +371,7 @@ func operatorRoutePatterns(g *Gateway) []string {
 	for _, declared := range [][]mountedRoute{g.coreRoutes(role), g.workstreamRoutes(role), g.moduleRoutes(role)} {
 		for _, rt := range declared {
 			if rt.operator {
-				out = append(out, rt.pattern)
+				out = append(out, string(rt.pattern))
 			}
 		}
 	}

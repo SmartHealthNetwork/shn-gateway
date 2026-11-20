@@ -721,6 +721,20 @@ func TestCDexRead_AnUnbindableTaskIs502(t *testing.T) {
 		"a bare reference answered with another resource": {func(m map[string]any) {
 			m["for"] = map[string]any{"reference": "Patient/p-3"}
 		}, nil, cdexReadUnboundPatient},
+		// The provider's own answer names the patient by a member that names
+		// no one: its system's answer, a 502 that names it so, never the
+		// reading payer's request at fault.
+		"a member number that is blank": {func(m map[string]any) {
+			p := m["contained"].([]any)[0].(map[string]any)
+			p["identifier"] = []any{map[string]any{"type": mb, "system": "http://example.org/x", "value": " "}}
+		}, nil, cdexReadUnboundNamesNoOne},
+		"a member number that is a bare Patient/": {func(m map[string]any) {
+			p := m["contained"].([]any)[0].(map[string]any)
+			p["identifier"] = []any{map[string]any{"type": mb, "system": "http://example.org/x", "value": "Patient/"}}
+		}, nil, cdexReadUnboundNamesNoOne},
+		"a bare reference to a Patient whose member identifier is blank": {func(m map[string]any) {
+			m["for"] = map[string]any{"reference": "Patient/p-4"}
+		}, nil, cdexReadUnboundNamesNoOne},
 	} {
 		for _, level := range allLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
@@ -733,6 +747,7 @@ func TestCDexRead_AnUnbindableTaskIs502(t *testing.T) {
 						"Patient/p-1": []byte(`{"resourceType":"Patient","id":"p-1","identifier":[{"system":"http://example.org/mrn","value":"MRN-1"}]}`),
 						"Patient/p-2": []byte(`{"resourceType":"Patient","id":"p-2","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"A"},{"system":"` + shnsdk.MemberSystem + `","value":"B"}]}`),
 						"Patient/p-3": []byte(`{"resourceType":"Group","id":"p-3","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"MBR-COVERED"}]}`),
+						"Patient/p-4": []byte(`{"resourceType":"Patient","id":"p-4","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":" "}]}`),
 					}
 				}
 				p := newReadProvider(t, level, sys, sor)
@@ -1278,6 +1293,55 @@ func TestCDexRequest_AMemberWithNoIdentifierIsRefusedWithARule(t *testing.T) {
 					t.Fatalf("the provider's system was called %d times", sys.calls())
 				}
 				wantRefusal(t, p.got.only(t), http.StatusBadRequest, RefusedByProviderGateway, RefusalAuthority)
+			})
+		}
+	}
+}
+
+// The Patient a bare Task.for reads from the provider's own system of record is
+// that system's answer, never scanned strictly: one the binding cannot decode (a
+// name repeated in the resource) binds the member by its id alone and the read is
+// carried, at every level, as in earlier releases. The control, the same Patient
+// read one way only, binds by its demographics.
+func TestCDexRead_ARecordPatientTheBindingCannotDecodeBindsByIDAlone(t *testing.T) {
+	task := readTask(t, func(m map[string]any) { m["for"] = map[string]any{"reference": "Patient/pat-1"} })
+	patient := func(repeat string) []byte {
+		return []byte(`{"resourceType":"Patient","id":"pat-1","identifier":[{"system":"` + shnsdk.MemberSystem + `","value":"eNEW"}],"birthDate":"1990-01-01",` + repeat + `"name":[{"family":"Record"}]}`)
+	}
+	for name, row := range map[string]struct {
+		patient []byte
+		want    string
+	}{
+		"a name repeated exactly":         {patient(`"birthDate":"1991-01-01",`), derivedPCI("eNEW", "", "")},
+		"a name repeated in another case": {patient(`"BirthDate":"1991-01-01",`), derivedPCI("eNEW", "", "")},
+		"read one way only (control)":     {patient(``), derivedPCI("eNEW", "1990-01-01", "Record")},
+	} {
+		if _, err := bindingView(row.patient); (err != nil) == strings.HasSuffix(name, "(control)") {
+			t.Fatalf("%s: fixture: the binding view reads it: %v", name, err)
+		}
+		for _, level := range allLevels {
+			t.Run(name+"/"+level.String(), func(t *testing.T) {
+				sys := newReadTaskSystem(t, taskAnswer(task))
+				sor := newReadSoR(sys.srv.URL + "/fhir")
+				sor.held = map[string][]byte{"Patient/pat-1": row.patient}
+				sor.notHeld = map[string]bool{"eNEW": true}
+				p := newReadProvider(t, level, sys, sor)
+				ans := p.readOf(t, "Task/t-1")
+				if ans.status != http.StatusOK || !bytes.Equal(ans.body, task) {
+					t.Fatalf("answer %d %s, want the Task delivered", ans.status, ans.body)
+				}
+				if ans.subject != row.want {
+					t.Fatalf("the answer's token names %q, want %q", ans.subject, row.want)
+				}
+				// A Patient the binding cannot read is a system-of-record read
+				// the answer was built without, recorded so; the control is not.
+				want := []string{BackendMalformed}
+				if strings.HasSuffix(name, "(control)") {
+					want = nil
+				}
+				if got := p.got.only(t).ReadsFailed; !slices.Equal(got, want) {
+					t.Fatalf("ReadsFailed %v, want %v", got, want)
+				}
 			})
 		}
 	}

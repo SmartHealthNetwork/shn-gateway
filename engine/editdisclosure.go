@@ -32,7 +32,7 @@ const EditedHeader = "X-SHN-Edited"
 // (E-17), made even on signed content.
 var headerDisclosedEdits = []relay.EditID{relay.EditPASPendReturnRekey, relay.EditCDexTaskReturnRekey, relay.EditDTRAdaptiveAddressRekey, relay.EditDTRAdaptiveAddressRestore, relay.EditCDexTaskLocationRekey,
 	relay.EditSubscriptionEndpointRekey, relay.EditSubscriptionURLSearchRekey, relay.EditSubscriptionEndpointRestore, relay.EditSubscriptionLocationRekey,
-	relay.EditCDexTaskNotificationAddressRekey}
+	relay.EditCDexTaskNotificationAddressRekey, relay.EditPASNotifiedReturnRekey}
 
 // setEditedHeader adds EditedHeader for each disclosed edit p carries, in the
 // order headerDisclosedEdits lists them, whatever order they were made in. The

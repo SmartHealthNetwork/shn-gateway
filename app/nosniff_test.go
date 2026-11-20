@@ -94,11 +94,38 @@ func TestMainListener_EveryAnswerCarriesNosniff(t *testing.T) {
 	http.DefaultTransport = guard
 	t.Cleanup(func() { http.DefaultTransport = guard.base })
 
+	// Local stand-ins for each participant's own system and token endpoint:
+	// the build may probe them.
+	system := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(system.Close)
+	cdsKey, _ := writeCDSKey(t)
+	// Each role is built with every setting that mounts routes, so each route
+	// is walked by its own handler.
 	full := map[string]string{
 		"PROVIDER_DTR_POPULATE_URL":         "https://populate.test/fhir/Questionnaire/$populate",
 		"PROVIDER_DAVINCI_INGRESS":          "1",
 		"PROVIDER_DAVINCI_INGRESS_BASE_URL": "https://gw.test",
 		"INGRESS_CLIENTS_FILE":              writeClientsFile(t, moduleClientsJSON(t, map[string]any{"module": engine.ModuleOnBehalf})),
+		"PROVIDER_PAS_SUBSCRIPTION":         "1",
+		"PROVIDER_CDEX_TASK_URL":            system.URL + "/fhir/Task",
+		"PROVIDER_CDEX_TOKEN_URL":           system.URL + "/token",
+		"PROVIDER_CDEX_CLIENT_ID":           "provider-gw",
+		"PROVIDER_CDEX_CLIENT_SECRET":       "s",
+		"PROVIDER_CDEX_SCOPE":               "system/Task.c",
+		"PROVIDER_CDEX_SUBSCRIPTION_SCOPE":  "system/Subscription.cruds",
+	}
+	payer := map[string]string{
+		"PAYER_DAVINCI_BASE_URL":           system.URL,
+		"PAYER_DAVINCI_INGRESS":            "1",
+		"PAYER_DAVINCI_INGRESS_BASE_URL":   "https://payer-gw.test",
+		"INGRESS_CLIENTS_FILE":             writeClientsFile(t, strings.Replace(testValidClientsJSON(t), `,"scopes":["system/Davinci.write"]`, "", 1)),
+		"PAYER_DAVINCI_TOKEN_URL":          system.URL + "/token",
+		"PAYER_DAVINCI_CLIENT_ID":          "payer-gw",
+		"PAYER_DAVINCI_CLIENT_KEY":         cdsKey,
+		"PAYER_DAVINCI_CLIENT_ALG":         "ES384",
+		"PAYER_DAVINCI_SCOPE":              "system/*.read",
+		"PAYER_DAVINCI_CDS_AUTH":           "client-jwt",
+		"PAYER_DAVINCI_SUBSCRIPTION_SCOPE": "system/Subscription.cruds",
 	}
 	walked := map[string]bool{}
 	for _, role := range []string{"provider", "payer", "facility", "phg"} {
@@ -107,10 +134,7 @@ func TestMainListener_EveryAnswerCarriesNosniff(t *testing.T) {
 		case "provider":
 			env = full
 		case "payer":
-			// A local stand-in for the payer's own system: the build may probe it.
-			payerSystem := httptest.NewServer(http.NotFoundHandler())
-			t.Cleanup(payerSystem.Close)
-			env = map[string]string{"PAYER_DAVINCI_BASE_URL": payerSystem.URL}
+			env = payer
 		}
 		b, _, err := buildRoleForPopulate(t, role, env)
 		if err != nil {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/cdextopic"
+	"github.com/SmartHealthNetwork/shn-gateway/pa/pastopic"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
@@ -344,7 +345,7 @@ func (p *cdexRequestProvider) subscribe(t *testing.T, f subFrame) subAnswer {
 		t.Fatal(err)
 	}
 	subject := ""
-	if leg != legCDexTaskSubscribe && leg != legCDexTaskStatus {
+	if leg != legCDexTaskSubscribe && leg != legCDexTaskStatus && leg != pastopic.SubscribeLeg {
 		subject = "pci:payer-task-subject"
 	}
 	tok := signTestToken(shnsdk.Token{
@@ -1104,6 +1105,7 @@ func TestCDexSubscribe_TheAnswerCheckComesFirst(t *testing.T) {
 					return readAnswer{status: http.StatusOK, header: fhirJSONHeader, body: []byte(c.body)}, true
 				}
 				a := p.subscribe(t, c.frame(p))
+				// The refused answer is the gateway's fixed OperationOutcome: its reason echoes only the answer's resource type, member names and FHIR type names, never a minted value, so "Doe" cannot match one by chance.
 				if a.status != http.StatusBadGateway || bytes.Contains(a.body, []byte("Doe")) {
 					t.Fatalf("answer %d %s, want 502 with nothing of the answer", a.status, a.body)
 				}
@@ -1239,6 +1241,7 @@ func TestCDexSubscribe_TheAnswerIsTheInteractionsOwn(t *testing.T) {
 					}
 					return
 				}
+				// The refused answer is the gateway's fixed OperationOutcome: its reason echoes only the answer's resource type, member names and FHIR type names, never a minted value, so "Doe" cannot match one by chance.
 				if a.status != http.StatusBadGateway || bytes.Contains(a.body, []byte("Doe")) || bytes.Contains(a.body, []byte("notify/cdex-task")) {
 					t.Fatalf("answer %d %s, want 502 with nothing of the answer", a.status, a.body)
 				}
@@ -1564,6 +1567,7 @@ func TestCDexSubscribe_AnErrorAnswerIsChecked(t *testing.T) {
 						}
 						return
 					}
+					// The refused answer is the gateway's fixed OperationOutcome: its reason echoes only the answer's resource type, member names and FHIR type names, never a minted value, so "Doe" cannot match one by chance.
 					if a.status != http.StatusBadGateway || bytes.Contains(a.body, []byte("Doe")) {
 						t.Fatalf("answer %d %s, want 502 with nothing of the answer", a.status, a.body)
 					}

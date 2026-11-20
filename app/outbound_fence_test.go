@@ -22,12 +22,15 @@ import (
 // and on a row with no site left, so the table stays true.
 var outboundSites = map[string]outboundSite{
 	// app: the template, and the clients made from it.
-	"app/app.go build shnsdk.NewClient":                                     {1, "the template every kindClient is a tagged copy of; never used untagged"},
+	"app/app.go build shnsdk.NewClient": {1, "the template every kindClient is a tagged copy of; never used untagged"},
+	// cmd/gateway: the container health check's probe (gateway -probe).
+	"cmd/gateway/probe.go probe http.Client{}":                              {1, "the container health check's probe of its own process: it reads one loopback address written as one, never a network endpoint, so no endpoint kind names it"},
+	"cmd/gateway/probe.go probe http.Transport{}":                           {1, "the probe's own transport, with no proxy: the same loopback read"},
 	"app/app.go build http.DefaultClient":                                   {1, "FHIR_DATA_URL with no SMART block: tagged fhir by the cfg.certs.Client it is passed to"},
 	"app/app.go build http.Client{}":                                        {1, "the payer's unauthenticated forward: payerTransport, the payer's tagged Router"},
 	"app/app.go var:requesterLegBudget shnsdk.NewClient":                    {1, "reads the template's timeout; no client is kept"},
 	"engine/workstream_pa_enrich.go var:cdexTaskDeadline shnsdk.NewClient":  {1, "reads the requester's leg budget for the Task forward's deadline; no client is kept"},
-	"engine/workstream_pa_enrich.go newGatewayState http.Client{}":          {1, "a payer's delivery of each notification to the endpoint its own system wrote into a Subscription: each Subscription names its own endpoint, at whatever host the payer chose, so no one endpoint kind names them"},
+	"engine/workstream_pa_enrich.go newGatewayState http.Client{}":          {2, "a subscriber's delivery of each notification to the endpoint its own system wrote into a Subscription (a payer's, and a provider's that takes the PAS topic's notifications): each Subscription names its own endpoint, at whatever host the subscriber chose, so no one endpoint kind names them"},
 	"app/app.go probeAuthClient smartauth.NewHTTPClient":                    {1, "built from a SMART config tagSmart tagged"},
 	"app/app.go probeAuthClient http.Client{}":                              {1, "a credential that does not load: every request fails before dialing"},
 	"app/payercdsauth.go payerCDSCheckTarget http.Client{}":                 {1, "a CDS client key that does not load: every request fails before dialing"},
@@ -38,6 +41,7 @@ var outboundSites = map[string]outboundSite{
 	"app/app.go providerCDexHTTPClient smartauth.NewHTTPClient":             {1, "providerCDexSmartConfig tags it cdex-task / cdex-task-token"},
 	"app/app.go providerCDexReadHTTPClient smartauth.NewHTTPClient":         {1, "providerCDexSmartConfig tags it cdex-task / cdex-task-token: the read goes to the Task forward's endpoint and token server"},
 	"app/app.go providerCDexSubscriptionHTTPClient smartauth.NewHTTPClient": {1, "providerCDexSmartConfig tags it cdex-task / cdex-task-token: the Subscription endpoint is at the Task forward's FHIR base and token server"},
+	"app/app.go payerSubscriptionHTTPClient smartauth.NewHTTPClient":        {1, "payerDavinciSmartConfig tags it with the payer Router / payer-token: the Subscription endpoint is at the payer's PAS base, and each call carries the PAS endpoint's tag"},
 	"app/attachmentinflight.go taskMetadataClient http.Client{}":            {1, "the task's own ECS metadata endpoint, read once at boot: the platform's, no peer and no endpoint kind"},
 	"app/attachmentinflight.go taskMetadataClient http.Transport{}":         {1, "that read's transport: no proxy, since the endpoint is on the task's own link"},
 	"app/bootfetch.go bootClient http.DefaultTransport":                     {1, "a nil transport's meaning; resolveDiscovery passes tagged clients"},
@@ -73,6 +77,8 @@ var outboundSites = map[string]outboundSite{
 	"engine/fhirserver_read.go client http.Client{}":                                {1, "wraps the tagged transport"},
 	"engine/lanehealth.go ownConnectionClient http.Transport{}":                     {1, "only when http.DefaultTransport is not an *http.Transport (an embedder's fixture), as before"},
 	"engine/lanehealth.go ownConnectionClient http.DefaultTransport":                {1, "the lane check's own clone, as before; Rewrapped with the lane client's kind (laneTransport)"},
+	"engine/notyetloaded.go freshConnClient http.DefaultClient":                     {1, "nil default of the Hub's or Framework's client it copies; never nil from build"},
+	"engine/notyetloaded.go freshRoundTripper http.DefaultTransport":                {1, "the base of a tagged client with no transport of its own, cloned for a retry and Rewrapped with that client's kind"},
 	"engine/lanehealth.go ownConnectionClient http.Client{}":                        {1, "wraps that clone, Rewrapped with the lane's kind"},
 	"engine/lanes.go QualifyValidatorLane http.Client{}":                            {1, "the untagged form for embedders; build uses QualifyValidatorLaneWith (laneQualifier)"},
 	"engine/module3_certify.go NewCertificationOperationValidator http.Transport{}": {1, "tagged certify-<line> by TagValidatorClient (certifyClient, CertificationClient)"},

@@ -103,7 +103,7 @@ func TestApplySignedContent_ContainedProvenanceTargetsItsContainer(t *testing.T)
 }
 
 // TestCoverageAgreesOnContainedHashTargets holds the indexed coverage to the
-// reference (coverageEach) on every effect in documents built to reach each
+// reference (hitsEach over the reading's regions) on every effect in documents built to reach each
 // step of a contained Provenance's "#": a holder that is a resource or not,
 // containment nested to three levels, a holder inside an element, a root
 // that is a resource, a Bundle entry or neither, and the Provenance's own
@@ -149,7 +149,8 @@ func TestCoverageAgreesOnContainedHashTargets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v\n%s", err, src)
 		}
-		ref, cov := coverageEach(d), coverage(d)
+		cov := coverage([]byte(src))
+		ref := cov.regions
 		for i := 0; i < d.Len(); i++ {
 			s, e := d.Span(splice.NodeID(i))
 			for _, eff := range []effect{{start: s, end: e}, {start: s, end: e, inside: true}} {

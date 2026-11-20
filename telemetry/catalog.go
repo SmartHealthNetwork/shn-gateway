@@ -140,6 +140,8 @@ const (
 	KeyTolerated    = "shn.finding.tolerated"
 	KeyListener     = "shn.listener"
 	KeyBound        = "shn.listener.bound"
+	KeyService      = "shn.service"
+	KeyRetryResult  = "shn.retry.result"
 )
 
 func attr(key string, values []string) Attribute { return Attribute{Key: key, Values: values} }
@@ -298,6 +300,18 @@ var (
 		}
 		return out
 	}()
+	retryServiceValues = func() (out []string) {
+		for _, v := range engine.NetworkRetryServices {
+			out = append(out, v)
+		}
+		return out
+	}()
+	retryResultValues = func() (out []string) {
+		for _, v := range engine.NetworkRetryResults {
+			out = append(out, v)
+		}
+		return out
+	}()
 	tokenOutcomeValues = func() (out []string) {
 		for _, v := range engine.TokenOutcomes {
 			out = append(out, v)
@@ -405,6 +419,9 @@ var (
 	TokenAcquisition = &Instrument{Name: "shn.gateway.authorization.tokens", Kind: Counter, Unit: "{token}",
 		Description: "Authorization Framework token acquisitions, by outcome.",
 		Attributes:  []Attribute{attr(KeyOutcome, tokenOutcomeValues)}}
+	NetworkRetries = &Instrument{Name: "shn.gateway.network.retries", Kind: Counter, Unit: "{retry}",
+		Description: "Calls to the Hub or the Authorization Framework sent again, on a new connection, after an instance that had not yet loaded the network's membership refused them, by service and the retry's result.",
+		Attributes:  []Attribute{attr(KeyService, retryServiceValues), attr(KeyRetryResult, retryResultValues)}}
 )
 
 // TelemetryExports counts OTLP exports by outcome (MON-R13). OpenTelemetry
@@ -465,6 +482,7 @@ var catalog = []*Instrument{
 	StorePoolConnections, StorePoolEmptyAcquires, AuditAppends, AuditRetries, AuditDrops,
 	AuditQueueDepth, AuditEndpointUnknown, ValidatorLaneQualified, ValidatorLaneAttempts,
 	GatewayInfo, CertificateExpiry, IngressKeyRemaining, IngressKeyAge, DependencyAge, PeersKnown, TokenLatency, TokenAcquisition,
+	NetworkRetries,
 	TelemetryExports,
 	Refusals, ExchangeStageDuration, ActiveRequests, ExchangeRequestSize, ExchangeResponseSize,
 	ConformanceFindings, ValidatorDuration, ConformanceChecksDropped,

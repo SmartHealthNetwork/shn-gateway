@@ -282,6 +282,15 @@ var providerOtherRoutes = []string{
 	// the provider sets its subscription scope
 	// (PROVIDER_CDEX_SUBSCRIPTION_SCOPE).
 	"POST /notify/cdex-task/{subscriber}/{kid}/{sealed}",
+	// The provider system's Subscription to the PAS topic at a payer's
+	// base, once the provider takes the topic's notifications
+	// (PROVIDER_PAS_SUBSCRIPTION).
+	"POST /pas/payer/{payer}/Subscription",
+	"GET /pas/payer/{payer}/Subscription",
+	"GET /pas/payer/{payer}/Subscription/{rest...}",
+	"PUT /pas/payer/{payer}/Subscription/{rest...}",
+	"DELETE /pas/payer/{payer}/Subscription/{rest...}",
+	"PATCH /pas/payer/{payer}/Subscription/{rest...}",
 }
 
 // otherRoleRoutes are the routes of the roles that originate nothing.
@@ -293,9 +302,12 @@ var otherRoleRoutes = map[string][]string{
 	// each base serves its CapabilityStatement, a provider's base its SMART
 	// configuration too; its system manages its Subscription to a provider's
 	// Tasks' changes at that provider's base (at the plain base, refused).
-	// The payer's gateway serves the public JWK Set of its CDS Hooks client
-	// key, with or without the ingress.
-	"payer": {"POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
+	// Its system posts each notification of a provider's Subscription to the
+	// PAS topic at the address its gateway wrote, once the payer sets its
+	// subscription scope (PAYER_DAVINCI_SUBSCRIPTION_SCOPE). The payer's
+	// gateway serves the public JWK Set of its CDS Hooks client key, with or
+	// without the ingress.
+	"payer": {"POST /notify/pas/{subscriber}/{kid}/{sealed}", "POST /substrate/inbound", "POST /cdex/provider/{provider}/Task", "POST /Task", "GET /cdex/providers",
 		"GET /cdex/provider/{provider}/Task/{id}", "GET /cdex/provider/{provider}/Task/{id}/_history/{vid}",
 		"GET /Task/{id}", "GET /Task/{id}/_history/{vid}", "GET /metadata", "GET /cdex/provider/{provider}/metadata",
 		"GET /cdex/provider/{provider}/.well-known/smart-configuration",
@@ -709,13 +721,13 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 				"core": g.coreRoutes(role), "pa": g.paRoutes(role), "fqs": g.fqsRoutes(role), "origination": g.moduleRoutes(role),
 			} {
 				for _, rt := range declared {
-					key := role + " " + rt.pattern
-					if other, dup := seen[rt.pattern]; dup {
+					key := role + " " + string(rt.pattern)
+					if other, dup := seen[string(rt.pattern)]; dup {
 						t.Errorf("%s under %s is declared by %s and %s", key, c, other, piece)
 					}
-					seen[rt.pattern] = piece
-					produced[piece+" "+rt.pattern] = true
-					scenario := strings.Contains(rt.pattern, "/scenario")
+					seen[string(rt.pattern)] = piece
+					produced[piece+" "+string(rt.pattern)] = true
+					scenario := strings.Contains(string(rt.pattern), "/scenario")
 					inbound := rt.pattern == "POST /substrate/inbound"
 					if (piece == "origination") != scenario || (piece == "core") != inbound {
 						t.Errorf("%s is declared by %s, which does not own it", key, piece)
@@ -728,16 +740,16 @@ func TestScenarioRoutes_EveryRouteIsClassified(t *testing.T) {
 					}
 					// An originating /scenario route, and only one, records its
 					// exchange, under its own closed route name.
-					if records := piece == "origination" && originating[rt.pattern]; (rt.exchangeRoute != "") != records {
+					if records := piece == "origination" && originating[string(rt.pattern)]; (rt.exchangeRoute != "") != records {
 						t.Errorf("%s under %s is declared with exchange route %q, want one exactly when it originates", key, c, rt.exchangeRoute)
 					} else if records {
 						if rt.exchangeRoute != originationExchangeRoute(rt.pattern) || !slices.Contains(ExchangeRoutes, rt.exchangeRoute) || rt.exchangeRoute == ExchangeOther {
 							t.Errorf("%s records route %q, want its originationExchangeRoute %q, one of ExchangeRoutes", key, rt.exchangeRoute, originationExchangeRoute(rt.pattern))
 						}
-						if other, dup := exchangeNames[rt.exchangeRoute]; dup && other != rt.pattern {
+						if other, dup := exchangeNames[rt.exchangeRoute]; dup && other != string(rt.pattern) {
 							t.Errorf("%s and %s record the same route %q", rt.pattern, other, rt.exchangeRoute)
 						}
-						exchangeNames[rt.exchangeRoute] = rt.pattern
+						exchangeNames[rt.exchangeRoute] = string(rt.pattern)
 					}
 					got[key] = true
 				}
@@ -778,7 +790,7 @@ func sameRoutes(a, b []mountedRoute) bool {
 func routePatterns(rs []mountedRoute) []string {
 	var out []string
 	for _, r := range rs {
-		out = append(out, r.pattern)
+		out = append(out, string(r.pattern))
 	}
 	return out
 }
@@ -801,7 +813,7 @@ type declaredRoute struct {
 // the conditions routeGateway sets.
 var (
 	routeRoles      = map[string]bool{"provider": true, "payer": true, "facility": true, "phg": true}
-	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.ProviderCDexReadScope": true, "cfg.ProviderCDexSubscriptionScope": true, "cfg.CDSClientJWKS": true}
+	routeGates      = map[string]bool{"cfg.IngressEnabled": true, "cfg.IngressBaseURL": true, "cfg.OriginationProfile": true, "ingressAuth": true, "cfg.ProviderCDexTaskURL": true, "cfg.ProviderCDexReadScope": true, "cfg.ProviderCDexSubscriptionScope": true, "cfg.PayerSubscriptionScope": true, "cfg.ProviderPASSubscription": true, "cfg.CDSClientJWKS": true}
 	routePatternLit = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /`)
 )
 

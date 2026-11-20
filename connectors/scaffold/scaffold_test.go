@@ -3,6 +3,7 @@ package scaffold
 import (
 	"testing"
 
+	"github.com/SmartHealthNetwork/shn-gateway/engine"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -36,5 +37,16 @@ func TestScaffold_UnknownMemberNotFound(t *testing.T) {
 	s := New()
 	if _, _, found := s.ResolvePatient("NOPE"); found {
 		t.Error("unknown member must not resolve")
+	}
+}
+
+// A member id that names no one (blank, or a bare "Patient/") is a member the
+// template does not hold: never found, and no identifier is derived from it.
+func TestScaffold_AMemberNamingNoOneIsNotFound(t *testing.T) {
+	s := New()
+	for _, id := range []string{"", "   ", "Patient/"} {
+		if pci, demo, found := s.ResolvePatient(id); found || pci != "" || demo != (engine.Demo{}) {
+			t.Errorf("ResolvePatient(%q) = %q, %+v, %v; want not found", id, pci, demo, found)
+		}
 	}
 }

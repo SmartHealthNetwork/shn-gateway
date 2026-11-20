@@ -156,7 +156,7 @@ func (g *Gateway) handleDTRNextQuestionIngress(w http.ResponseWriter, r *http.Re
 	w = &fhirOperationWriter{w}
 	// The package route's own credential check, first, so a credential it
 	// refuses is refused here the same way.
-	if g.ingressAuthRefused(w, r) {
+	if g.routeScopeRefused(w, r, scopeDTR) {
 		return
 	}
 	exchangeOf(r.Context()).leg(legType)

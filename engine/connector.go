@@ -9,6 +9,16 @@ import shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 // gateway/connectors/fhirsor (a FHIR/SMART-Backend-Services client over the holder's own
 // US Core server) or a partner implementation. The engine ships none — the in-process
 // persona census retired with the in-process payer stub (§4.1).
+//
+// A member id is an opaque value that names exactly one patient. A connector
+// matches it exactly, never as a pattern, a prefix or one of several
+// alternatives: one that searches a FHIR server by identifier escapes it as
+// FHIR token search requires (a backslash, comma, dollar sign or bar); an
+// unescaped value can match other members. The engine never reads a member
+// that names no one (empty, only whitespace, or "Patient/" with no id), and a
+// connector refuses one too: as a failed read (a *SoRReadError from a
+// ContextSystemOfRecord read), never as a member it does not hold. The engine
+// cannot escape a value for a connector's own query language.
 type SystemOfRecord interface {
 	ResolvePatient(memberID string) (pci string, demo Demo, found bool)
 	// PatientFHIRRef returns the FHIR Patient reference ("Patient/<id>") as known to the

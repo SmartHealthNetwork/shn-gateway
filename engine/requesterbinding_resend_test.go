@@ -136,6 +136,12 @@ func TestRequesterBindingResend(t *testing.T) {
 				}
 				want := row.want
 				want.Binding, want.Involvement = shnsdk.RequesterBindingBound, shnsdk.InvolvementRequesterDerived
+				if want.Resent {
+					// The harness's Hub client is a transport of its own, not
+					// an *http.Transport: no new connection can be guaranteed,
+					// so the resend takes the fallback, the client as it is.
+					want.ResentConnection = RequesterResentPooled
+				}
 				if x := p.recs.only(t); x.RequesterBinding == nil || *x.RequesterBinding != want {
 					t.Fatalf("requester binding %+v, want %+v", x.RequesterBinding, want)
 				}
@@ -175,7 +181,7 @@ func TestRequesterBindingResendWaits(t *testing.T) {
 		t.Fatalf("the Hub got %d records, want 2", len(posts))
 	}
 	wantSamePosts(t, p, posts)
-	want := RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterDerived, Outcome: RequesterBindingAccepted, Resent: true}
+	want := RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterDerived, Outcome: RequesterBindingAccepted, Resent: true, ResentConnection: RequesterResentPooled}
 	if x := p.recs.only(t); x.RequesterBinding == nil || *x.RequesterBinding != want {
 		t.Fatalf("requester binding %+v, want %+v", x.RequesterBinding, want)
 	}
@@ -266,7 +272,7 @@ func TestRequesterBindingNotTakenSettlesOther(t *testing.T) {
 		t.Fatalf("waiting to resend: %+v, want %+v", got, want)
 	}
 	resent := bound
-	resent.Resent = true
+	resent.Resent, resent.ResentConnection = true, RequesterResentNew
 	x.requesterBindingPending(resent)
 	x.requesterBindingMaySend()
 	want = resent
@@ -325,6 +331,119 @@ func TestResendRequesterBindingCountsTheFirstSendsTime(t *testing.T) {
 		cancel()
 		if ok != c.want {
 			t.Errorf("left %v, took %v: resend %v, want %v", c.left, c.took, ok, c.want)
+		}
+	}
+}
+
+// bindingOverRealConns puts p's Hub behind a loopback server the gateway
+// reaches through an *http.Transport of its own (realConns), so a resend can
+// take the fresh path, and returns the server's record of which connection
+// each call arrived on.
+func bindingOverRealConns(t *testing.T, p *readPayer) *connLog {
+	t.Helper()
+	client, log := realConns(t, p.hub)
+	p.g.cfg.Client = client
+	return log
+}
+
+// readOnce drives one CDex read whose answer discloses the patient, so the
+// gateway reports its binding, with the Hub's binding answers in turn.
+func readOnce(t *testing.T, p *readPayer, answers ...bindingAnswer) {
+	t.Helper()
+	p.g.resendWaitForTest = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
+	task := readTaskAnswer(t, nil)
+	p.hub.answerBody, p.hub.answerSubject = task, "pci:00000000000000000000000000000d15"
+	p.hub.bindingAnswers = answers
+	if rec := p.get(t, "/cdex/provider/"+readProviderID+"/Task/t-1"); rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), task) {
+		t.Fatalf("answer %d %s, want the provider's Task whatever became of the record", rec.Code, rec.Body)
+	}
+}
+
+// With a client whose base is an *http.Transport, a record the Hub never took
+// is sent again on a new connection, the same request byte for byte, at every
+// level, and the record says so.
+func TestRequesterBindingResend_OnANewConnection(t *testing.T) {
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			p := newReadPayer(t, level)
+			log := bindingOverRealConns(t, p)
+			readOnce(t, p, notTaken(), bindingAnswer{status: http.StatusNoContent})
+			_, _, posts := p.hub.snapshot()
+			if len(posts) != 2 {
+				t.Fatalf("the Hub got %d records, want 2", len(posts))
+			}
+			wantSamePosts(t, p, posts)
+			want := RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterDerived,
+				Outcome: RequesterBindingAccepted, Resent: true, ResentConnection: RequesterResentNew}
+			if x := p.recs.only(t); x.RequesterBinding == nil || *x.RequesterBinding != want {
+				t.Fatalf("requester binding %+v, want %+v", x.RequesterBinding, want)
+			}
+			sends := log.at(shnsdk.HubRequesterBindingPath)
+			if len(sends) != 2 {
+				t.Fatalf("%d binding sends reached the server, want 2", len(sends))
+			}
+			for _, earlier := range log.calls[:sends[1].seq] {
+				if earlier.conn == sends[1].conn {
+					t.Fatalf("the resend arrived on connection %d, which an earlier call used: %+v", sends[1].conn, log.calls)
+				}
+			}
+		})
+	}
+}
+
+// The defect the fresh path closes: the client's pooled connection is the one
+// the first send went on, and a resend through it would go there again. Here
+// the first send reuses the connection the read's own Hub call opened (the
+// pool at work), and the resend does not reuse it.
+func TestRequesterBindingResend_NeverReusesThePooledConnection(t *testing.T) {
+	p := newReadPayer(t, EnforcementStrict)
+	log := bindingOverRealConns(t, p)
+	readOnce(t, p, notTaken(), bindingAnswer{status: http.StatusNoContent})
+	sends := log.at(shnsdk.HubRequesterBindingPath)
+	routes := log.at("/route")
+	if len(sends) != 2 || len(routes) == 0 {
+		t.Fatalf("%d binding sends and %d routed calls, want 2 and at least 1", len(sends), len(routes))
+	}
+	if sends[0].conn != routes[0].conn {
+		t.Fatalf("control: the first send went on connection %d, not the pooled %d the read's Hub call opened", sends[0].conn, routes[0].conn)
+	}
+	if sends[1].conn == sends[0].conn {
+		t.Fatalf("the resend reused connection %d, the first send's", sends[0].conn)
+	}
+}
+
+// With a client whose base is not an *http.Transport (an embedding program's
+// own transport, as the read harness's Hub is), no new connection can be
+// guaranteed, so the resend takes the fallback: the client as it is, as before,
+// recorded pooled.
+func TestRequesterBindingResend_FallsBackWithoutAnHTTPTransport(t *testing.T) {
+	p := newReadPayer(t, EnforcementStrict)
+	if _, ok := freshConnClient(p.g.cfg.Client); ok {
+		t.Fatal("fixture: the read harness's Hub client has an *http.Transport base")
+	}
+	readOnce(t, p, notTaken(), bindingAnswer{status: http.StatusNoContent})
+	_, _, posts := p.hub.snapshot()
+	if len(posts) != 2 {
+		t.Fatalf("the Hub got %d records, want the fallback's resend too", len(posts))
+	}
+	if x := p.recs.only(t); x.RequesterBinding == nil || !x.RequesterBinding.Resent || x.RequesterBinding.ResentConnection != RequesterResentPooled {
+		t.Fatalf("requester binding %+v, want resent on the pooled connection", x.RequesterBinding)
+	}
+}
+
+// The resend's connection settles with the record, closed to its list: a
+// value outside RequesterResentConnections reads as other.
+func TestRequesterBindingResentConnectionIsClosed(t *testing.T) {
+	for _, row := range []struct{ conn, want string }{
+		{RequesterResentNew, RequesterResentNew},
+		{RequesterResentPooled, RequesterResentPooled},
+		{"reused", ExchangeOther},
+	} {
+		x := &exchangeRecorder{}
+		x.requesterBindingPending(RequesterBindingRecord{Binding: shnsdk.RequesterBindingBound, Involvement: shnsdk.InvolvementRequesterHeld, Resent: true, ResentConnection: row.conn})
+		x.requesterBindingMaySend()
+		if got := x.settledRequesterBinding(); got == nil || !got.Resent || got.ResentConnection != row.want {
+			t.Errorf("%s: %+v, want resent on %s", row.conn, got, row.want)
 		}
 	}
 }

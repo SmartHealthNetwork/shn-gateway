@@ -119,11 +119,18 @@ func nosniffGateways(t *testing.T, net *noNetwork) map[string]*Gateway {
 			// notifications too
 			c.ProviderCDexSubscriptionScope = "system/Subscription.cruds"
 			c.ProviderCDexSubscriptionClient = client
+			// and the PAS topic's notifications
+			c.ProviderPASSubscription = true
 		}),
 		"payer": build("payer", false, nil),
 		"payer with ingress": build("payer", true, func(cfg *Config) {
 			// and with its CDS client key's JWK Set
 			cfg.CDSClientJWKS = []byte(`{"keys":[]}`)
+			// and a provider's Subscription to the PAS topic, so its
+			// system's PAS notifications too
+			cfg.PayerSubscriptionScope = "system/Subscription.cruds"
+			cfg.PayerSubscriptionBaseURL = "http://payer.test/fhir"
+			cfg.PayerSubscriptionClient = client
 		}),
 		"facility": build("facility", false, nil),
 		"phg":      build("phg", false, nil),

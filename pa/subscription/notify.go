@@ -67,6 +67,141 @@ func ParseNotification(body []byte, t Topic) (*Notification, *Refusal) {
 	return &Notification{body: body, root: root, entries: entries.elems}, nil
 }
 
+// Resource is one resource a notification carries (Resources): an object
+// that a FHIR reader could take as a resource, wherever it sits.
+type Resource struct {
+	// Type is its resourceType's value, as sent.
+	Type string
+	// Raw is its exact bytes, and At where they start in the notification's.
+	Raw []byte
+	At  int
+	// Entry is whether it is the resource of an entry after the
+	// SubscriptionStatus (entry[i].resource for i > 0, the member name
+	// folded): what a full-resource notification delivers as its focus.
+	Entry bool
+	// Outer is the index, in the list Resources returns, of the resource it
+	// sits in that sits in no other but the notification Bundle and its
+	// SubscriptionStatus: its own index when it is that resource.
+	Outer int
+	// Parent is the index of the nearest resource it sits in, -1 when it
+	// sits in none but the notification Bundle and its SubscriptionStatus.
+	Parent int
+	// FullURL is, when it is the resource of an entry (an object's resource
+	// member, the names folded), that entry's fullUrl, "" when it states
+	// none as a string.
+	FullURL string
+	// EntryFullURL is the fullUrl of the nearest Bundle entry it sits in (an
+	// element of an entry list, the names folded), its own entry's or that
+	// of an entry whose resource contains it, "" when it sits in none or
+	// that entry states none:
+	// what a relative reference written in it resolves against (FHIR R4's
+	// Bundle rule).
+	EntryFullURL string
+	// Bundle is the index of the Bundle resource it sits in (an entry of it,
+	// or contained in one), -1 for the notification Bundle itself: the
+	// scope a urn reference written in it resolves in, then outward
+	// (FHIR R4's Bundle rule).
+	Bundle int
+}
+
+// IsOuter reports whether r, the resource at index i of Resources' list,
+// sits in no other resource but the notification Bundle and its
+// SubscriptionStatus.
+func (r Resource) IsOuter(i int) bool { return r.Outer == i }
+
+// TypeIs reports whether r's resourceType is typ, compared under the case
+// folding member names are read by (a lenient reader looks a resource type
+// up that way), so a check a resource type triggers fails closed.
+func (r Resource) TypeIs(typ string) bool {
+	return jsonmember.FoldedName(r.Type) == jsonmember.FoldedName(typ)
+}
+
+// Resources is every resource the notification carries, at any depth, in
+// the order its bytes hold them, each its exact bytes: every object, other
+// than the notification Bundle itself and its first entry's
+// SubscriptionStatus, that has a resourceType member, its name compared
+// under case folding as NoContent compares it. That is wherever a reader
+// could take one: an entry's resource (under any case of the name), a
+// resource array's elements, a parameter's or part's resource, an entry's
+// response.outcome, a contained resource, a nested Bundle's entries, and any
+// other member. It is what a topic's content check and its binding read
+// (Topic.CheckContent), so a resource placed beside the notification's focus
+// is read as the focus is, never passed over.
+//
+// A resourceType that is not a string with a value leaves it unknown which
+// resource an object is, so the notification cannot be read: it is refused
+// 403, recorded authority, at every conformance level (unknown is not
+// empty). Valid entry members beside a resource (fullUrl, request,
+// response, search) are read as they are, and carried as sent.
+func (n *Notification) Resources() ([]Resource, *Refusal) {
+	status := n.entries[0].member("resource")
+	later := make(map[*jnode]bool, len(n.entries))
+	for _, e := range n.entries[1:] {
+		later[e] = true
+	}
+	var out []Resource
+	var walk func(node *jnode, outer, parent, bundle int, entryResource bool, fullURL, entryURL string, entry bool) *Refusal
+	walk = func(node *jnode, outer, parent, bundle int, entryResource bool, fullURL, entryURL string, entry bool) *Refusal {
+		if node == nil {
+			return nil
+		}
+		if node.kind == '{' && node != n.root && node != status {
+			if t := node.memberFolded("resourceType"); t != nil {
+				typ, ok := t.stringOf()
+				if !ok || typ == "" {
+					return forbidden("an object in the notification has a resourceType that is not a string with a value, so which resource it is cannot be read")
+				}
+				if outer < 0 {
+					outer = len(out)
+				}
+				out = append(out, Resource{Type: typ, Raw: n.body[node.start:node.end], At: node.start, Entry: entryResource, Outer: outer, Parent: parent, FullURL: fullURL, EntryFullURL: entryURL, Bundle: bundle})
+				parent = len(out) - 1
+				if jsonmember.FoldedName(typ) == jsonmember.FoldedName("Bundle") {
+					bundle = parent
+				}
+			}
+		}
+		// A Bundle entry's members sit in it, and resolve against its
+		// fullUrl: against none (the stated base) when it states none.
+		if entry && node.kind == '{' {
+			entryURL, _ = node.memberFolded("fullUrl").stringOf()
+		}
+		for _, m := range node.members {
+			// An entry's resource after the SubscriptionStatus, its name
+			// folded, is the notification's own content; any object's
+			// resource member is resolved against its fullUrl.
+			resource := node.kind == '{' && jsonmember.FoldedName(m.name) == foldedResource && m.val.kind == '{'
+			isEntryResource := later[node] && resource
+			full := ""
+			if resource {
+				full, _ = node.memberFolded("fullUrl").stringOf()
+			}
+			if m.val.kind == '[' && jsonmember.FoldedName(m.name) == foldedEntry {
+				// A Bundle's entries: each element is an entry.
+				for _, e := range m.val.elems {
+					if rf := walk(e, outer, parent, bundle, false, "", entryURL, true); rf != nil {
+						return rf
+					}
+				}
+				continue
+			}
+			if rf := walk(m.val, outer, parent, bundle, isEntryResource, full, entryURL, false); rf != nil {
+				return rf
+			}
+		}
+		for _, e := range node.elems {
+			if rf := walk(e, outer, parent, bundle, false, "", entryURL, false); rf != nil {
+				return rf
+			}
+		}
+		return nil
+	}
+	if rf := walk(n.root, -1, -1, -1, false, "", "", false); rf != nil {
+		return nil, rf
+	}
+	return out, nil
+}
+
 // NoContent is §5's no-content test, by structure: the Bundle carries no
 // resource but the SubscriptionStatus (no other entry has a resource member),
 // the SubscriptionStatus carries no contained resource and no

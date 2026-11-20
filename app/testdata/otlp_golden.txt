@@ -112,6 +112,7 @@ scope github.com/SmartHealthNetwork/shn-gateway/telemetry v1.0.0-golden
     {shn.reason=budget} 1
     {shn.reason=involvement-not-carried} 1
     {shn.reason=overflow} 1
+    {shn.reason=request-unreadable} 1
     {shn.reason=system-of-record-unavailable} 1
     {shn.reason=unknown-member} 1
   shn.gateway.legs unit="{leg}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
@@ -120,6 +121,14 @@ scope github.com/SmartHealthNetwork/shn-gateway/telemetry v1.0.0-golden
     {shn.outcome=failed} 1
     {shn.outcome=routed} 1
     {shn.outcome=unreachable} 1
+  shn.gateway.network.retries unit="{retry}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE
+    {shn.retry.result=answered,shn.service=authz} 1
+    {shn.retry.result=answered,shn.service=hub} 1
+    {shn.retry.result=failed,shn.service=authz} 1
+    {shn.retry.result=failed,shn.service=hub} 1
+    {shn.retry.result=other,shn.service=other} 1
+    {shn.retry.result=refused,shn.service=authz} 1
+    {shn.retry.result=refused,shn.service=hub} 1
   shn.gateway.peers.known unit="{peer}" gauge
     {} 3
   shn.gateway.refusals unit="{refusal}" sum monotonic=true AGGREGATION_TEMPORALITY_CUMULATIVE

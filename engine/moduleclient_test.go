@@ -504,6 +504,62 @@ func TestModuleClient_UnknownModuleRefusesBoot(t *testing.T) {
 	}
 }
 
+// REJECTION, at boot: a module client registered for a Subscription scope, in
+// any spelling or case, refuses the ingress: no module builds a Subscription
+// interaction, so the scope could be granted for nothing. The controls start:
+// a module client with its usual scopes or a wildcard, and a native client
+// registered for a Subscription scope.
+func TestModuleClient_ASubscriptionScopeRefusesBoot(t *testing.T) {
+	_, pub := newTestClientKey(t)
+	start := func(clients map[string]IngressClientRegistration) error {
+		keys, err := newEphemeralKeyStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = newIngressAuthServer(testIngressBaseURL, clients, ingressFixedClock(), keys, NewInMemoryReplayStore())
+		return err
+	}
+	for _, scope := range []string{"system/Subscription.cruds", "system/Subscription.read", "system/Subscription.*", "system/Subscription.r?url=x", "SYSTEM/subscription.write"} {
+		t.Run("refused/"+scope, func(t *testing.T) {
+			err := start(map[string]IngressClientRegistration{
+				"native": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope}},
+				"module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope, scope}, Module: ModuleOnBehalf},
+			})
+			if err == nil || !strings.Contains(err.Error(), `registration "module"`) || !strings.Contains(err.Error(), "no module builds a Subscription interaction") || !strings.Contains(err.Error(), scope) {
+				t.Fatalf("err = %v, want the module's Subscription scope refused, naming it", err)
+			}
+		})
+	}
+	for name, clients := range map[string]map[string]IngressClientRegistration{
+		"a module with its usual scope":                {"module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope}, Module: ModuleOnBehalf}},
+		"a module with a wildcard":                     {"module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{"system/*.cruds"}, Module: ModuleOnBehalf}},
+		"a module with a Claim scope":                  {"module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{"system/Claim.write"}, Module: ModuleOnBehalf}},
+		"a native client with a Subscription scope":    {"native": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope, "system/Subscription.cruds"}}},
+		"a module beside a native Subscription client": {"module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{ingressScope}, Module: ModuleOnBehalf}, "native": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{"system/Subscription.cruds"}}},
+	} {
+		t.Run("starts/"+name, func(t *testing.T) {
+			if err := start(clients); err != nil {
+				t.Fatalf("err = %v, want it to start", err)
+			}
+		})
+	}
+	// The exported rule holds a client of no module to nothing.
+	if err := CheckModuleClientScopes("", []string{"system/Subscription.cruds"}); err != nil {
+		t.Fatalf("a client of no module: %v, want no refusal", err)
+	}
+	// Two module clients each registered for one: the first in client id
+	// order is the one named, every time.
+	two := map[string]IngressClientRegistration{
+		"b-module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{"system/Subscription.r"}, Module: ModuleOnBehalf},
+		"a-module": {Alg: "ES384", PublicKeyPEM: pub, Scopes: []string{"system/Subscription.r"}, Module: ModuleOnBehalf},
+	}
+	for i := 0; i < 20; i++ {
+		if err := start(two); err == nil || !strings.Contains(err.Error(), `registration "a-module"`) {
+			t.Fatalf("err = %v, want the first client in id order named", err)
+		}
+	}
+}
+
 // The closed sets the record and the declaration draw from, pinned: a value
 // added to either fails here until it is reviewed.
 func TestModuleClient_ClosedSetsPinned(t *testing.T) {

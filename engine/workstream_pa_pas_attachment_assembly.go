@@ -19,6 +19,9 @@ import (
 // step runs on the SDK's bundle before the attachment is completed, so the
 // completion sees every entry the request carries.
 func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
+	if err := providerIsThePayersRecord(in.Provider, in.Insurer); err != nil {
+		return nil, err
+	}
 	body, err := shnsdk.BuildConformantClaimBundleAtLineCarried(line, in)
 	if err != nil {
 		return body, err
@@ -33,6 +36,9 @@ func buildAuthoredPASSubmit(line string, in shnsdk.ConformantClaimInputs, extend
 }
 
 func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, extend ...func([]byte) ([]byte, error)) ([]byte, error) {
+	if err := providerIsThePayersRecord(in.Provider, in.Insurer); err != nil {
+		return nil, err
+	}
 	body, err := shnsdk.BuildConformantClaimUpdateBundleAtLineCarried(line, in)
 	if err != nil {
 		return nil, err
@@ -48,6 +54,26 @@ func buildAuthoredPASUpdate(line string, in shnsdk.ConformantClaimUpdateInputs, 
 		return nil, err
 	}
 	return completeAuthoredPASAttachment(body, in.QR, in.SR, in.CoverageRef)
+}
+
+// providerIsThePayersRecord refuses a PAS build whose requesting provider
+// (provider) is an Organization with the payer Organization's (insurer's) id.
+// Both are build inputs read from the participant's own system of record, and
+// the request carries each as an entry of its own, which two records under
+// one type and id cannot be, so it is a record read from that system the
+// build cannot carry as read (errRecordNotCarried, 502),
+// decided by the inputs' structure (type and id, read as the SDK's builders
+// read them) before the build, never by the builders' message.
+func providerIsThePayersRecord(provider, insurer []byte) error {
+	var p struct{ ResourceType, ID string }
+	var i struct{ ID string }
+	if json.Unmarshal(provider, &p) != nil || json.Unmarshal(insurer, &i) != nil {
+		return nil
+	}
+	if p.ResourceType == "Organization" && p.ID != "" && p.ID == i.ID {
+		return fmt.Errorf("%w: the requesting provider is an Organization with the payer Organization's id (Organization/%s), and the request carries each as an entry of its own", errRecordNotCarried, p.ID)
+	}
+	return nil
 }
 
 // pasBuildReIDs is the set of types of the records the SDK's Carried build
@@ -72,7 +98,7 @@ func pasBuildReIDs(order []byte, withProvenance bool) map[string]bool {
 // builtEntriesNamed is the fidelity of the gateway's own PAS build, checked
 // once, right after the SDK's Carried build, on every path of a submission or
 // an amendment, before any other step; nothing is sent when it refuses
-// (errRecordNotCarried, 422). Two of the build's own edits cannot be made:
+// (errRecordNotCarried, 502). Two of the build's own edits cannot be made:
 //   - It addresses each record it places (its entry's fullUrl, and the
 //     references the Claim and the Coverage make to it) by the record's
 //     resourceType and id. A participant's record that states either only in
@@ -88,6 +114,17 @@ func pasBuildReIDs(order []byte, withProvenance bool) map[string]bool {
 //     its id twice so is the participant's own ambiguity, not this edit's.
 //
 // Every entry SHN builds itself states both exactly, and only once.
+//
+// Every entry it can refuse is one the gateway read from its own
+// participant's system, so its refusal is 502 (gateway/STABILITY.md, "What
+// the gateway cannot carry or edit"). The only entries of another origin are
+// UC-05's facility report and the Provenance attributing it, a peer's
+// message, and it can refuse neither: the report is picked only by its
+// exact resourceType and id (cdexEvidenceEntries), and its type is never one
+// the build re-ids; the Provenance is not re-id'd on an amendment that
+// carries a report (pasBuildReIDs), and one that states no exact id is
+// refused first by the SDK's Carried build (422, the fidelity of SHN's own
+// build).
 func builtEntriesNamed(body []byte, reIDs map[string]bool) error {
 	bundle, err := exactMembers(body)
 	if err != nil {

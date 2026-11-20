@@ -510,10 +510,10 @@ func TestAccessLineFor_RequesterBinding(t *testing.T) {
 			`{"binding":"bound","involvement":"requester-held","outcome":"unknown"}`},
 		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingNotSent, NotSent: engine.RequesterNotSentHubUnreachable},
 			`{"binding":"bound","involvement":"requester-held","outcome":"not-sent","notSent":"hub-unreachable"}`},
-		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingAccepted, Resent: true},
-			`{"binding":"bound","involvement":"requester-held","outcome":"accepted","resent":true}`},
-		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingRefused, RefusedBy: engine.RefusedByHub, Status: 503, Resent: true},
-			`{"binding":"bound","involvement":"requester-held","outcome":"refused","refusedBy":"hub","status":503,"resent":true}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingAccepted, Resent: true, ResentConnection: engine.RequesterResentNew},
+			`{"binding":"bound","involvement":"requester-held","outcome":"accepted","resent":true,"resentConnection":"new"}`},
+		{engine.RequesterBindingRecord{Binding: "bound", Involvement: "requester-held", Outcome: engine.RequesterBindingRefused, RefusedBy: engine.RefusedByHub, Status: 503, Resent: true, ResentConnection: engine.RequesterResentPooled},
+			`{"binding":"bound","involvement":"requester-held","outcome":"refused","refusedBy":"hub","status":503,"resent":true,"resentConnection":"pooled"}`},
 	} {
 		rec := refusedRecord()
 		rec.RequesterBinding = &row.rec

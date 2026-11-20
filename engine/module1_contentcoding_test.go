@@ -21,7 +21,7 @@ func TestScenarioRoutes_AnUnsupportedCodingIs415(t *testing.T) {
 	t.Parallel()
 	for _, authenticated := range []bool{false, true} {
 		for _, rt := range originationRouteTable {
-			t.Run(rt.pattern, func(t *testing.T) {
+			t.Run(string(rt.pattern), func(t *testing.T) {
 				g, _, _ := crdTestSystem(t, uc03Coverage())
 				declareOriginationProfile(g, "demo")
 				if authenticated {
@@ -30,7 +30,7 @@ func TestScenarioRoutes_AnUnsupportedCodingIs415(t *testing.T) {
 				}
 				var got exchangeRecords
 				g.cfg.ExchangeObserved = got.observe
-				method, path, _ := strings.Cut(rt.pattern, " ")
+				method, path, _ := strings.Cut(string(rt.pattern), " ")
 				r := httptest.NewRequest(method, path, strings.NewReader(`{}`))
 				r.Header.Set("Content-Encoding", "br")
 				if authenticated {
@@ -52,14 +52,14 @@ func TestScenarioRoutes_AnUnsupportedCodingIs415(t *testing.T) {
 // assertion on authentication, 401, whatever the coding of its body.
 func TestScenarioRoutes_ACallerWithNoAssertionIsRefusedBeforeTheCoding(t *testing.T) {
 	for _, rt := range originationRouteTable {
-		t.Run(rt.pattern, func(t *testing.T) {
+		t.Run(string(rt.pattern), func(t *testing.T) {
 			g, _, _ := crdTestSystem(t, uc03Coverage())
 			declareOriginationProfile(g, "demo")
 			pub, _ := genED25519(t)
 			g.cfg.ScenarioCallers = map[string]ed25519.PublicKey{"operator": pub}
 			var got exchangeRecords
 			g.cfg.ExchangeObserved = got.observe
-			method, path, _ := strings.Cut(rt.pattern, " ")
+			method, path, _ := strings.Cut(string(rt.pattern), " ")
 			r := httptest.NewRequest(method, path, strings.NewReader(`{}`))
 			r.Header.Set("Content-Encoding", "br")
 			rec := httptest.NewRecorder()
@@ -84,7 +84,7 @@ func TestScenarioRoutes_AnswersAreNeverCompressed(t *testing.T) {
 	g.cfg.IngressEnabled = true
 	h := &acceptsGzip{g.Handler()}
 	for _, rt := range originationRouteTable {
-		method, path, _ := strings.Cut(rt.pattern, " ")
+		method, path, _ := strings.Cut(string(rt.pattern), " ")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
 		if ce, v := rec.Header().Get("Content-Encoding"), rec.Header().Get("Vary"); ce != "" || v != "" {
@@ -93,7 +93,7 @@ func TestScenarioRoutes_AnswersAreNeverCompressed(t *testing.T) {
 	}
 	controls := 0
 	for _, rt := range append(g.coreRoutes("provider"), g.workstreamRoutes("provider")...) {
-		method, path, _ := strings.Cut(rt.pattern, " ")
+		method, path, _ := strings.Cut(string(rt.pattern), " ")
 		if rt.credential != noCredential || strings.Contains(path, "{") {
 			continue
 		}

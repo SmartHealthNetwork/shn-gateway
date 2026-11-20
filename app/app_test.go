@@ -3361,3 +3361,34 @@ func TestLoadConfig_IngressBaseAlwaysBuildsAReturnPath(t *testing.T) {
 		})
 	}
 }
+
+// A provider's ingress client may register Subscription scopes, which the
+// Subscription routes at a payer's base take: each in one of SMART's
+// spellings boots, and none is required; one SMART does not spell refuses the
+// start, naming it, since it would be granted and permit nothing.
+func TestLoadConfig_ProviderIngressClientSubscriptionScopes(t *testing.T) {
+	scoped := func(scopes string) string {
+		return strings.Replace(testValidClientsJSON(t), `"scopes":["system/Davinci.write"]`, `"scopes":`+scopes, 1)
+	}
+	env := func(t *testing.T, scopes string) map[string]string {
+		e := baseProviderEnv()
+		e["PROVIDER_DAVINCI_INGRESS_BASE_URL"] = "https://gw.test"
+		e["INGRESS_CLIENTS_FILE"] = writeClientsFile(t, scoped(scopes))
+		if !strings.Contains(scoped(scopes), `"scopes":`+scopes) {
+			t.Fatal("fixture: scopes not replaced")
+		}
+		return e
+	}
+	for _, scopes := range []string{`["system/Davinci.write"]`, `["system/Davinci.write","system/Subscription.cruds"]`, `["system/Subscription.read","system/Subscription.write"]`} {
+		e := env(t, scopes)
+		if _, err := loadConfig(func(k string) string { return e[k] }); err != nil {
+			t.Fatalf("%s: %v", scopes, err)
+		}
+	}
+	for _, bad := range []string{"system/Subscription.xyz", "system/Subscription.rc"} {
+		e := env(t, `["system/Davinci.write","`+bad+`"]`)
+		if _, err := loadConfig(func(k string) string { return e[k] }); err == nil || !strings.Contains(err.Error(), `"`+bad+`" is not a SMART system/Subscription scope`) {
+			t.Fatalf("%s: want a boot refusal naming it, got %v", bad, err)
+		}
+	}
+}

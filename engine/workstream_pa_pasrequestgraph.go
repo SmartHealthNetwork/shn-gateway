@@ -141,7 +141,7 @@ func evidenceReadByMember(read func(context.Context, string) ([]byte, bool, erro
 // system answered whose subject is not exactly the request's patient (another
 // patient, or a reference form E-06 does not re-point): the build will not
 // carry it as this patient's evidence. It is the fidelity of the gateway's own
-// build (errRecordNotCarried: 422, recorded Rule fidelity at the build stage,
+// build (errRecordNotCarried: 502, recorded Rule fidelity at the build stage,
 // at every conformance level), the same refusal whichever request or
 // resume reaches it.
 func notThePatientsRecord(ref string) error {
@@ -189,13 +189,32 @@ func (e *evidenceUnreadableError) Unwrap() error { return &SoRReadError{Kind: So
 
 func recordUnreadable(ref string) error { return &evidenceUnreadableError{ref: ref} }
 
-// errEvidenceBound is a record read for the request that nests past the
-// request graph's own bound (pasgraph.MaxDepth), or past the relay's limits on
-// a body the gateway transmits, at its depth in the request: the gateway's own
-// limit,
-// refused as the completion refuses any other graph it will not read, never
-// blamed on the participant's system.
-var errEvidenceBound = errors.New("PAS evidence record past the request graph's bound")
+// evidencePastLimitError refuses ref, a record read from the participant's
+// system that the gateway's own build cannot carry within the gateway's own
+// carrying limits: it nests past the request graph's bound (pasgraph.MaxDepth),
+// it is past the relay's limits on a body the gateway transmits at its depth in
+// the request, or it takes the request past the graph's size, reference or
+// resource bounds, or the relay's limits on the request as a whole. It is the fidelity of the gateway's own build (rule fidelity, stage
+// build, at every conformance level), answered 502 since what cannot be carried
+// is what the gateway read from its own participant's system
+// (evidenceFidelityRefusal), never under no named rule and never 500. The
+// reason names the record and the limit, and says a retry cannot succeed until
+// the record changes: it carries no Retry-After.
+type evidencePastLimitError struct{ ref, limit string }
+
+func (e *evidencePastLimitError) Error() string {
+	return "PAS evidence " + e.ref + " read from the provider's system is past the gateway's own carrying limits: it " + e.limit + "; the request cannot be sent until that record changes"
+}
+
+func recordPastLimit(ref, limit string) error { return &evidencePastLimitError{ref: ref, limit: limit} }
+
+// The limits a record read can take the request past, as a refusal names them.
+var (
+	limitGraphDepth     = fmt.Sprintf("nests deeper than the request graph's %d levels", pasGraphMaxDepth)
+	limitGraphBytes     = fmt.Sprintf("takes the request past its %d MiB bound", pasGraphMaxBytes>>20)
+	limitGraphRefs      = fmt.Sprintf("takes the request past its %d references", pasGraphMaxReferences)
+	limitGraphResources = fmt.Sprintf("takes the request past its %d resources", pasGraphMaxResources)
+)
 
 // heldRecordFault decides raw, the system's answer to a read of ref
 // (<type>/<id>), before its subject is read, the same on every path (the
@@ -204,7 +223,7 @@ var errEvidenceBound = errors.New("PAS evidence record past the request graph's 
 // cannot be decoded, or is another resourceType or id; errRecordNotCarried,
 // naming ref, when its bytes cannot be carried as read
 // (uncarriableRecordBytes: the splice's own rule, the fidelity of the build);
-// and errEvidenceBound past the graph's own bound or the relay's limits on the
+// and recordPastLimit past the graph's own bound or the relay's limits on the
 // record as the request carries it: the gateway's own limits.
 func heldRecordFault(raw []byte, ref string) error {
 	r := bytes.Trim(raw, " \t\r\n")
@@ -218,7 +237,7 @@ func heldRecordFault(raw []byte, ref string) error {
 	if err := decodePASObject(r, &m); err != nil {
 		var c *pasgraph.CauseError
 		if errors.As(err, &c) && c.Cause() == pasgraph.RefusalBound {
-			return errEvidenceBound
+			return recordPastLimit(ref, limitGraphDepth)
 		}
 		return recordUnreadable(ref)
 	}
@@ -233,7 +252,7 @@ func heldRecordFault(raw []byte, ref string) error {
 	if _, err := relay.Doc(relay.NewBody(nested, relay.OriginUpstreamResponse)); err != nil {
 		var limit *relay.LimitError
 		if errors.As(err, &limit) {
-			return errEvidenceBound
+			return recordPastLimit(ref, limit.Limit()+" as the request carries it")
 		}
 		return recordUnreadable(ref)
 	}
@@ -336,15 +355,27 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		return fail()
 	}
 	refs := 0
+	// resources counts every object naming a resourceType, contained ones
+	// included, as the graph's own validation counts them.
+	resources := 0
 	total := len(body)
 	had := len(entries)
 	// added is each record read from the participant's system, as read: it
 	// is spliced into the request's bytes, which stay as built.
 	var added []bundleEntryBytes
+	// lastRead is the last record read and added, which a request past its
+	// size bound once spliced is refused naming.
+	lastRead := ""
 	for i := 0; i < len(entries); i++ {
 		entry := entries[i].(map[string]any)
 		owner := graph.ByURL[entry["fullUrl"].(string)]
+		// A record read from the participant's system (an entry the
+		// completion added) that takes the request past a bound of the graph
+		// is refused naming it; the request as built is the gateway's own.
+		fromRead := i >= had
+		ownerRef := owner.Resource["resourceType"].(string) + "/" + owner.Resource["id"].(string)
 		var selected []string
+		pastRefs, pastResources := false, false
 		var walk func(any, int, string) bool
 		walk = func(v any, depth int, path string) bool {
 			if depth > pasGraphMaxDepth {
@@ -352,9 +383,19 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			}
 			switch x := v.(type) {
 			case map[string]any:
+				if _, ok := x["resourceType"].(string); ok {
+					resources++
+					if resources > pasGraphMaxResources {
+						pastResources = true
+						return false
+					}
+				}
 				if ref, exists := x["reference"]; exists {
 					s, ok := ref.(string)
 					refs++
+					if ok && refs > pasGraphMaxReferences {
+						pastRefs = true
+					}
 					if !ok || refs > pasGraphMaxReferences {
 						return false
 					}
@@ -382,6 +423,12 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			return true
 		}
 		if !walk(owner.Resource, 0, "") {
+			if fromRead && pastRefs {
+				return nil, recordPastLimit(ownerRef, limitGraphRefs)
+			}
+			if fromRead && pastResources {
+				return nil, recordPastLimit(ownerRef, limitGraphResources)
+			}
 			return fail()
 		}
 		for _, ref := range selected {
@@ -405,6 +452,11 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			base := strings.TrimSuffix(owner.FullURL, "/"+owner.Resource["resourceType"].(string)+"/"+owner.Resource["id"].(string))
 			full := base + "/" + ref
 			if len(entries) >= pasGraphMaxResources {
+				if fromRead {
+					// The records this record read references take the
+					// request past its resource bound.
+					return nil, recordPastLimit(ownerRef, limitGraphResources)
+				}
 				return fail()
 			}
 			if err := ctx.Err(); err != nil {
@@ -429,11 +481,12 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			if errors.As(err, &unreadable) {
 				return nil, err
 			}
-			if errors.Is(err, errEvidenceBound) {
-				return fail()
+			var past *evidencePastLimitError
+			if errors.As(err, &past) {
+				return nil, err
 			}
 			if err != nil {
-				return nil, safeSoRError(err)
+				return nil, safeReadErr(err)
 			}
 			if !found {
 				// A definite absence, never a read that failed to answer
@@ -443,10 +496,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			// The record is decided before the request's size bound, in the
 			// order the E-06 wrapper decides it, so a record's answer does not
 			// depend on which id the system holds the member under.
-			switch err := heldRecordFault(raw, ref); {
-			case errors.Is(err, errEvidenceBound):
-				return fail()
-			case err != nil:
+			if err := heldRecordFault(raw, ref); err != nil {
 				return nil, err
 			}
 			var r map[string]any
@@ -468,7 +518,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			}
 			total += len(raw)
 			if total > pasGraphMaxBytes {
-				return fail()
+				return nil, recordPastLimit(ref, limitGraphBytes)
 			}
 			e := map[string]any{"fullUrl": full, "resource": r}
 			if !add(len(entries), e) {
@@ -480,6 +530,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 				return fail()
 			}
 			added = append(added, bundleEntryBytes{fullURL: encodedURL, resource: raw})
+			lastRead = ref
 		}
 	}
 	graph.Entries = entries
@@ -496,8 +547,30 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		// of the gateway's own edit (evidenceFidelityRefusal), not a graph fault.
 		return nil, err
 	}
+	if err == nil && len(result) > pasGraphMaxBytes && lastRead != "" {
+		// The records read took the request, as spliced, past its size bound.
+		return nil, recordPastLimit(lastRead, limitGraphBytes)
+	}
 	if err != nil || len(result) > pasGraphMaxBytes {
 		return fail()
+	}
+	if lastRead != "" {
+		// Each record read is within the relay's limits as the request
+		// carries it; together they may take the request past them (its
+		// tokens), which the build's own seal would refuse unnamed.
+		if _, err := relay.Doc(relay.NewBody(result, relay.OriginUpstreamResponse)); err != nil {
+			var limit *relay.LimitError
+			if !errors.As(err, &limit) {
+				return fail()
+			}
+			// Only when the request as built is within the relay's limits
+			// do the records read take it past them; past them already, it
+			// is the gateway's own build.
+			if _, err := relay.Doc(relay.NewBody(body, relay.OriginUpstreamResponse)); err != nil {
+				return fail()
+			}
+			return nil, recordPastLimit(lastRead, "takes the request past the relay's limits: the request "+limit.Limit())
+		}
 	}
 	return result, nil
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	"github.com/SmartHealthNetwork/shn-gateway/pa/personas"
+	vocab "github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -2059,10 +2060,20 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 
 	// Amend: attach the provider-LOCAL operative DiagnosticReport + Provenance,
 	// its subject naming the member's network patient (E-06).
-	drJSON, reportEdits, status, msg, readErr := g.supplementalReport(ctx, member, res.sorID)
-	if status != 0 {
-		if !failOriginRead(ctx, w, status, msg, readErr) {
-			writeJSON(w, status, map[string]string{"error": withCarriedLegs(ctx, msg)})
+	drJSON, reportEdits, refusal := g.supplementalReport(ctx, member, res.sorID)
+	if refusal != nil {
+		// The claim update is not sent. A report the build cannot carry as
+		// read is the fidelity of this gateway's own build (refusal rule
+		// fidelity, stage build), with the leg it did not send observed; a
+		// failed read is the system-of-record failure; anything else is
+		// answered with its status alone.
+		switch {
+		case refusal.fidelity:
+			exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+			g.observeOwnBuildRefused(res.recipient, "pas-claim-update", refusal.msg)
+			writeJSON(w, refusal.status, map[string]string{"error": withCarriedLegs(ctx, refusal.msg)})
+		case !failOriginRead(ctx, w, refusal.status, refusal.msg, refusal.err):
+			writeJSON(w, refusal.status, map[string]string{"error": withCarriedLegs(ctx, refusal.msg)})
 		}
 		return
 	}
@@ -2072,7 +2083,13 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 	}
 	drRef, ok := resourceRef(drJSON)
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": afterLegs(r.Context(), "supplemental report missing id")})
+		// A report the system holds with no id: nothing the build can address
+		// it by, and nothing it mints. The fidelity of the build, as a record
+		// read from the participant's own system (502), with the claim update
+		// it does not send observed.
+		exchangeOf(ctx).refusedFidelity(vocab.RefusalStageBuild)
+		g.observeOwnBuildRefused(res.recipient, "pas-claim-update", "supplemental report missing id")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "supplemental report missing id")})
 		return
 	}
 	// The amendment carries the provider's report and this Provenance as
@@ -2128,7 +2145,10 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 			ReportType: reportTypeFor(route, claimIn.ReportType),
 		}, res.requester)
 		if err != nil {
-			pasBuildFailure(w, r, err, "build update bundle failed")
+			// The records this build carries as written are the supplemental
+			// report, read from the participant's own system, and SHN's own
+			// Provenance: a record it cannot carry is the system's (502).
+			pasBuildFailure(w, r, readRecordNotCarried(err), "build update bundle failed")
 			return nil, nil, true, nil
 		}
 		recordReportTypeNotCarried(ctx, claimIn.ReportType, updateBundle)
@@ -2521,6 +2541,11 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		// anything is built (422).
 		if docType == "DiagnosticReport" {
 			ev, err := cdexEvidenceEntries(records)
+			if errors.Is(err, errFacilityReportNotCarried) {
+				g.refuseOwnBuild(ctx, w, res.recipient, "pas-claim-update",
+					"build update bundle failed: the facility's report on the federated-query leg cannot be the claim update's evidence: "+err.Error()+" (fidelity of SHN's own build)")
+				return
+			}
 			if err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": afterLegs(r.Context(), "federated response parse failed: "+err.Error())})
 				return

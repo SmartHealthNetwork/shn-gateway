@@ -96,6 +96,9 @@ func containedObjects(list []any) []map[string]any {
 	return out
 }
 
+// idShape is a FHIR id's characters only: its uses build an id or a relative
+// reference for a reading the gateway makes in memory, never a path or search it
+// sends, which take fhirid.Valid.
 var idShape = regexp.MustCompile(`^` + fhirID + `$`)
 
 // eligibilityRequestMember is the member a CoverageEligibilityRequest's
@@ -116,7 +119,22 @@ var idShape = regexp.MustCompile(`^` + fhirID + `$`)
 // reader's limits, a member value read from a byte or escape a reader replaces
 // (errReplacedCharacter).
 func eligibilityRequestMember(cer []byte) (string, error) {
+	// A patient reference that names no one is refused before the SDK's
+	// reader reads it, whatever that reader answers for it.
+	if blankPatientReference(cer) {
+		return "", errMemberNamesNoOne
+	}
 	literal, err := shnsdk.ParseEligibilityRequestMember(cer)
+	// From shn-sdk v1.15.0 the SDK's reader refuses a member that names no one
+	// (its only refusal, an *EligibilityRequestRefusal). A reference read so by
+	// names in any case may name its patient only in another case: that is
+	// read below, by exact names, and refused for it first, as before. Any
+	// other blank member is refused after (eligibilitySubmissionMember).
+	var namesNoOne *shnsdk.EligibilityRequestRefusal
+	blankRead := errors.As(err, &namesNoOne)
+	if blankRead {
+		literal, err = "", nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -130,6 +148,13 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 			return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
 		}
 		ref, ok := exactPatientReference(cer)
+		// Read so by names in any case, the member was blank: the exact
+		// reference reads as the SDK's reading did when it names no one too
+		// (whatever whitespace it carries), as a reader that returns the
+		// blank member reads it.
+		if blankRead && ok && memberNamesNoOne(strings.TrimPrefix(ref, "Patient/")) {
+			literal = strings.TrimPrefix(ref, "Patient/")
+		}
 		if !ok || strings.TrimPrefix(ref, "Patient/") != literal {
 			return "", fmt.Errorf("the request's patient: %w", errNamedInAnotherCase)
 		}
@@ -157,6 +182,25 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 	}
 	// Contained resources of another JSON type hold no contained Patient.
 	return containedRequestMember(ref, contained, literal)
+}
+
+// blankPatientReference reports whether a CoverageEligibilityRequest, read by
+// its exact member names, names its patient by a reference that names no one
+// (memberNamesNoOne). A body that does not read so is left to the readers that
+// follow.
+func blankPatientReference(cer []byte) bool {
+	var req struct {
+		ResourceType string `json:"resourceType"`
+		Patient      *struct {
+			Reference *string `json:"reference"`
+		} `json:"patient"`
+	}
+	if decodeMessage(cer, &req) != nil || req.ResourceType != "CoverageEligibilityRequest" || req.Patient == nil || req.Patient.Reference == nil {
+		return false
+	}
+	// One "Patient/" taken off, as the SDK's reader takes it, then the member
+	// that leaves read as the engine reads every member.
+	return memberNamesNoOne(strings.TrimPrefix(*req.Patient.Reference, "Patient/"))
 }
 
 // errReplacedCharacter is a request whose member value carries U+FFFD in a body that is not

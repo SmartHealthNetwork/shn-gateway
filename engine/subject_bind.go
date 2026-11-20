@@ -50,14 +50,50 @@ func (g *Gateway) resolveSubjectBinding(ctx context.Context, member string, payl
 // resolveBinding binds member as resolveSubjectBinding does. ownRecord reads a Patient the
 // request carries whose id is the member's as theirs though a Coverage names it as its party:
 // for another patient a request names by the id of a Patient it carries (identifyNamed,
-// involved.go), that Patient is the record of the very person looked up.
+// involved.go), that Patient is the record of the very person looked up. payload is a message's
+// own bytes (the request's, or an answer's): one the binding cannot decode is refused.
 func (g *Gateway) resolveBinding(ctx context.Context, member string, payload []byte, ownRecord bool) (pci string, held, found bool, readErr error) {
+	return g.resolveBindingFrom(ctx, member, payload, ownRecord, true)
+}
+
+// resolveBindingFrom is resolveBinding; message says whether payload is a message's own
+// bytes (true) or the system of record's own answer (false), such as the Patient a CDex
+// Task read binds from (bindCDexReadSubject). The system of record's bytes are never
+// scanned strictly, and one that the binding cannot decode is read, as in earlier
+// releases, as carrying no Patient: the member is bound by its id alone, and the read
+// is recorded as a system-of-record read that failed while the answer was still built
+// (ExchangeRecord.ReadsFailed, BackendMalformed).
+func (g *Gateway) resolveBindingFrom(ctx context.Context, member string, payload []byte, ownRecord, message bool) (pci string, held, found bool, readErr error) {
+	// A member that names no one is bound to no one: never read, and never
+	// derived from (derivedPCI), which every such request would share.
+	if memberNamesNoOne(member) {
+		return "", false, false, errMemberNamesNoOne
+	}
 	pci, _, found, readErr = ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(ctx, member)
 	if readErr != nil || found || g.cfg.RequireKnownMembers {
 		return pci, found, found, readErr
 	}
-	demo, ok := carriedDemographics(payload, member, ownRecord)
-	if !ok && carriesMembersParty(payload, member, ownRecord) {
+	// The Patients the payload carries are read from the binding's view of it
+	// (bindingView). A message the binding cannot decode at all is never read as
+	// carrying none: the identifier would then be derived from the member id
+	// alone, as if it carried no Patient for it. Every leg's own readers refuse
+	// such a message before its binding reads it (they read it strictly, or, on
+	// coverage eligibility, refuse a repeated name and parse each request it
+	// submits), so this is a guard: no request carried in earlier releases is
+	// refused by it (TestBinding_AnUndecodableBodyIsRefusedFirstOnEveryLeg).
+	var view canonicalView
+	if len(payload) > 0 {
+		v, err := bindingView(payload)
+		if err != nil && message {
+			return "", false, false, err
+		}
+		if err != nil {
+			exchangeOf(ctx).readsFailed([]string{BackendMalformed})
+		}
+		view = v
+	}
+	demo, ok := carriedDemographicsIn(view, member, ownRecord)
+	if !ok && carriesMembersPartyIn(view, member, ownRecord) {
 		return "", false, false, errPatientUnidentifiable
 	}
 	return derivedPCI(member, demo.BirthDate, demo.FamilyName), false, true, nil
@@ -74,8 +110,9 @@ const msgPatientUnidentifiable = "cannot identify the patient: the request carri
 
 // subjectBindingFailure is the answer to a failed bind of the member a request names:
 // a patient the request cannot identify is refused 400, recorded as authority (the
-// patient the exchange is for cannot be identified); any other failure is the system of
-// record's (SoRFailureResponse). On a leg this gateway answers, one whose answer repeats
+// patient the exchange is for cannot be identified); a request whose patients cannot be
+// read at all (errRequestPatientsUnreadable) is refused 422, recorded as authority on the
+// same ground; any other failure is the system of record's (SoRFailureResponse). On a leg this gateway answers, one whose answer repeats
 // a member name is recorded as sorFailure records it, on message integrity; on the
 // requester's side, where its system's reads are not the exchange's backend calls, the
 // record is unchanged.
@@ -83,6 +120,14 @@ func subjectBindingFailure(ctx context.Context, err error) (int, string) {
 	if errors.Is(err, errPatientUnidentifiable) {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonPatientUnidentifiable)
 		return http.StatusBadRequest, msgPatientUnidentifiable
+	}
+	if errors.Is(err, errRequestPatientsUnreadable) {
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonRequestPatientsUnreadable)
+		return http.StatusUnprocessableEntity, msgRequestPatientsUnreadable
+	}
+	if errors.Is(err, errMemberNamesNoOne) {
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonMemberNamesNoOne)
+		return http.StatusBadRequest, msgMemberNamesNoOne
 	}
 	if x := exchangeOf(ctx); readRepeatsAMember(err) && x.answering() {
 		x.sorFailure(err)
@@ -138,11 +183,30 @@ func carriedPatientDemographics(payload []byte, member string) (Demo, bool) {
 }
 
 // carriedDemographics is carriedPatientDemographics, reading a Patient whose id is the
-// member's as theirs when ownRecord (identifyNamed).
+// member's as theirs when ownRecord (identifyNamed). A request no canonical view can be
+// made of carries none here; resolveBinding refuses such a request before it reads this.
 func carriedDemographics(payload []byte, member string, ownRecord bool) (Demo, bool) {
+	return carriedDemographicsIn(viewOf(payload), member, ownRecord)
+}
+
+// viewOf is payload's binding view (bindingView), or the zero view, which carries no
+// patient, when payload is empty or the binding cannot decode it.
+func viewOf(payload []byte) canonicalView {
+	if len(payload) == 0 {
+		return canonicalView{}
+	}
+	view, err := bindingView(payload)
+	if err != nil {
+		return canonicalView{}
+	}
+	return view
+}
+
+// carriedDemographicsIn is carriedDemographics over a request's canonical view.
+func carriedDemographicsIn(view canonicalView, member string, ownRecord bool) (Demo, bool) {
 	var demo Demo
 	var found, conflict bool
-	visitCarriedPatients(payload, member, ownRecord, func(patient map[string]any, party bool) {
+	visitCarriedPatients(view, member, ownRecord, func(patient map[string]any, party bool) {
 		if party {
 			return
 		}
@@ -174,18 +238,22 @@ func carriesPatient(payload []byte, member string) bool {
 }
 
 // forEachCarriedPatient calls fn for every Patient resource the request carries for the
-// member, at any depth, read by its exact member names. A Patient is the member's when its
+// member, at any depth, read from the binding's view of the request (bindingView), so a
+// name the readers read, or a resource type they compare, sent in another case within a
+// FHIR resource reads as FHIR spells it. A Patient is the member's when its
 // id or its member identifier is the member id. A Coverage's party (shnsdk.CoverageParty:
 // the parent a dependent's Coverage names as a contained Patient in its subscriber or
 // policyHolder) is another person, never the member, whatever it carries: a Patient any
 // Coverage in the request names in either slot (partyNamed) is never read as the member,
-// wherever the request carries it. Contained resources named only in another case are no
-// resources to a reader taking names exactly, so none is read from them, and none is read
-// from the contained resources of a Coverage whose party is unclear (partyUnclear). An empty
-// or unreadable request carries none, and so does one that repeats a member name exactly, or
-// in another case within a FHIR resource (resourceRepeatsAName): it can be read two ways.
+// wherever the request carries it. None is read from the contained resources of a Coverage
+// whose party is unclear (partyUnclear): one spelling, in another case, a name the party
+// rule reads that the view does not canonicalise. An empty request carries none, and so
+// does one the binding cannot decode: one that is not one JSON document, or repeats a
+// member name exactly, or in another case within a FHIR resource (resourceRepeatsAName),
+// since it can be read two ways. resolveBinding refuses such a request rather than read it
+// as carrying none.
 func forEachCarriedPatient(payload []byte, member string, fn func(patient map[string]any)) {
-	visitCarriedPatients(payload, member, false, func(patient map[string]any, party bool) {
+	visitCarriedPatients(viewOf(payload), member, false, func(patient map[string]any, party bool) {
 		if !party {
 			fn(patient)
 		}
@@ -196,8 +264,13 @@ func forEachCarriedPatient(payload []byte, member string, fn func(patient map[st
 // id or member identifier that is a Coverage's party, or that the walk cannot decide is
 // not one: another person under the member's own member number.
 func carriesMembersParty(payload []byte, member string, ownRecord bool) bool {
+	return carriesMembersPartyIn(viewOf(payload), member, ownRecord)
+}
+
+// carriesMembersPartyIn is carriesMembersParty over a request's canonical view.
+func carriesMembersPartyIn(view canonicalView, member string, ownRecord bool) bool {
 	found := false
-	visitCarriedPatients(payload, member, ownRecord, func(_ map[string]any, party bool) { found = found || party })
+	visitCarriedPatients(view, member, ownRecord, func(_ map[string]any, party bool) { found = found || party })
 	return found
 }
 
@@ -205,10 +278,12 @@ func carriesMembersParty(payload []byte, member string, ownRecord bool) bool {
 // for each Patient bearing the member's id or member identifier that it does not read as
 // the member because a Coverage names it as its party or names no party one way. With
 // ownRecord, a Patient whose id is the member's, outside any contained list, is the record
-// of the person looked up and is never a party.
-func visitCarriedPatients(payload []byte, member string, ownRecord bool, fn func(patient map[string]any, party bool)) {
-	var doc any
-	if len(payload) == 0 || json.Unmarshal(payload, &doc) != nil || resourceRepeatsAName(payload) {
+// of the person looked up and is never a party. view is the request's canonical view
+// (bindingView), the zero view for none: the party slots and every identity compared are
+// of that one view.
+func visitCarriedPatients(view canonicalView, member string, ownRecord bool, fn func(patient map[string]any, party bool)) {
+	doc := view.doc
+	if doc == nil {
 		return
 	}
 	slots := partySlotsOf(doc)
@@ -227,6 +302,10 @@ func visitCarriedPatients(payload []byte, member string, ownRecord bool, fn func
 				return
 			}
 			for k, child := range v {
+				// A member spelling "contained" in another case is no contained list:
+				// within a FHIR resource the view spells it "contained" already, so this
+				// passes over only a member outside every resource (a vendor's own),
+				// which no reader taking FHIR's names reads as contained resources.
 				if k != "contained" && strings.EqualFold(k, "contained") {
 					continue
 				}
@@ -921,17 +1000,32 @@ func (g *Gateway) bindInboundSubjectAs(ctx context.Context, member string, paylo
 // the rule of the refusal it returns: a caller whose leg refuses every
 // failure on a network primitive names one where none was recorded.
 func (g *Gateway) bindInboundSubjectRecorded(ctx context.Context, member string, payload []byte, unidentifiable int) (pci string, status int, msg string, recorded bool) {
-	if member == "" {
-		return "", http.StatusBadRequest, "unknown member", false
+	return g.bindSubjectRecorded(ctx, member, payload, unidentifiable, true)
+}
+
+// bindRecordSubjectRecorded is bindInboundSubjectRecorded for a member bound from the
+// system of record's own answer (record) rather than the request's bytes: a record the
+// binding cannot decode binds the member by its id alone (resolveBindingFrom).
+func (g *Gateway) bindRecordSubjectRecorded(ctx context.Context, member string, record []byte, unidentifiable int) (pci string, status int, msg string, recorded bool) {
+	return g.bindSubjectRecorded(ctx, member, record, unidentifiable, false)
+}
+
+func (g *Gateway) bindSubjectRecorded(ctx context.Context, member string, payload []byte, unidentifiable int, message bool) (pci string, status int, msg string, recorded bool) {
+	// A member that names no one (blank, or "Patient/" with no id) is the
+	// request's: refused on authority, as every route refuses it
+	// (subjectBindingFailure), before anything is read.
+	if memberNamesNoOne(member) {
+		status, msg := subjectBindingFailure(ctx, errMemberNamesNoOne)
+		return "", status, msg, true
 	}
-	pci, held, found, readErr := g.resolveSubjectBinding(ctx, member, payload)
+	pci, held, found, readErr := g.resolveBindingFrom(ctx, member, payload, false, message)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
 		unident := errors.Is(readErr, errPatientUnidentifiable)
 		if unident {
 			status = unidentifiable
 		}
-		return "", status, msg, unident
+		return "", status, msg, unident || errors.Is(readErr, errRequestPatientsUnreadable)
 	}
 	if !found || pci == "" {
 		// A member not held is refused only by a participant that requires

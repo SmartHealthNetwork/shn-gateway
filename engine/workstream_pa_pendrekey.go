@@ -25,6 +25,22 @@ import (
 // IngressBaseURL cleared, serves the ingress without one.
 var errNoReturnPath = errors.New("no documentation return path")
 
+// errNotifiedUnreadable is E-22 unable to read a PAS content notification
+// one way only (relay.Doc), so it cannot be made.
+var errNotifiedUnreadable = errors.New("engine: E-22 cannot read the notification one way only")
+
+// readNotified is how both gateways read a PAS content notification for
+// E-22 before it is sent or delivered: notificationUnreadable when relay
+// cannot read it one way only (such as a lone surrogate in a string), which
+// each refuses on the fidelity of SHN's own edit, as E-17's reader
+// (readNotification) is held.
+func readNotified(body []byte, origin relay.Origin, _ string) notificationRead {
+	if _, err := relay.Doc(relay.NewBody(body, origin)); err != nil {
+		return notificationUnreadable
+	}
+	return notificationPlacesRead
+}
+
 // noRekeyedAnswer is the payload a return-path re-key (pendReturnRekey,
 // cdexTaskReturnRekey) or the created Task's Location (cdexTaskLocated)
 // returns with an error.
@@ -158,4 +174,54 @@ func refusePendRekey(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	writeJSON(w, http.StatusBadGateway, map[string]string{"error": withPayerAnsweredNote(
 		"the gateway cannot re-key the answer's documentation return address to the network (fidelity of SHN's own edit): " + err.Error())})
+}
+
+// pasNotifiedReturnRekey is E-22 (pas-notified-return-rekey; the
+// notifications design §6.4, D127 decision 10): E-10's change, made on a
+// payer's PAS content notification the provider's gateway delivers to its own
+// system. Each PAS Task's payer-url input in the notified decision, found by
+// structure (payerURLInputs), is re-keyed to this gateway's documentation
+// return path for the payer the Hub authenticated as the notifier, rebuilt
+// from the ingress base and that payer alone, never read from the
+// notification. It is made only for a payer that takes the documentation
+// submission, and even where a signature covers the payer-url (the delivery
+// discloses it). A payer-url that is not a string valueUrl, or a payer not
+// known to take the submission, is carried as sent and recorded. A
+// notification relay cannot read one way only is an edit this gateway
+// cannot make, as E-17's is: whether it carries a payer-url is unknown, and
+// unknown is not empty, so it is never delivered with the payer's address in
+// it. err is errNotifiedUnreadable then (the delivery refuses such a
+// notification first, pasContentDelivery's rekey check, so err is its last
+// guard), and errNoReturnPath when there is no return path to write.
+func (g *Gateway) pasNotifiedReturnRekey(x *exchangeRecorder, doc *relay.Document, in deliveryInput) ([]relay.Op, error) {
+	if doc == nil {
+		return nil, errNotifiedUnreadable
+	}
+	targets, nonstructural := payerURLInputs(doc)
+	if nonstructural {
+		x.editNotMade(EditNotMadeNotifiedNoStructuralPayerURL)
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	if !g.payerTakesDocumentation(in.notifier) {
+		x.editNotMade(EditNotMadeNotifiedPayerDoesNotTake)
+		return nil, nil
+	}
+	ret, err := cdexroute.ReturnBase(g.cfg.IngressBaseURL, in.notifier)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errNoReturnPath, err)
+	}
+	var v bytes.Buffer
+	enc := json.NewEncoder(&v)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ret); err != nil {
+		return nil, err
+	}
+	value := bytes.TrimSpace(v.Bytes())
+	ops := make([]relay.Op, 0, len(targets))
+	for _, n := range targets {
+		ops = append(ops, doc.Replace(n, value))
+	}
+	return ops, nil
 }

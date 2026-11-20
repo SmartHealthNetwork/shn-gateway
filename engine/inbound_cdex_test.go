@@ -167,23 +167,53 @@ func TestFederatedQueryAnswer_AuthoredFulfillmentWithVerifiedEmbeds(t *testing.T
 		_, _, err := sealCDexFulfillment(signed, records)
 		assertCDexRefused(t, err, shnsdk.ErrCDexSignedContent)
 	})
-	t.Run("a request Task in a status that does not allow fulfillment is refused", func(t *testing.T) {
-		done := bytes.Replace(task, []byte(`"status":"requested"`), []byte(`"status":"completed"`), 1)
-		_, _, err := sealCDexFulfillment(done, records)
-		assertCDexRefused(t, err, shnsdk.ErrCDexTaskStatus)
-	})
-	t.Run("a request that is not one well-formed Task is refused", func(t *testing.T) {
-		for name, bad := range map[string]string{
-			"duplicate member": `{"resourceType":"Task","status":"requested","status":"completed"}`,
-			"not a Task":       `{"resourceType":"Bundle","type":"collection"}`,
-			"output not array": `{"resourceType":"Task","status":"requested","output":{}}`,
+	t.Run("a request Task in a status that does not allow fulfillment is the facility's decline", func(t *testing.T) {
+		for _, row := range []struct{ name, from, to, diagnostics string }{
+			{"a closed status", `"status":"requested"`, `"status":"completed"`, "the Task's status (completed) does not allow it to be fulfilled"},
+			{"a status that is not a Task status code", `"status":"requested"`, `"status":"done"`, "the Task's status is not a Task status code, so it cannot be fulfilled"},
+			{"no status string", `"status":"requested"`, `"status":7`, "the Task has no status, so it cannot be fulfilled"},
 		} {
-			_, _, err := sealCDexFulfillment([]byte(bad), records)
+			declinedTask := bytes.Replace(task, []byte(row.from), []byte(row.to), 1)
+			if bytes.Equal(declinedTask, task) {
+				t.Fatalf("%s: the Task fixture changed", row.name)
+			}
+			_, _, err := sealCDexFulfillment(declinedTask, records)
+			var declined *cdexDeclined
+			var refused *cdexRequestRefused
+			if !errors.As(err, &declined) || !errors.Is(err, shnsdk.ErrCDexTaskStatus) || errors.As(err, &refused) {
+				t.Fatalf("%s: want the facility's decline wrapping ErrCDexTaskStatus, got %v", row.name, err)
+			}
+			if got := declined.diagnostics(); got != row.diagnostics {
+				t.Fatalf("%s: diagnostics %q, want %q", row.name, got, row.diagnostics)
+			}
+		}
+	})
+	t.Run("a request that is not a Task the fulfillment extends is refused", func(t *testing.T) {
+		for _, row := range []struct {
+			name, bad, reason string
+			rule              cdexRefusalRule
+			duplicate         bool
+		}{
+			{"duplicate member", `{"resourceType":"Task","status":"requested","status":"completed"}`, refusalCDexNotOneTask, cdexRefusedIntegrity, true},
+			{"member repeated under case folding", `{"resourceType":"Task","status":"requested","Status":"completed"}`, refusalCDexNotOneTask, cdexRefusedIntegrity, true},
+			{"not JSON", `{"resourceType":"Task",`, refusalCDexNotOneTask, cdexRefusedIntegrity, false},
+			{"past the relay's depth limit", `{"resourceType":"Task","status":"requested","extension":[{"valueX":` + strings.Repeat(`[`, 70) + strings.Repeat(`]`, 70) + `}]}`, refusalCDexPastLimits, cdexRefusedAtBuild, false},
+			{"not a Task", `{"resourceType":"Bundle","type":"collection"}`, refusalCDexNotOneTask, cdexRefusedAtBuild, false},
+			{"resourceType in another case", `{"ResourceType":"Task","status":"requested"}`, refusalCDexNotOneTask, cdexRefusedAtBuild, false},
+			{"root not an object", `["Task"]`, refusalCDexNotOneTask, cdexRefusedAtBuild, false},
+			{"contained not array", `{"resourceType":"Task","status":"requested","contained":{}}`, refusalCDexNotOneTask, cdexRefusedAtBuild, false},
+			{"output not array", `{"resourceType":"Task","status":"requested","output":{}}`, refusalCDexNotOneTask, cdexRefusedAtBuild, false},
+			{"output named Output", `{"resourceType":"Task","status":"requested","Output":[]}`, refusalCDexFoldedMember, cdexRefusedAtBuild, false},
+			{"contained named CONTAINED", `{"resourceType":"Task","status":"requested","CONTAINED":[]}`, refusalCDexFoldedMember, cdexRefusedAtBuild, false},
+		} {
+			_, _, err := sealCDexFulfillment([]byte(row.bad), records)
 			var refused *cdexRequestRefused
 			if !errors.As(err, &refused) {
-				t.Errorf("%s: want a request refusal, got %v", name, err)
-			} else if refused.signed() {
-				t.Errorf("%s: a shape refusal reads as a signed-content one", name)
+				t.Errorf("%s: want a request refusal, got %v", row.name, err)
+				continue
+			}
+			if refused.reason != row.reason || refused.rule != row.rule || refused.signed() || errors.Is(err, relay.ErrDuplicateKey) != row.duplicate {
+				t.Errorf("%s: refused %q under %v (signed %v, %v), want %q under %v", row.name, refused.reason, refused.rule, refused.signed(), err, row.reason, row.rule)
 			}
 		}
 	})
@@ -204,10 +234,13 @@ func assertCDexRefused(t *testing.T, err, sentinel error) {
 	if !errors.As(err, &refused) || !errors.Is(err, sentinel) {
 		t.Fatalf("want a request refusal wrapping %v, got %v", sentinel, err)
 	}
-	// Only a signed-content refusal is recorded on the fidelity of the
-	// gateway's own edit.
-	if want := sentinel == shnsdk.ErrCDexSignedContent || sentinel == relay.ErrSignedContent; refused.signed() != want {
-		t.Fatalf("refusal %v reads as signed content: %v, want %v", err, refused.signed(), want)
+	// The refusals by the SDK's or the relay's reading are of signed content,
+	// recorded on the fidelity of the gateway's own edit.
+	if !refused.signed() {
+		t.Fatalf("refusal %v does not read as signed content", err)
+	}
+	if refused.rule != cdexRefusedAtBuild {
+		t.Fatalf("refusal %v is recorded under %v, want the fidelity of the gateway's own edit", err, refused.rule)
 	}
 	if strings.Contains(refused.reason, "{") || !strings.HasPrefix(refused.reason, "federated query refused: ") {
 		t.Fatalf("refusal reason %q", refused.reason)
@@ -638,7 +671,7 @@ func TestFederatedQuery_RecordsRefusals(t *testing.T) {
 		"another patient's Patient": {&facilitySoR{patient: otherPatient, pages: map[string][][]byte{"DiagnosticReport": {facPage("", facDR1)}}}, http.StatusBadGateway},
 		"no Patient record":         {&facilitySoR{pages: map[string][][]byte{"DiagnosticReport": {facPage("", facDR1)}}}, http.StatusBadGateway},
 		"same record twice":         {&facilitySoR{patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": {facPage("n", facDR1), facPage("", facDR1)}}}, http.StatusBadGateway},
-		"over a bound":              {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchBound, Reason: "entry bound"}}, http.StatusUnprocessableEntity},
+		"over a bound":              {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchBound, Reason: "entry bound"}}, http.StatusBadGateway},
 		"unavailable":               {&facilitySoR{patient: facPatient, searchErr: &SearchError{Outcome: SearchUnavailable, Reason: "time bound"}}, http.StatusServiceUnavailable},
 		// An error answer that does not say the search is unsupported is a
 		// backend failure, never the connector's other read: what the search
@@ -660,7 +693,7 @@ func TestFederatedQuery_RecordsRefusals(t *testing.T) {
 			if want := map[string]string{
 				"no Patient record": "the facility's system of record did not return the member's Patient",
 				"same record twice": "system of record returned the same record twice",
-				"over a bound":      "records exceed the per-answer bound for DiagnosticReport",
+				"over a bound":      refusalCDexRecordsPastBound("DiagnosticReport"),
 			}[name]; want != "" && msg != want {
 				t.Fatalf("message = %q, want %q", msg, want)
 			}

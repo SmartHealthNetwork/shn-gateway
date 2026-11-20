@@ -115,12 +115,20 @@ func (g *Gateway) diagnosticEvent(ctx context.Context, e diagnostics.Event) {
 }
 
 // diagnosticHubRefusal records the Hub's non-2xx answer to an origination leg.
-func (g *Gateway) diagnosticHubRefusal(ctx context.Context, resp *http.Response, respBody []byte) {
+func (g *Gateway) diagnosticHubRefusal(ctx context.Context, status int, header http.Header, respBody []byte, detail string) {
 	if g.cfg.Diagnostic == nil {
 		return
 	}
-	headers, complete := diagnosticHeaders(resp.Header)
-	g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: resp.StatusCode, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: "Hub response"})
+	headers, complete := diagnosticHeaders(header)
+	g.diagnosticEvent(ctx, diagnostics.Event{Kind: "leg.failed", Status: status, Body: respBody, BodyComplete: len(respBody) < shnsdk.MaxResponseBytes, Headers: headers, HeadersComplete: complete, Detail: detail})
+}
+
+// captureHubAnswer captures a not-yet-loaded refusal postEnvelope kept
+// (hubAnswerCapture), with detail saying whether the leg was sent again.
+func (g *Gateway) captureHubAnswer(ctx context.Context, a *hubAnswerCapture, detail string) {
+	if a != nil {
+		g.diagnosticHubRefusal(ctx, a.status, a.header, a.body, detail)
+	}
 }
 
 // diagnosticSealed records an origination leg's payload as sealed for

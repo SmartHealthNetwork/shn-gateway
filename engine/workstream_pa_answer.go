@@ -54,6 +54,12 @@ func (paWorkstream) answer(leg string) answerHandler {
 		return (*Gateway).handleCDexSubscribeInbound
 	case "cdex-task-signal":
 		return (*Gateway).handleCDexSignalInbound
+	case "pas-subscription-subscribe":
+		return (*Gateway).handlePASSubscribeInbound
+	case "pas-subscription-signal":
+		return (*Gateway).handlePASSignalInbound
+	case "pas-subscription-notify":
+		return (*Gateway).handlePASNotifyInbound
 	}
 	return nil
 }

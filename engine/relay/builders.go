@@ -13,6 +13,10 @@ const (
 	// BuilderCDexFulfillment: a data-request answer that extends the payer's
 	// Task and embeds the facility's records unchanged.
 	BuilderCDexFulfillment BuilderID = "cdex-fulfillment"
+	// BuilderCDexDecline: the facility's answer declining a data request
+	// whose Task's status does not allow it to be fulfilled, as a FHIR
+	// server answers a change its Task state machine does not allow.
+	BuilderCDexDecline BuilderID = "cdex-decline"
 	// BuilderCDexRecords: the facility's answer to a data request: the
 	// records its own server holds, each embedded unchanged, with the
 	// patient they are about and the gateway's provenance for each.
@@ -72,6 +76,7 @@ const builderTestInjected BuilderID = "test-injected"
 var registeredBuilders = []BuilderID{
 	BuilderGatewayRefusal,
 	BuilderCDexFulfillment,
+	BuilderCDexDecline,
 	BuilderCDexRecords,
 	BuilderSoRSearchset,
 	BuilderSDKCRDRequest,

@@ -32,15 +32,11 @@ func signedProvenanceBundle(n int) string {
 // targets and the document's resources, not their product.
 func TestCoverageCostIsNearLinearInProvenanceTargets(t *testing.T) {
 	wantLinearCost(t, "coverage", 32768, func(n int) func() {
-		src := signedProvenanceBundle(n)
-		d, err := splice.Scan([]byte(src), splice.Limits{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if c := coverage(d); len(c.hits(effect{start: 0, end: len(src)})) == 0 {
+		src := []byte(signedProvenanceBundle(n))
+		if c := coverage(src); len(c.hits(effect{start: 0, end: len(src)})) == 0 {
 			t.Fatal("the Provenance covers nothing")
 		}
-		return func() { _ = coverage(d) }
+		return func() { _ = coverage(src) }
 	})
 }
 
@@ -87,7 +83,7 @@ func TestCoverageHitsCostIsNearLinearInEditsAndRegions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cov := coverage(doc.d)
+			cov := coverage(b.bytes())
 			// Each Subscription is covered by its own Signatures, kept once
 			// a region: n regions, or one.
 			if want := map[bool]int{false: n, true: 1}[dup]; len(cov.regions) != want {
@@ -132,7 +128,7 @@ func typeName(i int) string {
 // One effect touching many regions, each its own carrier, costs time near
 // linear in them, not their number times the carriers already found. A
 // document's carriers are bounded (one per R4 resource type, and three
-// more; TestCoverageCarriersAreBounded), far below this row's sizes, so it
+// more; signedcontent's TestCoverageCarriersAreBounded), far below this row's sizes, so it
 // builds the regions itself, as a document's resources lie (side by side,
 // each signed under a carrier of its own), to hold hits to it for any
 // carrier set.

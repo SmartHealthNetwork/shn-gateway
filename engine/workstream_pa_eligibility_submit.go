@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
+	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
@@ -179,6 +180,8 @@ func eligibilityNamedInAnotherCase(err error) (string, bool) {
 		return "eligibility request names its type or patient only in another case" + noPatient, true
 	case errors.Is(err, errReplacedCharacter):
 		return errEligibilityReplacedCharacter, true
+	case errors.Is(err, errMemberNamesNoOne):
+		return errEligibilityNamesNoOne, true
 	}
 	return "", false
 }
@@ -187,12 +190,21 @@ func eligibilityNamedInAnotherCase(err error) (string, bool) {
 // whose patient is named by a value carrying a replaced character.
 const errEligibilityReplacedCharacter = "eligibility request names its patient by a value carrying a replaced character (not well-formed UTF-8 or a lone surrogate escape): readers read it two ways, so the request names no patient to bind"
 
+// errEligibilityNamesNoOne is the refusal of a request whose patient
+// reference names no one (errMemberNamesNoOne): an empty or blank reference,
+// "Patient/" with no id, or a contained Patient whose member identifier names
+// no one. It is refused on authority (the subject binding), at every level.
+const errEligibilityNamesNoOne = "eligibility request names its patient by a reference that names no one, so the request names no patient to bind"
+
 // eligibilityAnotherCaseReason is the recorded reason of the refusal
 // eligibilityNamedInAnotherCase answers err with, without the member names it
 // quotes.
 func eligibilityAnotherCaseReason(err error) refusalReason {
 	if errors.Is(err, errReplacedCharacter) {
 		return reasonEligibilityReplacedValue
+	}
+	if errors.Is(err, errMemberNamesNoOne) {
+		return reasonEligibilityNamesNoOne
 	}
 	return reasonEligibilityAnotherCase
 }
@@ -316,8 +328,9 @@ func oneRequest(bundle []byte) (eligibilitySubmission, bool) {
 // submitted in a Bundle (the
 // operation's Bundle forms) is read only by its exact member names, never by
 // a reading that folds or skips one: its patient reference and its contained
-// resources must read one way, and a reference that is empty names no
-// patient. Its reference names:
+// resources must read one way, and a reference that names no one (empty,
+// blank, or "Patient/" with no id) is refused as a request sent alone is
+// (errMemberNamesNoOne). Its reference names:
 //   - "#id": the contained Patient with that id, by its member identifier
 //     (patientRefMember);
 //   - anything else, as a FHIR reader of the Bundle resolves it: the Patient
@@ -332,20 +345,36 @@ func oneRequest(bundle []byte) (eligibilitySubmission, bool) {
 //
 // Any other reference names no patient, and is refused.
 func eligibilitySubmissionMember(sub eligibilitySubmission) (string, error) {
+	member, err := eligibilitySubmissionMemberRead(sub)
+	if err == nil && memberNamesNoOne(member) {
+		return "", errMemberNamesNoOne
+	}
+	return member, err
+}
+
+// eligibilitySubmissionMemberRead is eligibilitySubmissionMember's reading of
+// the member, before a member that names no one is refused.
+func eligibilitySubmissionMemberRead(sub eligibilitySubmission) (string, error) {
 	if !sub.bundled {
 		return eligibilityRequestMember(sub.request)
 	}
 	var req struct {
-		Patient struct {
-			Reference string `json:"reference"`
+		Patient *struct {
+			Reference *string `json:"reference"`
 		} `json:"patient"`
 	}
 	if err := decodeMessage(sub.request, &req); err != nil {
 		return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
 	}
-	ref := req.Patient.Reference
-	if ref == "" {
+	// No reference at all is no reference, never an empty one.
+	if req.Patient == nil || req.Patient.Reference == nil {
 		return "", errors.New("the request names its patient by no reference")
+	}
+	ref := *req.Patient.Reference
+	// A reference that names no one (empty, blank, or "Patient/" with no id)
+	// is refused as a request sent alone refuses it.
+	if memberNamesNoOne(strings.TrimPrefix(ref, "Patient/")) {
+		return "", errMemberNamesNoOne
 	}
 	if strings.HasPrefix(ref, "#") {
 		contained, err := eligibilityContainedFor(sub.request, ref)
@@ -667,7 +696,7 @@ func (g *Gateway) eligibilitySoRReadOnce(ctx context.Context, member, key, resou
 // with a valid id: no base, version, fragment, leading slash or dot segment.
 func eligibilityRelativeID(ref, resourceType string) (string, bool) {
 	id, ok := strings.CutPrefix(ref, resourceType+"/")
-	if !ok || !fhirIDRE.MatchString(id) || id == "." || id == ".." {
+	if !ok || !fhirid.Valid(id) {
 		return "", false
 	}
 	return id, true
@@ -979,6 +1008,11 @@ func eligibilityRequestPayer(sub eligibilitySubmission, sor eligibilitySoRRead) 
 		lists = append(lists, cands)
 	}
 	if len(lists) == 0 {
+		// A request naming no insurer has no insurer reference to remedy: it
+		// is answered as naming no payer.
+		if req.Insurer == nil {
+			return nil, false, http.StatusUnprocessableEntity, eligibilityNoPayer, reasonEligibilityNoPayer
+		}
 		if remedy, ok := eligibilityRemedy(req.Insurer.Reference, "Organization", eligibilityRemedyInsurer); insurerUnresolved && ok {
 			return nil, false, http.StatusUnprocessableEntity, eligibilityInsurerUnresolved + "; " + remedy + ": insurer " + quotedBounded(req.Insurer.Reference), reasonEligibilityNoPayer
 		}

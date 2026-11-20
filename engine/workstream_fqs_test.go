@@ -31,7 +31,7 @@ func TestFQSAdapter_AnswersTheFederatedQuery(t *testing.T) {
 	if request, answer := legInvolvement(leg); request || answer {
 		t.Errorf("involvement (%v, %v), want neither", request, answer)
 	}
-	if got := namedMembers([]byte(`{"resourceType":"Task","for":{"reference":"Patient/m1"}}`), leg); got != nil {
+	if got := mustMembers(t)(namedMembers([]byte(`{"resourceType":"Task","for":{"reference":"Patient/m1"}}`), leg)); got != nil {
 		t.Errorf("members %v, want none", got)
 	}
 	k := func(role relay.Role, dir relay.Direction, outcome relay.Outcome) relay.Key {
@@ -44,6 +44,9 @@ func TestFQSAdapter_AnswersTheFederatedQuery(t *testing.T) {
 		k(relay.RoleRequester, relay.DirectionRequest, relay.OutcomeOriginated): {Allowed: authored, Builders: []relay.BuilderID{relay.BuilderSDKFederatedQuery}},
 		k(relay.RoleRequester, relay.DirectionResponse, relay.OutcomeAnswered):  {Allowed: relayed},
 		k(relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeAnswered):  {Allowed: authored, Builders: []relay.BuilderID{relay.BuilderCDexFulfillment}},
+		// The facility's decline of a Task whose status does not allow it to
+		// be fulfilled, its own error answer.
+		k(relay.RoleRecipient, relay.DirectionResponse, relay.OutcomeUpstreamError): {Allowed: authored, Builders: []relay.BuilderID{relay.BuilderCDexDecline}},
 	}
 	sameRule := func(a, b relay.Rule) bool {
 		return slices.Equal(a.Allowed, b.Allowed) && slices.Equal(a.Edits, b.Edits) && slices.Equal(a.Builders, b.Builders)

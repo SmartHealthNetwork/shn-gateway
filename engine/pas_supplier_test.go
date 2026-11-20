@@ -174,16 +174,17 @@ func TestPASSubmitSupplierRejectsInvalidLinkage(t *testing.T) {
 	}
 }
 
-// supplierLinkageAnswer answers a supplier record the splice cannot carry as
-// read 422, recorded as the fidelity of the gateway's own edit at the build and
-// saying which legs were carried; anything else is the gateway's own 500.
+// supplierLinkageAnswer answers a supplier record, read from the system of
+// record, that the splice cannot carry as read 502, recorded as the fidelity
+// of the gateway's own edit at the build and saying which legs were carried;
+// anything else is the gateway's own 500.
 func TestSupplierLinkageAnswer(t *testing.T) {
 	for _, row := range []struct {
 		name   string
 		err    error
 		status int
 	}{
-		{"a record not carried as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusUnprocessableEntity},
+		{"a record not carried as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusBadGateway},
 		{"the gateway's own failure", errors.New("conflicting supplier entry"), http.StatusInternalServerError},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -194,7 +195,7 @@ func TestSupplierLinkageAnswer(t *testing.T) {
 			if status != row.status {
 				t.Fatalf("status %d, want %d", status, row.status)
 			}
-			if row.status == http.StatusUnprocessableEntity {
+			if row.status == http.StatusBadGateway {
 				if err != nil || x.outcome != ExchangeRefused || x.rule != RefusalFidelity || x.refusalStage != vocab.RefusalStageBuild {
 					t.Fatalf("recorded %s %s/%s (err %v), want refused fidelity/build", x.outcome, x.rule, x.refusalStage, err)
 				}

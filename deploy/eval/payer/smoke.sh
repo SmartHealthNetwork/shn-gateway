@@ -15,7 +15,10 @@ set -euo pipefail
 # scenario-callers.json names (compose.eval.yml's SCENARIO_CALLERS_FILE). Make this run's caller
 # the way the provider README's step 0 does, `shn scenario-key --bundle`, on a copy of your
 # provider bundle, so your bundle itself is never written; every request below is signed.
-work=$(mktemp -d)
+# The copy goes in a work directory under TMPDIR, on the volume SHN_EVAL_KEYS_VOLUME names
+# when it is set, or the smoke refuses before copying anything (../workdir.sh).
+. gateway/deploy/eval/workdir.sh
+eval_workdir payer-selftest "$SHN_SECRETS_PROVIDER" || exit 1
 # The copy holds the bundle's private keys: remove it on every exit from here on.
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bundle" && cp -R "$SHN_SECRETS_PROVIDER"/. "$work/bundle"
@@ -24,12 +27,17 @@ if [ -d sdk ]; then ( cd sdk && go build -o "$work/shn" ./cmd/shn ); else cp "$(
 SHN_SECRETS_PROVIDER="$work/bundle"
 key="$work/scenario-caller-send-test.sign"
 
-prov="docker compose -p evalprov -f gateway/deploy/eval/compose.eval.yml"
+# With SHN_EVAL_KEYS_VOLUME set, the gateway reads the copy from a ramfs volume this smoke makes
+# and fills, never by binding it (../workdir.sh): set the trap that removes it before anything is made.
+trap 'eval_bundle_drop; rm -rf "$work"' EXIT
+eval_bundle_volume "$SHN_SECRETS_PROVIDER" || exit 1
+prov="docker compose -p evalprov -f gateway/deploy/eval/compose.eval.yml $eval_bundle_override"
 # The teardown must carry SHN_SECRETS too: compose.eval.yml interpolates it as a required
 # variable on EVERY compose invocation (down included, not just up), so a bare `down -v`
 # here would die on interpolation before removing anything — and a silenced trap would
-# leave the whole eval stack running after a green run. Same value the `up` below uses.
-trap 'SHN_SECRETS="$SHN_SECRETS_PROVIDER" $prov down -v; rm -rf "$work"' EXIT
+# leave the whole eval stack running after a green run. Same value the `up` below uses. set -e
+# holds inside the trap too, so a failed down must not end it before the rest runs.
+trap 'SHN_SECRETS="$SHN_SECRETS_PROVIDER" $prov down -v || echo "eval: compose down failed" >&2; eval_bundle_drop; rm -rf "$work"' EXIT
 
 # compose.eval.yml references br-provider:43a4806 as an `image:` (not a build:) service, and that
 # reference RI is never published — so `up --build` would try to PULL it and abort unless it's
@@ -46,7 +54,7 @@ SHN_SECRETS="$SHN_SECRETS_PROVIDER" PAYER_HOLDER_ID="$PAYER_HOLDER_ID" $prov up 
 # its route on the gateway's lane (provider-data) — member, order and claim facts — never a
 # value of this script's own (../persona_body.sh). Same descriptor the gateway reads.
 disc_url="${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}"
-desc=$(mktemp)
+desc="$work/discovery.json"
 curl -fsS "$disc_url" -o "$desc"
 
 # Readiness: the provider gateway (uc01 POST) — folds in seed + routing.

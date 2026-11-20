@@ -389,6 +389,7 @@ memory (Linux).
 | `shn.gateway.peers.known` | `shn_gateway_peers_known` | `PeersKnown` | gauge | `{peer}` | none | Holders the last successful registrar read converged. |
 | `shn.gateway.authorization.token.duration` | `shn_gateway_authorization_token_duration_seconds` | `TokenLatency` | histogram | `s` | none | Time to acquire an Authorization Framework token, its retry included. |
 | `shn.gateway.authorization.tokens` | `shn_gateway_authorization_tokens_total` | `TokenAcquisition` | counter | `{token}` | `shn.outcome` | Authorization Framework token acquisitions, by outcome. |
+| `shn.gateway.network.retries` | `shn_gateway_network_retries_total` | `NetworkRetry` | counter | `{retry}` | `shn.service`, `shn.retry.result` | Calls to the Hub or the Authorization Framework sent again, on a new connection, after an instance that had not yet loaded the network's membership refused them, by service and the retry's result. |
 | `shn.gateway.telemetry.exports` | `shn_gateway_telemetry_exports_total` | none | counter | `{export}` | `shn.outcome` | OTLP metric exports, by outcome. |
 | `shn.gateway.refusals` | `shn_gateway_refusals_total` | `ExchangeRefused`, `ExchangeRefusedByRule` | counter | `{refusal}` | `shn.direction`, `shn.exchange`, `shn.refusal.rule`, `shn.refusal.by`, `shn.refusal.stage` | Exchanges refused, by the network rule, the party that refused and, for a fidelity refusal, its stage. |
 | `shn.gateway.exchange.stage.duration` | `shn_gateway_exchange_stage_duration_seconds` | `ExchangeStageLatency` | histogram | `s` | `shn.direction`, `shn.exchange`, `shn.stage` | Time an exchange spent in each stage; an exchange's stages sum to its duration. |
@@ -415,6 +416,27 @@ memory (Linux).
 The five audit-outbox instruments (`shn.gateway.audit.*`) have no producer in v1.0.0:
 nothing appends to the outbox yet, so they stay silent, and their silence means not
 measured, not no drops ([CONFIGURATION.md](CONFIGURATION.md#the-audit-outbox)).
+
+### Retries after a not-yet-loaded refusal
+
+`shn.gateway.network.retries` (EMF `NetworkRetry`, dimensions `service` and
+`result`) counts each time your gateway sends a call to the Hub or the
+Authorization Framework again because an instance of it that had not yet
+loaded the network's membership refused the call before acting (`503
+registry not yet loaded` with `X-SHN-Delivered: no`). Your gateway sends such
+a call again at most twice, each time on a new connection
+([CONFIGURATION.md](CONFIGURATION.md)). `shn.service` is `hub` or `authz`;
+`shn.retry.result` is:
+
+- `answered`: the retry got any other answer, the exchange's own included;
+- `refused`: the retry was refused not yet loaded again;
+- `failed`: the retry got no answer of the service's own (a failed connection,
+  a timeout, or a proxy's answer in front of it).
+
+Each retry also writes one line, naming the service, which retry it is and the
+leg's correlation id, nothing of the call's content. A few retries while the
+network deploys are expected; `refused` that persists means an instance stays
+unready.
 
 ### Connection cuts
 
@@ -564,8 +586,8 @@ gateway reaches only the combinations its own traffic produces, usually a
 small fraction: a payer's gateway answers legs from the network, a
 provider's gateway calls for its own system, and most refusal combinations
 never occur. The gateway's other metrics (`LegOutcome`, `StoreError`, the
-store pool, audit, validator lane, certificate, ingress key, registrar feed
-and token metrics, and `ListenerCut`, which reaches at most six: the five
+store pool, audit, validator lane, certificate, ingress key, registrar feed,
+token and network retry metrics, and `ListenerCut`, which reaches at most six: the five
 bounds on the main listener and `header` on the observer) add combinations
 of their own.
 

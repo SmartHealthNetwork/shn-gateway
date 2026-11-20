@@ -86,6 +86,23 @@ const (
 // draws from.
 var RequesterNotSentReasons = []string{RequesterNotSentAuthorization, RequesterNotSentHubUnreachable, RequesterNotSentUnbuildable}
 
+// The connection a record's resend went on (RequesterBindingRecord.ResentConnection).
+const (
+	// RequesterResentNew: a new connection, through the Hub client's base
+	// transport with keep-alives off (freshConnClient), so the resend cannot
+	// land on the connection the refusing instance answered on.
+	RequesterResentNew = "new"
+	// RequesterResentPooled: the Hub client's own, which may reuse a pooled
+	// connection to the instance that refused: no new connection can be
+	// guaranteed when the client's base is not an *http.Transport (an
+	// embedding program's own), so the resend goes as it always has.
+	RequesterResentPooled = "pooled"
+)
+
+// RequesterResentConnections is the closed list
+// RequesterBindingRecord.ResentConnection draws from.
+var RequesterResentConnections = []string{RequesterResentNew, RequesterResentPooled}
+
 // Why a requester could not bind the patient an answer disclosed
 // (RequesterBindingRecord.Unbound). It stays on the requester's own record:
 // the Hub is told only that the binding is unavailable.
@@ -145,6 +162,9 @@ type RequesterBindingRecord struct {
 	// (resendRequesterBinding): Outcome is then the second send's, not-sent
 	// when none of it reached the Hub.
 	Resent bool
+	// ResentConnection is the connection the resend went on
+	// (RequesterResentConnections); set exactly when Resent.
+	ResentConnection string
 }
 
 // requesterBindingBudget bounds the whole report: the binding, the token for
@@ -296,6 +316,15 @@ func (g *Gateway) bindRequesterMember(ctx context.Context, answer []byte, member
 	switch {
 	case errors.Is(err, errPatientUnidentifiable):
 		return requesterBound{unbound: RequesterUnboundUnidentifiable}
+	case errors.Is(err, errMemberNamesNoOne):
+		return requesterBound{unbound: RequesterUnboundNoMember}
+	case errors.Is(err, errRequestPatientsUnreadable):
+		// The answer's patients cannot be read: as an answer that cannot be
+		// read, never as one carrying no Patient for the member. A guard: the
+		// one memberOf there is (cdexReadMember) reads the answer strictly and
+		// reports it unreadable first, so no answer reaches this today
+		// (TestBindRequesterMember_AnAnswerTheBindingCannotDecodeIsUnreadable).
+		return requesterBound{unbound: RequesterUnboundUnreadable}
 	case err != nil:
 		return requesterBound{unbound: RequesterUnboundSystemOfRecord}
 	case !found || pci == "":
@@ -407,7 +436,7 @@ func (g *Gateway) reportRequesterBinding(ctx context.Context, leg string, toks l
 	// Hub's.
 	x.requesterBindingPending(rec)
 	start := time.Now()
-	status, header, sent, err := g.postRequesterBinding(ctx, raw, assertion)
+	status, header, sent, err := g.postRequesterBinding(ctx, g.hubClient(), raw, assertion)
 	if wait, ok := resendRequesterBinding(ctx, status, header, err, time.Since(start)); ok {
 		// The Hub stated it never took the record: until it is sent again,
 		// none of it is the Hub's, so a cut now is other.
@@ -416,9 +445,16 @@ func (g *Gateway) reportRequesterBinding(ctx context.Context, leg string, toks l
 			rec.Outcome = ExchangeOther
 			return rec
 		}
-		rec.Resent = true
+		// On a new connection where one can be guaranteed: a pooled one may
+		// be the connection the refusing instance answered on, and would
+		// reach it again.
+		client, conn := g.hubClient(), RequesterResentPooled
+		if fresh, ok := freshConnClient(client); ok {
+			client, conn = fresh, RequesterResentNew
+		}
+		rec.Resent, rec.ResentConnection = true, conn
 		x.requesterBindingPending(rec)
-		status, _, sent, err = g.postRequesterBinding(ctx, raw, assertion)
+		status, _, sent, err = g.postRequesterBinding(ctx, client, raw, assertion)
 	}
 	switch {
 	case errors.Is(err, errRecordUnbuildable):
@@ -571,7 +607,7 @@ func (g *Gateway) requesterBindingToken(ctx context.Context, leg string, toks le
 // failure, if any; a request that could not be built is errRecordUnbuildable,
 // nothing dialed. A redirect is the Hub's answer, never followed
 // (serviceclient).
-func (g *Gateway) postRequesterBinding(ctx context.Context, body []byte, assertion string) (int, http.Header, bool, error) {
+func (g *Gateway) postRequesterBinding(ctx context.Context, client *http.Client, body []byte, assertion string) (int, http.Header, bool, error) {
 	// The first header field written is the first byte of the record on the
 	// wire: from then on the Hub may hold it.
 	x := exchangeOf(ctx)
@@ -589,7 +625,6 @@ func (g *Gateway) postRequesterBinding(ctx context.Context, body []byte, asserti
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Holder-Assertion", assertion)
-	client := g.hubClient()
 	if client.Timeout > 0 {
 		// One timer decides, the budget's or the client's, as on a leg.
 		var cancel context.CancelFunc

@@ -87,6 +87,35 @@ func TestCRDIngress_RequestBytesExceptDeclaredEdits(t *testing.T) {
 			t.Fatalf("answer %d; received equals sent: %v", rec.Code, bytes.Equal(sentRequest(t, env), body))
 		}
 	})
+
+	// The involved list reads a FHIR resource's names whatever their case
+	// (strictView), for reading only: a request spelling them in another case
+	// is carried byte-identical, with the Hub reading the list, at every level.
+	t.Run("a request spelling names in another case is relayed exactly", func(t *testing.T) {
+		body := ehrRequest(supported + `,"serviceHistory":null,"deviceHistory":null,"medicationHistory":null,"questionnaireResponses":null`)
+		body = bytes.Replace(body, []byte("  \"fhirServer\" : \"https://ehr.example/fhir\",\n"), nil, 1)
+		body = bytes.Replace(body, []byte("  \"fhirAuthorization\" : { \"access_token\" : \"ehr-secret-token\", \"token_type\" : \"Bearer\", \"expires_in\" : 300 },\n"), nil, 1)
+		folded := bytes.Replace(body, []byte(`"intent" : "order", "subject"`), []byte(`"intent" : "order", "Contained" : [ { "resourceType" : "patient", "id" : "example" } ], "subject"`), 1)
+		if bytes.Equal(folded, body) || bytes.Count(folded, []byte(`"Contained"`)) != 1 {
+			t.Fatal("fixture: the request spells nothing in another case")
+		}
+		sent := bytes.Clone(folded)
+		for _, level := range allLevels {
+			t.Run(level.String(), func(t *testing.T) {
+				env := newInProcessExchange(t)
+				env.originator.cfg.SoR = newPrefetchSoR().sor()
+				env.originator.cfg.ConformanceEnforcement = level
+				env.originator.cfg.HubAcceptsInvolved = true
+				rec := ingressAt(t, env, "shn-order-select", folded)
+				if rec.Code != http.StatusOK || !bytes.Equal(sentRequest(t, env), sent) {
+					t.Fatalf("answer %d %s; received equals sent: %v", rec.Code, rec.Body.String(), bytes.Equal(sentRequest(t, env), sent))
+				}
+			})
+		}
+		if !bytes.Equal(folded, sent) {
+			t.Fatal("the request's bytes were changed in place")
+		}
+	})
 }
 
 // ingressAt runs the whole provider ingress for body posted to

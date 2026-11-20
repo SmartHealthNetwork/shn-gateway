@@ -95,6 +95,15 @@ func cdexEvidenceEntries(bundle []byte) (cdexEvidenceFound, error) {
 		}
 	}
 	if report == nil {
+		// A report the Bundle holds (an entry whose exact resourceType is
+		// DiagnosticReport) that states no id exactly is held, not absent:
+		// the claim update carries a report under its own id, so this one
+		// cannot be its evidence.
+		for _, h := range heads {
+			if h.ResourceType == "DiagnosticReport" {
+				return cdexEvidenceFound{}, errFacilityReportNotCarried
+			}
+		}
 		return cdexEvidenceFound{}, errors.New("records Bundle holds no report")
 	}
 	// Where several Provenances attribute the report, the one whose target also
@@ -128,6 +137,14 @@ func cdexEvidenceEntries(bundle []byte) (cdexEvidenceFound, error) {
 	}
 	return cdexEvidenceFound{report: report, provenance: provenance, reportEntry: reportPos, provenanceEntry: provenancePos}, nil
 }
+
+// errFacilityReportNotCarried is cdexEvidenceEntries' refusal of a facility's
+// records Bundle that holds a report (by its exact resourceType) none of which
+// states an id exactly: the requester cannot carry it into the claim update,
+// its own message, under the report's own id. The facility's message is a
+// peer's, so it is the fidelity of the requester's own build (422), never
+// read as a Bundle that holds no report.
+var errFacilityReportNotCarried = errors.New("it states no id exactly, and the claim update carries the report under its own id")
 
 // fhirInstant reads a FHIR date or dateTime as an instant: a year, a
 // year-month or a date is the start of that period in UTC; a dateTime

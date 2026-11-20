@@ -95,6 +95,22 @@ var (
 	// and that sets its subscription scope: its own system's notifications of
 	// a payer's Tasks' changes, at the addresses its gateway writes.
 	notifyRoutePatterns = []string{"POST /notify/cdex-task/{subscriber}/{kid}/{sealed}"}
+	// pasSubscriptionRoutePatterns are mounted on a provider whose ingress is
+	// enabled and that takes the PAS topic's notifications: its own system's
+	// Subscription to the PAS topic at each payer's base.
+	pasSubscriptionRoutePatterns = []string{
+		"POST /pas/payer/{payer}/Subscription",
+		"GET /pas/payer/{payer}/Subscription",
+		"GET /pas/payer/{payer}/Subscription/{rest...}",
+		"PUT /pas/payer/{payer}/Subscription/{rest...}",
+		"DELETE /pas/payer/{payer}/Subscription/{rest...}",
+		"PATCH /pas/payer/{payer}/Subscription/{rest...}",
+	}
+	// pasNotifyRoutePatterns are mounted on a payer whose ingress is enabled
+	// and that sets its subscription scope: its own system's notifications of
+	// a provider's Subscription to the PAS topic, at the addresses its
+	// gateway writes.
+	pasNotifyRoutePatterns = []string{"POST /notify/pas/{subscriber}/{kid}/{sealed}"}
 	// cdsClientJWKSRoutePatterns are mounted on a payer whose CDS calls carry
 	// a CDS Hooks client JWT: the public JWK Set of its key, with or without
 	// the ingress.
@@ -105,12 +121,12 @@ var (
 // module1 is a declared origination profile: without one, module 1 mounts no
 // /scenario route.
 type routeConditions struct {
-	ingress, ingressAuth, baseURL, module1, cdexTask, cdsClientJWKS, cdexRead, cdexSubscription bool
+	ingress, ingressAuth, baseURL, module1, cdexTask, cdsClientJWKS, cdexRead, cdexSubscription, payerSubscription, providerPAS bool
 }
 
 func (c routeConditions) String() string {
 	var on []string
-	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask, "cdsClientJWKS": c.cdsClientJWKS, "cdexRead": c.cdexRead, "cdexSubscription": c.cdexSubscription} {
+	for name, set := range map[string]bool{"ingress": c.ingress, "ingressAuth": c.ingressAuth, "baseURL": c.baseURL, "module1": c.module1, "cdexTask": c.cdexTask, "cdsClientJWKS": c.cdsClientJWKS, "cdexRead": c.cdexRead, "cdexSubscription": c.cdexSubscription, "payerSubscription": c.payerSubscription, "providerPAS": c.providerPAS} {
 		if set {
 			on = append(on, name)
 		}
@@ -122,11 +138,11 @@ func (c routeConditions) String() string {
 	return strings.Join(on, "+")
 }
 
-// everyRouteCondition is every combination of the eight conditions.
+// everyRouteCondition is every combination of the ten conditions.
 func everyRouteCondition() []routeConditions {
 	var out []routeConditions
-	for bits := range 256 {
-		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0, bits&32 != 0, bits&64 != 0, bits&128 != 0})
+	for bits := range 1024 {
+		out = append(out, routeConditions{bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0, bits&16 != 0, bits&32 != 0, bits&64 != 0, bits&128 != 0, bits&256 != 0, bits&512 != 0})
 	}
 	return out
 }
@@ -151,15 +167,22 @@ func wantRoutes(role string, c routeConditions) []string {
 			}
 		}
 		// A provider whose participant sets its own Task endpoint takes
-		// the payer's attachment request, and one that sets the read scope
-		// the payer's read of its Task, each delivered on the inbound route.
-		if c.cdexTask || c.cdexRead || c.cdexSubscription {
+		// the payer's attachment request, one that sets the read scope the
+		// payer's read of its Task, and one that asks for the PAS topic's
+		// notifications a payer's, each delivered on the inbound route.
+		if c.cdexTask || c.cdexRead || c.cdexSubscription || c.providerPAS {
 			want = append(want, cdexTaskRoutePatterns...)
 		}
 		// One that sets the subscription scope, with its ingress, takes its
 		// own system's notifications at the addresses it writes.
 		if c.ingress && c.cdexSubscription {
 			want = append(want, notifyRoutePatterns...)
+		}
+		// One that takes the PAS topic's notifications, with its ingress,
+		// takes its own system's Subscription to that topic at a payer's
+		// base.
+		if c.ingress && c.providerPAS {
+			want = append(want, pasSubscriptionRoutePatterns...)
 		}
 	case "payer":
 		want = append(want, "POST /substrate/inbound")
@@ -171,6 +194,11 @@ func wantRoutes(role string, c routeConditions) []string {
 			if c.ingressAuth {
 				want = append(want, ingressAuthRoutePatterns...)
 				want = append(want, payerIngressAuthRoutePatterns...)
+			}
+			// One that sets the subscription scope takes its own system's
+			// PAS notifications at the addresses it writes.
+			if c.payerSubscription {
+				want = append(want, pasNotifyRoutePatterns...)
 			}
 		}
 	case "facility", "phg":
@@ -218,6 +246,12 @@ func routeGateway(role string, c routeConditions) *Gateway {
 	if c.cdexSubscription {
 		g.cfg.ProviderCDexSubscriptionScope = "system/Subscription.cruds"
 	}
+	if c.payerSubscription {
+		g.cfg.PayerSubscriptionScope = "system/Subscription.cruds"
+	}
+	if c.providerPAS {
+		g.cfg.ProviderPASSubscription = true
+	}
 	return withModuleOne(g)
 }
 
@@ -241,13 +275,27 @@ func mountedRoutes(mux *http.ServeMux, candidates []string) []string {
 	return got
 }
 
-func TestRoutes_EachRoleMountsItsPinnedSet(t *testing.T) {
-	for _, role := range []string{"provider", "payer", "facility", "phg", "", "unknown"} {
-		for _, c := range everyRouteCondition() {
-			got := mountedRoutes(routeGateway(role, c).routes(), everyKnownRoute())
-			if want := wantRoutes(role, c); !slices.Equal(got, want) {
-				t.Errorf("role %q under %s mounts\n  %v\nwant\n  %v", role, c, got, want)
-			}
+// Each role mounts exactly its pinned set under every combination of the
+// route conditions. Each role runs as a top-level test of its own, so the
+// engine's hash shards (tools/ci/test-shard.sh -hash, which splits by
+// top-level test name) spread the 1,024 conditions' gateways across shards
+// rather than build every role's in one; TestRoutes_PinnedSetSplitRunsEveryRole
+// holds the six.
+func TestRoutes_TheProviderMountsItsPinnedSet(t *testing.T)   { roleMountsItsPinnedSet(t, "provider") }
+func TestRoutes_ThePayerMountsItsPinnedSet(t *testing.T)      { roleMountsItsPinnedSet(t, "payer") }
+func TestRoutes_TheFacilityMountsItsPinnedSet(t *testing.T)   { roleMountsItsPinnedSet(t, "facility") }
+func TestRoutes_ThePHGMountsItsPinnedSet(t *testing.T)        { roleMountsItsPinnedSet(t, "phg") }
+func TestRoutes_NoRoleMountsItsPinnedSet(t *testing.T)        { roleMountsItsPinnedSet(t, "") }
+func TestRoutes_AnUnknownRoleMountsItsPinnedSet(t *testing.T) { roleMountsItsPinnedSet(t, "unknown") }
+
+// roleMountsItsPinnedSet holds role's mounted routes to its pinned set under
+// every condition.
+func roleMountsItsPinnedSet(t *testing.T, role string) {
+	t.Parallel()
+	for _, c := range everyRouteCondition() {
+		got := mountedRoutes(routeGateway(role, c).routes(), everyKnownRoute())
+		if want := wantRoutes(role, c); !slices.Equal(got, want) {
+			t.Errorf("role %q under %s mounts\n  %v\nwant\n  %v", role, c, got, want)
 		}
 	}
 }
@@ -255,7 +303,7 @@ func TestRoutes_EachRoleMountsItsPinnedSet(t *testing.T) {
 // The split above is the classified lists, and every condition's set is a
 // subset of what the classification says the role registers.
 func TestRoutes_PinnedSetsAreTheClassifiedRoutes(t *testing.T) {
-	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, providerIngressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns, notifyRoutePatterns)
+	split := slices.Concat(ingressRoutePatterns, ingressAuthRoutePatterns, providerIngressAuthRoutePatterns, davinciConfigRoutePatterns, cdexTaskRoutePatterns, notifyRoutePatterns, pasSubscriptionRoutePatterns)
 	slices.Sort(split)
 	other := slices.Clone(providerOtherRoutes)
 	slices.Sort(other)
