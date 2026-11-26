@@ -122,7 +122,7 @@ func TestParse_ReadsASubjectFromTheAnswer(t *testing.T) {
 // TestParse_ReadsASubjectOfNone: a leg flagged subject none parses, and only
 // that leg reports it; it does not read as a leg whose patient comes from the
 // answer. The shipped taxonomy flags the payer's subscription to its CDex
-// Tasks' changes and the provider's notification of them (D132), and the
+// Tasks' changes and the provider's notification of them, and the
 // provider's subscription to the PAS topic, alone.
 func TestParse_ReadsASubjectOfNone(t *testing.T) {
 	var shipped []string

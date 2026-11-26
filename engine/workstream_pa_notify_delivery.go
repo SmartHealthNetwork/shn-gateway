@@ -18,7 +18,7 @@ import (
 )
 
 // The subscriber's gateway's edits of a notification it delivers to its own
-// system (the notifications design §6.2 step 5, §6.4, §8): every registered
+// system: every registered
 // edit of a topic's signal or notify leg that the subscriber's gateway makes,
 // as recipient, on the request (relayEdits: E-17 on cdex-task-signal, and
 // E-22 on pas-subscription-notify with the PAS lane), is decided by its maker
@@ -102,8 +102,8 @@ func (g *Gateway) deliveredNotification(x *exchangeRecorder, leg string, body []
 	return relay.ApplyChanges(rb, ct, changes...)
 }
 
-// notificationAddressRekey is E-17 (cdex-task-notification-address-rekey;
-// the CDex design §15.7, D129): each absolute http or https address into the
+// notificationAddressRekey is E-17 (cdex-task-notification-address-rekey):
+// each absolute http or https address into the
 // provider's server in a CDex Task notification (notificationAddresses) that
 // lies under the base the provider's gateway stated (statedBase), by
 // dtraddress.Under's segment-boundary match, is re-keyed to this gateway's

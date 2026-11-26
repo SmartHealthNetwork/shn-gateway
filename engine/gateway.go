@@ -370,8 +370,8 @@ type Config struct {
 	// from IDENTITY_PREDECESSOR_DIR for the rotation's overlap; nil when unset.
 	// It reaches only the topic Subscription keys, which the PA workstream
 	// derives from Identity.SignPriv and it (subscription.DeriveKeys): the
-	// notifier gateway's credential (E-19) and ownership test (the
-	// notifications design §6.3, §7.2) are made with them, and the
+	// notifier gateway's credential (E-19) and ownership test are made with
+	// them, and the
 	// predecessor's only verify.
 	SubscriptionPredecessorKey ed25519.PrivateKey
 	// SubscriptionNotificationClient is the client a subscriber's gateway
@@ -522,6 +522,15 @@ type Config struct {
 	// value sends none, reads nothing more from the system of record and
 	// requests no further token.
 	HubAcceptsInvolved bool
+	// HubAcceptsInvolvedSummary reports that the network's Hub reads a
+	// gateway's signed summary of the involved list it sends: its discovery
+	// descriptor lists shnsdk.HubAcceptsInvolvedSummary in hubAccepts (read
+	// once at start by gateway/app). Only with HubAcceptsInvolved as well does
+	// a leg's envelope carry, on each side whose leg takes the list, this
+	// gateway's summary of that side's list (involvedsummary.go), so that the
+	// Hub records whether this gateway stated its list complete. The zero
+	// value sends none, and the envelope is what it is without it.
+	HubAcceptsInvolvedSummary bool
 	// InvolvedBudget bounds the whole involved pass of one leg: the
 	// system-of-record reads and the token requests it makes (involved.go).
 	// A patient not named when it runs out is left out, and the leg is sent.
@@ -578,17 +587,17 @@ type Config struct {
 	// record, or any conformance surface.
 	DemoEdgeCapture bool
 	// ConformanceEnforcement is this participant's conformance enforcement
-	// level (§3 of the conformance-enforcement-levels design). The ZERO VALUE
+	// level (docs/CONFIGURATION.md, CONFORMANCE_ENFORCEMENT). The ZERO VALUE
 	// IS STRICT, and it stays strict for every in-process construction here or
 	// in any test harness that does not say otherwise. A DEPLOYED gateway is
 	// different: the gateway/app env loader maps an ABSENT
-	// CONFORMANCE_ENFORCEMENT to EnforcementNone (D116), which is the one and
+	// CONFORMANCE_ENFORCEMENT to EnforcementNone, which is the one and
 	// only place a non-strict level comes from an omission. Every gate, reference
 	// participant and hosted gate therefore pins its level explicitly
 	// (the platform invariant suite's TestInvariant_EveryGateRunsStrict).
 	ConformanceEnforcement ConformanceEnforcement
 	// ConformanceToleratePeers is the payers whose answers this participant
-	// tolerates (CONFORMANCE_TOLERATE_PEERS, D122): a defect the FHIR profile
+	// tolerates (CONFORMANCE_TOLERATE_PEERS, its own opt-in): a defect the FHIR profile
 	// check of a payer's DTR or PAS answer would refuse is recorded instead, with
 	// its finding marked tolerated, when every payer identity the exchange was
 	// routed by is listed. The content rules and the CDS Hooks answer check are
@@ -610,6 +619,9 @@ type Gateway struct {
 	// waitForRetry replaces the wait before a not-yet-loaded retry (tests;
 	// retryWait).
 	waitForRetry func(ctx context.Context, d time.Duration) bool
+
+	// signInvolvedSummary replaces signInvolvedSummary (tests; involvedSummary).
+	signInvolvedSummary func(s shnsdk.InvolvedSummary, priv ed25519.PrivateKey, legTok shnsdk.Token) (string, error)
 
 	// states is each compiled-in workstream's own state on this gateway, by
 	// workstream id, built once by New (workstream.newGatewayState). A
@@ -1157,10 +1169,14 @@ const (
 	storeErrReplay     = "replay"
 	storeErrIngressKey = "ingresskey"
 	storeErrPended     = "pended"
+	// storeErrCDexRequest: the record of a carried attachment request could
+	// not be written or read; the request is carried and the submission
+	// bound unpaired, never refused.
+	storeErrCDexRequest = "cdex-request"
 )
 
 // StoreErrorStores is the closed list of store names StoreErrorMetric reports.
-var StoreErrorStores = []string{storeErrExchange, storeErrReplay, storeErrIngressKey, storeErrPended}
+var StoreErrorStores = []string{storeErrExchange, storeErrReplay, storeErrIngressKey, storeErrPended, storeErrCDexRequest}
 
 // noteStoreError counts one shared-state store failure. Nil-safe: a gateway with no
 // metric hook configured (every hermetic test, and any deployment without
@@ -1951,6 +1967,38 @@ func (e *envelopeTooLargeError) Error() string {
 // Is makes an envelopeTooLargeError an errEnvelopeTooLarge.
 func (e *envelopeTooLargeError) Is(target error) bool { return target == errEnvelopeTooLarge }
 
+// msgRecipientKeyNotUsable is the refusal of a leg, or of an answer, whose
+// recipient's registered encryption key cannot be sealed to: shn-sdk's Seal
+// refuses a key of small order, or none (shnsdk.ErrLowOrderKey): anything
+// sealed to a key of small order can be opened by anyone, so such a key
+// cannot authenticate its holder.
+// It is a network rule, authentication, at every conformance level, and the
+// leg or answer is refused before anything is sent. Its answer names no key
+// and no cryptographic detail: recipientKeyCause is in the log line and, on a
+// request leg, the record's reason (reasonRecipientKeyNotUsable).
+const msgRecipientKeyNotUsable = "the recipient's registered encryption key is not usable"
+
+// recipientKeyCause is why the recipient's registered key is not usable, as
+// the log line and the record's reason state it. Seal refuses a key of small
+// order and an absent one alike (shnsdk.ErrLowOrderKey), so the cause names
+// both.
+const recipientKeyCause = "it is a small-order (or absent) X25519 key, which cannot authenticate the recipient"
+
+// errRecipientKeyNotUsable is roundTripInner's refusal of a request leg whose
+// recipient's registered key is not usable (msgRecipientKeyNotUsable).
+// relayOriginationError answers it 502 {"error", "rule"}, rule
+// authentication.
+var errRecipientKeyNotUsable = errors.New(msgRecipientKeyNotUsable)
+
+// The answer's refusals when the requester's registered key is not usable
+// (sealResponseLeg): attested delivered once its system has answered
+// (answerRefusalRules), else written with its rule and no attestation
+// (unattestedAnswerRefusals). Both answer msgRecipientKeyNotUsable.
+const (
+	errAnswerRecipientKeyNotUsable           = msgRecipientKeyNotUsable
+	errAnswerRecipientKeyNotUsableUnattested = msgRecipientKeyNotUsable + " (before its system answered)"
+)
+
 // HubDeliveredHeader is the header the Hub sets on every POST /route error,
 // saying whether the recipient's gateway received the request: "no" when the Hub
 // refused before forwarding or the recipient's gateway was not reached or
@@ -2049,8 +2097,8 @@ func (e *hubRefusalError) legNotTaken() bool {
 // short (writeAnswerTooLarge).
 //
 // verified says the answer was refused after its envelope decoded, its
-// response token passed verification (VerifyBound, against the envelope's
-// stated sender), and that sender is the recipient on the leg's correlation:
+// sender is the recipient, its response token passed verification
+// (VerifyBoundWant, bound to that recipient) and its correlation is the leg's:
 // it is the recipient's own answer, so the recipient answered. Without it
 // (the Hub's answer could not be read, was not an envelope, its token failed,
 // or it names another sender or correlation), something in front of the
@@ -2180,7 +2228,7 @@ func (g *Gateway) authorizeRequest(r *http.Request, req authorizeReq) (shnsdk.To
 }
 
 // verifyAuthorized verifies a token against the Framework's key and binds it to
-// the request it answers: shnsdk.VerifyBound for a leg's own token,
+// the request it answers: shnsdk.VerifyBoundWant (verifyBoundWant) for a leg's own token,
 // shnsdk.VerifyInvolved for an involved patient's. A token that does not carry
 // the involvement requested is mintInvolved's to leave out, under its own
 // reason.
@@ -2189,7 +2237,7 @@ func (g *Gateway) verifyAuthorized(tok shnsdk.Token, req authorizeReq) error {
 	if req.Involvement == "" {
 		spec, answer, ok := legSpecForOp(req.Operation)
 		if !ok {
-			return errSubjectUnstated
+			return shnsdk.ErrSubjectUnstated
 		}
 		return verifyBoundWant(tok, g.cfg.AuthzPub, now, req.Frame, req.Operation, req.CorrelationID, g.cfg.HolderID, spec.mintedSubjectWant(req.SubjectPCI, answer), req.PayloadHash)
 	}
@@ -2602,8 +2650,9 @@ var errRoundAddressUnsupported = errors.New("payer gateway does not read a round
 
 // roundTripInner performs one authorized sealed exchange with the counterpart holder
 // through the Hub: authorize(op) → seal(txType/reqFrame) → POST hub
-// /route with a holder assertion → verify the response leg (VerifyBound respOp
-// + the SAME correlationID + Sender==recipient, envelope CorrelationID match) →
+// /route with a holder assertion → verify the response leg (Sender==recipient,
+// then VerifyBoundWant respOp + the SAME correlationID + holder recipient,
+// envelope CorrelationID match) →
 // decrypt and return the response payload. recipient is the counterpart holder
 // id (payer legs derive it from the patient's Coverage via recipientFor — no default;
 // facility/phg legs pass a LookupByRole result).
@@ -2727,6 +2776,13 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 		CorrelationID:   correlationID,
 	}
 	env, err := shnsdk.Seal(meta, payload, recipientHolder.EncPub)
+	if errors.Is(err, shnsdk.ErrLowOrderKey) {
+		// The recipient's registered key cannot be sealed to: refused on
+		// authentication, before a token is minted or anything is sent. The
+		// cause is logged and recorded, never answered (errRecipientKeyNotUsable).
+		log.Printf("gateway: %s not sealed to %s: %s (correlation %s)", txType, recipient, reasonRecipientKeyNotUsable, boundedID(correlationID))
+		return nil, errRecipientKeyNotUsable
+	}
 	if err != nil {
 		return nil, fmt.Errorf("seal failed")
 	}
@@ -2787,13 +2843,19 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	env.Metadata.AuthzToken = tokStr
 	env.Metadata.ConsentRef = tok.ConsentRef // empty for non-federated exchanges
 	// Every other patient the request carries rides in the involved list with
-	// its own token, so the Hub records the exchange under each of them too.
+	// its own token, so the Hub records the exchange under each of them too,
+	// with this gateway's signed summary of the list for a Hub that reads one.
 	// Recording only, within its own budget: nothing here fails or holds up
-	// the leg (involved.go).
-	env.Metadata.Involved = g.involvedForRequest(ctx, r, txType, reqFrame, op, correlationID, sha256hex(env.Ciphertext), request, pci)
+	// the leg (involved.go, involvedsummary.go).
+	env.Metadata.Involved, env.Metadata.InvolvedSummary = g.involvedRequestSide(ctx, r, txType, reqFrame, op, correlationID, sha256hex(env.Ciphertext), request, pci, tok)
 
 	body, err := shnsdk.EncodeEnvelope(env)
 	if err != nil {
+		return nil, fmt.Errorf("encode failed")
+	}
+	// The summary never takes an envelope over its limit: one it would is
+	// sent without it.
+	if body, err = g.withoutOverLimitSummary(ctx, &env, body, envelopeLimit); err != nil {
 		return nil, fmt.Errorf("encode failed")
 	}
 	if len(body) > envelopeLimit {
@@ -2917,24 +2979,25 @@ func (g *Gateway) roundTripInner(ctx context.Context, r *http.Request, recipient
 	if err := json.Unmarshal([]byte(respEnv.Metadata.AuthzToken), &respTok); err != nil {
 		return nil, &answerLostError{cause: "response leg authorization failed"}
 	}
-	// H1: the response token's Holder must be the responder (the counterpart). The
-	// envelope Sender is asserted == recipient just below, so pinning the token's
-	// holder to respEnv.Metadata.Sender stops a token minted for another holder
-	// being lifted into the counterpart's response. The pci the provider authorized
-	// this REQUEST with is pinned as the response token's subject: a payer-coverage
-	// response token for a DIFFERENT patient under the same correlation is rejected
-	// (H1).
-	if err := g.verifyAnswerToken(respTok, txType, respFrame, respOp, correlationID, respEnv.Metadata.Sender, pci, sha256hex(respEnv.Ciphertext)); err != nil {
-		return nil, &answerLostError{cause: "response leg authorization failed"}
-	}
-	// VerifyBound bound the token to the envelope's own stated sender: until
-	// the sender is the recipient and the correlation the leg's, nothing says
-	// the recipient answered, so neither refusal is verified.
-	if respEnv.Metadata.CorrelationID != correlationID {
-		return nil, &answerLostError{cause: "response correlation mismatch"}
-	}
+	// H1: the answer must come from the holder the leg was routed to. Its
+	// envelope's sender is checked first, so an answer from another sender is
+	// refused as such whoever holds its token, and its token is then bound to
+	// the routed recipient, never to the envelope's own claim of its sender:
+	// a token minted for another holder is not lifted into the recipient's
+	// answer. The pci the provider authorized this REQUEST with is pinned as
+	// the response token's subject: a payer-coverage response token for a
+	// DIFFERENT patient under the same correlation is rejected (H1).
 	if respEnv.Metadata.Sender != recipient {
 		return nil, &answerLostError{cause: "response sender mismatch"}
+	}
+	if err := g.verifyAnswerToken(respTok, txType, respFrame, respOp, correlationID, recipient, pci, sha256hex(respEnv.Ciphertext)); err != nil {
+		return nil, &answerLostError{cause: "response leg authorization failed"}
+	}
+	// The token is bound to the leg's correlation: until the envelope's own
+	// correlation is the leg's too, nothing says this answer is the leg's, so
+	// the refusal is not verified.
+	if respEnv.Metadata.CorrelationID != correlationID {
+		return nil, &answerLostError{cause: "response correlation mismatch"}
 	}
 	// The leg's two tokens, as the envelopes carried them, for a caller that
 	// reports its own binding of the patient the answer disclosed
@@ -3642,7 +3705,7 @@ func (g *Gateway) judgeLines(ctx context.Context, mod conformanceModule, fc find
 //
 // Every payer, on any lane, is governed at this gateway's level: none runs nothing,
 // observe records, structural refuses a structural defect, strict refuses every defect
-// and a check that could not run. No payer is exempt by default (D122): a participant
+// and a check that could not run. No payer is exempt by default: a participant
 // that tolerates a payer's known defects lists it (CONFORMANCE_TOLERATE_PEERS), and a
 // defect its level would refuse is then recorded, its finding marked tolerated; a check
 // that could not run is never tolerated.
@@ -3731,7 +3794,7 @@ func (g *Gateway) validatePayerAnswerAtCandidates(ctx context.Context, resourceJ
 }
 
 // undeclaredAnswerProfile is the profile a payer's answer that declares none
-// is judged against (owner decision D47): at structural and strict, its line's
+// is judged against: at structural and strict, its line's
 // own profile for what it is (answerLineProfile), which every candidate line's
 // lane resolves at its own version. "" at none and observe, for an answer that
 // declares a profile, and where its workstream names none: the answer is then
@@ -4506,8 +4569,8 @@ type (
 // subscribe leg (legSpec.Subscribe) or signal leg (legSpec.Signal) carries,
 // each value as it came, and whether the frame carries it.
 type subscribeFrame struct {
-	request, endpoint, channel, ifMatch, statedBase                string
-	hasRequest, hasEndpoint, hasChannel, hasIfMatch, hasStatedBase bool
+	request, endpoint, channel, ifMatch, prefer, statedBase                   string
+	hasRequest, hasEndpoint, hasChannel, hasIfMatch, hasPrefer, hasStatedBase bool
 }
 
 // withRequestFrameSubscribe tags ctx with the subscribe leg's frame headers.
@@ -4527,8 +4590,9 @@ func requestFrameSubscribe(ctx context.Context) subscribeFrame {
 // inboundFrameSubscription reads the topic Subscription headers of an inbound
 // request frame (shnsdk.FrameHeaderSubscriptionRequest,
 // FrameHeaderSubscriptionEndpoint, FrameHeaderSubscriptionChannel,
-// FrameHeaderIfMatch and FrameHeaderStatedBase), as they came. The
-// interaction and If-Match are defined only for a subscribe leg
+// FrameHeaderIfMatch, FrameHeaderPrefer and FrameHeaderStatedBase), as they
+// came. The interaction, If-Match and Prefer are defined only for a subscribe
+// leg
 // (legSpec.Subscribe), the sealed endpoint and headers for a subscribe or a
 // signal leg (legSpec.Signal), and the stated base, on a request, for a
 // signal leg alone: a frame that names one on any other leg is refused (400),
@@ -4548,9 +4612,10 @@ func inboundFrameSubscription(legType string, payload []byte) (subscribeFrame, i
 	f.endpoint, f.hasEndpoint = hdr.Headers[shnsdk.FrameHeaderSubscriptionEndpoint]
 	f.channel, f.hasChannel = hdr.Headers[shnsdk.FrameHeaderSubscriptionChannel]
 	f.ifMatch, f.hasIfMatch = hdr.Headers[shnsdk.FrameHeaderIfMatch]
+	f.prefer, f.hasPrefer = hdr.Headers[shnsdk.FrameHeaderPrefer]
 	f.statedBase, f.hasStatedBase = hdr.Headers[shnsdk.FrameHeaderStatedBase]
 	spec, _ := legSpecFor(legType)
-	subscribeOnly := f.hasRequest || f.hasIfMatch
+	subscribeOnly := f.hasRequest || f.hasIfMatch || f.hasPrefer
 	either := f.hasEndpoint || f.hasChannel
 	switch {
 	case subscribeOnly && !spec.Subscribe, either && !spec.Subscribe && !spec.Signal, f.hasStatedBase && !spec.Signal:
@@ -4864,6 +4929,22 @@ func (g *Gateway) sealResponseLeg(r *http.Request, respFrame, respOp, txType, in
 	}
 	g.diagnosticStage(r.Context(), "recipient.response", txType, payload, 0, "")
 	respEnv, err := shnsdk.Seal(respMeta, payload, requesterHolder.EncPub)
+	if errors.Is(err, shnsdk.ErrLowOrderKey) {
+		// The requester's registered key cannot be sealed to: the answer is
+		// refused on authentication, 502 as every refusal of an answer is
+		// (answerRefusalRules), before a token is minted. Once its system has
+		// answered (it may have acted), the refusal is attested delivered;
+		// before that there is nothing to attest. The cause is logged, never
+		// answered.
+		log.Printf("gateway: %s answer not sealed to %s: %s (correlation %s)", txType, requester, reasonRecipientKeyNotUsable, boundedID(inboundCorrID))
+		x := exchangeOf(r.Context())
+		if x.systemAnswered() {
+			x.refusedAttested("", RefusalAuthentication)
+			return nil, framed, http.StatusBadGateway, errAnswerRecipientKeyNotUsable
+		}
+		x.refused(RefusalAuthentication)
+		return nil, framed, http.StatusBadGateway, errAnswerRecipientKeyNotUsableUnattested
+	}
 	if err != nil {
 		return nil, framed, http.StatusInternalServerError, "seal failed"
 	}
@@ -4910,12 +4991,18 @@ func (g *Gateway) sealResponseLeg(r *http.Request, respFrame, respOp, txType, in
 	respEnv.Metadata.AuthzToken = respTokStr
 	// The payer's own binding of the member, when it differs from the leg
 	// token's patient, rides in the involved list with its own token, so the
-	// Hub records the answer under it too. Recording only: nothing here fails
+	// Hub records the answer under it too, with this gateway's signed summary
+	// of the list for a Hub that reads one. Recording only: nothing here fails
 	// the answer.
-	respEnv.Metadata.Involved = g.involvedForAnswer(r, txType, respFrame, respOp, inboundCorrID, sha256hex(respEnv.Ciphertext), subjectPCI)
+	respEnv.Metadata.Involved, respEnv.Metadata.InvolvedSummary = g.involvedAnswerSide(r, txType, respFrame, respOp, inboundCorrID, sha256hex(respEnv.Ciphertext), subjectPCI, respTok)
 
 	out, err = shnsdk.EncodeEnvelope(respEnv)
 	if err != nil {
+		return nil, framed, http.StatusInternalServerError, "encode failed"
+	}
+	// The summary never takes an answer over the limit the Hub reads: one it
+	// would is sent without it.
+	if out, err = g.withoutOverLimitSummary(r.Context(), &respEnv, out, shnsdk.MaxResponseBytes); err != nil {
 		return nil, framed, http.StatusInternalServerError, "encode failed"
 	}
 	// An answer whose sealed envelope is over the limit the Hub reads is

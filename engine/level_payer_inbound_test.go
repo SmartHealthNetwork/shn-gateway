@@ -69,6 +69,10 @@ type levelPayer struct {
 	// corr, when set, is the correlation id every leg carries instead of a
 	// fresh one: a requester reusing its own trace id.
 	corr string
+	// restate, when set, rewrites each leg's envelope metadata and its
+	// token before the envelope is sealed and the token signed, so the token
+	// is still the Framework's and binds the sealed bytes.
+	restate func(m *shnsdk.Metadata, tok *shnsdk.Token)
 	// mu guards findings and skipped: at observe a queued check reports from a
 	// worker as well as from the leg's goroutine.
 	mu sync.Mutex
@@ -164,6 +168,8 @@ type payerAnswer struct {
 	header http.Header
 	// name is the transaction type the answer's envelope names.
 	name string
+	// meta is the answer envelope's metadata (framed answers only).
+	meta shnsdk.Metadata
 	// frame is the headers the response frame states (nil when unframed).
 	frame map[string]string
 }
@@ -214,17 +220,24 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 		}
 	}
 	clock := p.g.cfg.Clock()
-	env, err := shnsdk.Seal(shnsdk.Metadata{
+	meta := shnsdk.Metadata{
 		Sender: p.requester.ID, Recipient: p.g.cfg.HolderID, TransactionType: leg,
 		AuthorityFrame: spec.ReqFrame, Timestamp: clock.Format(time.RFC3339), CorrelationID: corr,
-	}, payload, p.g.cfg.Identity.EncPub)
+	}
+	tok := shnsdk.Token{
+		Operation: spec.Op, Subject: subject, Frame: spec.ReqFrame, Holder: p.requester.ID,
+		CorrelationID: corr, Expiry: clock.Add(time.Hour),
+	}
+	if p.restate != nil {
+		p.restate(&meta, &tok)
+		corr = meta.CorrelationID
+	}
+	env, err := shnsdk.Seal(meta, payload, p.g.cfg.Identity.EncPub)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	tok := signTestToken(shnsdk.Token{
-		Operation: spec.Op, Subject: subject, Frame: spec.ReqFrame, Holder: p.requester.ID,
-		CorrelationID: corr, Expiry: clock.Add(time.Hour), PayloadHash: sha256hexT(env.Ciphertext),
-	}, p.authzPriv)
+	tok.PayloadHash = sha256hexT(env.Ciphertext)
+	tok = signTestToken(tok, p.authzPriv)
 	tokBytes, err := json.Marshal(tok)
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +285,7 @@ func (p *levelPayer) sendFramed(t *testing.T, leg string, headers map[string]str
 	if err != nil {
 		t.Fatalf("decode response leg: %v", err)
 	}
-	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header, name: answerEnv.Metadata.TransactionType, contentType: hdr.Headers["Content-Type"]}
+	return payerAnswer{status: hdr.Status, body: answer, framed: true, corr: corr, header: rec.Result().Header, name: answerEnv.Metadata.TransactionType, meta: answerEnv.Metadata, contentType: hdr.Headers["Content-Type"]}
 }
 
 // content returns the content-rule findings recorded, as rule/decision.

@@ -49,8 +49,8 @@ var ConformanceLevels = []string{"none", "observe", "structural", "strict"}
 // exactly the published values and errors on anything else, including empty:
 // the gateway/app env loader never calls it for an absent
 // CONFORMANCE_ENFORCEMENT, and sets EnforcementNone itself instead (the
-// published default, D116). A level that is not published is a boot error, never a
-// reserved word.
+// published default: a participant that states no level is not checked). A
+// level that is not published is a boot error, never a reserved word.
 func ParseConformanceEnforcement(s string) (ConformanceEnforcement, error) {
 	switch s {
 	case "strict":
@@ -174,8 +174,8 @@ func newConformancePolicy(level ConformanceEnforcement, unreadableRefusesBelowSt
 
 func (p ConformancePolicy) Level() ConformanceEnforcement { return p.level }
 
-// conformanceModule is module 3, opt-in payload conformance (core design
-// §3.5): the one thing a payload conformance check asks whether it runs and
+// conformanceModule is module 3, opt-in payload conformance: the one thing a payload
+// conformance check asks whether it runs and
 // what a defect it finds does. A network rule (networkRefusal) and module 2's
 // bridged edit (bridgedDecision) are decided ahead of it, never by it; a
 // bridged finding only names the module's level.
@@ -271,7 +271,7 @@ func (g *Gateway) toleratesAll(payers []shnsdk.PayerIdentifier) bool {
 }
 
 // tolerantModule is module 3 deciding a payer's answer from a payer the
-// participant tolerates (D122): a defect its level would refuse is recorded
+// participant tolerates, its own opt-in: a defect its level would refuse is recorded
 // instead. A check that could not run is decided as ever: what the validator
 // did not say is not a verdict to tolerate.
 type tolerantModule struct{ conformanceModule }

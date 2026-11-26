@@ -204,6 +204,18 @@ func TestAccessLineFor(t *testing.T) {
 	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"involvedOmitted"`)) {
 		t.Fatalf("a call that left no one out rendered involvedOmitted: %s %v", b, err)
 	}
+	// Why a summary of an involved list was not sent: on the line, and off it
+	// when every summary due was sent.
+	for _, reason := range engine.InvolvedSummaryNotSentReasons {
+		unsent := answered
+		unsent.InvolvedSummaryNotSent = reason
+		if b, err = json.Marshal(accessLineFor(unsent)); err != nil || !bytes.Contains(b, []byte(`"involvedSummaryNotSent":"`+reason+`"`)) {
+			t.Fatalf("a call whose summary was not sent (%s): %s %v", reason, b, err)
+		}
+	}
+	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"involvedSummaryNotSent"`)) {
+		t.Fatalf("a call that sent every summary rendered involvedSummaryNotSent: %s %v", b, err)
+	}
 	if b, err = json.Marshal(accessLineFor(answered)); err != nil || bytes.Contains(b, []byte(`"authorizeError"`)) {
 		t.Fatalf("a call with authority rendered an authorize error: %s %v", b, err)
 	}
@@ -357,6 +369,12 @@ func buildPayerAt(t *testing.T, payerSystem string, extra map[string]string) (bu
 	if err := shnsdk.WriteBundle(dir, id, "payer", "https://holder.example"); err != nil {
 		t.Fatal(err)
 	}
+	return buildPayerFrom(t, dir, payerSystem, extra)
+}
+
+// buildPayerFrom is buildPayerAt with the bundle in dir.
+func buildPayerFrom(t *testing.T, dir, payerSystem string, extra map[string]string) (built, string) {
+	t.Helper()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
 	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(keyBody)) }))

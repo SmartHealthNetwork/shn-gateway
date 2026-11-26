@@ -150,7 +150,7 @@ type ConformanceFinding struct {
 	SourcePayloadSHA256 string   `json:"sourcePayloadSha256,omitempty"`
 	Issues              []string `json:"issues,omitempty"` // RAW diagnostics; see the struct comment — emitFinding redacts before either carrier sees this.
 	// Tolerated is set when the level would have refused a payer's answer and
-	// the participant tolerates that payer (CONFORMANCE_TOLERATE_PEERS, D122):
+	// the participant tolerates that payer (CONFORMANCE_TOLERATE_PEERS, its own opt-in):
 	// the answer was recorded and carried instead. Never set on a check that
 	// could not run, which is never tolerated.
 	Tolerated bool `json:"tolerated,omitempty"`

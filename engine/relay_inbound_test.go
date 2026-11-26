@@ -44,6 +44,10 @@ type inboundAuthzStub struct {
 	// holder is the answering holder the minted token names; "payer" when
 	// unset, the recipient every payer-side suite builds.
 	holder string
+	// involvement, when set, has a minted token carry the involvement it was
+	// requested with, as the real Framework's does, so an involved list's
+	// entries verify; unset, it carries none.
+	involvement bool
 }
 
 func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -57,6 +61,7 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 		SubjectPCI    string `json:"subjectPCI"`
 		CorrelationID string `json:"correlationId"`
 		PayloadHash   string `json:"payloadHash"`
+		Involvement   string `json:"involvement"`
 	}
 	_ = json.Unmarshal(body, &authReq)
 	holder := s.holder
@@ -72,6 +77,9 @@ func (s *inboundAuthzStub) RoundTrip(req *http.Request) (*http.Response, error) 
 		CorrelationID: authReq.CorrelationID,
 		Expiry:        s.clock().Add(time.Hour),
 		PayloadHash:   authReq.PayloadHash,
+	}
+	if s.involvement {
+		tok.Involvement = authReq.Involvement
 	}
 	tok = signTestToken(tok, s.authzPriv)
 	b, _ := json.Marshal(map[string]any{"token": tok})

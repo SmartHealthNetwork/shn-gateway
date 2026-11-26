@@ -86,7 +86,14 @@ func (g *Gateway) handleEligibilityIngress(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "parse member failed" + eligibilityBatchAt(subs, i)})
 			return
 		}
-		pci, found, readErr := g.resolveSubjectPCI(r.Context(), member, sub.scope)
+		// An id that names one Patient by structure but is not a FHIR id
+		// binds as written: whether to refuse it is the participant's
+		// conformance choice.
+		if !eligibilityPatientIDConforms(sub) && g.guard(r.Context(), KindContent, RuleRequestShape, sub.request) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": msgEligibilityPatientIDNotFHIRID + eligibilityBatchAt(subs, i)})
+			return
+		}
+		pci, found, readErr := g.eligibilityIngressSubject(r.Context(), member, sub)
 		if readErr != nil {
 			status, msg := subjectBindingFailure(r.Context(), readErr)
 			writeJSON(w, status, map[string]string{"error": msg})

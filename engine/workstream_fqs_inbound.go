@@ -53,6 +53,10 @@ func (g *Gateway) handleFederatedQueryInbound(w http.ResponseWriter, r *http.Req
 		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusForbidden, "query rejected: "+err.Error(), nil)
 		return
 	}
+	if _, conforms := taskForRead(queryJSON); !conforms && g.guard(r.Context(), KindContent, RuleRequestShape, queryJSON) {
+		g.refuseInbound(w, r, legFederatedQuery, env, tok, answerTok, http.StatusBadRequest, msgFederatedQueryPatientIDNotFHIRID, nil)
+		return
+	}
 
 	// (3) Bind the token subject to the queried patient. The Authorization
 	// Framework checked consent for the token's patient, so a queried patient

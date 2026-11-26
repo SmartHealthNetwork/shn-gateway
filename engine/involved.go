@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -149,6 +150,7 @@ type involvedPatient struct {
 // omitInvolved reports one patient left out of a leg's involved list.
 func (g *Gateway) omitInvolved(ctx context.Context, direction, leg, corrID, reason string) {
 	exchangeOf(ctx).involvedOmitted(reason)
+	involvedTallyFrom(ctx).add(reason)
 	g.observe(ObserverEvent{Kind: InvolvedOmittedEvent, Direction: direction, LegType: leg, CorrelationID: corrID, Detail: reason})
 	if g.cfg.InvolvedMetric != nil {
 		g.cfg.InvolvedMetric(reason)
@@ -622,10 +624,11 @@ func indexCarriedPatients(payload []byte) *carriedIndex {
 }
 
 // fullURLNames are the names a Patient carried as the resource of an entry
-// with fullURL goes by through it: the fullUrl itself and the id it names, as
-// every leg's reader reads a Patient reference (the id after its last
-// "Patient/", a "/_history/<version>" taken off or not, and the id up to the
-// next "/").
+// with fullURL may go by through it: the fullUrl itself and the ids a reading of
+// its text after the last "Patient/" gives (a "/_history/<version>" taken off or
+// not, and the id up to the next "/"). It is a superset of what FHIR's reference
+// grammar reads (readPatientReference), so a reference naming the Patient in any
+// form a reader takes is matched.
 func fullURLNames(fullURL string) []string {
 	names := []string{fullURL}
 	for _, u := range []string{fullURL, stripHistoryRef(fullURL)} {
@@ -733,7 +736,7 @@ func (g *Gateway) identifyNamed(ctx context.Context, m namedMember, legSubject s
 	case m.shared:
 		return "", namedUnknown, nil
 	}
-	pci, held, found, err := g.resolveBinding(ctx, m.member, m.scope, true)
+	pci, held, found, err := g.resolveBindingSubject(ctx, m.member, m.scope, m.subjectResource, true, true)
 	switch {
 	case notProvablyThePatient(err):
 		return "", namedUnknown, nil
@@ -753,6 +756,13 @@ func (g *Gateway) identifyNamed(ctx context.Context, m namedMember, legSubject s
 		// structure.
 		return "", namedUnknown, nil
 	}
+	// A member whose own subject resource carries no birth date and family name is
+	// bound by its id alone: never named so.
+	if m.subjectResource != nil {
+		if _, ok := PatientDemographics(m.subjectResource); !ok {
+			return "", namedUnknown, nil
+		}
+	}
 	if _, carried := carriedDemographics(m.scope, m.member, true); carried {
 		return pci, namedOther, nil
 	}
@@ -764,6 +774,10 @@ func (g *Gateway) identifyNamed(ctx context.Context, m namedMember, legSubject s
 type namedMember struct {
 	member string
 	scope  []byte
+	// subjectResource is the leg's subject resource (resolveSubjectPCIFrom) when it is
+	// this member's own Patient, so the member is identified exactly as the leg's
+	// subject binding identifies it; nil otherwise.
+	subjectResource []byte
 	// pas is whether the leg is PAS submit or update, whose request names its
 	// subject by Claim.patient: subject and shared are decided by the
 	// request's structure there (pasSubjectNames), and a member the system of
@@ -827,6 +841,30 @@ type involvedCollector struct {
 	mu      sync.Mutex
 	held    map[string]bool // each binding made, and whether it was held
 	entries []involvedPatient
+	// binding is how far the payer's own binding of the member got, for the
+	// answer's summary (involvedAnswerSide): a summary is sent only once it
+	// is settled or has failed.
+	binding bindingState
+}
+
+// bindingState is how far a payer leg's own binding of the member(s) its
+// request names got, as the binding sites report it to the collector.
+type bindingState struct {
+	// attempted: a binding ran (resolved, failed, or found no one).
+	attempted bool
+	// open: a binding resolved, or a member was refused before its binding
+	// could say anything of it, and the answer's list does not yet reflect
+	// it (noteSubjectBinding settles it): the list may be missing that
+	// member's patient, so no summary is sent.
+	open bool
+	// unbound: the leg stopped before binding every member its request
+	// names (leftUnbound), so the bindings of the members after the one it
+	// stopped at never ran: the list may be missing their patients, and no
+	// summary is sent.
+	unbound bool
+	// failed counts, by omission reason, each member whose binding failed:
+	// its patient cannot be on the list, and the summary says so.
+	failed map[string]int
 }
 
 type involvedCollectorKey struct{}
@@ -846,15 +884,116 @@ func involvedCollectorFrom(ctx context.Context) *involvedCollector {
 	return c
 }
 
-// bound records a binding the payer made, and whether its system of record
-// holds the member.
-func (c *involvedCollector) bound(pci string, held bool) {
+// bindingRead records the course of one member's binding, for the answer's
+// summary (involvedAnswerSide), as each binding site reports it: the core
+// binding (bindSubjectHeld), and a leg that reads its member from the system
+// of record itself (coverage eligibility answered from the payer's records),
+// so that one course is never read two ways. err is the binding's failure;
+// otherwise found is whether the system of record holds the member, pci its
+// binding and held whether it was held rather than derived.
+//   - failed (bindingOmitReason): the patient cannot be named, and the summary
+//     states the member left out, by reason alone, never under a guessed
+//     identity. A failure that says nothing of a patient (a member that names
+//     no one) leaves the list open instead: no summary is sent. A failed
+//     binding is counted in the summary only, not in the exchange record's
+//     InvolvedOmitted, which counts the list's own pass.
+//   - ran and found no member (one the system of record does not hold, where
+//     the participant requires known members): no patient to name, so nothing
+//     is left out of the list for it.
+//   - held, but with no identifier: a member this gateway cannot identify,
+//     failed as unknown-member, as the request side's identifyNamed counts it.
+//   - resolved: open until the answer's list reflects it (settled).
+func (c *involvedCollector) bindingRead(pci string, held, found bool, err error) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.held[pci] = held
+	c.binding.attempted = true
+	switch {
+	case err != nil:
+		c.failedLocked(err)
+	case !found:
+	case pci == "":
+		c.failedLocked(errPatientUnidentifiable)
+	default:
+		c.held[pci] = held
+		c.binding.open = true
+	}
+}
+
+// failedLocked counts a member whose binding failed with err under its
+// omission reason, or leaves the list open for a failure that has none. c.mu
+// is held.
+func (c *involvedCollector) failedLocked(err error) {
+	reason, ok := bindingOmitReason(err)
+	if !ok {
+		c.binding.open = true
+		return
+	}
+	if c.binding.failed == nil {
+		c.binding.failed = map[string]int{}
+	}
+	c.binding.failed[reason]++
+}
+
+// settled records that the binding last made is reflected in the answer's
+// list: its patient named when it differs from the leg token's, or none
+// needed.
+func (c *involvedCollector) settled() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.binding.attempted, c.binding.open = true, false
+}
+
+// leftUnbound records that a leg naming several members stopped before it
+// bound them all (bindEachMember): the bindings of those after the one it
+// stopped at never ran, so the answer's list may be missing their patients and
+// is open for good, whatever a later binding reports: no summary is sent,
+// which the Hub reads as not knowing whether the list was complete.
+func (c *involvedCollector) leftUnbound() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.binding.attempted, c.binding.unbound = true, true
+}
+
+// bindingOutcome is whether the answer's binding is settled or failed, and so
+// stated in a summary (ok), and the omissions its failed bindings add.
+func (c *involvedCollector) bindingOutcome() (failed map[string]int, ok bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.binding.attempted || c.binding.open || c.binding.unbound {
+		return nil, false
+	}
+	return maps.Clone(c.binding.failed), true
+}
+
+// bindingOmitReason is the omission reason a failed binding of a member is
+// stated under: errRequestPatientsUnreadable is request-unreadable, a patient
+// the request cannot identify (errPatientUnidentifiable) unknown-member, and
+// any other failure, a read of the system of record that did not answer,
+// system-of-record-unavailable. A member that names no one
+// (errMemberNamesNoOne) is refused before anything is read: no reason (ok
+// false).
+func bindingOmitReason(err error) (reason string, ok bool) {
+	switch {
+	case errors.Is(err, errMemberNamesNoOne):
+		return "", false
+	case errors.Is(err, errRequestPatientsUnreadable):
+		return involvedOmitRequestUnreadable, true
+	case errors.Is(err, errPatientUnidentifiable):
+		return involvedOmitUnknown, true
+	}
+	return involvedOmitUnreadable, true
 }
 
 // differs names the payer's binding pci as an involved patient: payer-held

@@ -289,6 +289,16 @@ var answerRefusalRules = map[string]string{
 	errAnswerDenied:                   RefusalAuthority,
 	errAnswerAuditRefused:             RefusalAudit,
 	errAnswerAuthorizationUnavailable: RefusalAuthority,
+	errAnswerRecipientKeyNotUsable:    RefusalAuthentication,
+}
+
+// unattestedAnswerRefusals are buildResponseLeg's refusals of an answer made
+// before its system answered, by the reason it returns, each with the text and
+// rule it is answered with: {"error": text, "rule": rule}, the shape of
+// attestAnswerRefused, with no attestation, since its system did nothing to
+// attest.
+var unattestedAnswerRefusals = map[string]struct{ text, rule string }{
+	errAnswerRecipientKeyNotUsableUnattested: {msgRecipientKeyNotUsable, RefusalAuthentication},
 }
 
 // writeResponseLegFailure writes buildResponseLeg's refusal. msg is this
@@ -296,6 +306,10 @@ var answerRefusalRules = map[string]string{
 func writeResponseLegFailure(w http.ResponseWriter, status int, msg string) {
 	if rule, ok := answerRefusalRules[msg]; ok {
 		attestAnswerRefused(w, rule, msg)
+		return
+	}
+	if r, ok := unattestedAnswerRefusals[msg]; ok {
+		writeJSON(w, status, map[string]string{"error": r.text, "rule": r.rule})
 		return
 	}
 	writeJSON(w, status, map[string]string{"error": msg})

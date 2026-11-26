@@ -20,7 +20,7 @@ import (
 // as sent. The network refuses one only on its own primitives: a submission
 // that names no registered payer to route to (routing), and one whose
 // MemberId it cannot read, so it cannot identify the patient it must check
-// authority for (D121).
+// authority for.
 
 const legCDexSubmit = "cdex-attachment-submit"
 
@@ -38,7 +38,7 @@ const (
 // submission can be addressed to, each with its return path.
 const CDexPayersPath = "/cdex/payers"
 
-// cdexLine is the one CDex line the network carries (D127). Its submission
+// cdexLine is the one CDex line the network carries (CDex 2.1.0). Its submission
 // rides no declared contract line (the leg's catalog contract is ""); the
 // line names only the endpoint a payer publishes for it.
 const cdexLine = "2.1"
@@ -59,14 +59,25 @@ const cdexEndpointCode = "davinci_cdex_attachsubmit_endpoint"
 const PayerIdDiffersEvent = "cdex.payer-id-differs"
 
 // cdexSubmission is what the network reads of a $submit-attachment: the
-// member the patient is bound by and the payer it is addressed to. Nothing
-// else of the submission is read or changed.
+// member the patient is bound by, the payer it is addressed to, and the
+// tracking identifier that pairs it with the request it answers
+// (workstream_pa_cdex_pairing.go). Nothing else of the submission is read or
+// changed.
 type cdexSubmission struct {
 	member string
+	// tracking is the one TrackingId value: ok is false when the submission
+	// carries none, or two that differ.
+	tracking cdexTracking
 	// payer is the one payer the PayerId values name, nil when there are
 	// none or two that differ; payers is every PayerId value, in order.
 	payer  *shnsdk.PayerIdentifier
 	payers []shnsdk.PayerIdentifier
+}
+
+// cdexTracking is a submission's TrackingId, its system and value.
+type cdexTracking struct {
+	system, value string
+	ok            bool
 }
 
 // cdexParameters is the part of a Parameters resource the reader decodes: each
@@ -93,7 +104,7 @@ const errCDexNoMember = "cannot identify the patient: the submission carries no 
 // body that repeats a member name is refused on message integrity, at every
 // level. A body that is not a Parameters resource, or carries no MemberId
 // value, or two that differ, names no one patient, and is refused: the
-// network cannot identify the patient it must check authority for (D121).
+// network cannot identify the patient it must check authority for.
 // Two PayerId values that differ name no one payer; payer is then nil, and the
 // submission is routed as one that names none.
 func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, string) {
@@ -108,6 +119,7 @@ func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, 
 	}
 	var s cdexSubmission
 	members := map[string]bool{}
+	trackings := map[cdexTracking]bool{}
 	for _, param := range p.Parameter {
 		if param.ValueIdentifier == nil || param.ValueIdentifier.Value == "" {
 			continue
@@ -116,9 +128,17 @@ func readCDexSubmission(ctx context.Context, body []byte) (cdexSubmission, int, 
 		case "MemberId":
 			members[param.ValueIdentifier.Value] = true
 			s.member = param.ValueIdentifier.Value
+		case "TrackingId":
+			t := cdexTracking{system: param.ValueIdentifier.System, value: param.ValueIdentifier.Value, ok: true}
+			trackings[t] = true
+			s.tracking = t
 		case "PayerId":
 			s.payers = append(s.payers, shnsdk.PayerIdentifier{System: param.ValueIdentifier.System, Value: param.ValueIdentifier.Value})
 		}
+	}
+	if len(trackings) != 1 {
+		// None, or two that differ: no one request is named.
+		s.tracking = cdexTracking{}
 	}
 	if p.ResourceType != "Parameters" || len(members) != 1 {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonCDexNoMember)
@@ -195,9 +215,14 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// The patient is bound by the MemberId: the provider's own patient when its
-	// system of record holds the member, otherwise the identifier derived from
-	// it, so a member the payer does not hold is carried (unknown is not empty).
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), sub.member, body)
+	// system of record holds the member; otherwise the patient of the
+	// attachment request it answers, when this gateway carried that request
+	// from the same payer for the same member (cdexPairing, read before any of its bytes); otherwise
+	// the identifier derived from the member and the submission's top-level
+	// resources, never its attachment content, so a member the payer does not
+	// hold is carried (unknown is not empty).
+	paired, unpaired := g.cdexPairing(sub, recipient)
+	pci, held, found, readErr := g.resolveBindingSubject(r.Context(), sub.member, cdexBindingPayload(body, paired), nil, false, true)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(r.Context(), readErr)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -213,6 +238,15 @@ func (g *Gateway) handleCDexSubmitIngress(w http.ResponseWriter, r *http.Request
 	scope.leg = leg
 	ex := g.exchanges.Begin(workstreamPA)
 	child := g.ingressCorrelation(w, r)
+	switch {
+	case held:
+	case paired != "":
+		pci = paired
+	default:
+		// Observed under the leg's own correlation, once the submission is
+		// bound and will be sent.
+		g.noteCDexUnpaired(child, unpaired)
+	}
 	request, ok := sealModuleRequest(w, builder, relay.Exact(relay.NewBody(body, relay.OriginIngressRequest), "application/fhir+json"), body)
 	if !ok {
 		return
@@ -356,10 +390,24 @@ func (g *Gateway) handleCDexSubmitInbound(w http.ResponseWriter, r *http.Request
 		g.refuseInbound(w, r, legCDexAttachmentSubmit, env, tok, answerTok, status, msg, nil)
 		return
 	}
-	subjectPCI, status, msg := g.bindInboundSubject(ctx, sub.member, body)
+	// Bound as the provider's gateway binds it: the payer's own member when
+	// its system of record holds it; otherwise the patient of the attachment
+	// request it answers, when this gateway carried that request to the same
+	// provider for the same member (cdexPairing, read before any of its bytes); otherwise from the
+	// member and the submission's top-level resources, never its attachment
+	// content.
+	paired, unpaired := g.cdexPairing(sub, env.Metadata.Sender)
+	subjectPCI, held, status, msg, _ := g.bindSubjectHeld(ctx, sub.member, cdexBindingPayload(body, paired), nil, http.StatusBadRequest, true)
 	if status != 0 {
 		g.refuseInbound(w, r, legCDexAttachmentSubmit, env, tok, answerTok, status, msg, nil)
 		return
+	}
+	switch {
+	case held:
+	case paired != "":
+		subjectPCI = paired
+	default:
+		g.noteCDexUnpaired(env.Metadata.CorrelationID, unpaired)
 	}
 	g.noteSubjectBinding(ctx, legCDexSubmit, env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	result, err := g.cfg.Responder.Handle(ctx, legCDexSubmit, env.Metadata.CorrelationID, subjectPCI, body)

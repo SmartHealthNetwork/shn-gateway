@@ -53,27 +53,34 @@ const badAnswerPrefix = "the provider's answer on a Subscription interaction is 
 
 // CheckSubscribeAnswer is the notifier gateway's check of a 2xx answer its
 // system gave on a subscribe leg, before the answer is delivered: structural
-// and exact, a network rule at every level, tied to the interaction it
-// answers (in, as the frame's subscriptionRequest names it; id the
-// Subscription's id, read only for an instance $status). It passes exactly:
-//   - a read or a vread: a Subscription;
-//   - a create or an update: a Subscription, no body, or an OperationOutcome
-//     (a system that answers minimal by its own default);
-//   - a delete: an OperationOutcome, or no body;
-//   - a search or a page of one: a searchset Bundle whose every entry's
-//     resource is a Subscription or an OperationOutcome;
-//   - an instance $status: a Bundle of type searchset (the Backport IG STU
-//     1.1's) or history (an earlier server's), whose entries are exactly one
-//     SubscriptionStatus Parameters of the profile's shape (statusShape),
-//     whose subscription names id.
+// and exact, a network rule at every level. It passes an answer that holds
+// nothing but shapes that name no patient, whatever the interaction (in, as
+// the frame's subscriptionRequest names it) it answers:
+//   - a Subscription;
+//   - an OperationOutcome;
+//   - no body;
+//   - a searchset Bundle whose every entry's resource is a Subscription or
+//     an OperationOutcome;
+//   - on an interaction that names the Subscription by id (a read, a vread,
+//     an update, a delete or an instance $status): a $status Bundle, of type
+//     searchset (the Backport IG STU 1.1's) or history (an earlier
+//     server's), whose entries are exactly one SubscriptionStatus Parameters
+//     of the profile's shape (statusShape), whose subscription names id, the
+//     Subscription's id. A Bundle is read as a $status Bundle when it is a
+//     history Bundle or an entry carries a Parameters. On a create, a search
+//     or a page, which name no id, one is refused. It carries no
+//     Subscription, so on a read or a vread the caller's ownership test,
+//     which needs the read's own Subscription, answers it with the
+//     network's 404.
 //
-// A shape valid for another interaction is refused. Nothing in any of them
-// may hold a resource but each Bundle entry's own: no contained resource and
-// no resource-valued member, an OperationOutcome included. Member names are
-// read folded, as a lenient reader would take them, and a member that is not
-// the array or object it should be fails closed. Anything else, a body that
-// is not one unambiguous JSON object included, is refused 502, recorded
-// authority: the network delivers no other resource on this leg.
+// Nothing in any of them may hold a resource but each Bundle entry's own: no
+// contained resource and no resource-valued member, an OperationOutcome
+// included. Member names are read folded, as a lenient reader would take
+// them, and a member that is not the array or object it should be fails
+// closed. Anything else, a body that is not one unambiguous JSON object
+// included, is refused 502, recorded authority: the network delivers no other
+// resource on this leg. Whose each Subscription it carries is is the caller's
+// ownership test (AnswerSubscriptions).
 func CheckSubscribeAnswer(body []byte, in shnsdk.SubscriptionInteraction, id string, shape NotificationShape) *Refusal {
 	_, r := AnswerSubscriptions(body, in, id, shape)
 	return r
@@ -85,17 +92,18 @@ func CheckSubscribeAnswer(body []byte, in shnsdk.SubscriptionInteraction, id str
 // (Keys.Owns): read here as CheckSubscribeAnswer reads the answer, so a
 // Subscription the check passes is never one the caller does not see.
 func AnswerSubscriptions(body []byte, in shnsdk.SubscriptionInteraction, id string, shape NotificationShape) ([]*Subscription, *Refusal) {
-	noBody := in == shnsdk.SubscriptionCreate || in == shnsdk.SubscriptionUpdate || in == shnsdk.SubscriptionDelete
+	// An answer to no interaction the leg carries is never delivered.
+	if !carried(in) {
+		return nil, badAnswer("it answers no Subscription interaction this network carries")
+	}
 	// A JSON object or array followed by anything is never one JSON
 	// value, whatever ClassifyBody makes of its first.
 	if jsonValueThenMore(body) {
 		return nil, badAnswer("it is not one JSON object this network can read unambiguously")
 	}
 	switch kind, _, err := ClassifyBody(body); {
-	case kind == BodyEmpty && noBody:
-		return nil, nil
 	case kind == BodyEmpty:
-		return nil, badAnswer("it has no body, which a " + string(in) + " is not answered with")
+		return nil, nil
 	case kind == BodyFHIRXML:
 		return nil, badAnswer("it is FHIR XML, which this network reads only as JSON and so cannot check")
 	case kind == BodyNotFHIR:
@@ -111,31 +119,69 @@ func AnswerSubscriptions(body []byte, in shnsdk.SubscriptionInteraction, id stri
 		return nil, badAnswer("it is not one JSON object this network can read unambiguously")
 	}
 	rt, _ := root.memberFolded("resourceType").stringOf()
-	switch in {
-	case shnsdk.SubscriptionRead, shnsdk.SubscriptionVRead, shnsdk.SubscriptionCreate, shnsdk.SubscriptionUpdate:
-		if rt == "Subscription" {
-			if holdsResource(root, true) {
-				return nil, badAnswer("the Subscription holds a resource")
-			}
-			return []*Subscription{{body: body, root: root}}, nil
+	switch rt {
+	case "Subscription":
+		if holdsResource(root, true) {
+			return nil, badAnswer("the Subscription holds a resource")
 		}
-		if rt == "OperationOutcome" && noBody {
-			return nil, outcomeShape(root)
-		}
-	case shnsdk.SubscriptionDelete:
-		if rt == "OperationOutcome" {
-			return nil, outcomeShape(root)
-		}
-	case shnsdk.SubscriptionSearch, shnsdk.SubscriptionPage:
-		if rt == "Bundle" {
+		return []*Subscription{{body: body, root: root}}, nil
+	case "OperationOutcome":
+		return nil, outcomeShape(root)
+	case "Bundle":
+		if !statusShaped(root) {
 			return searchsetSubscriptions(body, root)
 		}
-	case shnsdk.SubscriptionStatus:
-		if rt == "Bundle" {
+		if namesID(in) {
 			return nil, statusBundle(root, id, shape)
 		}
+		return nil, badAnswer("a " + string(in) + " is not answered with a $status Bundle")
 	}
-	return nil, badAnswer("a " + string(in) + " is not answered with this (" + rt + ")")
+	return nil, badAnswer("a Subscription interaction is not answered with this (" + rt + ")")
+}
+
+// carried reports whether in is an interaction a subscribe leg carries.
+func carried(in shnsdk.SubscriptionInteraction) bool {
+	switch in {
+	case shnsdk.SubscriptionRead, shnsdk.SubscriptionVRead, shnsdk.SubscriptionCreate, shnsdk.SubscriptionUpdate,
+		shnsdk.SubscriptionDelete, shnsdk.SubscriptionStatus, shnsdk.SubscriptionSearch, shnsdk.SubscriptionPage:
+		return true
+	}
+	return false
+}
+
+// namesID reports whether in names one Subscription by its id (a read, a
+// vread, an update, a delete or an instance $status), the one a $status
+// Bundle answering it must name.
+func namesID(in shnsdk.SubscriptionInteraction) bool {
+	switch in {
+	case shnsdk.SubscriptionRead, shnsdk.SubscriptionVRead, shnsdk.SubscriptionUpdate, shnsdk.SubscriptionDelete, shnsdk.SubscriptionStatus:
+		return true
+	}
+	return false
+}
+
+// statusShaped reports whether root, a Bundle, is read as a $status Bundle:
+// a history Bundle, or one an entry of which carries a Parameters resource. A
+// searchset of Subscriptions and OperationOutcomes is neither.
+func statusShaped(root *jnode) bool {
+	if typ, _ := root.memberFolded("type").stringOf(); typ == "history" {
+		return true
+	}
+	entries := root.memberFolded("entry")
+	if entries == nil || entries.kind != '[' {
+		return false
+	}
+	for _, e := range entries.elems {
+		if e.kind != '{' {
+			continue
+		}
+		if res := e.memberFolded("resource"); res != nil && res.kind == '{' {
+			if rt, _ := res.memberFolded("resourceType").stringOf(); rt == "Parameters" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // outcomeShape refuses an OperationOutcome that holds a resource.
@@ -415,7 +461,7 @@ func CheckErrorAnswer(body []byte) *Refusal {
 		if rt != "OperationOutcome" {
 			return badAnswer("its error answer is a resource other than an OperationOutcome")
 		}
-		x, _ := readXML(bytes.TrimLeft(bytes.TrimPrefix(body, utf8BOM), " \t\r\n"))
+		x, _ := readXML(bytes.TrimLeft(bytes.TrimPrefix(body, utf8BOM), " \t\r\n"), nil)
 		if xmlHoldsResource(x) {
 			return badAnswer("the OperationOutcome holds a resource")
 		}
@@ -461,7 +507,7 @@ func CheckSignalAnswer(body []byte) *Refusal {
 		if err != nil {
 			return badAnswer("its answer is FHIR XML this network cannot read one way only")
 		}
-		x, xerr := readXML(trimmed)
+		x, xerr := readXML(trimmed, nil)
 		if xerr != nil || !x.fhir || x.root != "Bundle" {
 			return badAnswer("its answer is FHIR XML this network cannot read one way only")
 		}
@@ -561,21 +607,25 @@ var (
 // holdsResource reports whether n holds a resource: an object with a
 // resourceType member below n (or n itself, unless self is set, when n is the
 // resource being judged), or a contained member anywhere in n.
-func holdsResource(n *jnode, self bool) bool {
+func holdsResource(n *jnode, self bool) bool { return holdsResourceWalked(n, self, nil) }
+
+// holdsResourceWalked is holdsResource, counting in w each value it visits.
+func holdsResourceWalked(n *jnode, self bool, w *walk) bool {
 	if n == nil {
 		return false
 	}
+	w.add(1)
 	for _, m := range n.members {
 		f := jsonmember.FoldedName(m.name)
 		if f == foldedContained || (!self && f == foldedResourceType) {
 			return true
 		}
-		if holdsResource(m.val, false) {
+		if holdsResourceWalked(m.val, false, w) {
 			return true
 		}
 	}
 	for _, e := range n.elems {
-		if holdsResource(e, false) {
+		if holdsResourceWalked(e, false, w) {
 			return true
 		}
 	}

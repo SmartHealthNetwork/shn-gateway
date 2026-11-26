@@ -514,7 +514,7 @@ func TestCompleteAuthoredPASRequest_EvidenceUnderTheMembersRecordID(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				out, edits, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, row.sorID, member)
+				out, edits, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, row.sorID, member, nil)
 				if (err == nil) != row.ok {
 					t.Fatalf("completion err = %v, want ok %v", err, row.ok)
 				}
@@ -776,7 +776,7 @@ func wantEvidenceRecorded(t *testing.T, r ExchangeRecord, row evidenceSubjectRow
 //     patient's;
 //   - each is recorded as the fidelity of SHN's own build at the build stage,
 //     whatever the request sent before it, as a record E-06 would re-point
-//     that a signature covers is (D113, 502 too): what cannot be carried is
+//     that a signature covers is (502 too): what cannot be carried is
 //     what the gateway read from its own participant's system;
 //   - bytes the build cannot carry as read are refused 502 the same way;
 //   - a record the system definitely does not hold (it cannot be filled) is
@@ -1031,7 +1031,7 @@ func TestRekeyEvidenceSubject_EachEvidenceType(t *testing.T) {
 	for _, rt := range []string{"Condition", "Observation", "ClinicalImpression", "Goal", "DiagnosticReport"} {
 		t.Run(rt, func(t *testing.T) {
 			held := []byte(`{"resourceType":"` + rt + `","id":"r1","status":"final","contained":[{"resourceType":"Observation","id":"c1","subject":{"reference":"Patient/pat-77"}}],"subject":{"reference":"Patient/pat-77"}}`)
-			out, _, err := rekeyEvidenceSubject(held, "Patient/pat-77", "MBR-X")
+			out, _, err := rekeyEvidenceSubject(held, "Patient/pat-77", "MBR-X", evidencePatientElement[rt])
 			if err != nil {
 				t.Fatal(err)
 			}

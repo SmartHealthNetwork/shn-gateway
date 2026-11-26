@@ -172,9 +172,10 @@ func TestSendSignsWithTheKeyTheGatewayRunsWith(t *testing.T) {
 }
 
 // TestSendDropsAQueuedRowItWouldNotSend: a row that is not what Append
-// stores (a value the guard refuses, an already signed request, more than one
-// value or anything after it, a record under another row's recordId, not a
-// record) leaves the outbox counted invalid and is never sent.
+// stores (a value the guard refuses, a record carrying involved among them,
+// an already signed request, more than one value or anything after it, a
+// record under another row's recordId, not a record) leaves the outbox
+// counted invalid and is never sent.
 func TestSendDropsAQueuedRowItWouldNotSend(t *testing.T) {
 	good, err := json.Marshal(authored())
 	if err != nil {
@@ -191,6 +192,9 @@ func TestSendDropsAQueuedRowItWouldNotSend(t *testing.T) {
 		"a trailing brace":        append(append([]byte{}, good...), '}'),
 		"another row's recordId":  mustMarshal(t, withRecordID(authored(), "01JZX5A7B8C9D0E1F2G3H4JA99")),
 		"not a record":            []byte(`[1,2]`),
+		// A version 3 member the SDK's record now decodes: the guard, not the
+		// decoder, keeps it out of a send.
+		"a record carrying involved": mustMarshal(t, withInvolved(authored())),
 	} {
 		p := &plane{}
 		srv := httptest.NewServer(p)
@@ -981,5 +985,10 @@ func mustMarshal(t *testing.T, v any) []byte {
 
 func withRecordID(r shnsdk.AuditRecord, id string) shnsdk.AuditRecord {
 	r.RecordID = id
+	return r
+}
+
+func withInvolved(r shnsdk.AuditRecord) shnsdk.AuditRecord {
+	r.Involved = &shnsdk.Involved{Completeness: shnsdk.InvolvedComplete}
 	return r
 }

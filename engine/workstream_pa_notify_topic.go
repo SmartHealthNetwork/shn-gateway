@@ -9,8 +9,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/pa/subscription"
 )
 
-// A topic Subscription's notification travels two halves (the notifications
-// design §6.2 step 5, §7.3, §7.4): the notifier's gateway takes it from its
+// A topic Subscription's notification travels two halves: the notifier's gateway takes it from its
 // own system at a notification address it wrote (handleNotifyIngress), and the
 // subscriber's gateway delivers it to the endpoint its own system wrote
 // (handleSignalDelivery). Both halves hold every notification to its topic's

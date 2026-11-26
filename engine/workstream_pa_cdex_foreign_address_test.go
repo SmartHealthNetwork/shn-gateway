@@ -18,7 +18,7 @@ import (
 
 // A payer can learn another payer's notification address at a provider: an
 // empty page of the other payer's search is delivered with its links as the
-// provider's system wrote them, and those may name the address (§7.2). The
+// provider's system wrote them, and those may name the address. The
 // address names the other payer, its key id and its sealed endpoint, which
 // opens only under that payer's gateway's key. These rows hold that a payer
 // holding another payer's address cannot use it: nothing it frames makes the

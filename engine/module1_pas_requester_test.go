@@ -419,7 +419,7 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), plain, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID, g.contextRequesterRead); err != nil {
 		t.Fatalf("the request without a requester fails the guard: %v", err)
 	}
 	in.SR = withOrderRequester(t, in.SR, "Practitioner/prac-2")
@@ -431,14 +431,14 @@ func TestModuleOnePAS_EvidenceGuardPassesTheCarriedRequester(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err == nil {
+	if _, _, err = g.completeAuthoredPASRequest(context.Background(), without, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID, g.contextRequesterRead); err == nil {
 		t.Fatal("a request naming a clinician it does not carry passed the evidence guard")
 	}
 	with, err := buildModuleOnePASSubmit("2.2", in, records)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
+	if _, _, err := g.completeAuthoredPASRequest(context.Background(), with, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID, g.contextRequesterRead); err != nil {
 		t.Fatalf("the carried request failed the evidence guard: %v", err)
 	}
 }
@@ -506,7 +506,7 @@ func TestModuleOnePAS_AuthorNamingTheCarriedClinician(t *testing.T) {
 				t.Fatalf("questionnaire author %q, carried entry %q on the order's base %q: want the author as written, naming that entry", author, full, base)
 			}
 			if name == "submit" {
-				if _, _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID); err != nil {
+				if _, _, err := g.completeAuthoredPASRequest(context.Background(), body, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID, g.contextRequesterRead); err != nil {
 					t.Fatalf("the evidence guard refused the carried request: %v", err)
 				}
 			}

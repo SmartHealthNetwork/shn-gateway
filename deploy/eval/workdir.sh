@@ -20,6 +20,17 @@
 # them: a directory left where a volume was once mounted is not that volume. Anything it cannot
 # check is a refusal too. A refusal removes the directory it made, leaves `work` empty and
 # returns 1. Unset, nothing is checked and TMPDIR alone decides.
+# eval_dir is the evaluation bundle's directory, this file's, every symbolic link in its path
+# resolved: the smokes find every file they use from it. eval_sdk is the SDK's source, the sdk/
+# directory where a smoke is started, as SHN's repository has beside the gateway when make starts
+# a smoke from its root; elsewhere, as in the published module, it is empty and the smokes use the
+# installed shn.
+eval_dir=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+eval_sdk=
+if [ -d sdk ]; then
+  eval_sdk=$(CDPATH='' cd -P -- sdk && pwd -P)
+fi
+
 eval_workdir() {
   local name=${1:?eval_workdir: no name} bundle=${2:?eval_workdir: no bundle directory}
   local base=${TMPDIR:-/tmp}
@@ -96,7 +107,7 @@ eval_bundle_holder_seconds=14400
 eval_bundle_vol=
 eval_bundle_holder=
 eval_bundle_fill=
-eval_bundle_override=
+eval_bundle_override=()
 
 # eval_docker_exists KIND NAME: 0 when docker has a KIND (container or volume) named NAME, 1 when it
 # says there is none, 2 when it cannot tell (the daemon unreachable, any other error).
@@ -121,7 +132,7 @@ eval_docker_free() {
 
 eval_bundle_volume() {
   local copy=${1:?eval_bundle_volume: no bundle copy}
-  eval_bundle_override=
+  eval_bundle_override=()
   [ -n "${SHN_EVAL_KEYS_VOLUME+set}" ] || return 0
   eval_on_volume "$copy" "$SHN_EVAL_KEYS_VOLUME" || return 1
   if [ -z "$(ls -A "$copy")" ]; then
@@ -205,7 +216,7 @@ $eval_bundle_vol
     return 1
   }
   export SHN_EVAL_BUNDLE_VOLUME=$eval_bundle_vol
-  eval_bundle_override="-f gateway/deploy/eval/compose.eval.ramfs.yml"
+  eval_bundle_override=(-f "$eval_dir/compose.eval.ramfs.yml")
 }
 
 # eval_bundle_drop removes the fill container, the holder, then the volume, each only if it exists;

@@ -47,18 +47,31 @@ func TestPatientRefMember(t *testing.T) {
 		{"https://x/Patient/MBR-X/x%26date%3Dge1900-01-01", "", false},
 		{"https%3A%2F%2Fx%2FPatient%2FMBR-X", "", false},
 		{"Patient/MBR-X/_history/", "", false},
-		// A character outside a FHIR id, in the id or the base.
+		// An escape in the id can hide a "/": it names no Patient.
 		{"Patient/MBR-X%41", "", false},
-		{"Patient/A$x", "", false},
-		{"https://x/a%2Fb/Patient/MBR-X", "", false},
+		// An id that is not a FHIR id names that Patient by structure, as
+		// written: refusing it is the participant's conformance choice. A
+		// base's own segments may carry an escape.
+		{"Patient/A$x", "A$x", true},
+		{"Patient/MBR_X", "MBR_X", true},
+		{"https://x/fhir/Patient/MBR_X", "MBR_X", true},
+		{"https://x/a%2Fb/Patient/MBR-X", "MBR-X", true},
+		// "Patient/" inside another reference, or another reference spelled
+		// to look like one, names no Patient.
+		{"urn:Patient/MBR-X", "", false},
+		{"Group/1/Patient/MBR-X", "", false},
+		{"Basic/1/_history/Patient/MBR-X", "", false},
+		{" Patient/MBR-X", "", false},
+		{"patient/MBR-X", "", false},
 		// A contained reference is "#<id>" and nothing else.
 		{"Patient/Y#p1", "", false},
 		{"x#p1", "", false},
 		{"#p1/x", "", false},
 		{"#p1/Observation/1", "", false},
-		// An id is at most 64 characters.
+		// A FHIR id is at most 64 characters; a longer one still names its
+		// Patient as written. A contained reference's id is a FHIR id.
 		{"Patient/" + strings.Repeat("a", 64), strings.Repeat("a", 64), true},
-		{"Patient/" + strings.Repeat("a", 65), "", false},
+		{"Patient/" + strings.Repeat("a", 65), strings.Repeat("a", 65), true},
 		{"#" + strings.Repeat("a", 65), "", false},
 	} {
 		got, ok := patientRefMember(row.ref, contained)
@@ -247,34 +260,60 @@ func TestEligibility_UnresolvablePatientReferenceIsRefused(t *testing.T) {
 	}
 }
 
-// Any other reference that is not a well-formed one is read as before, by the
-// SDK's reader, which takes what follows "Patient/" as the member: a member
-// id is an identifier value, not limited to a FHIR id's shape. At every level.
-func TestEligibility_OtherReferencesAreReadAsBefore(t *testing.T) {
+// Any other reference is read by FHIR's reference grammar, as every patient
+// reference is. One that names no Patient so (a bare id, another type, a
+// trailing path, a lowercase type, "Patient/" inside another reference, a URN,
+// an escape, an operation) names no one: refused 400 on authority at every
+// level before the payer's system is asked, where earlier releases read the
+// member from its text. One that names a Patient by an id that is not a FHIR id
+// binds as written: the payer answers it (here, an unknown member) at none and
+// observe, observe records the request's shape, and structural and strict
+// refuse it as that shape.
+func TestEligibility_OtherReferencesAreReadByTheGrammar(t *testing.T) {
 	t.Parallel()
-	for name, row := range map[string]struct {
-		ref      string
-		answered bool // the SDK's reader names a held member
-	}{
-		"bare id":              {dtrFrameMember, true},
-		"not a Patient":        {"Organization/payer", false},
-		"underscore in the id": {"Patient/MBR_1", false},
-		"trailing slash":       {"Patient/" + dtrFrameMember + "/", false},
-		"lowercase type":       {"patient/" + dtrFrameMember, false},
-		"id over 64":           {"Patient/" + strings.Repeat("a", 65), false},
+	for name, ref := range map[string]string{
+		"bare id":            dtrFrameMember,
+		"not a Patient":      "Organization/payer",
+		"trailing slash":     "Patient/" + dtrFrameMember + "/",
+		"lowercase type":     "patient/" + dtrFrameMember,
+		"urn:Patient":        "urn:Patient/" + dtrFrameMember,
+		"Patient/ inside":    "Group/1/Patient/" + dtrFrameMember,
+		"a trailing path":    "Patient/" + dtrFrameMember + "/x",
+		"an escape":          "Patient/" + dtrFrameMember + "%2Fx",
+		"an operation":       "Patient/$everything",
+		"behind white space": " Patient/" + dtrFrameMember,
 	} {
 		for _, level := range eligibilityLevels {
-			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				p := eligibilityPayer(t, level, false)
-				ans := p.sendAs(t, "coverage-eligibility", "", eligibilityWithPatient(t, dtrFrameMember, row.ref), p.pci)
-				if row.answered {
-					if ref, err := ParseCoverageEligibilityResponsePatient(ans.body); ans.status != http.StatusOK || err != nil || ref != "Patient/"+dtrFrameMember {
-						t.Fatalf("answer %d %s, want answered about the member, as before", ans.status, ans.body)
-					}
-					return
+			t.Run("names no one/"+name+"/"+level.String(), func(t *testing.T) {
+				p, got := newRecordingLevelPayer(t, level)
+				ans := p.sendAs(t, "coverage-eligibility", "", eligibilityWithPatient(t, dtrFrameMember, ref), p.pci)
+				p.wantRefused(t, ans, http.StatusBadRequest, errEligibilityNamesNoOne)
+				wantRefusal(t, got.only(t), http.StatusBadRequest, RefusedByPayerGateway, RefusalAuthority)
+				if p.partner.lastPath != "" {
+					t.Fatalf("a refused request reached the payer's system at %s", p.partner.lastPath)
 				}
-				if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusBadRequest || msg != "unknown member" {
-					t.Fatalf("answer %d %s, want the payer's 400 unknown member, as before", ans.status, ans.body)
+			})
+		}
+	}
+	for name, ref := range map[string]string{
+		"underscore in the id":    "Patient/MBR_1",
+		"id over 64":              "Patient/" + strings.Repeat("a", 65),
+		"absolute, not a FHIR id": "https://ehr.example/fhir/Patient/MBR_1",
+	} {
+		for _, level := range eligibilityLevels {
+			t.Run("not a FHIR id/"+name+"/"+level.String(), func(t *testing.T) {
+				p := eligibilityPayer(t, level, false)
+				ans := p.sendAs(t, "coverage-eligibility", "", eligibilityWithPatient(t, dtrFrameMember, ref), p.pci)
+				switch level {
+				case EnforcementNone, EnforcementObserve:
+					if msg, echoed := gatewayRefusal(t, "coverage-eligibility", ans.contentType, ans.body); len(echoed) != 0 || ans.status != http.StatusBadRequest || msg != "unknown member" {
+						t.Fatalf("answer %d %s, want the payer's 400 unknown member: the member bound as written", ans.status, ans.body)
+					}
+					if fs := p.content(); level == EnforcementObserve && !hasFinding(fs, RuleRequestShape) {
+						t.Fatalf("at observe want a %s finding, got %v", RuleRequestShape, findingsText(fs))
+					}
+				default:
+					p.wantRefused(t, ans, http.StatusBadRequest, msgEligibilityPatientIDNotFHIRID)
 				}
 			})
 		}
@@ -366,34 +405,42 @@ func TestFederatedQuery_PatientReferenceForms(t *testing.T) {
 
 // A federated query whose Task.for or query patient is not a well-formed
 // reference, or names no patient or more than one, is refused before any
-// record is read, at every level: never read as a narrower query.
+// record is read, at every level: never read as a narrower query. A Task.for
+// that names no Patient by FHIR's reference grammar names no one: 400 on
+// authority, as the requester's gateway answers it (earlier releases answered
+// the facility's 403 query rejected). A query patient that is not the Task's is
+// the narrowness check's 403.
 func TestFederatedQuery_MalformedPatientReferenceIsRefused(t *testing.T) {
 	t.Parallel()
 	rows := map[string]struct {
 		forRef, queryRef string
 		contained        []map[string]any
+		namesNoOne       bool // Task.for names no Patient
 	}{
-		"operation after the id":      {"Patient/" + dtrFrameMember + "/$everything", "Patient/" + dtrFrameMember + "/$everything", nil},
-		"escaped tail":                {"Patient/" + dtrFrameMember, "Patient/" + dtrFrameMember + "/%zz", nil},
-		"double-escaped tail":         {"Patient/" + dtrFrameMember, "Patient/" + dtrFrameMember + "/%2525", nil},
-		"smuggled date bound":         {"Patient/" + dtrFrameMember, "https://x/Patient/" + dtrFrameMember + "/x%26date%3Dge1900-01-01", nil},
-		"contained member, not an id": {"#pat", "#pat", []map[string]any{containedMember("pat", "A/x")}},
-		"trailing slash and resource": {"Patient/" + dtrFrameMember + "/", "Patient/" + dtrFrameMember + "/Observation/1", nil},
-		"contained id not carried":    {"#nobody", "Patient/" + dtrFrameMember, []map[string]any{containedMember("pat", dtrFrameMember)}},
-		"contained twice":             {"#pat", "Patient/" + dtrFrameMember, []map[string]any{containedMember("pat", dtrFrameMember), containedMember("pat", anotherHeldMember)}},
-		"not a Patient":               {"Organization/payer", "Patient/" + dtrFrameMember, nil},
+		"operation after the id":      {"Patient/" + dtrFrameMember + "/$everything", "Patient/" + dtrFrameMember + "/$everything", nil, true},
+		"escaped tail":                {"Patient/" + dtrFrameMember, "Patient/" + dtrFrameMember + "/%zz", nil, false},
+		"double-escaped tail":         {"Patient/" + dtrFrameMember, "Patient/" + dtrFrameMember + "/%2525", nil, false},
+		"smuggled date bound":         {"Patient/" + dtrFrameMember, "https://x/Patient/" + dtrFrameMember + "/x%26date%3Dge1900-01-01", nil, false},
+		"contained member, not an id": {"#pat", "#pat", []map[string]any{containedMember("pat", "A/x")}, false},
+		"trailing slash and resource": {"Patient/" + dtrFrameMember + "/", "Patient/" + dtrFrameMember + "/Observation/1", nil, true},
+		"contained id not carried":    {"#nobody", "Patient/" + dtrFrameMember, []map[string]any{containedMember("pat", dtrFrameMember)}, true},
+		"contained twice":             {"#pat", "Patient/" + dtrFrameMember, []map[string]any{containedMember("pat", dtrFrameMember), containedMember("pat", anotherHeldMember)}, true},
+		"not a Patient":               {"Organization/payer", "Patient/" + dtrFrameMember, nil, true},
 	}
 	for name, row := range rows {
 		for _, level := range bindLevels {
 			t.Run(name+"/"+level.String(), func(t *testing.T) {
-				p, _ := newRecordingLevelPayer(t, level)
+				p, got := newRecordingLevelPayer(t, level)
 				p.answering(t, "federated-query")
 				p.g.cfg.ConsentURL = "http://consent.test"
 				p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 				reads := &recordReadCounter{SystemOfRecord: p.g.cfg.SoR, ContextSystemOfRecord: ReadSystemOfRecord(p.g.cfg.SoR)}
 				p.g.cfg.SoR = reads
 				ans := sendConsented(t, p, "federated-query", cdexTaskWithPatient(t, dtrFrameMember, row.forRef, row.queryRef, row.contained...), p.pci, "Consent/c-1")
-				if ans.status != http.StatusForbidden || !bytes.Contains(ans.body, []byte("query rejected")) {
+				if row.namesNoOne {
+					p.wantRefused(t, ans, http.StatusBadRequest, msgMemberNamesNoOne)
+					wantRefusal(t, got.only(t), http.StatusBadRequest, partyAnswering("federated-query"), RefusalAuthority)
+				} else if ans.status != http.StatusForbidden || !bytes.Contains(ans.body, []byte("query rejected")) {
 					t.Fatalf("answer %d %s, want 403 query rejected", ans.status, ans.body)
 				}
 				if n := reads.n.Load(); n != 0 {

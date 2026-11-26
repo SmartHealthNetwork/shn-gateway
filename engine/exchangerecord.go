@@ -127,7 +127,9 @@ type ExchangeRecord struct {
 	// sentence, from the closed set refusalReasons, never a value read from
 	// the request, its body, a credential or a patient. Where the answer adds
 	// a detail read from the request (an identifier, a member name), the
-	// record keeps the sentence without it. A reason outside the set is
+	// record keeps the sentence without it. A recipient whose registered
+	// encryption key is not usable is answered without the cause, which the
+	// reason adds (a small-order X25519 key). A reason outside the set is
 	// recorded as ExchangeOther. Empty unless Outcome is ExchangeRefused and
 	// the refusing site named its reason (authentication and scope at an
 	// ingress, message integrity, authority read from the body, routing with
@@ -202,6 +204,19 @@ type ExchangeRecord struct {
 	// call's involved lists left out: the exchange has no record under them.
 	// Nil when none was.
 	InvolvedOmitted map[string]int
+	// InvolvedSummaryNotSent is why this gateway sent no summary of an
+	// involved list it sent to a Hub that reads summaries (its discovery
+	// descriptor lists both involved and involved-summary), one of
+	// InvolvedSummaryNotSentReasons: InvolvedSummaryOverLimit, the envelope
+	// was sent without it because it alone would have taken the envelope over
+	// its size limit; InvolvedSummaryUnsigned, it could not be made (signed
+	// or encoded); InvolvedSummaryBindingUnsettled, an answer's, because this
+	// gateway's own binding of the member had not settled. On a call that
+	// sends more than one leg, the first leg's whose summary was not sent.
+	// Empty when every summary due was sent, and for a Hub that does not read
+	// them. The Hub reads a missing summary as not knowing whether the list
+	// was complete. Content-free; not a metric dimension. Evolving.
+	InvolvedSummaryNotSent string
 	// Findings summarizes the conformance findings the call's checks recorded.
 	Findings FindingSummary
 	// Edits are the ids of the registered edits (relay.EditIDs: E-01 …) this
@@ -840,29 +855,41 @@ const (
 	// JSON, so whether it carries an address to restore (E-13) is unknown, or
 	// an address found in it could not be rewritten.
 	EditNotMadeAddressUnreadableRequest = "E-13:unreadable-request"
-	// EditNotMadeRekeyPayerGatewayOlder: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyPayerGatewayOlder: the adaptive address re-key (E-12) was not made, for
+	// the reason its value names.
 	EditNotMadeRekeyPayerGatewayOlder = "E-12:payer-gateway-older"
-	// EditNotMadeRekeyNotTheRoundsAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyNotTheRoundsAddress: the adaptive address re-key (E-12) was not made,
+	// for the reason its value names.
 	EditNotMadeRekeyNotTheRoundsAddress = "E-12:not-the-rounds-address"
-	// EditNotMadeRekeyContainedInPackageResponse: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyContainedInPackageResponse: the adaptive address re-key (E-12) was not
+	// made, for the reason its value names.
 	EditNotMadeRekeyContainedInPackageResponse = "E-12:contained-in-package-response"
-	// EditNotMadeRekeyRequestCarriedAQuestionnaire: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyRequestCarriedAQuestionnaire: the adaptive address re-key (E-12) was not
+	// made, for the reason its value names.
 	EditNotMadeRekeyRequestCarriedAQuestionnaire = "E-12:request-carried-a-questionnaire"
-	// EditNotMadeRekeyNotUnderBase: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyNotUnderBase: the adaptive address re-key (E-12) was not made, for the
+	// reason its value names.
 	EditNotMadeRekeyNotUnderBase = "E-12:not-under-base"
-	// EditNotMadeRekeyEscapedAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyEscapedAddress: the adaptive address re-key (E-12) was not made, for the
+	// reason its value names.
 	EditNotMadeRekeyEscapedAddress = "E-12:escaped-address"
-	// EditNotMadeRekeyBaseSpelledDifferently: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyBaseSpelledDifferently: the adaptive address re-key (E-12) was not made,
+	// for the reason its value names.
 	EditNotMadeRekeyBaseSpelledDifferently = "E-12:base-spelled-differently"
-	// EditNotMadeRekeyUnreadableTag: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyUnreadableTag: the adaptive address re-key (E-12) was not made, for the
+	// reason its value names.
 	EditNotMadeRekeyUnreadableTag = "E-12:unreadable-tag"
-	// EditNotMadeRekeyUncleanRemainder: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyUncleanRemainder: the adaptive address re-key (E-12) was not made, for
+	// the reason its value names.
 	EditNotMadeRekeyUncleanRemainder = "E-12:unclean-remainder"
-	// EditNotMadeRekeyUnreadableAddress: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyUnreadableAddress: the adaptive address re-key (E-12) was not made, for
+	// the reason its value names.
 	EditNotMadeRekeyUnreadableAddress = "E-12:unreadable-address"
-	// EditNotMadeRekeyUnreadableAnswer: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyUnreadableAnswer: the adaptive address re-key (E-12) was not made, for
+	// the reason its value names.
 	EditNotMadeRekeyUnreadableAnswer = "E-12:unreadable-answer"
-	// EditNotMadeRekeyAddressNotWritable: the adaptive address re-key (E-12) was not made: see the CDex design §14.5.
+	// EditNotMadeRekeyAddressNotWritable: the adaptive address re-key (E-12) was not made, for
+	// the reason its value names.
 	EditNotMadeRekeyAddressNotWritable = "E-12:address-not-writable"
 	// EditNotMadeTaskLocationNotUnderBase: the provider's gateway framed no
 	// Task location (E-16) because its system's Location does not lie under
@@ -1446,6 +1473,16 @@ func (x *exchangeRecorder) involvedOmitted(reason string) {
 	})
 }
 
+// involvedSummaryNotSent notes why a summary of an involved list was not sent
+// (InvolvedSummaryNotSentReasons), keeping the first reason the call gave.
+func (x *exchangeRecorder) involvedSummaryNotSent(reason string) {
+	x.with(func() {
+		if x.rec.InvolvedSummaryNotSent == "" {
+			x.rec.InvolvedSummaryNotSent = closed(InvolvedSummaryNotSentReasons, reason)
+		}
+	})
+}
+
 // clock is the time the recorder reads latencies by: the gateway's own.
 func (x *exchangeRecorder) clock() time.Time {
 	if x.now == nil {
@@ -1786,6 +1823,8 @@ func (x *exchangeRecorder) legOutcome(err error) {
 		x.decided(ExchangeRefused, RefusedByAuthorizationFramework, authzRefused.rule)
 	case errors.As(err, &noAuthority):
 		x.refused(RefusalAuthority)
+	case errors.Is(err, errRecipientKeyNotUsable):
+		x.refusedFor(RefusalAuthentication, reasonRecipientKeyNotUsable)
 	case errors.Is(err, errHubUnreachable), errors.Is(err, errHubTimeout), errors.Is(err, errAuthzUnreachable):
 		x.decided(ExchangeUnreachable, "", "")
 	case errors.As(err, &hr):

@@ -8,7 +8,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 )
 
-// linebridge.go is module 2, the IG-line bridge (core design §3.3): the
+// linebridge.go is module 2, the IG-line bridge: the
 // reach across lines by a transform chain (arm (3) of line selection), the
 // walk of a request along that chain, the carry of an answer into the
 // requester's line (E-08), and the bridged check that certifies what the

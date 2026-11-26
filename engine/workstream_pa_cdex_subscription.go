@@ -19,7 +19,7 @@ import (
 )
 
 // The payer's topic Subscription to its CDex Tasks' changes
-// (cdex-task-subscribe; the notifications design §5, §6, §7, §9): a payer's
+// (cdex-task-subscribe): a payer's
 // system creates, reads, updates, deletes and searches a Subscription on the
 // HRex Task topic at the provider's own Subscription endpoint, through its own
 // gateway, the Hub and the provider's gateway, and asks its $status. The leg
@@ -38,26 +38,34 @@ import (
 // same at every conformance level:
 //   - a PATCH is refused 405 on the fidelity of SHN's own edit, and an
 //     instance's history or the type-level $status 403 on authority
-//     (subscription.CheckInteraction, §7.2, §9); an id or version that is
+//     (subscription.CheckInteraction); an id or version that is
 //     not a FHIR id, or any other interaction outside the closed set, 400 on
 //     routing; a search or page query outside the set it carries 403 on
-//     authority (§7.2);
+//     authority;
 //   - a create, and an update of a Subscription that does not exist, is read
 //     (415 or 400 on the fidelity of SHN's own edit when it cannot be),
 //     held to the closed shape with the HRex Task topic's filter (403 on
-//     authority, §7.1), and forwarded with its channel re-keyed to this
+//     authority), and forwarded with its channel re-keyed to this
 //     gateway's notification address for the payer (E-19);
 //   - an update, delete or instance $status of an existing Subscription is
 //     forwarded only once a read of it, on the same leg with the same token,
 //     shows it is the payer's (subscription.Keys.Owns); otherwise the
-//     network's 404 on authority (§7.2);
-//   - a read or vread is forwarded, and a 2xx delivered only when the
-//     Subscription is the payer's; otherwise the network's 404;
+//     network's 404 on authority;
+//   - a read or vread is forwarded, and a 2xx delivered only when it carries
+//     exactly one Subscription, the payer's; otherwise the network's 404;
+//   - a 2xx to a create, an update, a delete or a $status that carries a
+//     Subscription is delivered only when each it carries is the payer's (a
+//     create's or an update's at most one); otherwise the network's 404;
 //   - a search is forwarded with its url re-keyed (E-21), and a page as it is;
 //     a 2xx delivered only when every Subscription in it is the payer's,
 //     otherwise 403 on authority;
+//   - the payer's return preference, Prefer, is carried to the provider's
+//     system as sent on the interaction's own forward, never on the
+//     gateway's own read before it; one framed that is not exactly one
+//     return preference is refused 400 on integrity;
 //   - every 2xx answer is first held to the answer check
-//     (subscription.CheckSubscribeAnswer: 502 on authority), and framed with
+//     (subscription.CheckSubscribeAnswer: 502 on authority), which passes
+//     any shape naming no patient whatever the interaction, and framed with
 //     the provider's base as statedBase for the payer's gateway (E-20).
 //
 // Everything the provider's system answers otherwise, its own 4xx and 5xx
@@ -93,13 +101,16 @@ const (
 	// refusalCDexSubscribeIfMatch: an If-Match on an interaction other than
 	// an update or a delete, or one an HTTP field cannot carry.
 	refusalCDexSubscribeIfMatch = "an If-Match is framed only on a Subscription update or delete, as an HTTP field value"
+	// refusalCDexSubscribePrefer: a Prefer framed that is not exactly one
+	// return preference, as an HTTP field value.
+	refusalCDexSubscribePrefer = "a Prefer is framed only as one return preference, as an HTTP field value"
 	// refusalCDexSubscribeTarget: the interaction's address below the
 	// provider's base could not be built.
 	refusalCDexSubscribeTarget = "the provider's gateway cannot build the Subscription's address below its system's base; nothing was sent"
 )
 
 // cdexSubscriptionNotFound is the network's answer to an interaction on a
-// Subscription that is not the requesting payer's (§7.2): an OperationOutcome
+// Subscription that is not the requesting payer's: an OperationOutcome
 // this gateway writes, the same bytes whatever is wrong, so it says nothing of
 // the Subscription or of why. FHIR R4 allows a 404 for access denied.
 var cdexSubscriptionNotFound = []byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"not-found","diagnostics":"Subscription not found"}]}`)
@@ -228,13 +239,27 @@ func readsQuery(v string) bool {
 
 // ownsOne reports whether subs, the Subscriptions a read's or a vread's 2xx
 // answer carries (subscription.AnswerSubscriptions), are exactly one the payer
-// owns. An answer that carries none (an OperationOutcome, an empty body) or
-// more than one (a searchset) is not a read's own Subscription.
+// owns. An answer that carries none (an OperationOutcome, an empty body, a
+// $status Bundle) or more than one (a searchset) is not a read's own
+// Subscription.
 func (s *cdexSubscriptionState) ownsOne(subs []*subscription.Subscription, ingress, payer string, topic subscription.Topic) bool {
 	if len(subs) != 1 {
 		return false
 	}
 	return s.keys.Owns(subs[0], ingress, payer, topic)
+}
+
+// ownsAll reports whether every Subscription in subs, those a delete's or a
+// $status's 2xx answer carries (subscription.AnswerSubscriptions), is one the
+// subscriber owns. An answer that carries none passes: it names no
+// Subscription.
+func (s *cdexSubscriptionState) ownsAll(subs []*subscription.Subscription, ingress, subscriber string, topic subscription.Topic) bool {
+	for _, sub := range subs {
+		if !s.keys.Owns(sub, ingress, subscriber, topic) {
+			return false
+		}
+	}
+	return true
 }
 
 // owns reports whether a provider's 2xx answer to the read of a Subscription

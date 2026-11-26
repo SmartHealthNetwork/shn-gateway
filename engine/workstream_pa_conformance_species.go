@@ -123,7 +123,7 @@ var paLineMarkers = map[string]bool{
 }
 
 // undeclaredAnswerProfile is the line profile a PAS answer that declares no
-// profile is judged against (owner decision D47): a response Bundle against
+// profile is judged against: a response Bundle against
 // the PAS response Bundle profile (the inquiry one on an inquiry leg), a bare
 // ClaimResponse against profile-claimresponse (profile-claiminquiryresponse),
 // each without a version, so each candidate line's lane resolves its own.
@@ -145,8 +145,8 @@ func (c paCertification) undeclaredAnswerProfile(contract string, payload []byte
 }
 
 // undeclaredRequestProfile is the line profile a carried PAS request that
-// declares no profile is judged against by the payer's gateway (owner
-// decision D47(2)): its request Bundle against the PAS request Bundle profile
+// declares no profile is judged against by the payer's gateway (at the
+// payer's own level): its request Bundle against the PAS request Bundle profile
 // on a $submit or an update, and against the inquiry request Bundle profile on
 // an $inquire, each without a version, so each candidate line's lane resolves
 // its own. At 2.1 and 2.2 the submit and update profile is read per entry

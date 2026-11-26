@@ -132,7 +132,7 @@ func certifyCDSHooksAnswer(ctx context.Context, mod conformanceModule, emit func
 			desc += " at " + v.Path
 		}
 		if v.Severity != shnsdk.SeverityError {
-			// One finding per violation (§5), advisory included: a SHOULD-level
+			// One finding per violation, advisory included: a SHOULD-level
 			// finding never refuses, but it is still something the participant
 			// should be able to read back.
 			advisory = append(advisory, desc)

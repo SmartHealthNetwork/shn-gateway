@@ -14,7 +14,7 @@ import (
 // At each level, through the choke point, in both directions: a profile the
 // payload declares that the validator does not hold is a check that could not
 // run, decided as every such check is (gateway/docs/CONFIGURATION.md,
-// CONFORMANCE_ENFORCEMENT; the conformance-levels design §4): not run at
+// CONFORMANCE_ENFORCEMENT): not run at
 // none; recorded as unavailable and carried at observe and structural; the
 // gateway's own 500 at strict, with no finding, its body naming the profile
 // as a finding would. The finding names the profile (unresolvedProfiles). A profile SHN asks for explicitly is not the payload's

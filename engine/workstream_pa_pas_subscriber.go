@@ -13,8 +13,8 @@ import (
 )
 
 // The provider gateway's side of a provider's topic Subscription to the PAS
-// topic (pas-subscription-subscribe; the notifications design §6.1, §7.2,
-// §10): the provider's own system manages its Subscription at a payer's base
+// topic (pas-subscription-subscribe): the provider's own system manages its Subscription at a
+// payer's base
 // on its gateway (POST, GET, PUT, PATCH and DELETE <base>/Subscription[/…],
 // with <base> /pas/payer/{payer}, the base it sends that payer's claims to),
 // as it would at the payer's own base, and the network carries each

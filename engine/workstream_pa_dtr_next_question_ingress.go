@@ -350,7 +350,7 @@ func (g *Gateway) forwardNextQuestionRound(w http.ResponseWriter, r *http.Reques
 }
 
 // roundToleratedPayers is the payer identities a round's answer is judged as
-// coming from, for the participant's own tolerance (D122): a round carries no
+// coming from, for the participant's own tolerance: a round carries no
 // Coverage to name them, but its payer is known from its address, so they are
 // the identities the participant tolerates that route to that payer by the
 // routing read the package route makes (PayerRouter). None tolerates nothing,
@@ -389,7 +389,8 @@ func (g *Gateway) nextQuestionPayerRefusal(payer string) (int, string, refusalRe
 	return http.StatusUnprocessableEntity, errNextQuestionNoSubpath, reasonNextQuestionNoSubpath
 }
 
-// bindNextQuestionRound binds the round's patient by D121, as the package
+// bindNextQuestionRound binds the round's patient by the network's
+// patient-match rule, as the package
 // route binds its subject, from the forms the payer's gateway binds
 // (framedNextQuestionSubject, patientMember): a Patient reference, relative or
 // absolute. A round naming no subject, or a subject that is not a Patient
@@ -414,7 +415,12 @@ func (g *Gateway) bindNextQuestionRound(r *http.Request, body []byte) (string, i
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonNextQuestionNotPatient)
 		return "", http.StatusForbidden, errNextQuestionNotPatient
 	}
-	pci, found, err := g.resolveSubjectPCI(ctx, member, body)
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !memberNamesNoOne(member) && !idShape.MatchString(member) && g.guard(ctx, KindContent, RuleRequestShape, body) {
+		return "", http.StatusBadRequest, msgDTRPatientIDNotFHIRID
+	}
+	pci, found, err := g.resolveSubjectPCIFrom(ctx, member, body, dtrSubjectResource(body, member))
 	if err != nil {
 		status, msg := subjectBindingFailure(ctx, err)
 		return "", status, msg

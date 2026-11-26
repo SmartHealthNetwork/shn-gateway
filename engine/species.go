@@ -34,14 +34,14 @@ type certificationAdapter interface {
 	candidateGroups(contract string, payload []byte) [][]string
 	// undeclaredAnswerProfile is the profile, without a version, a payer's
 	// answer of contract that declares none is judged against at line on leg
-	// at structural and strict (owner decision D47): its line's own profile
+	// at structural and strict: its line's own profile
 	// for what the answer is. ok is false where the workstream names none.
 	undeclaredAnswerProfile(contract string, payload []byte, line, leg string) (string, bool)
 	// undeclaredRequestProfile is the profile, without a version, a carried
 	// request of contract that declares none is judged against at line on leg
-	// by the recipient's gateway at structural and strict (owner decision
-	// D47(2)): its line's own profile for what the request is. ok is false
-	// where the workstream names none.
+	// by the recipient's gateway at structural and strict (each side judges
+	// a carried request at its own level): its line's own profile for what
+	// the request is. ok is false where the workstream names none.
 	undeclaredRequestProfile(contract string, payload []byte, line, leg string) (string, bool)
 	// excuse marks the issues of a reading of body at line against profile
 	// that are a known consequence of how the validator checks the
@@ -120,7 +120,7 @@ func ValidateAtForTest(ctx context.Context, v shnsdk.Validator, body []byte, lin
 
 // RequestLineProfileForTest is requestLineProfile: the profile a payer's
 // gateway judges a carried request of contract that declares none against at
-// line on leg (D47(2)), for the platform's real-validator lane tests. Test-only,
+// line on leg, for the platform's real-validator lane tests. Test-only,
 // like ValidateAtForTest.
 func RequestLineProfileForTest(contract string, payload []byte, line, leg string) string {
 	return requestLineProfile(contract, payload, line, leg)

@@ -196,7 +196,13 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 			// carried below strict behind the subject the others bind. When no
 			// coverage or order names a patient the subject cannot be read,
 			// which refuses at every level.
-			if !boundElsewhere() || g.guard(ctx, KindContent, RulePatientMixed, raw) {
+			if !boundElsewhere() {
+				// Nothing names the request's patient: the leg's authority
+				// cannot be bound, at every level.
+				exchangeOf(ctx).refusing(RefusalAuthority)
+				return out, http.StatusForbidden, "questionnaire-package " + p.name + " names no patient"
+			}
+			if g.guard(ctx, KindContent, RulePatientMixed, raw) {
 				return out, http.StatusForbidden, "questionnaire-package " + p.name + " names no patient"
 			}
 			continue
@@ -225,7 +231,12 @@ func (g *Gateway) prepareDTRPackageRequest(ctx context.Context, raw []byte) (dtr
 		}
 	}
 	out.member = subject
-	pci, found, err := g.resolveSubjectPCI(ctx, out.member, raw)
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !memberNamesNoOne(subject) && !idShape.MatchString(subject) && g.guard(ctx, KindContent, RuleRequestShape, raw) {
+		return out, http.StatusBadRequest, msgDTRPatientIDNotFHIRID
+	}
+	pci, found, err := g.resolveSubjectPCIFrom(ctx, out.member, raw, dtrSubjectResource(raw, out.member))
 	if err != nil {
 		status, msg := subjectBindingFailure(ctx, err)
 		return out, status, msg

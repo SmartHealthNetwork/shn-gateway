@@ -11,8 +11,9 @@ import (
 // an empty field is the route's own missing patient (its own text), and any
 // other reference that names no one ("Patient/", "Patient/ ",
 // "Patient/Patient/") is refused 400 msgMemberNamesNoOne, but where the
-// route's own reading answers first: eligibility's own text on its legs, and
-// the patient-mixed check at strict on a PAS bundle. An order whose subject
+// route's own reading answers first: eligibility's own text on its legs. A PAS
+// bundle's Claim.patient that names no one is refused so at every level,
+// before the patient-mixed check. An order whose subject
 // names no one is the patient-mixed rule's (carried below strict). A zero
 // status is a request carried.
 type namesNoOneAnswer struct {
@@ -51,8 +52,6 @@ func namesNoOneWant(route, ref string, level ConformanceEnforcement) (namesNoOne
 		switch {
 		case ref == "":
 			return namesNoOneAnswer{http.StatusBadRequest, "PAS bundle missing Claim.patient"}, true
-		case strict:
-			return namesNoOneAnswer{http.StatusForbidden, "inconsistent patient in PAS bundle"}, true
 		}
 		return none, true
 	case "FQS ingress":

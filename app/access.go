@@ -51,6 +51,7 @@ func accessLineFor(r engine.ExchangeRecord) diagnostics.AccessLine {
 	line.AnswerError = r.AnswerError
 	line.AuthorizeError = r.AuthorizeError
 	line.InvolvedOmitted = r.InvolvedOmitted
+	line.InvolvedSummaryNotSent = r.InvolvedSummaryNotSent
 	if b := r.RequesterBinding; b != nil {
 		line.RequesterBinding = &diagnostics.AccessRequesterBinding{
 			Binding: b.Binding, Involvement: b.Involvement, Unbound: b.Unbound,

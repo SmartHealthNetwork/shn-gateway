@@ -607,8 +607,10 @@ each arrives, and you de-duplicate by its event number, as you would directly. N
 system serving the HRex Task topic has been run with it live yet.
 
 **Not carried.** `PATCH`, an instance `_history`, a type-level `$status` and a search at the plain
-base are refused; the network carries no `Prefer` header on any leg, so the provider's system
-answers a create or an update by its own default. A Subscription names no provider, so one at the
+base are refused. From shn-gateway v1.17.0 at both gateways, the first return preference in
+your `Prefer` (`return=minimal`, `return=representation`, `return=OperationOutcome`) reaches the
+provider's system as sent; no other preference does, so the provider's system answers those by
+its own default. A Subscription names no provider, so one at the
 plain base is never sent to every provider: create it at the provider's base.
 
 ### A payer subscribes to its CDex Task

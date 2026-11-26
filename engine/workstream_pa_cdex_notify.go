@@ -4,8 +4,7 @@ package engine
 
 import "net/http"
 
-// The notifier's half of a notification (the notifications design §6.2 step
-// 5, §6.3, §7.3, §7.4, §9): the provider's own system posts each notification
+// The notifier's half of a notification: the provider's own system posts each notification
 // of the HRex Task topic (a handshake, a heartbeat or an id-only event) to the
 // notification address its gateway wrote into the payer's Subscription (E-19),
 // POST [ingress]/notify/cdex-task/{subscriber}/{kid}/{sealed}, and the gateway
@@ -13,7 +12,7 @@ import "net/http"
 // address names. Every rule is a network rule, the same at every conformance
 // level:
 //   - the Authorization value must be the gateway's own credential for the
-//     address and the X-SHN-Channel value beside it (§6.3; one of each): a
+//     address and the X-SHN-Channel value beside it (one of each): a
 //     notification without either, or whose credential does not verify
 //     under the current key or the predecessor kept for a rotation's overlap,
 //     is refused 401 on authentication, nothing sent;
@@ -21,11 +20,10 @@ import "net/http"
 //     (subscription.ClassifyBody, then subscription.ParseNotification: a FHIR
 //     JSON Bundle whose first entry is a SubscriptionStatus Parameters naming
 //     the topic's canonical, with or without a |version): anything else is
-//     refused 400 on routing (§7.3);
-//   - a notification that is not no-content by structure (§5's test,
+//     refused 400 on routing;
+//   - a notification that is not no-content by structure (the no-content test,
 //     subscription.Notification.NoContent) is refused 403 on authority: the
-//     topic has no content leg (N11), and content never rides a signal row
-//     (§7.4);
+//     topic has no content leg (N11), and content never rides a signal row;
 //   - a notification outside the HRex Task topic's closed notification
 //     shape (subscription.Notification.CheckShape: the closed
 //     SubscriptionStatus Bundle an instance $status answer is held to, as a
@@ -56,7 +54,7 @@ import "net/http"
 //
 // The answer is carried back to the provider's system as the payer's gateway
 // relays it: the subscriber endpoint's own answer, or a refusal. A retry is a
-// new POST, sent in a new frame, so it is never refused as a replay (§9).
+// new POST, sent in a new frame, so it is never refused as a replay.
 
 // RouteCDexNotify is the notification route on a provider's gateway, as
 // exchange records name it.

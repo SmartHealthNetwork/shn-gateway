@@ -94,8 +94,8 @@ func (r e08Result) wantRefused(t *testing.T, answer []byte) {
 }
 
 // The provider's Da Vinci ingress judges the payer's DTR package answer at its
-// conformance level, as it judges the PAS answers it carries (carriedAnswerRefused,
-// D48), whether or not module 2 then renames it, and for every payer: the
+// conformance level, as it judges the PAS answers it carries (carriedAnswerRefused),
+// whether or not module 2 then renames it, and for every payer: the
 // coverage names 00001, a reference payer, judged like any payer unless the
 // participant lists it, on the plain and the demo origination lane. The answer is judged
 // at the lines of the names it uses (PackageBundle: 2.0 and 2.1; packagebundle:

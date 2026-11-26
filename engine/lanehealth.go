@@ -25,8 +25,8 @@ import (
 // lanehealth.go is whether an explicitly configured validator lane
 // (FHIR_VALIDATE_URL_<line>, or FHIR_VALIDATE_URL's lane at its line) can be
 // reached, for module 2 alone: a chain is
-// planned to a line only while its lane can certify what the walk makes
-// (design §3.3, Lanes). A discovered lane has its own signal, its
+// planned to a line only while its lane can certify what the walk makes.
+// A discovered lane has its own signal, its
 // qualification (DiscoveredLane); an explicit lane was never qualified, so it
 // starts reachable, as it boots today, and only its own failures change that.
 //

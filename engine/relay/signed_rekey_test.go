@@ -35,14 +35,14 @@ const rekeyed = `"https://provider-gw.example/cdex/payer/payer-1"`
 
 // TestSignedContentRekeyExemption: the PAS pend return-path re-key (E-10) and
 // the attachment-request Task's (E-11) are made even where a signature covers
-// the payer-url they change (D127). With the questionnaireAdaptive address's
-// re-key and restore (E-12, E-13, D128; their rows are in
+// the payer-url they change, and disclosed. With the questionnaireAdaptive
+// address's re-key and restore (E-12, E-13; their rows are in
 // adaptive_test.go) and a topic Subscription's channel seal, re-key and
-// restore (E-18, E-19 and E-20, D132; their rows are in
+// restore (E-18, E-19 and E-20; their rows are in
 // signed_subscription_test.go and signed_subscriber_test.go) and a CDex Task
 // notification's address re-key (E-17, as E-12; its rows are in
 // signed_notification_test.go) and a PAS content notification's payer-url
-// re-key (E-22, E-10's change on the notified decision, D127 decision 13),
+// re-key (E-22, E-10's change on the notified decision),
 // with E-18 and E-20 made on the PAS topic's subscribe leg too (the tenth
 // recorded exception; its rows are in test/adversarial
 // pas_subscription_subscriber_test.go),
@@ -116,7 +116,7 @@ func TestSignedContentRekeyExemption(t *testing.T) {
 		}
 	}
 	// Every other edit made by ApplyChanges, on exactly the value the exempt
-	// edits may change, is still refused (D127's row).
+	// edits may change, is still refused: only the re-key is exempt.
 	for _, id := range EditIDs() {
 		if _, exempt := signedExempt[id]; exempt || slices.Contains(TransformEditIDs(), id) || slices.Contains(headerEdits, id) || slices.Contains(queryEdits, id) {
 			continue

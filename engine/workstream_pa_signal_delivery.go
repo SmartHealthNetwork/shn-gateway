@@ -59,7 +59,7 @@ func (g *Gateway) handleSignalDelivery(w http.ResponseWriter, r *http.Request, e
 		refuse(rf.Primitive, rf.Status, rf.Reason)
 		return
 	}
-	// The signal row's check, by structure (§7.4): the message is a
+	// The signal row's check, by structure: the message is a
 	// notification of the topic that discloses no patient's data. The
 	// classifier's refusal is equivalent to ParseNotification's for every
 	// body that reaches it (each refuses what is not one FHIR JSON object it
@@ -69,7 +69,7 @@ func (g *Gateway) handleSignalDelivery(w http.ResponseWriter, r *http.Request, e
 		refuse(RefusalAuthority, http.StatusForbidden, dt.refusals.content)
 		return
 	}
-	// The row is checked against the content by structure (§7.4): a signal
+	// The row is checked against the content by structure: a signal
 	// leg carries a notification that discloses no patient's data, and a
 	// content leg one that does (the notifier's gateway picks the leg by the
 	// same test), so a message on either that fails its row's test is
@@ -118,7 +118,7 @@ func (g *Gateway) handleSignalDelivery(w http.ResponseWriter, r *http.Request, e
 	}
 	target, err := url.Parse(d.Endpoint)
 	if err != nil {
-		// Unreachable: OpenDelivery holds the endpoint to §6.5's rule,
+		// Unreachable: OpenDelivery holds the endpoint to the endpoint rule,
 		// which parses it.
 		refuse(RefusalIntegrity, http.StatusUnprocessableEntity, refusalSignalEndpointUnreadable)
 		return

@@ -271,7 +271,7 @@ func TestPayerAnswerFlows_PartnerPayerIsGovernedAtItsLevel(t *testing.T) {
 	}
 }
 
-// No payer is exempt by default (D122): the network's reference payers' answers are
+// No payer is exempt by default: the network's reference payers' answers are
 // judged on every family and both lanes, refused at structural and strict by a
 // validator that refuses everything, recorded at observe, unchecked at none. A
 // participant that tolerates them lists them (CONFORMANCE_TOLERATE_PEERS).

@@ -489,11 +489,12 @@ func unknowns(n int) []string {
 }
 
 // namedOffPAS runs requestNamedPatients on leg for payload, whose own patient
-// is subject, and fails unless no one is named and omitted is want.
+// is subject, bound as the leg binds it (from its subject resource), and fails
+// unless no one is named and omitted is want.
 func namedOffPAS(t *testing.T, leg string, payload []byte, subject string, want []string) {
 	t.Helper()
 	g, omitted := heldRecordsGateway(t)
-	pci, found, err := g.resolveSubjectPCI(context.Background(), subject, payload)
+	pci, found, err := g.resolveSubjectPCIFrom(context.Background(), subject, payload, legSubjectResource(leg, payload, subject))
 	if err != nil || !found {
 		t.Fatalf("subject: %v %v", found, err)
 	}

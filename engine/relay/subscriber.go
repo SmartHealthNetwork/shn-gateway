@@ -15,8 +15,8 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/fhirid"
 )
 
-// The subscriber's side of a topic Subscription (the notifications design
-// §6.2): E-18 seals the channel of the create or update the subscriber's
+// The subscriber's side of a topic Subscription: E-18 seals the channel of the create or
+// update the subscriber's
 // gateway sends, E-20 restores it on the answers, and E-23 writes a create's
 // or an update's Location at the subscriber's per-counterpart base.
 
@@ -78,15 +78,17 @@ func (m *model) rootChannel() (splice.NodeID, bool) {
 	return ch, true
 }
 
-// subscriptionChannelSeal is E-18's exemption (D132, N2): the removal of the
-// root Subscription's channel.endpoint or channel.header member, and nothing
-// else, decided by structure.
+// subscriptionChannelSeal is E-18's exemption (a signed Subscription's
+// channel is sealed and disclosed, as a signed payer-url is re-keyed): the
+// removal of the root Subscription's channel.endpoint or channel.header
+// member, and nothing else, decided by structure.
 func (m *model) subscriptionChannelSeal(eff effect) bool {
 	ch, ok := m.rootChannel()
 	return ok && eff.removed && eff.removedIn == ch && (eff.removedKey == "endpoint" || eff.removedKey == "header")
 }
 
-// subscriptionChannelRestore is E-20's exemption (D132, N2), decided by
+// subscriptionChannelRestore is E-20's exemption (a signed answer's channel is
+// restored and disclosed, as a signed payer-url is re-keyed), decided by
 // structure. In a Subscription that is the document's root, or the resource
 // of an entry of a root Bundle: a replace of its channel.endpoint string with
 // a JSON string, a replace of its channel.header array with an array of

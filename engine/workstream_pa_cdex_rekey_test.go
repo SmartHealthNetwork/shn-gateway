@@ -91,7 +91,7 @@ func TestCDexTaskRekey_PayerURLBecomesTheReturnPath(t *testing.T) {
 	}
 }
 
-// Where a signature covers the payer-url the re-key is still made (D127), and
+// Where a signature covers the payer-url the re-key is still made, and
 // the forward discloses it with the signature it broke.
 func TestCDexTaskRekey_SignedPayerURLIsRekeyedAndDisclosed(t *testing.T) {
 	g, got := rekeyGateway(pendRekeyBase, "payer-1", []string{legCDexSubmit})

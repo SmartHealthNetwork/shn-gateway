@@ -141,6 +141,22 @@ func (g *Gateway) orderRequesterRecords(ctx context.Context, order []byte) ([][]
 	return records, nil
 }
 
+// contextRequesterRead is module 1's requester rule (orderRequesterRecords)
+// as the PAS completion reads a QuestionnaireResponse context's requester
+// (contextRequesterRead): the records, or a fidelity refusal's reason, or
+// the system's failure.
+func (g *Gateway) contextRequesterRead(ctx context.Context, record []byte) ([][]byte, string, error) {
+	records, refusal := g.orderRequesterRecords(ctx, record)
+	switch {
+	case refusal == nil:
+		return records, "", nil
+	case refusal.fidelity:
+		return nil, refusal.msg, nil
+	default:
+		return nil, "", refusal.readErr
+	}
+}
+
 // requesterCarryRef splits a relative "Type/id" reference.
 func requesterCarryRef(ref string) (typ, id string, ok bool) {
 	typ, id, ok = strings.Cut(ref, "/")

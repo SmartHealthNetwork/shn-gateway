@@ -166,6 +166,28 @@ set to this payer's holder id (see [`../README.md`](../README.md) →
 a payer bundle can't originate, so you can't reuse this bundle's credentials to generate
 the traffic — and its own `/scenario` caller, which its step 0 creates (`shn scenario-key`).
 
+### Run the payer self-test
+
+`smoke.sh` here does that origination for you. It boots the provider evaluation bundle (as the
+Compose project `evalprov`) routed at your payer, drives all 8 prior-authorization use cases
+through the hosted Hub, each decided by your payer's `br-payer`, and tears everything down. It
+makes the `/scenario` caller itself, on a copy of your provider bundle, so the bundle is never
+written.
+
+Your payer must already be running with this bundle and registered under a public `baseURL`
+(see "Reachability"): the Hub dials it, so a payer at `127.0.0.1` cannot be tested. You also
+need a `--role provider` registration bundle, and your payer's holder id (`shn clients`). The
+self-test needs Docker, `git`, `curl`, `jq` and the `shn` CLI on your `PATH`, and does not start unless
+`SHN_KIT_EVAL_LIVE=1` is set, since it reaches the hosted Hub. From this directory, or any other:
+
+```sh
+SHN_KIT_EVAL_LIVE=1 SHN_SECRETS_PROVIDER=/abs/path/to/my-provider-bundle \
+  PAYER_HOLDER_ID=my-payer-holder-id bash smoke.sh
+```
+
+To keep its copy of your bundle on one volume, see [`../README.md`](../README.md), "Keeping your
+keys on one volume".
+
 ## Decisioning options
 
 This bundle ships one default, but the gateway supports three ways to

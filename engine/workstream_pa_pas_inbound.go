@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -23,9 +24,12 @@ import (
 // DiagnosticReport facts an in-process adjudicator needs (the live relay leaves adjudication to the RI).
 type conformantPASSubjects struct {
 	member string // the bound member id (Claim.patient, sans "Patient/")
-	qrJSON []byte // the QuestionnaireResponse resource, or nil (R-5: optional on this leg)
-	srJSON []byte // the ServiceRequest resource (REQUIRED, R-4)
-	hasDR  bool   // a DiagnosticReport entry is present (FR-20 pended branch)
+	// noMember is the binding's refusal when Claim.patient resolves to a Patient
+	// that holds no member key (errPatientCarriesNoMember); member is then "".
+	noMember error
+	qrJSON   []byte // the QuestionnaireResponse resource, or nil (R-5: optional on this leg)
+	srJSON   []byte // the ServiceRequest resource (REQUIRED, R-4)
+	hasDR    bool   // a DiagnosticReport entry is present (FR-20 pended branch)
 }
 
 // parseConformantPASSubjects is readConformantPASSubjects refusing every defect
@@ -83,6 +87,7 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 		qrSubject                  string
 		covBene                    string
 		drSubject                  string
+		covJSON, drJSON            []byte
 		haveClaim, haveSR, haveCov bool
 	)
 	for _, e := range probe.Entry {
@@ -124,11 +129,11 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 			// gates "an order is present" regardless of order resource type.
 			srSubject, haveSR, s.srJSON = ref("subject"), true, e.Resource
 		case "Coverage":
-			covBene, haveCov = ref("beneficiary"), true
+			covBene, haveCov, covJSON = ref("beneficiary"), true, e.Resource
 		case "QuestionnaireResponse":
 			qrSubject, s.qrJSON = ref("subject"), e.Resource
 		case "DiagnosticReport":
-			drSubject, s.hasDR = ref("subject"), true
+			drSubject, s.hasDR, drJSON = ref("subject"), true, e.Resource
 		default:
 			// Patient / Organization / Practitioner / PractitionerRole / Provenance — tolerated.
 		}
@@ -149,14 +154,45 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 	if haveCov && covBene == "" && refuses(RuleRequestShape) {
 		return conformantPASSubjects{}, http.StatusBadRequest, "PAS bundle missing Coverage.beneficiary"
 	}
-	// Extract the member id tolerantly: a requester may write a bundle's references absolute
+	// Claim.patient names the patient by FHIR's reference grammar. A
+	// requester may write a bundle's references absolute
 	// ("https://shn.example/fhir/Patient/MBR" not "Patient/MBR"), as SDK requesters before
-	// shn-sdk v1.9.0 and gateways before v1.8.0 did on the reference-payer lane. pasMemberFromRef
-	// reads the bare id from either form, so SHN's member bind works regardless of base
-	// while the patient-consistency fence below still compares the SAME member identity.
-	member := pasMemberFromRef(claimPat)
-	if ((haveSR && pasMemberFromRef(srSubject) != member) ||
-		(covBene != "" && pasMemberFromRef(covBene) != member)) && refuses(RulePatientMixed) {
+	// shn-sdk v1.9.0 and gateways before v1.8.0 did on the reference-payer lane; either form
+	// reads as the id, so the patient-consistency fence below compares the SAME member identity.
+	// A Claim.patient that names no Patient, or names it by an id that names no one, is
+	// bound to no one: the request is read no further, and the binding refuses it on
+	// authority at every level (errMemberNamesNoOne).
+	member, conforms, noMember := pasClaimSubject(bundleJSON, claimPat)
+	if noMember != nil {
+		return conformantPASSubjects{noMember: noMember}, 0, ""
+	}
+	if memberNamesNoOne(member) {
+		return conformantPASSubjects{member: member}, 0, ""
+	}
+	// Each other subject is read by the same structure as Claim.patient
+	// (pasPatientRefMember): a URN or "#<id>" naming the member's Patient is the
+	// member. One that names no Patient so is compared as written, which names
+	// no member this binds.
+	var doc map[string]any
+	_ = decodeMessage(bundleJSON, &doc)
+	subjectOf := func(holderJSON []byte, ref string) string {
+		if id, _, ok := readPatientReference(ref); ok {
+			return id
+		}
+		var holder map[string]any
+		_ = decodeMessage(holderJSON, &holder)
+		if m, _, err := pasPatientRefMember(doc, holder, ref); err == nil && m != "" {
+			return m
+		}
+		return ref
+	}
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !conforms && refuses(RuleRequestShape) {
+		return conformantPASSubjects{}, http.StatusBadRequest, msgPASPatientIDNotFHIRID
+	}
+	if ((haveSR && subjectOf(s.srJSON, srSubject) != member) ||
+		(covBene != "" && subjectOf(covJSON, covBene) != member)) && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
 	// A QR with no subject could carry answers adjudicated for a different
@@ -167,10 +203,10 @@ func readConformantPASSubjects(bundleJSON []byte, coverageAddresses bool, refuse
 	if s.qrJSON != nil && qrSubject == "" && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "PAS bundle QuestionnaireResponse missing subject"
 	}
-	if qrSubject != "" && pasMemberFromRef(qrSubject) != member && refuses(RulePatientMixed) {
+	if qrSubject != "" && subjectOf(s.qrJSON, qrSubject) != member && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
-	if s.hasDR && pasMemberFromRef(drSubject) != member && refuses(RulePatientMixed) {
+	if s.hasDR && subjectOf(drJSON, drSubject) != member && refuses(RulePatientMixed) {
 		return conformantPASSubjects{}, http.StatusForbidden, "inconsistent patient in PAS bundle"
 	}
 	if pasCarriesAnotherPatient(bundleJSON, member) && refuses(RulePatientMixed) {
@@ -339,6 +375,11 @@ func pasMemberIdentifiers(p map[string]any, member string) (mine, another bool) 
 //   - a reference whose reference names "Patient/<id>" names that member
 //     (pasMemberFromRef: in either spelling, under any base, versioned or
 //     not);
+//   - a reference that carries a "Patient" segment but names no Patient by
+//     FHIR's reference grammar (patientLike: "urn:Patient/<id>",
+//     "#Patient/<id>", one behind white space, "Patient/" inside another
+//     reference) names a patient this cannot know: it is unreadable, never
+//     the member and never read as another patient by its text;
 //   - any other reference with no reference that names a patient, by an
 //     element whose target is the patient (pasSubjectElements) or by its type,
 //     names the member only by one of the member's identifiers: the member
@@ -348,7 +389,37 @@ func pasMemberIdentifiers(p map[string]any, member string) (mine, another bool) 
 // points at, which is read in its own right. The Bundle's own elements are
 // read as well. A bundle this cannot read is reported as naming another
 // patient: never read as naming no one.
+//
+// It is pasOtherPatients' two answers read as one: a request that names an
+// unreadable patient may name another. A participant's own policy decides
+// what each means (a payer's Smart Gateway at strict refuses either; the
+// SDK's Responder refuses another and hands the unreadable to its
+// Adjudicator).
 func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
+	another, unreadable := pasOtherPatients(bundleJSON, member)
+	return another || len(unreadable) > 0
+}
+
+// pasOtherPatients reads a PAS request Bundle as pasCarriesAnotherPatient
+// does, with its two answers apart: another reports a patient other than
+// member, and unreadable lists each reference that carries a "Patient"
+// segment but names no Patient by FHIR's reference grammar (patientLike), as
+// written, each once, in byte order. The read stops at the first other patient,
+// so the list is complete only when another is false. Unknown is not empty: such
+// a reference is never dropped, and never read as the member.
+func pasOtherPatients(bundleJSON []byte, member string) (another bool, unreadable []string) {
+	seen := map[string]bool{}
+	another = pasReadOtherPatients(bundleJSON, member, seen)
+	for ref := range seen {
+		unreadable = append(unreadable, ref)
+	}
+	sort.Strings(unreadable)
+	return another, unreadable
+}
+
+// pasReadOtherPatients is pasOtherPatients' read: it reports another patient,
+// and adds each unreadable reference it meets to unreadable.
+func pasReadOtherPatients(bundleJSON []byte, member string, unreadable map[string]bool) bool {
 	var doc map[string]any
 	if decodeMessage(bundleJSON, &doc) != nil {
 		return true
@@ -399,7 +470,13 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 			if _, party := ref[pasPartySlotMark]; party {
 				return false
 			}
-			return strings.Contains(literal, "Patient/") && pasMemberFromRef(literal) != member
+			if _, _, ok := readPatientReference(literal); !ok && patientLike(literal) {
+				// Its patient is unknown: recorded, never compared by its text.
+				unreadable[literal] = true
+				return false
+			}
+			m, names := patientRefCompared(literal)
+			return names && m != member
 		}
 		if id, ok := ref["identifier"].(map[string]any); ok && id["system"] == shnsdk.MemberSystem {
 			return false
@@ -477,22 +554,72 @@ func pasCarriesAnotherPatient(bundleJSON []byte, member string) bool {
 	return false
 }
 
-// pasMemberFromRef returns the bare member id from a Patient reference, tolerating BOTH a
-// relative ref ("Patient/MBR") and an absolute fullUrl ("https://host/base/Patient/MBR").
-// A requester may write a bundle's references absolute (SDK requesters before shn-sdk v1.9.0
-// and gateways before v1.8.0 did on the reference-payer lane); SHN's member bind must read the
-// id regardless of base. Identical to the old strings.TrimPrefix(...,"Patient/")
-// for the relative case (LastIndex hits index 0). A ref with no "Patient/" segment is returned
-// unchanged, so the downstream ResolvePatient fails closed (unknown member).
-// A versioned reference names the same patient: Patient/<id>/_history/<version>
-// reads as <id>. Only a trailing version is dropped (stripHistoryRef): a base
-// whose path contains /_history/ is part of the reference.
+// pasMemberFromRef is the name a reference reads as on the PAS legs: the
+// Patient id it names by FHIR's reference grammar (readPatientReference), in
+// either the relative ("Patient/MBR") or the absolute ("https://host/base/Patient/MBR")
+// form, versioned or not; any other reference reads as itself, so it never
+// reads as a member id and the consistency fences compare it as written. A
+// requester may write a bundle's references absolute (SDK requesters before
+// shn-sdk v1.9.0 and gateways before v1.8.0 did on the reference-payer lane).
+// "Patient/" found inside another reference ("Basic/1/_history/Patient/2",
+// "#Patient/2") names no Patient.
 func pasMemberFromRef(ref string) string {
-	ref = stripHistoryRef(ref)
-	if i := strings.LastIndex(ref, "Patient/"); i >= 0 {
-		return ref[i+len("Patient/"):]
+	if id, _, ok := readPatientReference(ref); ok {
+		return id
 	}
 	return ref
+}
+
+// msgPASPatientIDNotFHIRID is a PAS request whose Claim.patient names one
+// Patient by an id that is not a FHIR id: the request's own shape
+// (RuleRequestShape), refused only where the participant's level refuses it.
+const msgPASPatientIDNotFHIRID = "PAS bundle Claim.patient names its Patient by an id that is not a FHIR id"
+
+// pasPatientRefMember is the member a PAS request's patient reference names, read by
+// structure: the one reading the inquiry, the submission and the update share, for
+// Claim.patient and for each other subject they compare with it. holder is the
+// resource that carries ref, whose contained list a "#<id>" names into.
+//
+// A Patient reference (readPatientReference) names its id. A "#<id>" or URN that
+// names one Patient (claimPatientTarget: one the holder contains, or the one Bundle
+// entry under that fullUrl) names that Patient's member, as a Patient/<id> naming it
+// would: a contained Patient its member identifier (containedPatientMember; its id is
+// local to its holder, never a member id), an entry its id, else its member
+// identifier. Such a Patient that holds no member key names no one
+// (errPatientCarriesNoMember): never the reference's text, which every request
+// naming its patient so would share. Any other reference names no Patient: "", which
+// names no one.
+func pasPatientRefMember(doc, holder map[string]any, ref string) (member string, conforms bool, err error) {
+	if id, conforms, ok := readPatientReference(ref); ok {
+		return id, conforms, nil
+	}
+	p, contained := claimPatientTarget(doc, holder, ref)
+	if p == nil {
+		return "", false, nil
+	}
+	if !contained {
+		if id, _ := p["id"].(string); id != "" {
+			return id, true, nil
+		}
+	}
+	if m, ok := containedPatientMember(p); ok {
+		return m, true, nil
+	}
+	return "", true, errPatientCarriesNoMember
+}
+
+// pasClaimSubject is the member a PAS submit or update names by its operative
+// Claim's patient reference (pasPatientRefMember), and whether the id it is read
+// from is a FHIR id. A bundle that cannot be read as a JSON object names no one.
+func pasClaimSubject(bundleJSON []byte, ref string) (member string, conforms bool, err error) {
+	if id, conforms, ok := readPatientReference(ref); ok {
+		return id, conforms, nil
+	}
+	var doc map[string]any
+	if decodeMessage(bundleJSON, &doc) != nil {
+		return "", false, nil
+	}
+	return pasPatientRefMember(doc, firstClaim(doc), ref)
 }
 
 // ingressPASNativeSubjectPCI resolves the bound member of a conformant PAS bundle to a pci
@@ -509,7 +636,11 @@ func (g *Gateway) ingressPASNativeSubjectPCIContext(ctx context.Context, bundleJ
 	if status != 0 {
 		return "", status, msg
 	}
-	pci, found, readErr := g.resolveSubjectPCI(ctx, s.member, bundleJSON)
+	if s.noMember != nil {
+		status, msg := subjectBindingFailure(ctx, s.noMember)
+		return "", status, msg
+	}
+	pci, found, readErr := g.resolveSubjectPCIFrom(ctx, s.member, bundleJSON, pasSubjectResource(bundleJSON))
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
 		return "", status, msg
@@ -568,7 +699,7 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 	// is carried to the payer like any other.
 	g.noteSubjectBinding(r.Context(), "pas-claim", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
 	// The carried request, judged at the payer's own level before its system
-	// sees it (D47(2)); none and observe carry it unchecked.
+	// sees it; none and observe carry it unchecked.
 	if !g.carriedRequestAccepted(w, r, legPASClaim, env, tok, answerTok, bundleJSON) {
 		return
 	}
@@ -701,8 +832,8 @@ func (g *Gateway) handlePASNativeInbound(w http.ResponseWriter, r *http.Request,
 // Rollback (it acquires a claim via BeginClaimUpdate, like the minimized pas-claim-update leg).
 //
 // The REQUEST bundle is preserved unchanged: SHN enforces authority/FR-32 here, and judges the
-// carried update at the payer's own conformance level before the payer's system sees it (owner
-// decision D47(2), carriedRequestAccepted), as handlePASNativeInbound does the submission:
+// carried update at the payer's own conformance level before the payer's system sees it
+// (carriedRequestAccepted), as handlePASNativeInbound does the submission:
 // nothing at none and observe, a refusal at structural and strict only for what that level refuses.
 //
 // Response member-fence (R-7) is NAMESPACE-AWARE, mirror of the conformant submit leg: it runs BY
@@ -718,7 +849,7 @@ func (g *Gateway) handlePASUpdateNativeInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 	g.noteSubjectBinding(r.Context(), "pas-claim-update", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
-	// The carried update, judged at the payer's own level (D47(2)).
+	// The carried update, judged at the payer's own level.
 	if !g.carriedRequestAccepted(w, r, legPASClaimUpdate, env, tok, answerTok, bundleJSON) {
 		return
 	}
@@ -859,7 +990,11 @@ func (g *Gateway) conformantPASBindContext(ctx context.Context, bundleJSON []byt
 	if status != 0 {
 		return "", "", status, msg
 	}
-	subjectPCI, status, msg = g.bindInboundSubject(ctx, s.member, bundleJSON)
+	if s.noMember != nil {
+		status, msg := subjectBindingFailure(ctx, s.noMember)
+		return "", "", status, msg
+	}
+	subjectPCI, status, msg = g.bindInboundSubjectFrom(ctx, s.member, bundleJSON, pasSubjectResource(bundleJSON))
 	if status != 0 {
 		return "", "", status, msg
 	}
@@ -1235,4 +1370,59 @@ func metaVersionIDOf(raw []byte) string {
 		return ""
 	}
 	return v
+}
+
+// claimPatientTarget is the Patient a PAS request's Claim.patient names when
+// readPatientReference does not read it: a "#<id>" names the one resource
+// the Claim contains with that id, and a URN ("urn:uuid:…", "urn:oid:…")
+// names the one entry of the Bundle whose fullUrl it is. doc is the Bundle
+// and claim the Claim, each read as a JSON object. contained reports a
+// contained Patient. nil is a reference that names no Patient: no such
+// resource, more than one, or one of another type. Nothing else is resolved:
+// a relative or http reference to another type names that type, never a
+// Patient, whatever an entry under it holds.
+func claimPatientTarget(doc, claim map[string]any, ref string) (patient map[string]any, contained bool) {
+	var found []map[string]any
+	switch {
+	case strings.HasPrefix(ref, "#"):
+		// A contained resource's id is one path segment: "#Patient/1" names
+		// no contained resource, whatever one carries as its id.
+		id := ref[1:]
+		if id == "" || strings.Contains(id, "/") {
+			return nil, false
+		}
+		list, _ := claim["contained"].([]any)
+		for _, c := range containedObjects(list) {
+			if cid, _ := c["id"].(string); cid == id {
+				found = append(found, c)
+			}
+		}
+		contained = true
+	case strings.HasPrefix(ref, "urn:"):
+		entries, _ := doc["entry"].([]any)
+		for _, e := range entries {
+			em, _ := e.(map[string]any)
+			if u, _ := em["fullUrl"].(string); u == ref {
+				r, _ := em["resource"].(map[string]any)
+				found = append(found, r)
+			}
+		}
+	}
+	if len(found) != 1 || found[0] == nil || found[0]["resourceType"] != "Patient" {
+		return nil, false
+	}
+	return found[0], contained
+}
+
+// firstClaim is a PAS Bundle's operative Claim, its first Claim entry's
+// resource, read as a JSON object; nil when it carries none.
+func firstClaim(doc map[string]any) map[string]any {
+	entries, _ := doc["entry"].([]any)
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		if r, _ := em["resource"].(map[string]any); r != nil && r["resourceType"] == "Claim" {
+			return r
+		}
+	}
+	return nil
 }

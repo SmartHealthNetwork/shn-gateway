@@ -323,6 +323,30 @@ func oneRequest(bundle []byte) (eligibilitySubmission, bool) {
 	return eligibilitySubmission{request: found.resource, entries: entries}, true
 }
 
+// eligibilityPatientIDConforms reports whether a submitted request's patient
+// reference, when it names a Patient by FHIR's reference grammar
+// (readPatientReference), names it by a FHIR id. One that is a "#<id>" or a
+// urn:uuid: names a Patient by its member identifier or entry, which is not
+// read as an id here.
+func eligibilityPatientIDConforms(sub eligibilitySubmission) bool {
+	var req struct {
+		Patient struct {
+			Reference string `json:"reference"`
+		} `json:"patient"`
+	}
+	if decodeMessage(sub.request, &req) != nil {
+		return true
+	}
+	id, conforms, ok := readPatientReference(req.Patient.Reference)
+	return !ok || conforms || memberNamesNoOne(id)
+}
+
+// msgEligibilityPatientIDNotFHIRID is the refusal of an eligibility request
+// whose patient reference names its Patient by an id that is not a FHIR id: the
+// request's own shape, refused only by a participant that opted into it
+// (structural and strict).
+const msgEligibilityPatientIDNotFHIRID = "eligibility request names its Patient by an id that is not a FHIR id"
+
 // eligibilitySubmissionMember is the member a submitted request's patient
 // names. A request sent alone is read by eligibilityRequestMember. A request
 // submitted in a Bundle (the
@@ -399,7 +423,9 @@ func eligibilitySubmissionMemberRead(sub eligibilitySubmission) (string, error) 
 		if member, ok := patientRefMember(ref, nil); ok {
 			return member, nil
 		}
-		return "", fmt.Errorf("patient reference %s names no Patient the Bundle carries", quotedBounded(ref))
+		// It names no Patient by FHIR's reference grammar, and no entry
+		// answers it: it names no one.
+		return "", errMemberNamesNoOne
 	}
 	var p struct {
 		ID         string `json:"id"`
@@ -408,7 +434,7 @@ func eligibilitySubmissionMemberRead(sub eligibilitySubmission) (string, error) 
 	if decodeMessage(patient, &p) != nil {
 		return "", fmt.Errorf("patient reference %s names a Patient that cannot be read one way only", quotedBounded(ref))
 	}
-	if written := patientRefShape.FindStringSubmatch(ref); written != nil && p.ID != written[1] {
+	if written, _, ok := readPatientReference(ref); ok && p.ID != written {
 		return "", fmt.Errorf("patient reference %s names a Bundle entry whose id is not the reference's", quotedBounded(ref))
 	}
 	if p.ID != "" {

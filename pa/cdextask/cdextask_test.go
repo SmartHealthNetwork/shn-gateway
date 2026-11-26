@@ -103,6 +103,9 @@ func TestRead_TheIGExample(t *testing.T) {
 	if task.PayerURL != (PayerURL{State: Present, Value: example19URL, Index: 2, Form: "valueUrl"}) {
 		t.Errorf("payer-url %+v", task.PayerURL)
 	}
+	if !reflect.DeepEqual(task.Tracking, example19Tracking) {
+		t.Errorf("tracking %+v\nwant %+v", task.Tracking, example19Tracking)
+	}
 }
 
 // The IG's attachment requests by questionnaire read their own code and the
@@ -132,6 +135,9 @@ func TestRead_TheIGQuestionnaireExamples(t *testing.T) {
 			}
 			if task.PayerURL != (PayerURL{State: Present, Value: example19URL, Index: payerURLIndex, Form: "valueUrl"}) {
 				t.Errorf("payer-url %+v", task.PayerURL)
+			}
+			if task.Tracking.State != Present || task.Tracking.Identifier.Value == "" {
+				t.Errorf("tracking %+v", task.Tracking)
 			}
 		})
 	}

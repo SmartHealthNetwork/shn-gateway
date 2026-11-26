@@ -249,13 +249,29 @@ is denied before it ever reaches your payer:
   registered under a public `baseURL` and running before you originate, or the Hub has nothing
   to dial. Run it with the payer evaluation bundle — see [`payer/README.md`](payer/README.md).
 
-## Keeping your keys on one volume
+## The two smokes
 
-The two smokes in this directory, `smoke.sh` and `payer/smoke.sh`, are SHN's own checks of this
-bundle. They run from SHN's source tree, and this module cannot run them as published yet: each
-starts from paths outside the module's own layout. To evaluate the bundle yourself, run it with
-`docker compose` as the steps above describe. What follows is what each smoke does with a bundle
-when it runs.
+Two scripts here run the bundle end to end through the hosted Hub, each from a copy of a
+registration bundle you give it: `smoke.sh` and `payer/smoke.sh`. Each finds its files from its
+own directory, so run it from this directory or any other. Both need Docker, `git`, `curl`, `jq`
+and the `shn` CLI on your `PATH` (`go install github.com/SmartHealthNetwork/shn-sdk/cmd/shn@latest`).
+Both first build the reference provider app (`brprovider/build.sh`, which clones it from
+GitHub), and neither starts unless `SHN_KIT_EVAL_LIVE=1` is set, since each reaches the hosted
+Hub.
+
+- **`smoke.sh`** is SHN's check of this bundle. It boots the bundle with your `--role provider`
+  bundle, drives the 8 provider-data use cases against the hosted `conformance-payer` with
+  `shn send-test`, and checks the conformant lane's generated certificate. It runs the gateway at
+  `strict`, so a defect in the bundle fails it:
+
+  ```sh
+  SHN_KIT_EVAL_LIVE=1 SHN_SECRETS=/abs/path/to/my-provider-bundle bash smoke.sh
+  ```
+
+- **`payer/smoke.sh`** is the payer self-test: it drives the same use cases at your own deployed
+  payer. See [`payer/README.md`](payer/README.md), "Run the payer self-test".
+
+## Keeping your keys on one volume
 
 Both smokes (`smoke.sh` and `payer/smoke.sh`) copy the bundle you give them, private keys
 included, into a new `0700` directory under `TMPDIR`, and remove it when they exit. To hold every

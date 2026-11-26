@@ -14,7 +14,7 @@ import (
 )
 
 // The payer gateway's Da Vinci ingress for the payer's CDex attachment
-// request (D127): the payer's own system, authenticated as a registered client
+// request: the payer's own system, authenticated as a registered client
 // with a bearer granted a scope that permits creating a Task (taskCreate:
 // TaskWriteScope, system/Task.* or a v2 scope with c), creates a CDex 2.1.0
 // Task Attachment Request at a provider's base on its gateway
@@ -28,7 +28,7 @@ import (
 //   - a Task it cannot route: a base that names no registered provider
 //     (routing);
 //   - a Task it cannot bind to a patient: one that names no member number
-//     for Task.for, or two that differ (the leg's authority, D121).
+//     for Task.for, or two that differ (the leg's authority).
 //
 // The provider's answer is relayed exactly, its headers as on the other
 // carried legs. A 2xx answer gains a Location naming the created Task at this
@@ -149,25 +149,30 @@ func (g *Gateway) serveCDexRequest(w http.ResponseWriter, r *http.Request, recip
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": errCDexRequestNoPatient})
 		return
 	}
-	// The patient is bound by the member number, by the shared rule
-	// (resolveSubjectPCI), so this leg and the provider's CDex submission,
-	// keyed by the same number, bind one patient alike: the payer's own member
-	// when its system of record holds it; otherwise an identifier derived from
-	// the member number and the demographics of a carried Patient the shared
-	// rule reads as the member's, one whose id is the number or that carries it
-	// under shnsdk.MemberSystem. A Patient naming the number only under the
-	// payer's own identifier system is not read as the member's, so such a Task
-	// derives from the number alone, as a submission does. A member the
-	// provider may not hold is carried (unknown is not empty).
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), member, body)
+	// The patient is bound by the member number and the Task's own subject
+	// Patient, the contained Patient Task.for names (resolveSubjectPCIFrom):
+	// the payer's own member when its system of record holds it; otherwise an
+	// identifier derived from the member number and that Patient's birth date
+	// and family name, else from the number alone, never from another Patient
+	// the Task carries. A Task.for that names no Patient the Task carries binds
+	// by the rule for a leg with no subject Patient. A member the provider may
+	// not hold is carried (unknown is not empty). The provider's submission
+	// that answers this Task pairs with it by its tracking identifier
+	// (workstream_pa_cdex_pairing.go), so both legs bind one patient.
+	pci, found, readErr := g.resolveSubjectPCIFrom(r.Context(), member, body, task.Patient.Resource)
 	if errors.Is(readErr, errPatientUnidentifiable) {
-		// The shared rule found the number on another person the Task carries
-		// (a Coverage's party it recognizes by the same id or member system)
-		// and no Patient of the member's own: it identifies no one patient,
-		// refused as any Task the network cannot bind (422, as the other bind
-		// failures here).
+		// The rule found the number on another person the Task carries (a
+		// Coverage's party it recognizes by the same id or member system) and
+		// no Patient of the member's own to identify it, or a subject Patient
+		// without a birth date and name: it identifies no one patient, refused
+		// as any Task the network cannot bind (422, as the other bind failures
+		// here).
 		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonPatientUnidentifiable)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msgPatientUnidentifiable})
+		msg := msgPatientUnidentifiable
+		if errors.Is(readErr, errSubjectUnidentifiable) {
+			msg = msgSubjectUnidentifiable
+		}
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
 		return
 	}
 	if readErr != nil {
@@ -204,6 +209,8 @@ func (g *Gateway) serveCDexRequest(w http.ResponseWriter, r *http.Request, recip
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	// Carried and answered: the submission that answers it pairs with it.
+	g.recordCDexRequest(task, recipient, member, pci)
 	answerCtx := withFindingContext(r.Context(), findingContext{LegType: leg, CorrelationID: child, Seam: "payer-ingress", Whose: "peer"})
 	if repeatsAMember(answerCtx, answer) {
 		g.recordLeg(ex.ID, legProj.Project(child, "error"))

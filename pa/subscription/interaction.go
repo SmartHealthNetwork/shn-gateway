@@ -7,8 +7,8 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
-// CheckInteraction is the notifications design's rule (§7.2, §9) on the
-// interactions a subscribe leg never carries, read from the request's method
+// CheckInteraction is the rule on the interactions a subscribe leg never carries, read from
+// the request's method
 // and path alone, before the request is parsed as one it carries
 // (shnsdk.ParseSubscriptionRequest), at either gateway, a network rule at
 // every level. request is "<METHOD> <path>[?<query>]", the path below the

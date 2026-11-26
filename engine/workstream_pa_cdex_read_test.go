@@ -3,9 +3,9 @@
 package engine
 
 // workstream_pa_cdex_read_test.go — the provider gateway's side of the
-// payer's read of its CDex Task (cdex-task-status, D129): the read carried to
+// payer's read of its CDex Task (cdex-task-status): the read carried to
 // the provider's own Task endpoint as a plain FHIR read, the answer put to the
-// network's delivery rule (Q2) and bound to its patient (Q1, D121), each row at
+// network's delivery rule (Q2) and bound to its patient (Q1), each row at
 // every conformance level.
 
 import (
@@ -223,7 +223,7 @@ type readAnswerOf struct {
 
 // read delivers a read of readPath (none when hasPath is false) with body as
 // the Hub would, on leg (the read's own unless set), under a token naming no
-// patient: the flagged leg's request names none (D129, Q1).
+// patient: the flagged leg's request names none.
 func (p *cdexRequestProvider) read(t *testing.T, leg, readPath string, hasPath bool, body []byte) readAnswerOf {
 	t.Helper()
 	if leg == "" {
@@ -565,7 +565,7 @@ func TestCDexRead_NotTakenIsRefusedAsRouting(t *testing.T) {
 	}
 }
 
-// The network's 404 (D129, Q2), at every level: a provider's 2xx that is not
+// The network's 404, at every level: a provider's 2xx that is not
 // one JSON Task carrying exactly one structural payer-url equal to this
 // gateway's return path for the reading payer is answered the network's 404,
 // the same bytes in every case, recorded as the leg's authority and as this
@@ -673,8 +673,8 @@ func TestCDexRead_The404IsAConstantOperationOutcome(t *testing.T) {
 }
 
 // A Task that passes the delivery rule but that the provider's gateway cannot
-// bind to a patient is refused 502 on the leg's authority at every level
-// (D129, Q1): the network cannot identify the patient whose record it would
+// bind to a patient is refused 502 on the leg's authority at every level:
+// the network cannot identify the patient whose record it would
 // disclose. Nothing of the Task is delivered.
 func TestCDexRead_AnUnbindableTaskIs502(t *testing.T) {
 	mb := map[string]any{"coding": []any{map[string]any{"system": v20203MB.System, "code": "MB"}}}

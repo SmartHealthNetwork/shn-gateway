@@ -31,7 +31,7 @@ through wiring your own systems, see [INTEGRATION.md](INTEGRATION.md).
 |---|---|
 | `SHN_DISCOVERY_URL` | The single anchor — resolves the network's trust-plane endpoints (Hub, Authorization Framework, registrar, consent, audit, PHG, …) and trust anchors. Example: `https://accounts.shn-preview.org/discovery`. The gateway starts only when this descriptor accepts wire protocol `2.0.0`, the version it sends (below). |
 | `ROLE` | `provider`, `payer`, `facility`, or `phg`. Must match the role you registered. |
-| `SHN_SECRETS` | Path to the bundle directory written by `shn register -out`. |
+| `SHN_SECRETS` | Path to the bundle directory written by `shn register -out`. The gateway opens what it receives with the public key `enc.key` derives, whatever `manifest.json` states. From v1.17.0 it logs one boot line comparing the two, naming each key by its fingerprint only: `gateway: encryption key ok: …` when `manifest.json`'s `encPub` is that key, else `gateway: WARNING: encryption key <verdict>: …`, the verdict being `manifest-missing`, `manifest-malformed`, `manifest-low-order` (a key that cannot authenticate your holder) or `manifest-differs-from-private-key`. Under a warning, check that your holder's registration names the derived key: a peer seals to the key your registration names. |
 
 **The start check.** The gateway sends wire protocol `2.0.0`'s leg names, so at start it reads the
 descriptor once and starts only when `wireProtocolVersionsAccepted` contains `2.0.0` (with the
@@ -382,7 +382,10 @@ A request that names its patient by a reference that names no one (empty or blan
 record and never identified from the empty member id. It is refused at every level, whatever
 this setting, `400 cannot identify the patient: the request names its patient by a reference
 that names no one` (recorded as `authority`), or by the leg's own refusal where it reads the
-patient first.
+patient first. A PAS request whose `Claim.patient` names a Patient it carries that holds no
+member key is refused the same way, with the text that says what to carry: `400 cannot identify
+the patient: the request names its patient by a reference to a Patient it carries that holds no
+member identifier; name the patient by Patient/<id>, or give that Patient one member identifier`.
 
 A provider's and a payer's gateway read the setting wherever they bind a patient a request
 names: the legs the table below lists, and also the federated query at a provider's ingress and
@@ -393,7 +396,7 @@ nothing there. On every role, a value other than `true` or `false` refuses to bo
 
 | Env var | Description |
 |---|---|
-| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS, CDex or federated query subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. A request that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request, and on a provider's `$next-question` rounds from v1.8.0). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
+| `REQUIRE_KNOWN_MEMBERS` | `true` or `false`; unset means `false`. By default a CRD, DTR, PAS, CDex or federated query subject your system of record does not hold (and, on a payer that declares its own eligibility endpoint with `PAYER_ELIGIBILITY_URL`, a coverage-eligibility subject) is carried, identified by the member id and the Patient the request carries for it. A Patient that a coverage names as its subscriber, policyholder or payor, by reference or by an identifier, is another person and is never taken for the member's Patient, even when it carries the member's number; from v0.63.0 a request that carries no Patient for the member with a birth date and name, and carries such a person under the member's number, is refused `400 cannot identify the patient: …` (recorded as `authority`): the number is shared, so the member id alone identifies no one patient. From v1.17.0, on every leg here (on the federated query, on the requester's gateway; the facility's identifies only a member its system of record holds), the member's Patient is the one the leg's subject reference resolves to inside the request (on the CDex attachment request, the Patient its `Task.for` names), and another Patient the request carries for the member never changes its identity: a subject Patient without a birth date and a family name is identified by the member id alone, and refused `400 cannot identify the patient: …` (`422` on the CDex attachment request; recorded as `authority`) when the request also carries such a person under the member's number and another Patient for the member with both. A CDex attachment submission is identified as the attachment request it answers was, when this gateway carried that request (see `POST /$submit-attachment`). A request whose subject reference resolves to no Patient it carries, and that carries no Patient for the member with a birth date and a family name, or several that disagree, is identified by the member id alone, so for a payer that issues family-level member numbers (a dependent sharing the subscriber's number) such requests from different members of one family share one identity; send the member's own Patient on every leg to avoid it. Send the same Patient, unchanged, on every leg of one exchange: for a member the payer does not hold, a later leg that carries a different Patient, or none, is not matched to what an earlier leg recorded (an amendment still reaches the payer and its answer is relayed, but it binds and records nothing; an inquiry's decision is relayed but not recorded). A receiving gateway handles the member the request names as it would directly, whether one side holds the member, both do, or neither does, and files what it records about the exchange under its own identification of that member. That identification, for a member your system of record does not hold, is never the identifier of a member it does hold, so the exchange is never recorded under the wrong member; the bytes exchanged are the same. Nothing is added to a request on the member's behalf unless the provider opts in with `ENRICH_NATIVE_REQUESTS=true` (see [Accept Da Vinci requests from a provider EHR](#accept-da-vinci-requests-from-a-provider-ehr-provider-optional)); with it, a CRD request for a member your system does not hold leaves out history prefetch it cannot read, with the reason recorded. Set `true` to check members against your own system of record instead: such a subject is refused (`400 unknown member`; `403 request patient does not resolve` on a provider's `$questionnaire-package` request, and on a provider's `$next-question` rounds from v1.8.0). `true` needs a system of record: a native-forward payer that keeps none (`FHIR_DATA_URL` unset) refuses to boot with it. Any other value refuses to boot. |
 | `SHN_ACCEPT_UNKNOWN_MEMBERS` | **No longer read** (from shn-gateway v1.0.0). Carrying members your system of record does not hold is the default, so a gateway that sets it, to any value, logs `gateway: WARNING: SHN_ACCEPT_UNKNOWN_MEMBERS is set but no longer read` at boot and starts; remove it. Beside `REQUIRE_KNOWN_MEMBERS=true` it no longer refuses to boot: `REQUIRE_KNOWN_MEMBERS` alone decides. Releases before v1.0.0 logged a deprecation warning, and refused to boot when it was set to anything but `0` or `false` together with `REQUIRE_KNOWN_MEMBERS=true`. |
 
 ## Documentation attachment size (every role)
@@ -539,7 +542,11 @@ There is nothing to configure:
     given, or the fixed sentence in it when the answer adds a detail (an
     identifier, a member name, a count, the contract lines). It never carries a value from the
     request, a credential or patient data, and a value the gateway has not
-    registered is written as `other`.
+    registered is written as `other`. From v1.17.0 one reason says more than its
+    answer: a leg whose recipient's registered encryption key is not usable is
+    answered `502` `the recipient's registered encryption key is not usable`
+    with rule `authentication`, and its reason adds the fixed cause (a
+    small-order, or absent, X25519 key).
   - Read it to tell such refusals apart, but don't match on its text: a minor
     release may reword a sentence or add one. `refusal.rule` is the field to
     decide by.
@@ -937,6 +944,20 @@ There is nothing to configure:
   it is sealed without its headers before that is minted) or `ETag:decoded-from-gzip` (a strong `ETag` on an answer the transport
   decoded from gzip). The answer goes through without it. A value that is merely odd, such
   as an unquoted `ETag`, is carried as sent. Absent when empty. Evolving.
+- `involvedSummaryNotSent` (from shn-gateway v1.17.0; the exchange record's
+  `InvolvedSummaryNotSent`), on a network whose discovery descriptor lists both `involved` and
+  `involved-summary` in `hubAccepts`, says why your gateway sent no signed summary of an
+  involved list it sent on the call, one of `engine.InvolvedSummaryNotSentReasons`:
+  `involved-summary-over-limit` (the envelope was sent without it, because the summary alone
+  would have taken it over its size limit), `involved-summary-unsigned` (the summary could not
+  be made: no usable signing key, or no token signature to bind it to) or
+  `involved-summary-binding-unsettled` (an answer's: your gateway's own binding of the member
+  the request names had not settled, because it never ran, the member names no one, it resolved
+  but the leg was refused before its patient entered the list, or a coverage-eligibility batch
+  was refused at one request's member before the members after it were bound). Nothing is
+  refused for a summary, and the Hub records that it does not know whether that list was
+  complete. On a call that sends more than one leg, it is the first such leg's. Absent when every summary due
+  was sent, and on a network that does not list both. Evolving.
 - With diagnostic collection configured, the captured request names the ids it
   was built with, as its `Detail`, before it is sent: `leg.sealed` once the
   request is sealed, before the network's authorization is asked, and
@@ -995,11 +1016,12 @@ With `METRICS_SERVICE` set, or an OpenTelemetry exporter on, the gateway also re
 shared state and the patients a leg leaves out:
 
 - `StoreError` (`store`): one count per failure of the shared-state store, by store
-  (`exchange`, `replay`, `ingresskey` or `pended`). It is how a database outage shows:
+  (`exchange`, `replay`, `ingresskey`, `pended` or, from v1.17.0, `cdex-request`). It is how a database outage shows:
   a `replay` or `ingresskey` failure on a request is answered `503`, and a failed
   background reload of the ingress key is counted as `ingresskey` too, though it answers
-  nothing. An `exchange` or `pended` failure leaves the request itself unaffected, and only
-  the record is skipped (for `pended`, the payer's answer still reaches the requester),
+  nothing. An `exchange`, `pended` or `cdex-request` failure leaves the request itself unaffected, and only
+  the record is skipped (for `pended`, the payer's answer still reaches the requester; for
+  `cdex-request`, a submission is identified as one with no record of its request),
   apart from `POST /scenario/reset`, which answers `503` when it cannot clear the exchange
   records.
 - `StorePool` (`stat`), with `SHN_STORE_DATABASE_URL` set, every 30 seconds: the store's
@@ -1533,7 +1555,7 @@ See [INTEGRATION.md](INTEGRATION.md) for how these fit together.
 
 | Env var | Description |
 |---|---|
-| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). Setting either is your declaration that your system cannot speak Da Vinci itself, so the gateway runs module 1, the `/scenario/*` origination API, for it. Unset, module 1 is off: the gateway serves its Da Vinci ingress and relays, mounts no `/scenario` route (each answers `404`), and needs no module 1 setting; `SCENARIO_CALLERS_FILE` then refuses to boot, and a set `NPI`, `PROVIDER_DTR_NATIVE`, `PROVIDER_DTR_POPULATE_URL` or `PROVIDER_DTR_POPULATE_TOKEN_URL` is unused and named in a boot warning, though still checked at boot (an invalid `NPI`, or an incomplete `PROVIDER_DTR_*` group, refuses boot). Before shn-gateway v1.0.0, unset meant `demo`. From shn-gateway v0.57.0 any other value refuses to boot, on every role, with an error naming the accepted values; that includes `demo` or `provider-data` in another case or with surrounding whitespace, since the value is matched exactly. Earlier releases accepted an unknown value and built the requests the gateway originates on no known lane. |
+| `ORIGINATION_PROFILE` | provider. Set to `provider-data` to originate every prior-auth UC off your seeded FHIR system of record and drive real payer verdicts — the config-only provider lane, no custom code. `demo` originates the shipped demo order set instead. Both lanes answer a REAL payer's questionnaire, so both require `PROVIDER_DTR_POPULATE_URL` (the operated `$populate` endpoint, validated at boot). Setting either is your declaration that your system cannot speak Da Vinci itself, so the gateway runs module 1, the `/scenario/*` origination API, for it. Unset, module 1 is off: the gateway serves its Da Vinci ingress and relays, mounts no `/scenario` route (each answers `404`), and needs no module 1 setting; `SCENARIO_CALLERS_FILE` then refuses to boot, and a set `NPI`, `PROVIDER_DTR_NATIVE`, `PROVIDER_DTR_POPULATE_URL` or `PROVIDER_DTR_POPULATE_TOKEN_URL` is unused and named in a boot warning, though still checked at boot (an invalid `NPI`, or an incomplete `PROVIDER_DTR_*` group, refuses boot). Before shn-gateway v1.0.0, unset meant `demo`. From shn-gateway v0.57.0 any other value refuses to boot, on every role, with an error naming the accepted values; that includes `demo` or `provider-data` in another case or with surrounding whitespace, since the value is matched exactly. Earlier releases accepted an unknown value and built the requests the gateway originates on no known lane. From shn-gateway v1.17.0, a record your QuestionnaireResponse names in a DTR `qr-context` beside the exchange's own order and Coverage is read from your system of record and carried on `provider-data`, and refused before the payer on `demo`, which reads no orders ([STABILITY.md](../STABILITY.md), "The records a QuestionnaireResponse's contexts name"). |
 | `FHIR_DATA_URL` | FHIR R4 base URL for your system of record. **Required on every role but a native-forward payer.** The gateway reads its members, coverage and clinical facts from your own FHIR server; there is no built-in persona stub any more, so an unset value is a boot error naming this variable. From shn-gateway v0.58.0 (earlier releases refuse to boot without it on every role), a payer whose own system answers every exchange (`PAYER_DAVINCI_BASE_URL`, below) may leave it unset: its gateway then keeps no system of record. It binds each member from the request that names it, exactly as it binds a member a system of record does not hold (see [Members your system of record does not hold](#members-your-system-of-record-does-not-hold-every-role)), and answers coverage eligibility only through `PAYER_ELIGIBILITY_URL`: without that endpoint, an eligibility request is answered `501` "coverage eligibility is not offered by this payer". It logs `gateway: no system of record (FHIR_DATA_URL unset)` at boot. `REQUIRE_KNOWN_MEMBERS=true` needs a system of record, and refuses to boot without one. |
 | `FHIR_TOKEN_URL` | SMART Backend Services token endpoint, if your FHIR server requires authenticated access. Requires the client credential block below. |
 | `FHIR_CLIENT_ID` | SMART client id. |
@@ -2206,7 +2228,31 @@ member your system of record does not hold is carried (unless
 `REQUIRE_KNOWN_MEMBERS=true`), and a submission that is not a `Parameters`, or has no
 readable `MemberId` or two that differ, is refused with 400, since the network cannot
 identify the patient; one that repeats a member name is refused with 400 too, since it can
-be read two ways. A body larger than the attachment ceiling is
+be read two ways. From v1.17.0, a submission for a member your system of record does not
+hold is identified as the payer's attachment request it answers was, when this gateway
+carried that request: from the payer the submission goes to, with the tracking identifier
+the submission's `TrackingId` names (the Task's `identifier` typed `tracking-id`, the same
+system and value), for the same `MemberId`. Otherwise it is identified from its `MemberId`
+and the Patients it carries at its top level, never from its attachment content, and the
+gateway emits the observer event `cdex.request-unpaired`, whose `detail` says why
+(`no-tracking-id`, `no-record`, `counterparty-differs`, `member-differs`,
+`member-conflict`, or `store-error`). A submission that answers a pended prior
+authorization rather than an attachment request is one of these: no request was carried
+for it. Pairing never refuses a submission; a submission it pairs is identified before
+anything it carries is read for its binding, even one earlier releases refused for the
+patient it named. One it does not pair, whose top level carries another person
+under the member's number (a coverage's subscriber, policyholder or payor) and no Patient
+of the member's own with a birth date and family name, is refused `400 cannot identify the
+patient: …` (`authority`), at every level, since its attachment content is not read for
+them. The payer's gateway
+does the same for the submissions it takes. Each gateway keeps its record of an attachment
+request it carried (the tracking identifier, the other participant, the member and the
+patient's network identifier, nothing of the request's content) for six months from its
+last change, in the store `SHN_STORE_DATABASE_URL` names, and otherwise in memory, which a
+restart clears. A tracking identifier carried again for another patient or member is
+marked as naming no one request until its record expires, and is never re-recorded for
+that patient meanwhile. Expired records are
+removed in the background, a bounded number at a time. A body larger than the attachment ceiling is
 refused with 413 before it is read further, and a payer that does not take the leg is the Hub's
 `422`, with its reason as it stands. The submission rides no declared contract line,
 so `SHN_CONTRACT_VERSIONS` and `REQUIRE_SHARED_LINE` do not apply to it. This gateway's
@@ -3010,9 +3056,15 @@ conformance level, and answers the payer with the refusal:
 | `422 cannot bind the request to a patient: Task.for names no one member number (an identifier typed v2-0203#MB)` | `Task.for`, on the reference or on the Patient it contains, names no member number, or two that differ (the leg's `authority`). |
 
 Your gateway binds the member number against your system of record, as on every leg the network
-delivers: a member your system holds is that patient, and one it does not hold is identified from
-the number alone and carried, unless you require known members (`REQUIRE_KNOWN_MEMBERS`, then
-`400 unknown member`, recorded as `conformance`). A member your system reports as held but with no
+delivers: a member your system holds is that patient, and one it does not hold is carried, unless
+you require known members (`REQUIRE_KNOWN_MEMBERS`, then `400 unknown member`, recorded as
+`conformance`). From v1.17.0, a member it does not hold is identified as the payer's gateway
+identifies it, from the birth date and family name of the Patient the Task contains as
+`Task.for`, else from the number alone (earlier releases: from the number alone, for a Patient
+naming the number only under the payer's identifier system, as the CDex IG's example does), and
+the Task is refused `422` (`authority`) where the payer's gateway refuses it. Your gateway
+records the Task's tracking identifier with the payer and that patient, so the documentation
+your system sends back for it is identified alike (see `POST /$submit-attachment`). A member your system reports as held but with no
 identifier names no one patient: from v1.12.0 that `400 unknown member` is recorded on the leg's
 `authority`. A system of record that fails the lookup gives the usual `502` or `503`.
 
@@ -3211,9 +3263,11 @@ HRex Task topic, with REST-hook delivery on, for the Subscription to deliver any
 
 **What reaches your system.** The interaction, at your base, as the payer's system made it, with
 no body on a read, delete, `$status`, search or page, `Accept: application/fhir+json`, and the
-payer named in `X-SHN-Requester`, as on the Task create. The network carries no `Prefer` header
-on any leg, so a `Prefer: return=…` the payer's system sends does not reach yours, and your system
-answers a create or an update by its own default. Every rule below is the network's own, the same
+payer named in `X-SHN-Requester`, as on the Task create. From shn-gateway v1.17.0 at both
+gateways, the first return preference in the payer's `Prefer` (`return=minimal`,
+`return=representation`, `return=OperationOutcome`, or any other value) also reaches your system
+as sent (below); no other preference does (`handling`, `respond-async`, `wait`), and no `Prefer`
+reaches your system on any other leg, so your system answers those by its own default. Every rule below is the network's own, the same
 at every conformance level. Each body is judged by its structure, never by the media type it is
 labelled with: FHIR JSON is a JSON object with a `resourceType` member (its name read in any
 case), after an optional byte order mark and whitespace; FHIR XML is an XML document whose root
@@ -3314,9 +3368,16 @@ carried.
   take client-assigned ids. This is intended.
 - **An update and a delete** carry the payer's `If-Match`, when it sent one, as the HTTP
   `If-Match` of that request, exactly as sent; your gateway's own read before them carries none.
+- **Every interaction** carries the payer's return preference, from shn-gateway v1.17.0, when the
+  payer's system sent one, as the HTTP `Prefer` of that request, exactly as sent; your gateway's
+  own read before an update, a delete or a `$status` carries none. A `Prefer` the payer's
+  gateway framed that is not exactly one return preference is refused `400`, `integrity`, with
+  nothing sent. The answer it produces is held to the check below, as every answer is.
 - **A read and a vread** are sent with the payer's `_elements` and `_summary`, when it sent them,
-  as sent, and a `2xx` is delivered only when it is one Subscription that is the payer's by the
-  same test. That test reads only `channel.endpoint` and the credential beside it, so only an
+  as sent, and a `2xx` is delivered only when it carries exactly one Subscription, the payer's by
+  the same test; from shn-gateway v1.17.0 an answer that carries none (an OperationOutcome, no
+  body, a `$status` Bundle) or more than one is the network's `404`, since no read before it showed the id is the
+  payer's (before, it was refused `502`). That test reads only `channel.endpoint` and the credential beside it, so only an
   answer whose subset hides the channel (`_summary=true` leaves out `channel.header`; an
   `_elements` without `channel` leaves out the channel) is the network's `404`, as is one that is
   not the payer's. One that hides the criteria or the filter is still the payer's own
@@ -3353,22 +3414,29 @@ carried.
   value, and accepts a notification at an address only with its own credential for that address.
   This is accepted, as closest to a direct connection, where the page would show that payer's
   endpoint in the clear. If the count matters to you, keep your system's page ids random.
-- **Every `2xx` answer** is first held to the shape of the interaction it answers, and nothing
-  else is delivered:
+- **Every `2xx` answer** is first held to the answer check, and nothing else is delivered. From
+  shn-gateway v1.17.0 an answer passes when it holds nothing but shapes that name no patient,
+  whatever the interaction it answers; before, each interaction passed only the shape listed for
+  it, so a delete answered with the deleted Subscription, for one, was refused:
 
-  | Interaction | Your system's `2xx` answer |
+  | Your system's `2xx` answer | Passes on |
   |---|---|
-  | read, vread | A Subscription. |
-  | create, update | A Subscription that is the payer's by the ownership test (another's is the network's `404`), no body, or an OperationOutcome (a system answering minimal by its own default). |
-  | delete | An OperationOutcome, or no body. |
-  | search, page | A searchset Bundle whose every entry is a Subscription or an OperationOutcome. |
-  | instance `$status` | A Bundle of type `searchset` (the Backport IG STU 1.1's) or `history` (an earlier server's), holding exactly one SubscriptionStatus Parameters, whose `subscription` references the Subscription asked for (`Subscription/<id>`, or an absolute `http` or `https` URL whose path ends in it, with no query, fragment or version), and whose `notification-event` `focus`, when valued, is a Task reference (`Task/<id>`, a version of one, or an absolute URL ending in one; a `type`, when stated, must agree); any `additional-context` is refused, since the HRex Task topic declares none, and so is a reference whose type cannot be read one way only (`#x`, a urn, no reference). A `$status` answer on this leg is held to the Backport SubscriptionStatus shape, and anything outside it is refused `502` on authority: every member at every depth one that shape defines, of its type (so no extension), the subscription reference a Subscription by its reference and any type, no other reference anywhere, entries, links and CodeableConcepts with only their own members, the `topic` the topic's own canonical, and no address, read with its percent-escapes decoded, (an entry's `fullUrl`, `request.url` or `response.location`, a link's `url`) naming a resource type but `Subscription` or `Parameters`. |
+  | A Subscription. | Every interaction. |
+  | An OperationOutcome. | Every interaction. |
+  | No body. | Every interaction. |
+  | A searchset Bundle whose every entry is a Subscription or an OperationOutcome. | Every interaction. |
+  | A `$status` Bundle: a Bundle of type `searchset` (the Backport IG STU 1.1's) or `history` (an earlier server's), holding exactly one SubscriptionStatus Parameters, whose `subscription` references the Subscription asked for (`Subscription/<id>`, or an absolute `http` or `https` URL whose path ends in it, with no query, fragment or version), and whose `notification-event` `focus`, when valued, is a Task reference (`Task/<id>`, a version of one, or an absolute URL ending in one; a `type`, when stated, must agree); any `additional-context` is refused, since the HRex Task topic declares none, and so is a reference whose type cannot be read one way only (`#x`, a urn, no reference). A `$status` answer on this leg is held to the Backport SubscriptionStatus shape, and anything outside it is refused `502` on authority: every member at every depth one that shape defines, of its type (so no extension), the subscription reference a Subscription by its reference and any type, no other reference anywhere, entries, links and CodeableConcepts with only their own members, the `topic` the topic's own canonical, and no address, read with its percent-escapes decoded, (an entry's `fullUrl`, `request.url` or `response.location`, a link's `url`) naming a resource type but `Subscription` or `Parameters`. A Bundle is read as one when it is a `history` Bundle or an entry carries a Parameters. | An interaction that names the Subscription by id: a read, a vread, an update, a delete and an instance `$status`. On a read or a vread it carries no Subscription, so the ownership test below answers it with the network's `404`. On a create, a search or a page it is refused. |
 
-  A shape valid only for another interaction, a contained resource or any resource held
-  elsewhere (an OperationOutcome's included, a Bundle's outside its entries), FHIR XML (which the
-  network reads only as JSON, so cannot check), a body that is not FHIR (plain text included,
-  where no body is allowed too), and FHIR JSON that cannot be read one way only, are refused
-  `502`, recorded on `authority`, with nothing of it delivered. A delivered answer is carried as your system sent it, with your base framed
+  Then each Subscription the answer carries is held to the ownership test: a read's or a vread's
+  carries exactly one, the payer's; a create's or an update's at most one, the payer's; a
+  delete's or a `$status`'s only the payer's, from shn-gateway v1.17.0 (each otherwise the
+  network's `404`); a search's or a page's only the payer's (otherwise `403`).
+
+  A contained resource or any resource held elsewhere (an OperationOutcome's included, a
+  Bundle's outside its entries), a `$status` Bundle where it does not pass, FHIR XML (which the
+  network reads only as JSON, so cannot check), a body that is not FHIR (plain text included),
+  and FHIR JSON that cannot be read one way only, are refused `502`, recorded on `authority`,
+  with nothing of it delivered. A delivered answer is carried as your system sent it, with your base framed
   beside it for the payer's gateway (`statedBase`). On a create's or an update's `2xx`, your
   gateway also frames, from shn-gateway v1.13.0, the tail of your system's `Location`
   (`subscriptionLocation`: `Subscription/<id>` or `Subscription/<id>/_history/<vid>`), only
@@ -3418,7 +3486,7 @@ An instance `_history` and a type-level `$status` are refused `403` on the leg's
 the request's method and path, before the request is read further: a past version may name
 another endpoint, and a type-level `$status` answers for other subscribers' Subscriptions.
 
-A request frame names a `subscriptionRequest` or `If-Match` on this leg alone, a
+A request frame names a `subscriptionRequest`, `If-Match` or (from v1.17.0) `Prefer` on this leg alone, a
 `subscriptionEndpoint` or `subscriptionChannel` on this leg and the notification leg
 (`cdex-task-signal`) alone, and a `statedBase` on the notification leg's request alone. From
 v1.13.0 a gateway of any role refuses, at every conformance level and before its leg's handler
@@ -4262,19 +4330,26 @@ conformance level, and records each refusal as this gateway's:
   contains as `Task.for` (a `#id` reference), or from `Task.for.identifier`. A Task that names no
   member number for `Task.for`, or two that differ, is `422` (`authority`), since the network
   cannot identify the patient. A member your system of record does not hold is carried, unless
-  `REQUIRE_KNOWN_MEMBERS=true`, which refuses it `400` (`conformance`). Its network patient
-  identifier is derived as on the provider's CDex submission, which names the same number: from
-  the member number, with the birth date and family name of a Patient the Task carries only when
-  that Patient's `id` is the number or it carries the number under the system `urn:shn:member`.
-  A Patient naming the number only under your own identifier system, as the CDex IG's example
-  does, is not read for them, so the identifier derives from the number alone. In that same
-  reading, a Task carrying no Patient of the member's own but another person (a Coverage's
-  subscriber, policyholder or payor) under the member's `id` or `urn:shn:member` number is
-  `422` (`authority`): the number is shared, so it identifies no one patient.
+  `REQUIRE_KNOWN_MEMBERS=true`, which refuses it `400` (`conformance`). From v1.17.0, its
+  network patient identifier is derived from the member number and the birth date and family
+  name of the Patient the Task contains as `Task.for`, whatever system that Patient names the
+  number under (the CDex IG's example names it under the payer's own), else from the number
+  alone; another Patient the Task carries never changes it. Earlier releases read a Patient's
+  birth date and family name only when its `id` was the number or it carried the number under the
+  system `urn:shn:member`, so the IG's example derived from the number alone. A `Task.for` that
+  names no Patient the Task contains is derived as before, from a Patient the Task carries under
+  the member's `id` or `urn:shn:member` number. A Task carrying another person (a Coverage's
+  subscriber, policyholder or payor) under the member's `id` or `urn:shn:member` number, and no
+  Patient of the member's own to identify it (from v1.17.0, a `Task.for` Patient with no birth
+  date and family name), is `422` (`authority`): the number is shared, so it identifies no one
+  patient. Your gateway records the Task's tracking identifier with the provider and the patient
+  it identified, so the documentation the provider sends back for that Task is identified alike
+  (see the provider's `POST /$submit-attachment`).
 
 Nothing else in the Task decides whether it is carried, and at a provider's base nothing in it
 decides where it goes. The network does not judge its `requester`, tracking identifier or
-`payer-url`, and reads its `owner` only for the organization NPIs it states.
+`payer-url`, reads its `owner` only for the organization NPIs it states, and reads its tracking
+identifier only to pair the documentation that answers the Task with it.
 
 **The owner at a provider's base.** From shn-gateway v1.7.0, the gateway reads the organization
 NPIs `Task.owner` states: an NPI on the owner reference itself, on the `organization` of the
@@ -4463,6 +4538,9 @@ refusal as its own:
   `routing`, nothing sent; **a base that names no registered provider:** `404` (`422` for a
   create), `routing`.
 - **A body on a read, vread, delete, `$status`, search or page:** `400`, `integrity`.
+- **A return preference in your `Prefer`** that a frame could not carry as sent (bytes that are
+  not UTF-8), from shn-gateway v1.17.0: `400`, `integrity`. Any other preference is not carried,
+  and refuses nothing.
 - **`channel.endpoint`** that is not an absolute `https` URL with no userinfo, fragment, space or
   backslash, or none: `422`, `integrity`; one that is itself a notification address of the
   network: `422`, `routing`.
@@ -4487,8 +4565,10 @@ refusal as its own:
 
 A provider whose gateway does not take the leg is refused by the Hub on `routing`; the provider's
 own answers and its gateway's refusals (its closed Subscription shape, its network `404` for a
-Subscription not yours, its answer check) are carried as on every leg. The network carries no
-`Prefer` header, so the provider's system answers a create or an update by its own default.
+Subscription not yours, its answer check) are carried as on every leg. From shn-gateway v1.17.0
+at both gateways, the first return preference in your system's `Prefer` reaches the provider's
+system as sent, on the interaction's own request; no other preference does, so the provider's
+system answers those by its own default.
 Each provider's base declares `Subscription` in its CapabilityStatement (exactly the search
 parameters `url`, `status` and `_id`, and `$status`) only when that provider takes the leg.
 

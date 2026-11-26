@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,8 +34,146 @@ var patientRefShape = regexp.MustCompile(`^(?:https?://[A-Za-z0-9.\-]+(?::[0-9]{
 // localRefShape is a well-formed contained reference.
 var localRefShape = regexp.MustCompile(`^#(` + fhirID + `)$`)
 
+// fhirIDOnly is a FHIR id alone.
+var fhirIDOnly = regexp.MustCompile(`^` + fhirID + `$`)
+
+// readPatientReference reads a literal reference by FHIR's reference grammar,
+// by its structure, never by finding "Patient/" in its text. It names
+// a Patient when it is the relative "Patient/<id>", or an http or https URL
+// (a host, no user, query or fragment, no empty path segment) whose path ends
+// in "Patient/<id>", either with an optional trailing "/_history/<version>".
+// ok is false for anything else: another type, another number of segments, an
+// empty id or version, an operation ("$<name>") where the id goes, a URN or
+// another scheme, a "#" (a contained reference, which its caller resolves), a
+// query, an escaped character in the id or version (a "%" escape can hide a
+// "/", so the reference would read two ways; a base's own segments may carry
+// one), or a URL that does not parse. Such a reference names no Patient.
+//
+// id is the Patient id as written. conforms reports whether it, and the
+// version when there is one, are FHIR ids: an id that names one Patient by
+// structure but is not a FHIR id (an underscore, a space, more than 64
+// characters) still names that Patient, and whether to refuse it is the
+// participant's conformance choice, never the network's.
+func readPatientReference(ref string) (id string, conforms, ok bool) {
+	typ, id, conforms, ok := readTypedReference(ref)
+	if !ok || typ != "Patient" {
+		return "", false, false
+	}
+	return id, conforms, true
+}
+
+// resourceTypeName is a FHIR resource type's name, as a reference's type
+// segment spells it.
+var resourceTypeName = regexp.MustCompile(`^[A-Z][A-Za-z]{0,63}$`)
+
+// readTypedReference reads a literal reference to a resource of any type by
+// the grammar readPatientReference reads a Patient's: typ is its type segment
+// (a resource type's name), id its id as written, and conforms and ok as there.
+func readTypedReference(ref string) (typ, id string, conforms, ok bool) {
+	if ref == "" || strings.ContainsAny(ref, "#?") {
+		return "", "", false, false
+	}
+	path := ref
+	absolute := false
+	if i := strings.IndexByte(ref, ':'); i >= 0 && !strings.Contains(ref[:i], "/") {
+		// A scheme: only an http or https URL is read.
+		u, err := url.Parse(ref)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", false, false
+		}
+		// The path as sent, taken from the reference's own text after its
+		// authority, never a path rebuilt from the decoded one, where an
+		// escaped "/" would read as a separator. A base may carry escapes.
+		rest, found := strings.CutPrefix(ref[i+1:], "//")
+		j := strings.IndexByte(rest, '/')
+		if !found || j < 0 {
+			return "", "", false, false
+		}
+		path, absolute = rest[j+1:], true
+	}
+	seg := strings.Split(path, "/")
+	version := ""
+	if n := len(seg); n >= 4 && seg[n-2] == "_history" {
+		version, seg = seg[n-1], seg[:n-2]
+		if version == "" {
+			return "", "", false, false
+		}
+	}
+	n := len(seg)
+	if n < 2 || (!absolute && n != 2) || !resourceTypeName.MatchString(seg[n-2]) || seg[n-1] == "" || strings.HasPrefix(seg[n-1], "$") {
+		return "", "", false, false
+	}
+	for _, s := range seg {
+		if s == "" {
+			return "", "", false, false
+		}
+	}
+	// The segments that name the Patient carry no escape: one can hide a "/",
+	// so the reference would read two ways. A base's own segments may.
+	if strings.Contains(seg[n-1], "%") || strings.Contains(version, "%") {
+		return "", "", false, false
+	}
+	id = seg[n-1]
+	conforms = fhirIDOnly.MatchString(id) && (version == "" || fhirIDOnly.MatchString(version))
+	return seg[n-2], id, conforms, true
+}
+
+// patientRefCompared is how a patient-consistency check reads a literal
+// reference: the Patient id it names by FHIR's reference grammar
+// (readPatientReference), else, for a reference to a patient that names no
+// Patient so (patientLike), the reference as written, which is no member the
+// request binds. names is false for any other reference (another type, a URN,
+// a "#<id>"), which the check resolves or leaves to its own type.
+func patientRefCompared(ref string) (member string, names bool) {
+	if id, _, ok := readPatientReference(ref); ok {
+		return id, true
+	}
+	if patientLike(ref) {
+		return ref, true
+	}
+	return "", false
+}
+
+// patientLike reports whether a reference carries a "Patient" segment, its
+// segments split at "/", ":" and "#" and read without surrounding white
+// space, as written or with its escapes decoded: a reference to a patient,
+// whether or not it names one by FHIR's reference grammar. A "#<id>" and a
+// well-formed reference to another type (readTypedReference) are not.
+func patientLike(ref string) bool {
+	if contained := strings.TrimSpace(ref); strings.HasPrefix(contained, "#") && len(contained) > 1 && !strings.ContainsAny(contained[1:], "/:#") {
+		// A "#<id>" names a contained resource by its id, which its caller
+		// resolves: never a reference to a patient by its text.
+		return false
+	}
+	if typ, _, _, ok := readTypedReference(ref); ok && typ != "Patient" {
+		// A well-formed reference to another type names that type, whatever
+		// its base or id spells.
+		return false
+	}
+	if patientSegment(ref) {
+		return true
+	}
+	decoded, err := url.PathUnescape(ref)
+	return err == nil && decoded != ref && patientSegment(decoded)
+}
+
+// patientSegment reports a "Patient" segment of ref (patientLike).
+func patientSegment(ref string) bool {
+	for _, s := range strings.FieldsFunc(ref, func(r rune) bool { return r == '/' || r == ':' || r == '#' }) {
+		if strings.TrimSpace(s) == "Patient" {
+			return true
+		}
+	}
+	return false
+}
+
 // patientRefMember returns the member a patient reference names, among the
-// resource's contained resources; ok is false when it names none.
+// resource's contained resources; ok is false when it names none. A "#<id>"
+// names the one contained Patient with that id, by its member identifier;
+// any other reference is read by FHIR's reference grammar
+// (readPatientReference), and names the Patient id it writes, whether or not
+// that id is a FHIR id (whether to refuse one that is not is the
+// participant's conformance choice, never the network's).
 func patientRefMember(ref string, contained []map[string]any) (string, bool) {
 	if m := localRefShape.FindStringSubmatch(ref); m != nil {
 		id := m[1]
@@ -53,8 +192,8 @@ func patientRefMember(ref string, contained []map[string]any) (string, bool) {
 		}
 		return containedPatientMember(found)
 	}
-	if m := patientRefShape.FindStringSubmatch(ref); m != nil {
-		return m[1], true
+	if id, _, ok := readPatientReference(ref); ok {
+		return id, true
 	}
 	return "", false
 }
@@ -106,7 +245,7 @@ var idShape = regexp.MustCompile(`^` + fhirID + `$`)
 // first, so a request it refuses is refused as before; the request is then
 // read by its exact member names, and its patient reference resolved in its
 // well-formed forms. A reference that is neither well-formed nor contained
-// keeps the SDK's reading. A request the strict reader refuses for its own
+// names no one (errMemberNamesNoOne), never a member read from its text. A request the strict reader refuses for its own
 // limits (not well-formed UTF-8 or a lone surrogate escape, or past its depth
 // or token bound) is read so too when it reads one way only: it repeats no
 // member name and names its patient's reference, and the contained resources
@@ -165,7 +304,7 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 		if errors.Is(err, errNamedInAnotherCase) {
 			return "", fmt.Errorf("the request's patient: %w", err)
 		}
-		member, err := containedRequestMember(ref, contained, literal)
+		member, err := containedRequestMember(ref, contained)
 		// This reader replaces each byte of not-well-formed UTF-8, and each lone surrogate
 		// escape, with U+FFFD: a member value read from such a byte or escape may have been
 		// sent as any of several values another reader keeps apart. One carrying U+FFFD as
@@ -181,7 +320,7 @@ func eligibilityRequestMember(cer []byte) (string, error) {
 		return "", fmt.Errorf("the request's patient cannot be read one way only: %w", err)
 	}
 	// Contained resources of another JSON type hold no contained Patient.
-	return containedRequestMember(ref, contained, literal)
+	return containedRequestMember(ref, contained)
 }
 
 // blankPatientReference reports whether a CoverageEligibilityRequest, read by
@@ -298,19 +437,20 @@ func replacesCharacters(body []byte) bool {
 
 // containedRequestMember is the member a request's patient reference ref
 // names, with contained its contained resources read by their exact member
-// names and literal the SDK's reading of ref.
-func containedRequestMember(ref string, contained []any, literal string) (string, error) {
+// names.
+func containedRequestMember(ref string, contained []any) (string, error) {
 	if member, ok := patientRefMember(ref, containedObjects(contained)); ok {
 		return member, nil
 	}
 	// A contained reference that names no contained Patient, or more than
-	// one, names no patient. Any other reference that is not a well-formed
-	// one keeps the SDK's reading: a member id is an identifier value, not
-	// limited to a FHIR id's shape, so it is read as before.
+	// one, names no patient. Any other reference names no Patient by FHIR's
+	// reference grammar ("urn:Patient/<id>", "Group/1", "Patient/1/x", a bare
+	// id): it names no one, and the binding refuses it on authority, never a
+	// member read from its text.
 	if strings.HasPrefix(ref, "#") {
 		return "", fmt.Errorf("patient reference %q names no patient", ref)
 	}
-	return literal, nil
+	return "", errMemberNamesNoOne
 }
 
 // eligibilityContainedFor is a request's contained resources, read by their

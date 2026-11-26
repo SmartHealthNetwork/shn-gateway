@@ -39,22 +39,37 @@ type cdexCoding struct {
 	Code   string `json:"code"`
 }
 
-// blankTaskFor reports whether a federated-query Task, read by its exact member
-// names, names its patient by a relative reference that names no one: the
-// member it reads as (one "Patient/" taken off, as cdexTaskQuery takes it)
-// names no member (memberNamesNoOne). An absent or empty Task.for, or a Task
-// that does not read so, is left to the reader that follows.
-func blankTaskFor(task []byte) bool {
+// taskForRead reads a federated-query Task's Task.for, by its exact member
+// names, by FHIR's reference grammar: namesNoOne reports a reference that
+// names no Patient so ("urn:Patient/<id>", "Group/1", "Patient/1/x",
+// "Patient/a%2Fb", a "#<id>" naming no contained Patient or more than one),
+// or names one by an id that names no one ("Patient/"); conforms reports
+// whether the Patient id it names is a FHIR id (a contained Patient's member
+// identifier is not an id, and conforms). An absent or empty Task.for, or a
+// Task that does not read so, is left to the reader that follows.
+func taskForRead(task []byte) (namesNoOne, conforms bool) {
 	var view struct {
 		For *struct {
 			Reference *string `json:"reference"`
 		} `json:"for"`
+		Contained []any `json:"contained"`
 	}
 	if decodeMessage(task, &view) != nil || view.For == nil || view.For.Reference == nil || *view.For.Reference == "" {
-		return false
+		return false, true
 	}
-	return memberNamesNoOne(strings.TrimPrefix(*view.For.Reference, "Patient/"))
+	ref := *view.For.Reference
+	if id, conforms, ok := readPatientReference(ref); ok {
+		return memberNamesNoOne(id), conforms
+	}
+	member, ok := patientRefMember(ref, containedObjects(view.Contained))
+	return !ok || memberNamesNoOne(member), true
 }
+
+// msgFederatedQueryPatientIDNotFHIRID is the refusal of a federated-query
+// Task whose Task.for names its Patient by an id that is not a FHIR id: the
+// request's own shape, refused only by a participant that opted into it
+// (structural and strict).
+const msgFederatedQueryPatientIDNotFHIRID = "federated query Task.for names its Patient by an id that is not a FHIR id"
 
 // cdexTaskQuery is a federated-query Task read as its data request, and the
 // member its patient names. It is the one reading of the Task's patient: the
@@ -64,9 +79,10 @@ func blankTaskFor(task []byte) bool {
 // Task that is not a data request the leg's scope admits (one patient, named
 // document types), or whose patient cannot be read.
 func cdexTaskQuery(task []byte) (shnsdk.ParsedCDexRequest, string, error) {
-	// A Task.for that names no one is refused before the SDK's reader reads
-	// it, whatever that reader answers for it (errMemberNamesNoOne).
-	if blankTaskFor(task) {
+	// A Task.for that names no Patient by FHIR's reference grammar, or names
+	// no one, is refused before the SDK's reader reads it, whatever that
+	// reader answers for it (errMemberNamesNoOne).
+	if namesNoOne, _ := taskForRead(task); namesNoOne {
 		return shnsdk.ParsedCDexRequest{}, "", errMemberNamesNoOne
 	}
 	parsed, err := shnsdk.ParseCDexTaskDataRequest(relativeCDexPatients(task))
@@ -97,8 +113,13 @@ func relativeCDexPatients(task []byte) []byte {
 		return task
 	}
 	relative := func(ref string) string {
-		// Only a member in an id's shape is written into Patient/<member>
-		// and the query: anything else is left as sent, for the check.
+		// A Patient reference names its id, whether or not it is a FHIR id
+		// (a segment, so it holds no "/"). A contained Patient's member is
+		// written into Patient/<member> and the query only in an id's shape:
+		// anything else is left as sent, for the check.
+		if id, _, ok := readPatientReference(ref); ok {
+			return "Patient/" + id
+		}
 		if member, ok := patientRefMember(ref, containedObjects(holder.Contained)); ok && idShape.MatchString(member) {
 			return "Patient/" + member
 		}

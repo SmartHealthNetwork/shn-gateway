@@ -10,51 +10,51 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/pa/dtraddress"
 )
 
-// The edits' names (§8). The engine registers each in relay under its name
+// The edits' names. The engine registers each in relay under its name
 // and records it; nothing here registers them.
 const (
-	// EditHeaderSeal is E-18 (§6.2 step 1): the subscriber's gateway seals
+	// EditHeaderSeal is E-18: the subscriber's gateway seals
 	// the channel, removing channel.endpoint and channel.header from a create
 	// or update it sends; both travel only sealed.
 	EditHeaderSeal = "subscription-header-seal"
-	// EditEndpointRekey is E-19 (§6.2 step 2): the notifier's gateway re-keys
+	// EditEndpointRekey is E-19: the notifier's gateway re-keys
 	// channel.endpoint to its notification address and channel.header to its
 	// credential and the sealed headers.
 	EditEndpointRekey = "subscription-endpoint-rekey"
-	// EditEndpointRestore is E-20 (§6.2 step 3): the subscriber's gateway restores
+	// EditEndpointRestore is E-20: the subscriber's gateway restores
 	// channel.endpoint and channel.header in every Subscription that opens,
 	// and re-keys the answer's addresses under the notifier's stated base.
 	EditEndpointRestore = "subscription-endpoint-restore"
-	// EditURLSearchRekey is E-21 (§6.2 step 4): the notifier's gateway re-keys a search's
+	// EditURLSearchRekey is E-21: the notifier's gateway re-keys a search's
 	// url to the notification address E-19 would write.
 	EditURLSearchRekey = "subscription-url-search-rekey"
 )
 
 // Why E-20 was not made on a Subscription, or on the answer's addresses.
 const (
-	// NotMadeNoEndpoint (§6.2 step 3): the Subscription states no channel.endpoint string.
+	// NotMadeNoEndpoint: the Subscription states no channel.endpoint string.
 	NotMadeNoEndpoint = "no-endpoint"
-	// NotMadeForeignAddress (§6.2 step 3): its endpoint is not a notification address of
+	// NotMadeForeignAddress: its endpoint is not a notification address of
 	// the answering notifier's gateway; it is left as it is.
 	NotMadeForeignAddress = "not-a-notification-address"
-	// NotMadeAnotherBinding (§6.2 step 3): its address names another subscriber or topic.
+	// NotMadeAnotherBinding: its address names another subscriber or topic.
 	NotMadeAnotherBinding = "another-subscriber-or-topic"
-	// NotMadeNoSealedHeaders (§6.2 step 3): its channel.header holds no one X-SHN-Channel
+	// NotMadeNoSealedHeaders: its channel.header holds no one X-SHN-Channel
 	// value.
 	NotMadeNoSealedHeaders = "no-sealed-headers"
 	// NotMadeKeyRetired: its sealed values are under a key that is neither
-	// current nor the configured predecessor (§6.2 "Key rotation").
+	// current nor the configured predecessor.
 	NotMadeKeyRetired = "key-retired"
-	// NotMadeSealInvalid (§6.2 step 3): its sealed values do not open.
+	// NotMadeSealInvalid: its sealed values do not open.
 	NotMadeSealInvalid = "seal-invalid"
-	// NotMadeNoStatedBase (§6.2 step 3): the answer holds an http or https
+	// NotMadeNoStatedBase: the answer holds an http or https
 	// fullUrl or link and the notifier stated no base, so none is re-keyed.
 	NotMadeNoStatedBase = "no-stated-base"
-	// NotMadeUnreadable (§6.2 step 3): the Bundle's entry or link list is
+	// NotMadeUnreadable: the Bundle's entry or link list is
 	// present and not an array, or an entry is not an object, so nothing in
 	// it is restored or re-keyed.
 	NotMadeUnreadable = "unreadable-bundle"
-	// NotMadeLinkURL (§6.2 step 3): a url parameter of a link, any of them,
+	// NotMadeLinkURL: a url parameter of a link, any of them,
 	// with or without a modifier, names a notification address, or cannot be
 	// read, and neither the search this gateway framed (Search) nor a
 	// Subscription restored in the same answer restores it to the
@@ -62,8 +62,8 @@ const (
 	NotMadeLinkURL = "link-url-not-restored"
 )
 
-// Search is the search by url a subscriber's gateway framed for its system
-// (§6.2 step 4), as E-20 restores the answer's links from it: Endpoint, the
+// Search is the search by url a subscriber's gateway framed for its system,
+// as E-20 restores the answer's links from it: Endpoint, the
 // endpoint the system searched by, and Sealed, the values this gateway sealed
 // it to (SealEndpointForSearch: the current key's, and the predecessor's
 // during an overlap), each "<kid>.<sealed>", which E-21 wrote into the
@@ -74,12 +74,12 @@ type Search struct {
 	Sealed   []string
 }
 
-// NotMade is an edit the library did not make, and why (§8: each edit has
+// NotMade is an edit the library did not make, and why (each edit has
 // its not-made reasons, which the engine records).
 type NotMade struct{ Edit, Reason string }
 
 // SealOutbound is E-18, at the subscriber's gateway on a subscribe leg's
-// create or update (§6.2 step 1): it seals the channel, channel.endpoint
+// create or update: it seals the channel, channel.endpoint
 // (SealEndpoint) and the channel.header values (SealHeaders, an absent header
 // an empty set), and returns the body with the channel.endpoint and
 // channel.header members removed and every other byte as it was, with the two
@@ -180,7 +180,7 @@ func removeMembers(body []byte, obj *jnode, names ...string) ([]byte, error) {
 }
 
 // RekeyForNotifier is E-19, at the notifier's gateway on a subscribe leg's
-// create or update forwarded to its system (§6.2 step 2, §6.3): it sets
+// create or update forwarded to its system: it sets
 // channel.endpoint to a.String() and channel.header to exactly two values,
 // "Authorization: <k.Credential(a, sealedHeaders)>" and
 // "X-SHN-Channel: <sealedHeaders>", and leaves every other byte as it was. The
@@ -234,7 +234,7 @@ func RekeyForNotifier(k Keys, a Address, sealedHeaders string, s *Subscription) 
 }
 
 // Restore is E-20, at the subscriber's gateway on a subscribe leg's answer
-// relayed to its system (§6.2 step 3): body is a Subscription, or a Bundle
+// relayed to its system: body is a Subscription, or a Bundle
 // (a searchset and its pages) whose entries' Subscriptions are each
 // restored, outcome entries carried as they are.
 //
@@ -644,7 +644,7 @@ func underBase(v, base, counterpart string) (string, bool) {
 var fhirSearchEscaper = strings.NewReplacer(`\`, `\\`, `,`, `\,`, `$`, `\$`, `|`, `\|`)
 
 // RekeySearchURL is E-21, at the notifier's gateway on a subscribe leg's
-// search forwarded to its system (§6.2 step 4): it returns q with url set to
+// search forwarded to its system: it returns q with url set to
 // the notification address E-19 would write for each sealed endpoint the
 // subscriber's gateway framed (Address{notifierIngress, b.Topic,
 // b.Subscriber, sealed}), as one comma-separated value during a key overlap,
@@ -680,7 +680,7 @@ func RekeySearchURL(notifierIngress string, b Binding, sealedEndpoints []string,
 }
 
 // SearchURLValues reads a FHIR search's url parameter value, as a subscriber's
-// system sends it (§6.2 step 4), into the endpoints it names, each to be
+// system sends it, into the endpoints it names, each to be
 // sealed by SealEndpointForSearch: the value is split at each comma that is
 // not escaped, and each part unescaped (`\,`, `\$`, `\|` and `\\` are a comma,
 // a dollar sign, a vertical bar and a backslash). A backslash before any

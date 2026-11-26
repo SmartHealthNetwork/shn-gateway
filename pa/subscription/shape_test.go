@@ -42,7 +42,7 @@ func TestParseSubscription(t *testing.T) {
 	}
 }
 
-// §7.1's closed shape: each rule's refusal, 403 authority, beside its
+// The closed shape: each rule's refusal, 403 authority, beside its
 // control row.
 func TestCheckShape(t *testing.T) {
 	const backportProfile = `"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription"`
@@ -253,7 +253,7 @@ func TestParseFilters(t *testing.T) {
 	wantRefusal(t, "a plus sign after a system", r, http.StatusForbidden, recording.RefusalAuthority)
 }
 
-// The filter matcher (§7.1 rule 3, N4).
+// The filter matcher (N4).
 func TestMatchIdentifiers(t *testing.T) {
 	const npiSys, otherSys = "http://hl7.org/fhir/sid/us-npi", "urn:oid:2.16.840.1.113883.4.4"
 	one := []Identifier{{npiSys, "1234567893"}}
@@ -288,7 +288,7 @@ func TestMatchIdentifiers(t *testing.T) {
 	}
 }
 
-// §6.5's endpoint rule.
+// The endpoint rule.
 func TestCheckEndpoint(t *testing.T) {
 	isParticipant := func(s string) bool { return s == "provider-1" }
 	isTopic := func(s string) bool { return s == "test" }
@@ -338,7 +338,7 @@ func query(t *testing.T, raw string) url.Values {
 	return q
 }
 
-// §7.2's search rule, named parameter by named parameter.
+// The search rule, named parameter by named parameter.
 func TestCheckSearch(t *testing.T) {
 	for _, raw := range []string{
 		"url=https://x",
@@ -389,7 +389,7 @@ func TestCheckPageQuery(t *testing.T) {
 	}
 }
 
-// §6.1's id rule, at its 64-character boundary.
+// The id rule, at its 64-character boundary.
 func TestCheckID(t *testing.T) {
 	for _, id := range []string{"a", "sub-1", "A.b-9", strings.Repeat("a", 64), "...", ".a", "a."} {
 		if r := CheckID(id); r != nil {

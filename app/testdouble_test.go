@@ -35,9 +35,10 @@ func productionShaped() map[string]string {
 }
 
 // A released build refuses to boot with SHN_FAKE_VALIDATOR set, whatever else is
-// configured: at every conformance level (none included, where D117 leaves no
-// runtime validation unless the participant opts in), beside a real validator URL,
-// with no validator at all, and for any value, not only the one a test build honours.
+// configured: at every conformance level (none included, where a message SHN
+// builds is validated at runtime only when the participant opts into checking),
+// beside a real validator URL, with no validator at all, and for any value, not
+// only the one a test build honours.
 func TestReleasedBuildRefusesTheValidatorTestDoubleAtBoot(t *testing.T) {
 	releasedBuild(t)
 	if _, err := loadConfig(env(productionShaped())); err != nil {

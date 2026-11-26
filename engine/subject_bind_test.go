@@ -500,10 +500,6 @@ func TestPayerBind_UnheldMemberBindsFromCarriedPatientByDefault(t *testing.T) {
 			_, pci, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, false))
 			return pci, status, msg
 		},
-		"PAS contained in the Claim": func() (string, int, string) {
-			_, pci, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, true))
-			return pci, status, msg
-		},
 		"DTR questionnaire parameter": func() (string, int, string) {
 			body := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","resource":` + patient + `}]}`)
 			return g.bindNextQuestionSubjectContext(ctx, "Patient/"+strangerMember, body)
@@ -515,6 +511,13 @@ func TestPayerBind_UnheldMemberBindsFromCarriedPatientByDefault(t *testing.T) {
 				t.Fatalf("status=%d msg=%q pci=%q, want bound to %q", status, msg, pci, want)
 			}
 		})
+	}
+	// A Patient the Claim contains, where Claim.patient names the Bundle's own Patient
+	// entry, which carries neither fact: that entry is the subject resource
+	// (pasSubjectResource), so the member binds by its id alone, never from the
+	// contained Patient. Earlier releases bound it from the contained one.
+	if _, pci, status, msg := g.conformantPASBindContext(ctx, pasBundleWithPatient(t, strangerMember, patient, true)); status != 0 || pci != strangerPCI() {
+		t.Fatalf("PAS contained in the Claim beside its own bare entry: status=%d msg=%q pci=%q, want bound by id alone %q", status, msg, pci, strangerPCI())
 	}
 }
 

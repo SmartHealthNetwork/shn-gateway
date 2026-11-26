@@ -1370,7 +1370,7 @@ func TestFailEvidenceLinkage(t *testing.T) {
 		{"the system did not answer", &SoRReadError{Kind: SoRUnavailable}, http.StatusServiceUnavailable, false, "PAS evidence linkage failed"},
 		{"the system's answer was unusable", &SoRReadError{Kind: SoRInvalidResponse}, http.StatusBadGateway, false, "PAS evidence linkage failed"},
 		{"the gateway's own failure", errors.New("evidence graph too large"), http.StatusBadGateway, false, "PAS evidence linkage failed"},
-		{"evidence E-06 would re-point under a signature (D113)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusBadGateway, true, "signed content cannot be edited (E-06, Signature in Condition)"},
+		{"evidence E-06 would re-point under a signature (a fidelity refusal of SHN's own edit)", &relay.SignedContentError{Edit: relay.EditEvidenceSubjectRekey, Carrier: "Signature in Condition"}, http.StatusBadGateway, true, "signed content cannot be edited (E-06, Signature in Condition)"},
 		{"the gateway could not prepare a record it read", errEvidencePrepare, http.StatusInternalServerError, false, "prepare evidence record failed"},
 		{"a record read the splice cannot carry as read", fmt.Errorf("%w: it is not UTF-8", errRecordNotCarried), http.StatusBadGateway, true, "a record read from the system of record cannot be carried as read: it is not UTF-8"},
 		{"a record the request references that the system does not hold", recordNotHeld("Condition/c1"), http.StatusUnprocessableEntity, true, "a record the request references cannot be filled: Condition/c1 is not held by the system of record"},

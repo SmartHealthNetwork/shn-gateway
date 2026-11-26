@@ -1,7 +1,7 @@
 //go:build !shn_coreonly
 
-// workstream_fqs.go — the Federated Query Services workstream's adapter
-// (design §4.2): its one leg, the federated query, derived from the gateway's
+// workstream_fqs.go — the Federated Query Services workstream's adapter: its
+// one leg, the federated query, derived from the gateway's
 // copy of the network's leg taxonomy (fqs.json), its Da Vinci ingress route,
 // and what each transmit of it may carry. Its other files hold the leg's
 // recipient handler (workstream_fqs_inbound.go), the facility's records

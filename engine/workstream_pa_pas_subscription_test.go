@@ -382,7 +382,7 @@ func TestPASSubscribe_TheCapabilityStatementIsASignalOnly(t *testing.T) {
 	}
 }
 
-// The loop rule (§6.5) knows the PAS topic's notification addresses as it
+// The loop rule knows the PAS topic's notification addresses as it
 // knows the HRex Task topic's: an endpoint that is a registered gateway's
 // /notify/pas/ address is the network's own, whichever topic's Subscription
 // names it, and a token no topic serves is not.

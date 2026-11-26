@@ -209,7 +209,7 @@ func TestBuildWiresDefaultLanesIntoCertification(t *testing.T) {
 // build asks for the boot certification warm-up exactly when certification
 // evidence is collected: at every level but none, where no certification
 // worker starts and nothing would use a warmed validator. An unset level is
-// none (D116).
+// none.
 func TestBuildWarmsCertificationOnlyWhenItRuns(t *testing.T) {
 	unresolvedComposeLanes(t)
 	for level, want := range map[string]bool{"": false, "observe": true, "structural": true, "strict": true, "none": false} {

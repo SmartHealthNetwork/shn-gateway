@@ -1,7 +1,7 @@
 //go:build !shn_coreonly
 
-// workstream_pa.go — the Prior Authorization workstream's adapter (design
-// §4.2): its leg catalog, derived from the gateway's copy of the network's leg
+// workstream_pa.go — the Prior Authorization workstream's adapter: its leg
+// catalog, derived from the gateway's copy of the network's leg
 // taxonomy, its participant-facing routes, its ownership rows
 // (workstream_pa_ownership.go) and which legs name involved patients
 // (workstream_pa_involved.go). The core reads them only through

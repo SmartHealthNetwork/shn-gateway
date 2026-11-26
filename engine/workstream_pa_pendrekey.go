@@ -176,8 +176,7 @@ func refusePendRekey(w http.ResponseWriter, r *http.Request, err error) {
 		"the gateway cannot re-key the answer's documentation return address to the network (fidelity of SHN's own edit): " + err.Error())})
 }
 
-// pasNotifiedReturnRekey is E-22 (pas-notified-return-rekey; the
-// notifications design §6.4, D127 decision 10): E-10's change, made on a
+// pasNotifiedReturnRekey is E-22 (pas-notified-return-rekey): E-10's change, made on a
 // payer's PAS content notification the provider's gateway delivers to its own
 // system. Each PAS Task's payer-url input in the notified decision, found by
 // structure (payerURLInputs), is re-keyed to this gateway's documentation

@@ -39,6 +39,7 @@ import (
 var expectedDDLTables = []string{
 	"gw_auth_number", "gw_pended_claim", "gw_pended_claim_key", "gw_eob", // business Store
 	"gw_pa_continuation", "gw_pa_continuation_item", // the continuation store
+	"gw_cdex_request",                                               // the CDex request record
 	"gw_ingress_key", "gw_replay", "gw_exchange", "gw_exchange_leg", // shared replica state
 	"gw_audit_outbox", // the audit outbox
 }

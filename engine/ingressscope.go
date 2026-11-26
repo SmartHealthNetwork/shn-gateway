@@ -233,8 +233,8 @@ func challengeScope(need taskPermission) string {
 	return ""
 }
 
-// The scopes a payer gateway's Subscription routes take (the notifications
-// design §6.1): a system-level Subscription scope that permits the
+// The scopes a payer gateway's Subscription routes take: a system-level Subscription scope
+// that permits the
 // interaction, as SMART defines one, read as a Task scope is: create (c) for a
 // create; read (r) for a read, a vread and an instance $status; update (u)
 // for an update; delete (d) for a delete; search (s) for a search and its

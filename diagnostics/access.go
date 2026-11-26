@@ -86,7 +86,14 @@ type AccessLine struct {
 	// lists left out: the exchange has no record under them
 	// (engine.InvolvedOmitReasons). Absent when none was.
 	InvolvedOmitted map[string]int `json:"involvedOmitted,omitempty"`
-	Findings        AccessFindings `json:"findings"`
+	// InvolvedSummaryNotSent is why the gateway sent no summary of an
+	// involved list it sent to a Hub that reads summaries
+	// (engine.InvolvedSummaryNotSentReasons):
+	// involved-summary-over-limit, involved-summary-unsigned or
+	// involved-summary-binding-unsettled. Absent when every summary due was
+	// sent, and for a Hub that does not read them. Evolving.
+	InvolvedSummaryNotSent string         `json:"involvedSummaryNotSent,omitempty"`
+	Findings               AccessFindings `json:"findings"`
 	// RelayEdits are the ids of the registered edits (E-01 …) the gateway
 	// applied to the bytes it sent on the leg, in transmit order, each once,
 	// named only once the bytes were sent (engine.ExchangeRecord.Edits). A

@@ -59,7 +59,8 @@ type PgStore struct {
 	// retention window. Injected so the retention rows are deterministic; never
 	// reassigned outside tests.
 	now func() time.Time
-	// mu guards lastPurge only (the lazy retention sweep's throttle). Every other
+	// mu guards the lazy retention sweeps' throttles only (lastPurge and the
+	// two below). Every other
 	// field is read-only after construction, and the ledger's mutual exclusion is
 	// the database's row lock, not this mutex.
 	mu        sync.Mutex
@@ -69,6 +70,9 @@ type PgStore struct {
 	// different call paths: one throttle would let a busy ledger starve the
 	// continuation sweep, and vice versa.
 	lastContinuationPurge time.Time
+	// lastCDexRequestPurge throttles the CDex request record's own lazy sweep,
+	// separate from the other two for the same reason.
+	lastCDexRequestPurge time.Time
 }
 
 // NewPgStore runs EnsureSchema (the fail-fast: pgxpool.New is lazy and does not
@@ -194,6 +198,42 @@ CREATE INDEX IF NOT EXISTS gw_pa_continuation_retention ON gw_pa_continuation (h
 -- back '' and an amendment built from such a row is refused, never given the
 -- amendment's own time.
 ALTER TABLE gw_pa_continuation ADD COLUMN IF NOT EXISTS claim_created TEXT NOT NULL DEFAULT '';
+-- gw_cdex_request is the record of the CDex attachment requests this holder's
+-- gateway carried (engine.CDexRequestStore): one row per request, keyed by the
+-- other participant and the request's tracking identifier, holding the member
+-- and the patient identifier the request was bound to. A submission that
+-- answers the request pairs with it by that key. Shared across the holder's
+-- replicas and durable, so a submission landing on another replica, or after a
+-- restart, still pairs.
+--
+-- SCALARS ONLY — NO OPAQUE COLUMN (AI-1, ddl_fence): opaque identifiers, a flag
+-- and a time; nothing of the request's or the submission's content.
+--
+-- conflicted marks a key recorded for two different (member, patient) pairs:
+-- it names no one request, and its first member and patient are kept, never
+-- overwritten. Retention counts from changed_at, the store's OWN clock (the
+-- record or the conflict), for the pend ledger's six months.
+--
+-- The CHECK is the backstop for engine.MaxCDexTrackingBytes: the tracking
+-- identifier is participant-supplied and part of the primary key, so an
+-- oversized value would overflow the btree index row. Callers and both stores
+-- refuse it first (see gw_replay for the same pairing).
+CREATE TABLE IF NOT EXISTS gw_cdex_request (
+    holder_id       TEXT NOT NULL,
+    counterparty    TEXT NOT NULL,
+    tracking_system TEXT NOT NULL,
+    tracking_value  TEXT NOT NULL,
+    member_id       TEXT NOT NULL,
+    subject_pci     TEXT NOT NULL,
+    conflicted      BOOLEAN NOT NULL DEFAULT false,
+    changed_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (holder_id, counterparty, tracking_system, tracking_value),
+    CHECK (octet_length(tracking_system) + octet_length(tracking_value) <= 512)
+);
+-- The tracking identifier with any participant: a lookup with no record for
+-- its own participant says whether another participant's request holds it.
+CREATE INDEX IF NOT EXISTS gw_cdex_request_by_tracking ON gw_cdex_request (holder_id, tracking_system, tracking_value);
+CREATE INDEX IF NOT EXISTS gw_cdex_request_retention ON gw_cdex_request (holder_id, changed_at);
 -- gw_pa_continuation_item is the item map: one row per line the submission
 -- carried, with the sequence it was submitted under, the product it asked for,
 -- its date of service and the trace number the payer echoes. It is what a later
@@ -303,7 +343,8 @@ CREATE INDEX IF NOT EXISTS gw_audit_outbox_due ON gw_audit_outbox (holder_id, ne
 
 // EnsureSchema creates the gateway tables (business Store: gw_auth_number,
 // gw_pended_claim with the pend ledger's gw_pended_claim_key, the continuation
-// store's gw_pa_continuation with gw_pa_continuation_item, and gw_eob, which
+// store's gw_pa_continuation with gw_pa_continuation_item, the CDex request
+// record gw_cdex_request, and gw_eob, which
 // nothing writes or reads any more; shared replica state: gw_ingress_key,
 // gw_replay, gw_exchange, gw_exchange_leg; and the audit outbox,
 // gw_audit_outbox) if absent (idempotent; plain DDL, no

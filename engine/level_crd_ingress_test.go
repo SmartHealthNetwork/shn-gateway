@@ -216,11 +216,11 @@ func TestLevelCRDIngress_DraftOrderWithoutSubject(t *testing.T) {
 	}
 }
 
-// The CRD legs' own patient check compares a draft order's subject with the
-// hook's patientId as written, version included: a versioned reference to the
-// hook's own patient is another patient there (refused at strict, recorded at
-// observe and structural, not checked at none), though the involved list
-// reads it as the hook's patient (carriedMembers).
+// The CRD legs' own patient check reads a draft order's subject by FHIR's
+// reference grammar: a versioned reference to the hook's own patient names that
+// patient, as the involved list reads it (carriedMembers). It is carried at
+// every level and records no patient.mixed finding; earlier releases compared
+// it as written, version included, and refused it at strict.
 func TestLevelCRDIngress_VersionedOwnDraftOrderSubject(t *testing.T) {
 	body := bytes.Replace(ehrRequest(supported), []byte(`"subject" : { "reference" : "Patient/example" }`), []byte(`"subject" : { "reference" : "Patient/example/_history/2" }`), 1)
 	if bytes.Equal(body, ehrRequest(supported)) {
@@ -229,7 +229,14 @@ func TestLevelCRDIngress_VersionedOwnDraftOrderSubject(t *testing.T) {
 	for _, level := range allLevels {
 		t.Run(level.String(), func(t *testing.T) {
 			env, rec, findings := levelIngressRow(t, newPrefetchSoR(), level, body)
-			wantLevelOutcome(t, level, env, rec, findings, RulePatientMixed, http.StatusForbidden, "inconsistent patient reference in ingress payload")
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s, network hits %d; want it carried", rec.Code, rec.Body.String(), env.routeHitCount())
+			}
+			for _, f := range findings {
+				if f.Rule == RulePatientMixed {
+					t.Fatalf("a versioned reference to the hook's own patient recorded %+v", f)
+				}
+			}
 		})
 	}
 }

@@ -24,7 +24,7 @@ const (
 )
 
 // cdexRequestCodeTaken reports whether the Task's code is one the leg carries,
-// read by system and code: a request for attachments by code, or (D128) a
+// read by system and code: a request for attachments by code, or a
 // request for a questionnaire to be completed. Any other code, the CDex
 // data-request codes among them, is outside the leg's authority. Both ends of
 // the leg decide by it.
@@ -42,7 +42,7 @@ var v20203MB = cdextask.Coding{System: "http://terminology.hl7.org/CodeSystem/v2
 // Task.for, on the reference itself (Task.for.identifier) and on the Patient it
 // contains as Task.for. ok is false when it names none, two that differ, or an
 // identifier on the reference that cannot be read: it then names no one patient
-// the network can identify (D121). Whether the
+// the network can identify. Whether the
 // Patient is contained, or the member number sits on the reference, is the
 // profile's concern, never the network's.
 func cdexTaskMember(task cdextask.Task) (string, bool) {

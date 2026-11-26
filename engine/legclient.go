@@ -60,7 +60,7 @@ type legFailure struct {
 
 // routeFor is the route the core will send leg to recipient on: the
 // read-only query a module 1 site asks before it builds, so that it builds at
-// the line the core routes (design §3.2, Line choice). It observes nothing; a
+// the line the core routes. It observes nothing; a
 // site that refuses on its error records the refusal itself (selectLegLine).
 func (g *Gateway) routeFor(leg, recipient string, builder relay.BuilderID) (legRoute, error) {
 	return g.selectLegRoute(recipient, leg, builder)

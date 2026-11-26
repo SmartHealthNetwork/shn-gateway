@@ -481,7 +481,7 @@ func (g *Gateway) handleDTRIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The payer's answer is judged as the PAS answers this ingress carries are,
-	// whether or not module 2 then renames it (D48): payload conformance at
+	// whether or not module 2 then renames it: payload conformance at
 	// this gateway's level, every payer alike. An empty answer (a 204, or a 2xx
 	// with no body) carries no package to judge and is carried as sent.
 	answerCtx := withFindingContext(r.Context(), findingContext{LegType: legType, CorrelationID: child, Seam: "provider-ingress", Whose: "peer"})

@@ -891,34 +891,34 @@ func (d *Document) SignedCarrier(n NodeID) string {
 // (stringAt). Any other change an exempt edit makes to signed content is
 // refused, as every other edit's is.
 var signedExempt = map[EditID]func(m *model, eff effect) bool{
-	// D127: the return address of a pended PAS answer's Task is re-keyed
-	// to the network even when signed, and the forward discloses it.
+	// The return address of a pended PAS answer's Task is re-keyed to the
+	// network even when signed, so every message routes through the network,
+	// and the forward discloses it.
 	EditPASPendReturnRekey: stringAt((*model).payerURLValue),
-	// D127: so is the return address of a payer's attachment-request Task.
+	// So is the return address of a payer's attachment-request Task.
 	EditCDexTaskReturnRekey: stringAt((*model).payerURLValue),
-	// D127 decision 13, applied to the notified decision (the lead,
-	// 2026-11-12): so is the return address of a PAS Task in a payer's
-	// content notification.
+	// So is the return address of a PAS Task in a payer's content
+	// notification: the same rule, applied to the notified decision.
 	EditPASNotifiedReturnRekey: stringAt((*model).payerURLValue),
-	// D128: the questionnaireAdaptive address is re-keyed even where the
+	// The questionnaireAdaptive address is re-keyed even where the
 	// payer's signature covers it, and restored even where the provider's
 	// does; each place may also take the one form change adaptivePair allows.
 	EditDTRAdaptiveAddressRekey:   stringAt((*model).adaptiveAddressValue),
 	EditDTRAdaptiveAddressRestore: stringAt((*model).adaptiveAddressValue),
-	// D132 (N2): a topic Subscription's channel.endpoint and channel.header
-	// are re-keyed to the notifier gateway's notification address and
-	// credential even where a signature covers them, and the forward
-	// discloses it.
+	// A signed topic Subscription is re-keyed and disclosed, as a signed
+	// payer-url is: its channel.endpoint and channel.header are re-keyed to
+	// the notifier gateway's notification address and credential even where
+	// a signature covers them, and the forward discloses it.
 	EditSubscriptionEndpointRekey: (*model).subscriptionChannelChange,
-	// D132 (N2): the subscriber's gateway seals a topic Subscription's
+	// By the same rule, the subscriber's gateway seals a topic Subscription's
 	// channel (E-18) and restores it on the answers (E-20) even where a
 	// signature covers it, and each is disclosed.
 	EditSubscriptionHeaderSeal:      (*model).subscriptionChannelSeal,
 	EditSubscriptionEndpointRestore: (*model).subscriptionChannelRestore,
-	// The CDex design §15.7, applied by the lead as E-12 is (D128): a CDex
-	// Task notification's addresses into the provider's server are re-keyed
-	// to the payer gateway's base for that provider even where a signature
-	// covers them, and the delivery discloses it.
+	// As E-12 is: a CDex Task notification's
+	// addresses into the provider's server are re-keyed to the payer
+	// gateway's base for that provider even where a signature covers them,
+	// and the delivery discloses it.
 	EditCDexTaskNotificationAddressRekey: stringAt((*model).notificationAddressValue),
 }
 
@@ -946,7 +946,8 @@ func stringAt(place func(m *model, n splice.NodeID) bool) func(m *model, eff eff
 	}
 }
 
-// subscriptionChannelChange is E-19's exemption (D132, N2): a change of the
+// subscriptionChannelChange is E-19's exemption (a signed Subscription is
+// re-keyed and disclosed, as a signed payer-url is): a change of the
 // root Subscription's channel that is a replace, with a JSON string, of its
 // endpoint string; a replace, with a JSON array of strings, of its header
 // array; the insert of an endpoint member that is a JSON string, into a

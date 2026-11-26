@@ -106,7 +106,7 @@ func cdexDataRequest(system, code string) func(t *testing.T) []byte {
 }
 
 // cdexQuestionnaireTasks are the CDex 2.1.0 IG's own questionnaire-request
-// Tasks, byte for byte as published (D128):
+// Tasks, byte for byte as published:
 //   - Task-cdex-task-inline-example22.json, the Task the IG's questionnaire
 //     page has the payer POST (a static questionnaire;
 //     https://hl7.org/fhir/us/davinci-cdex/STU2.1/Task-cdex-task-inline-example22.json);
@@ -174,7 +174,7 @@ func TestCDexRequestIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 		"not a Task": {func(*testing.T) []byte { return []byte(`{"resourceType":"Parameters"}`) }, "provider-1", http.StatusForbidden, errCDexRequestNotTask, RefusalAuthority},
 		"no code":    {func(t *testing.T) []byte { return cdexRequestEdit(t, `"code" : {`, `"codeX" : {`) }, "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
 		// The CDex data-request Tasks (the IG's cdex-temp codes) are outside
-		// the leg's authority (the design, §12), whatever else the Task says.
+		// the leg's authority, whatever else the Task says.
 		"a data request by code":          {cdexDataRequest(cdexTempCodes, "data-request-code"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
 		"a data request by query":         {cdexDataRequest(cdexTempCodes, "data-request-query"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
 		"a data request by questionnaire": {cdexDataRequest(cdexTempCodes, "data-request-questionnaire"), "provider-1", http.StatusForbidden, errCDexRequestCode, RefusalAuthority},
@@ -774,7 +774,7 @@ func runCDexRequestIngress(t *testing.T, level ConformanceEnforcement, body []by
 var cdexRequestAnswer = []byte(`{"resourceType":"Task","id":"t-1","status":"requested","intent":"order"}`)
 
 // A Task the network can bind to a patient, coded as a request for
-// attachments by code or (D128) for a questionnaire, is carried to the
+// attachments by code or for a questionnaire, is carried to the
 // provider its base names exactly as sent, and the provider's answer relayed exactly, with
 // its status and no Location, at every level, whichever form names the member
 // number: the Patient it contains as Task.for (the IG's own example),
@@ -797,7 +797,7 @@ func TestCDexRequestIngress_CarriesTheTaskAsSent(t *testing.T) {
 			})
 		},
 	}
-	// The IG's questionnaire-request Tasks (D128), as published.
+	// The IG's questionnaire-request Tasks, as published.
 	for _, f := range cdexQuestionnaireTasks {
 		bodies["the IG's "+f] = func(t *testing.T) []byte { return cdexFixture(t, f) }
 	}
@@ -834,19 +834,24 @@ func TestCDexRequestIngress_CarriesTheTaskAsSent(t *testing.T) {
 	}
 }
 
-// Today's bind of a payer-system member number, pinned so that a change to it
-// is made on purpose: the shared rule reads a carried Patient's demographics
-// only when its id is the member number or it carries the number under
-// shnsdk.MemberSystem, so a Task naming its member under the payer's own
-// identifier system, as the CDex IG's example does, derives the patient's
-// identifier from the number alone, as the provider's CDex submission keyed by
-// the same number does. A Coverage's subscriber carrying that same payer-system
-// number is not read as sharing it, so the Task is carried, at every level.
-func TestCDexRequestIngress_APayerSystemMemberNumberDerivesFromTheNumberAlone(t *testing.T) {
+// The Task's own subject Patient, the contained Patient Task.for names, decides
+// the binding of a member the payer's system does not hold, whatever system the
+// member number is under: the CDex IG's example, which names its member under
+// the payer's own identifier system, binds from that Patient's birth date and
+// family name (earlier releases derived it from the number alone, as the
+// submission did; the submission now pairs with the request by its tracking
+// identifier). A Task.for naming the member by identifier alone has no subject
+// Patient and binds by the number alone; a Coverage's subscriber carrying that
+// same payer-system number is not read as sharing it, so the Task is carried,
+// at every level.
+func TestCDexRequestIngress_TheTasksSubjectPatientDecidesItsBinding(t *testing.T) {
 	t.Parallel()
 	mb := map[string]any{"coding": []any{map[string]any{"system": v20203MB.System, "code": "MB"}}}
 	payerNumber := map[string]any{"type": mb, "system": "http://example.org/cdex/payer/member-ids", "value": "Member123"}
-	want := derivedPCI("Member123", "", "")
+	wants := map[string]string{
+		"the IG's example as sent":                           derivedPCI("Member123", "1987-02-20", "Shaw"),
+		"a subscriber carrying the same payer-system number": derivedPCI("Member123", "", ""),
+	}
 	for name, body := range map[string]func(t *testing.T) []byte{
 		// Its contained Patient has a birth date and a family name.
 		"the IG's example as sent": cdexRequestTask,
@@ -876,8 +881,8 @@ func TestCDexRequestIngress_APayerSystemMemberNumberDerivesFromTheNumberAlone(t 
 				env.substrate.mu.Lock()
 				subjects := slices.Clone(env.substrate.authorizedSubjects)
 				env.substrate.mu.Unlock()
-				if len(subjects) != 1 || subjects[0] != want {
-					t.Fatalf("authorized for %q, want the identifier derived from the member number alone %s", subjects, want)
+				if want := wants[name]; len(subjects) != 1 || subjects[0] != want {
+					t.Fatalf("authorized for %q, want %s", subjects, want)
 				}
 			})
 		}

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// E-20 reads the address by its tail alone (§6.2 step 3 as corrected): the
+// E-20 reads the address by its tail alone: the
 // subscriber's gateway does not know the notifier gateway's ingress, so
 // whatever comes before "/notify/<topic>/<subscriber>/<kid>/<sealed>" is not
 // read, and what the restore rests on is that the seals open under the binding

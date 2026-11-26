@@ -328,8 +328,8 @@ func TestSubscriber_TheFrameHeaders(t *testing.T) {
 	if h := f.frameHeaders(); len(h) != 1 || h[shnsdk.FrameHeaderSubscriptionRequest] != "GET Subscription/s1" {
 		t.Fatalf("headers %v", h)
 	}
-	f = &subscribeRequest{request: "PUT Subscription/s1", endpoint: "e", channel: "c", ifMatch: `W/"1"`, contentType: "application/fhir+json"}
-	if h := f.frameHeaders(); len(h) != 5 || h[shnsdk.FrameHeaderIfMatch] != `W/"1"` || h[shnsdk.FrameHeaderSubscriptionEndpoint] != "e" ||
+	f = &subscribeRequest{request: "PUT Subscription/s1", endpoint: "e", channel: "c", ifMatch: `W/"1"`, prefer: "return=minimal", contentType: "application/fhir+json"}
+	if h := f.frameHeaders(); len(h) != 6 || h[shnsdk.FrameHeaderIfMatch] != `W/"1"` || h[shnsdk.FrameHeaderPrefer] != "return=minimal" || h[shnsdk.FrameHeaderSubscriptionEndpoint] != "e" ||
 		h[shnsdk.FrameHeaderSubscriptionChannel] != "c" || h["Content-Type"] != "application/fhir+json" {
 		t.Fatalf("headers %v", h)
 	}

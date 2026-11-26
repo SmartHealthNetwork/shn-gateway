@@ -133,7 +133,7 @@ func TestCDexRequest_CarriedToTheProvidersTaskEndpoint(t *testing.T) {
 	}
 }
 
-// The CDex 2.1.0 IG's own questionnaire-request Tasks (D128), at every level:
+// The CDex 2.1.0 IG's own questionnaire-request Tasks, at every level:
 // each reaches the provider's Task endpoint exactly as published but for its
 // one payer-url, re-keyed to this gateway's return path for the sending payer
 // (E-11) and disclosed. The questionnaire canonical, the signature-flag input
@@ -237,15 +237,15 @@ func TestCDexRequest_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 	}
 }
 
-// The provider's gateway binds the Task by its member number exactly as the
-// payer's ingress does (TestCDexRequestIngress_APayerSystemMemberNumberDerivesFromTheNumberAlone):
-// a member its system does not hold derives from the number alone, so the
-// Task and its documentation submission name one patient. Bound so, under a
-// token for that patient, the binding differs from nothing; under a token for
+// The provider's gateway binds the Task from its own subject Patient exactly as
+// the payer's ingress does (TestCDexRequestIngress_TheTasksSubjectPatientDecidesItsBinding):
+// a member its system does not hold derives from the contained Patient
+// Task.for names, so both gateways name one patient. Bound so, under a token
+// for that patient, the binding differs from nothing; under a token for
 // another, the provider's binding is recorded as differing, and the Task is
 // carried either way.
-func TestCDexRequest_APayerSystemMemberNumberDerivesFromTheNumberAlone(t *testing.T) {
-	want := derivedPCI("Member123", "", "")
+func TestCDexRequest_TheTasksSubjectPatientDecidesItsBinding(t *testing.T) {
+	want := derivedPCI("Member123", "1987-02-20", "Shaw")
 	for _, level := range allLevels {
 		for subject, differs := range map[string]bool{want: false, "pci:another": true} {
 			t.Run(level.String()+"/"+subject, func(t *testing.T) {

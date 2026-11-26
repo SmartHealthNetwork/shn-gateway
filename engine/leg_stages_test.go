@@ -189,7 +189,7 @@ func TestExchangeRecord_FramedRefusalBeforeDispatch(t *testing.T) {
 
 // A PAS inquiry at structural spends time in the pend ledger's lookup and
 // writes, as well as the reads, the check of the carried inquiry at the
-// payer's own level (owner decision D47(2)), the forward and the seal. The
+// payer's own level, the forward and the seal. The
 // payer's answer is relayed, not certified, and the gateway builds nothing
 // from it (a check's own time is TestExchangeRecord_LegStagesValidateExactly).
 // The stages never add up to more than the call.

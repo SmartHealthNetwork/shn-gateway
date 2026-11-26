@@ -25,8 +25,8 @@ func notificationBody(sig string) Body {
 }
 
 // E-17 (cdex-task-notification-address-rekey) is made even where a signature
-// covers a CDex Task notification's addresses into the provider's server (the
-// CDex design §15.7; the lead, applying it as E-12's re-key): the replace,
+// covers a CDex Task notification's addresses into the provider's server (applied
+// as E-12's re-key is): the replace,
 // with a string, of the SubscriptionStatus's subscription reference and
 // notification-event focus reference, each entry's request.url, fullUrl and
 // response.location, and the url of each of the Bundle's links and of each

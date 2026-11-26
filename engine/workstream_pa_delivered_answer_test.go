@@ -44,7 +44,7 @@ type hubFault struct {
 	mutate  func([]byte) []byte
 	payer   *LegResult
 	// forgedToken signs the answer's token with a key the Framework does
-	// not hold: it reads, and fails VerifyBound.
+	// not hold: it reads, and fails VerifyBoundWant.
 	forgedToken bool
 	// restate rewrites the answer envelope's metadata and its token, which
 	// is then signed again with the Framework's own key, so the token still
@@ -207,9 +207,9 @@ func TestOrigination_AnAnswerAfterTheRecipientMayHaveReceivedItIsMarkedDelivered
 			text: "the recipient may have received this request (the Hub's answer is not an envelope): " + check},
 		{name: "answer whose token is signed by another key", fault: hubFault{forgedToken: true}, status: 502, delivered: deliveredUnknown,
 			text: "the recipient may have received this request (response leg authorization failed): " + check},
-		// A token that verifies against the envelope's own stated sender,
-		// another holder than the recipient: nothing says the recipient
-		// answered.
+		// An answer whose envelope names another holder than the recipient,
+		// its token that holder's own: refused on its sender before its
+		// token is read, so nothing says the recipient answered.
 		{name: "answer from another sender", fault: hubFault{restate: func(e *shnsdk.Envelope, tok *shnsdk.Token) {
 			e.Metadata.Sender, tok.Holder = "payer-b", "payer-b"
 		}}, status: 502, delivered: deliveredUnknown,

@@ -10,7 +10,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
-// Notification is a parsed notification Bundle (§7.3), kept as the bytes the
+// Notification is a parsed notification Bundle, kept as the bytes the
 // notifier's system posted.
 type Notification struct {
 	body    []byte
@@ -18,7 +18,7 @@ type Notification struct {
 	entries []*jnode
 }
 
-// Body is the notification's bytes as received (§7.3), which the route
+// Body is the notification's bytes as received, which the route
 // carries as sent. The caller must not change
 // them.
 func (n *Notification) Body() []byte { return n.body }
@@ -27,7 +27,7 @@ func notANotification(reason string) *Refusal {
 	return refuse(http.StatusBadRequest, recording.RefusalRouting, reason)
 }
 
-// ParseNotification is the notification route's structural minimum (§7.3), a
+// ParseNotification is the notification route's structural minimum, a
 // network rule at every level: one unambiguous JSON Bundle whose first entry's
 // resource is a SubscriptionStatus Parameters naming t's canonical (with or
 // without a |version) in exactly one topic parameter (valueCanonical).
@@ -202,7 +202,7 @@ func (n *Notification) Resources() ([]Resource, *Refusal) {
 	return out, nil
 }
 
-// NoContent is §5's no-content test, by structure: the Bundle carries no
+// NoContent is the no-content test, by structure: the Bundle carries no
 // resource but the SubscriptionStatus (no other entry has a resource member),
 // the SubscriptionStatus carries no contained resource and no
 // resource-valued parameter or part at any depth, and no entry has a
@@ -393,7 +393,7 @@ func partsHoldResource(list *jnode) bool {
 	return false
 }
 
-// Leg is the leg a notification rides (§5, §7.4): the topic's signal leg
+// Leg is the leg a notification rides: the topic's signal leg
 // when n passes NoContent, and its content leg otherwise. It is "" when the
 // topic has no such leg (CDex has no content leg), which the caller refuses
 // 403, recorded authority.
@@ -404,8 +404,7 @@ func Leg(t Topic, n *Notification) string {
 	return t.ContentLeg()
 }
 
-// Delivery is where the subscriber's gateway delivers a notification (§6.2
-// step 5): the
+// Delivery is where the subscriber's gateway delivers a notification: the
 // endpoint the subscriber's system wrote, and the header values it wrote.
 type Delivery struct {
 	Endpoint string
@@ -413,11 +412,11 @@ type Delivery struct {
 }
 
 // OpenDelivery opens a notification's sealed endpoint and headers at the
-// subscriber's gateway (§6.2 step 5), under b: the subscriber, the notifier
+// subscriber's gateway, under b: the subscriber, the notifier
 // that authenticated the leg, and the topic. Either value failing to open,
 // whether altered, under a retired key, or sealed for another notifier,
 // topic or endpoint, is refused 403, recorded authority, and nothing is
-// delivered. The opened endpoint is then held to §6.5's rule
+// delivered. The opened endpoint is then held to the endpoint rule
 // (CheckEndpoint, with loop), and refused as that rule refuses it: a value
 // sealed for a search (SealEndpointForSearch seals any endpoint a system
 // searches for) is never delivered to unless it is an endpoint the rule

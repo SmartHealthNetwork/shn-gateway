@@ -146,8 +146,8 @@ func funcTyped(t reflect.Type, path string, seen map[reflect.Type]bool) []string
 	return nil
 }
 
-// No relay check comes from a module package (D113: the core keeps the edit
-// catalog and the independent verifier). Structurally:
+// No relay check comes from a module package (the core keeps the edit catalog
+// and the independent verifier). Structurally:
 //   - a row (Edit) carries no func- or interface-typed part, so a
 //     workstream's row is data and cannot bring a check of its own;
 //   - every header edit the core lists has its check in the core's map, keyed

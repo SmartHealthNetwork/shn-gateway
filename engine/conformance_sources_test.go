@@ -185,6 +185,10 @@ var validateCallSites = map[string]string{
 	// any other is carried as sent; the renamed answer's check and a carried
 	// answer's report both go through judgeLines.
 	"workstream_pa_dtr_answer_bridge.go:dtrAnswerAt": "edit-evidence",
+	// The PAS request graph's own reference check (pasgraph's Validate): that
+	// every reference the completed request makes resolves to an entry it
+	// carries. It reads no profile and calls no validator.
+	"workstream_pa_pasrequestgraph.go:retainPASRequestEvidenceWithPolicy": "not-fhir",
 }
 
 // validateFHIREntryPoints are the wrappers that reach the choke point, keyed

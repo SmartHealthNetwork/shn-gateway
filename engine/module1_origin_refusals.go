@@ -186,7 +186,7 @@ func buildFidelityStatus(err error) int {
 
 // evidenceFidelityRefusal is the answer to evidence the gateway's own edit
 // cannot carry, recorded as the fidelity of SHN's own edit at the build, with
-// buildFidelityStatus's status: the signed-content refusal (D113) for evidence
+// buildFidelityStatus's status: the signed-content refusal for evidence
 // E-06 would re-point and a signature covers, a record read from the
 // participant's system that the build cannot carry as read, and a record the
 // request references that the system does not hold, each saying so

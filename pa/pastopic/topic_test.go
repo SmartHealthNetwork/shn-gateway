@@ -46,7 +46,7 @@ func want403(t *testing.T, name string, rf *subscription.Refusal) {
 	}
 }
 
-// The filter rule (§7.1 rule 3): exactly one org-identifier, no modifier, no
+// The filter rule: exactly one org-identifier, no modifier, no
 // other parameter, and a system|value pair carried only when it equals an
 // attested pair.
 func TestCheckFilter_Shape(t *testing.T) {
@@ -160,7 +160,7 @@ func claimResponse(codes ...string) string {
 	return `{"resourceType":"ClaimResponse","id":"cr1",` + ext + `"patient":{"reference":"Patient/p1"},"outcome":"complete"}`
 }
 
-// N6 (§7.3), a network rule: a content notification is the subscriber's
+// N6, a network rule: a content notification is the subscriber's
 // only when every ClaimResponse it carries names, as its
 // applicationReceiverCode, an identifier attested for the subscriber (a bare
 // value equal to an attested value, or a system|value pair equal to an

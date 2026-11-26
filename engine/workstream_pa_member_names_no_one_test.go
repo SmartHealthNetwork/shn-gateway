@@ -331,11 +331,14 @@ func cdexTaskNaming(t *testing.T, ref string) []byte {
 // syntax names that member exactly: the gateway reads its system of record for
 // it as written and binds no one else (the FHIR connector escapes it, rows in
 // internal/fixturesor and connectors/fhirsor). It is refused on consent where
-// the token names another patient, and sends nothing for the one member.
+// the token names another patient, and sends nothing for the one member. Its id
+// is not a FHIR id: a participant that opted into the request's own shape
+// (structural, strict) refuses it 400 before anything is read.
 func TestFederatedQuery_ATaskNamingSearchSyntaxReadsThatMemberOnly(t *testing.T) {
 	t.Parallel()
 	const member = "x," + shnsdk.MemberSystem + "|"
 	for _, level := range allLevels {
+		shape := level == EnforcementStructural || level == EnforcementStrict
 		t.Run("inbound/"+level.String(), func(t *testing.T) {
 			p, got := newRecordingLevelPayer(t, level)
 			p.answering(t, "federated-query")
@@ -344,6 +347,13 @@ func TestFederatedQuery_ATaskNamingSearchSyntaxReadsThatMemberOnly(t *testing.T)
 			var reads []string
 			p.g.cfg.SoR.(*censusSoR).reads = &reads
 			ans := sendConsented(t, p, "federated-query", cdexTaskNaming(t, "Patient/"+member), p.pci, "Consent/c-1")
+			if shape {
+				p.wantRefused(t, ans, http.StatusBadRequest, msgFederatedQueryPatientIDNotFHIRID)
+				if len(reads) != 0 {
+					t.Fatalf("read the system of record for %q before refusing the request's shape", reads)
+				}
+				return
+			}
 			if ans.status != http.StatusForbidden || bytes.Contains(ans.body, []byte("DiagnosticReport")) {
 				t.Fatalf("answer %d %s; want refused on consent, nothing disclosed", ans.status, ans.body)
 			}
@@ -359,6 +369,13 @@ func TestFederatedQuery_ATaskNamingSearchSyntaxReadsThatMemberOnly(t *testing.T)
 			env.payerReturns(LegResult{Response: testResponse([]byte(`{}`))})
 			rec := httptest.NewRecorder()
 			env.originator.ingressRoute(RouteFederatedQuery)(rec, fqIngressPost(fqTaskNaming(t, "facility", "Patient/"+member)))
+			if shape {
+				refusedBeforeTheNetwork(t, env, rec, http.StatusBadRequest, msgFederatedQueryPatientIDNotFHIRID)
+				if len(reads) != 0 {
+					t.Fatalf("read the system of record for %q before refusing the request's shape", reads)
+				}
+				return
+			}
 			if len(reads) == 0 || reads[0] != member {
 				t.Fatalf("read the system of record for %q, want %q first (answer %d %s)", reads, member, rec.Code, rec.Body)
 			}
@@ -371,14 +388,21 @@ func TestFederatedQuery_ATaskNamingSearchSyntaxReadsThatMemberOnly(t *testing.T)
 // never a blank member. A Task.for that names a member, however written, is
 // read as before, and an absent or empty one is left to the SDK's reader.
 func TestCDexTaskQuery_ATaskForNamingNoOneIsRefusedBeforeTheReader(t *testing.T) {
-	for _, ref := range []string{"Patient/", "Patient/ ", "Patient/Patient/", "Patient/Patient/ ", " "} {
+	// A Task.for that names no Patient by FHIR's reference grammar names no
+	// one too: "Patient/" found inside another reference, a trailing path, an
+	// operation, an escape, another type, a URN.
+	for _, ref := range []string{"Patient/", "Patient/ ", "Patient/Patient/", "Patient/Patient/ ", " ",
+		"Patient/Patient/X", "Patient/X/y", "Patient/$everything", "Patient/a%2Fb", "urn:Patient/X", "Group/1", "Group/1/Patient/X", " Patient/X"} {
 		if _, member, err := cdexTaskQuery(cdexTaskNaming(t, ref)); !errors.Is(err, errMemberNamesNoOne) {
 			t.Errorf("Task.for %q: member %q, err %v; want errMemberNamesNoOne", ref, member, err)
 		}
 	}
 	for ref, want := range map[string]string{
-		"Patient/" + dtrFrameMember: dtrFrameMember,
-		"Patient/Patient/X":         "Patient/X",
+		"Patient/" + dtrFrameMember:                          dtrFrameMember,
+		"https://ehr.example/fhir/Patient/" + dtrFrameMember: dtrFrameMember,
+		// An id that is not a FHIR id names its Patient as written.
+		"Patient/MBR_X":                          "MBR_X",
+		"https://ehr.example/fhir/Patient/MBR_X": "MBR_X",
 	} {
 		if _, member, err := cdexTaskQuery(cdexTaskNaming(t, ref)); err != nil || member != want {
 			t.Errorf("Task.for %q: member %q, err %v; want %q", ref, member, err, want)

@@ -56,7 +56,7 @@ func isDemoProfile(profile string) bool { return profile == "demo" }
 // insurer, absolute references and payer Organization entry the reference payer
 // resolves). It decides nothing about checking a payer's answer: every payer's answer is
 // governed at the gateway's conformance level, and a participant that tolerates a
-// payer's known defects lists it (CONFORMANCE_TOLERATE_PEERS, D122). Egress is
+// payer's known defects lists it (CONFORMANCE_TOLERATE_PEERS, its own opt-in). Egress is
 // unaffected on every lane: SHN-built bytes are always validated.
 func relaysReferencePayerBytes(profile string) bool {
 	return targetsBrPayer(profile) || isDemoProfile(profile)
@@ -102,7 +102,7 @@ const referencePayerSystem = "urn:oid:2.16.840.1.113883.6.300"
 // identity — not the holder that happens to answer for it — says whose answer it is.
 // Their DTR and PAS answers are the reference implementation's own bytes, which do not
 // yet conform at every request (the 2.0 reference payer's orderless DTR package fails
-// DTR 2.0.1). No gateway exempts them (D122): SHN's own provider gateways list exactly
+// DTR 2.0.1). No gateway exempts them by default: SHN's own provider gateways list exactly
 // these identities in CONFORMANCE_TOLERATE_PEERS, which the platform's invariant suite pins to this
 // set, until their answers conform.
 // personas.BridgeDemoPayerID and BridgeRefusePayerID, the two SHN-operated bridging-demo payers,
@@ -1655,7 +1655,7 @@ func (g *Gateway) handleUC03Bridge(w http.ResponseWriter, r *http.Request, scena
 	// instead. Every other walk error (a genuine fault) still falls through to
 	// the ordinary 502 below unchanged.
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return
@@ -1796,7 +1796,7 @@ func (g *Gateway) handleUC07HCPCS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return
@@ -2000,7 +2000,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return
@@ -2153,7 +2153,7 @@ func (g *Gateway) handleUC04(w http.ResponseWriter, r *http.Request) {
 		}
 		recordReportTypeNotCarried(ctx, claimIn.ReportType, updateBundle)
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -2401,7 +2401,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return
@@ -2625,7 +2625,7 @@ func (g *Gateway) handleUC05(w http.ResponseWriter, r *http.Request) {
 		}
 		recordReportTypeNotCarried(ctx, claimIn.ReportType, updateBundle)
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -2774,7 +2774,7 @@ func (g *Gateway) handleUC08(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return

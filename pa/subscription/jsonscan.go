@@ -59,12 +59,17 @@ func scanJSON(body []byte) (*jnode, error) {
 // scanDecodedJSON is scanJSON for raw, one JSON value a json.Decoder has
 // already read whole, so its syntax is known to be valid: only its UTF-8,
 // its repeated names and its depth are left to check.
-func scanDecodedJSON(raw []byte) (*jnode, error) {
+//
+// w counts UTF-8's pass, the parser's, its strings' decoding and the values
+// it reads.
+func scanDecodedJSON(raw []byte, w *walk) (*jnode, error) {
+	w.add(len(raw))
 	if !utf8.Valid(raw) {
 		return nil, errJSON
 	}
-	p := &jparser{b: raw}
+	p := &jparser{b: raw, w: w}
 	n, err := p.value(0)
+	w.add(p.i)
 	if err != nil || p.i != len(p.b) {
 		return nil, errJSON
 	}
@@ -74,6 +79,7 @@ func scanDecodedJSON(raw []byte) (*jnode, error) {
 type jparser struct {
 	b []byte
 	i int
+	w *walk
 }
 
 func (p *jparser) ws() {
@@ -93,6 +99,7 @@ func (p *jparser) value(depth int) (*jnode, error) {
 		return nil, errJSON
 	}
 	n := &jnode{start: p.i}
+	p.w.add(1)
 	switch c := p.b[p.i]; {
 	case c == '{':
 		n.kind = '{'
@@ -190,6 +197,7 @@ func (p *jparser) str() (string, error) {
 		p.i++
 	}
 	p.i++
+	p.w.add(p.i - start)
 	var s string
 	if err := json.Unmarshal(p.b[start:p.i], &s); err != nil {
 		return "", errJSON

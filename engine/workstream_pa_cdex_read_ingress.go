@@ -13,7 +13,7 @@ import (
 )
 
 // The payer gateway's side of the payer's read of its CDex Task
-// (cdex-task-status, D129): the payer's own system reads the
+// (cdex-task-status): the payer's own system reads the
 // attachment-request Task it created at a provider's base on its gateway, as
 // a plain FHIR read or vread at that base (GET <base>/Task/{id},
 // GET <base>/Task/{id}/_history/{vid}), and the network carries the read to
@@ -51,8 +51,7 @@ const RouteCDexRead = "cdex-read"
 // The refusals of a payer's read that only its gateway makes.
 const (
 	// errCDexReadPlainBase: a read at the plain Task endpoint names no
-	// provider, and the Task's id is the provider's, so it cannot be routed
-	// (D129, Q5).
+	// provider, and the Task's id is the provider's, so it cannot be routed.
 	errCDexReadPlainBase = "Task not found at this base: a Task is read at the base of the provider it was created for (GET [base]/Task/[id]), which " + CDexProvidersPath + " lists; the Location the Task's create answered names that address"
 	// errCDexReadPath opens the refusal of a read whose path is not a Task's
 	// read or vread.
@@ -133,7 +132,7 @@ func (g *Gateway) handleCDexReadIngress(w http.ResponseWriter, r *http.Request) 
 
 // handleCDexReadPlain is the payer system's read or vread at the plain Task
 // endpoint: it names no provider, and the Task's id is the provider's, so the
-// network cannot route it (D129, Q5). It is answered 404 with this gateway's
+// network cannot route it. It is answered 404 with this gateway's
 // own OperationOutcome naming where a Task is read, recorded as routing, once
 // the bearer is admitted for a read. Sending it to every provider is not
 // done: that would send the id to providers that never saw it.
@@ -213,7 +212,7 @@ func notFoundOutcome(msg string) map[string]any {
 // that is not a Task; member is "" for a Task.for naming no one member
 // number, such as one that is only a reference into the provider's own
 // system, which this gateway cannot read: its binding is then unavailable,
-// never guessed (D129, Q1).
+// never guessed.
 func cdexReadMember(answer []byte) (member string, readable bool) {
 	task, err := cdextask.Read(relay.NewBody(answer, relay.OriginPeerFrame))
 	if err != nil {

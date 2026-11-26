@@ -9,11 +9,11 @@ import (
 )
 
 // carriedRequestAccepted is the recipient's gateway's check of a carried
-// request it receives, at its participant's own conformance level (owner
-// decision D47(2)): a workstream's handler calls it after the leg's subject
-// binding and before its participant's system sees the request (the PA
-// workstream's PAS $submit, update and $inquire). It reports whether the
-// request goes on; when it does not, it has written the refusal.
+// request it receives, at its participant's own conformance level (each side
+// judges a carried request at its own level): a workstream's handler calls it
+// after the leg's subject binding and before its participant's system sees the
+// request (the PA workstream's PAS $submit, update and $inquire). It reports
+// whether the request goes on; when it does not, it has written the refusal.
 //
 //   - none and observe run nothing here: no validator call, and the request is
 //     carried exactly as sent (observe keeps the evidence certification every

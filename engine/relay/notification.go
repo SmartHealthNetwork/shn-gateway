@@ -2,8 +2,8 @@ package relay
 
 import "github.com/SmartHealthNetwork/shn-gateway/engine/relay/internal/splice"
 
-// A CDex Task notification's addresses into the provider's server (E-17, the
-// CDex design §15.7): the places the payer's gateway re-keys to its own base
+// A CDex Task notification's addresses into the provider's server (E-17): the
+// places the payer's gateway re-keys to its own base
 // for that provider, decided by structure.
 
 // notificationAddressValue is E-17's place, for its signed-content exemption:

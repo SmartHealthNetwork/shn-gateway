@@ -125,7 +125,7 @@ func TestDTRNextQuestionIngress_RefusesWhatFailsAndForwardsWhatPasses(t *testing
 		"a percent-encoded letter": {payer("2.2/" + nqTag + "/%61/Questionnaire/$next-question"), good, true, nil, http.StatusUnprocessableEntity, errNextQuestionAddress, RefusalRouting},
 		"fetch-server, a short tag": {"/dtr/fetch-server/payer/2.2/short/Questionnaire/$next-question", good, true, nil,
 			http.StatusUnprocessableEntity, errNextQuestionAddress, RefusalRouting},
-		// The patient (D121), as the package route binds its subject.
+		// The patient, as the package route binds its subject.
 		"not a next-question input": {payer("2.2/" + nqTag + "/Questionnaire/$next-question"), []byte(`{"resourceType":"Parameters"}`), true, nil,
 			http.StatusBadRequest, errNextQuestionNotInput, RefusalAuthority},
 		"no subject": {payer("2.2/" + nqTag + "/Questionnaire/$next-question"),
@@ -864,7 +864,7 @@ func TestDTRNextQuestionIngress_TheRoundsAnswerIsReKeyedAndDisclosed(t *testing.
 // answer is, a check the participant opts into: at none it is relayed
 // unjudged, at observe relayed with the defect recorded, and at strict a
 // defect refuses it as conformance, unless the participant tolerates the
-// payer (D122), read for a round, which carries no Coverage, as an identity
+// payer, read for a round, which carries no Coverage, as an identity
 // it tolerates that routes to the round's payer. One that routes to another
 // payer tolerates nothing here.
 func TestDTRNextQuestionIngress_TheRoundsAnswerIsJudgedAndTolerated(t *testing.T) {

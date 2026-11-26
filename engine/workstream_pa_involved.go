@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"slices"
 	"sort"
@@ -17,7 +18,8 @@ import (
 // names the payer's own binding of the member when it differs from the leg
 // token's patient: the prior-authorization legs, coverage eligibility, whose
 // batch names a patient for each request, and the PAS topic's content
-// notification, whose decision may name more than one (D31).
+// notification, whose decision may name more than one: an exchange is
+// recorded under every patient involved.
 var paRequestInvolvedLegs = map[string]bool{
 	"pas-subscription-notify": true,
 	"coverage-eligibility":    true,
@@ -92,7 +94,7 @@ func (paWorkstream) requestMembersIn(ctx context.Context, leg string, payload []
 				out = append(out, namedMember{unreadable: true})
 				continue
 			}
-			out = append(out, namedMember{member: m, scope: sub.scope, ownScope: true})
+			out = append(out, namedMember{member: m, scope: sub.scope, ownScope: true, subjectResource: memberSubjectResource(eligibilitySubjectResource(sub), m)})
 		}
 		return out, nil
 	}
@@ -108,7 +110,7 @@ func (paWorkstream) requestMembersIn(ctx context.Context, leg string, payload []
 	if pas {
 		subject, shared = pasSubjectNames(view)
 	}
-	members := carriedMembersIn(view, leg)
+	members, unreadable := carriedMembersIn(view, leg)
 	// On CRD the leg's own patient is context.patientId, by the request's
 	// structure, as the leg's subject binding reads it. When no resource the
 	// request carries references it, it is still the name subjectCarriedNames
@@ -124,7 +126,14 @@ func (paWorkstream) requestMembersIn(ctx context.Context, leg string, payload []
 		}
 	}
 	for _, m := range members {
-		out = append(out, namedMember{member: m, scope: payload, pas: pas, subject: subject[m] && !shared[m], shared: shared[m], legName: legName != "" && m == legName})
+		out = append(out, namedMember{member: m, scope: payload, pas: pas, subject: subject[m] && !shared[m], shared: shared[m], legName: legName != "" && m == legName,
+			subjectResource: legSubjectResource(leg, payload, m)})
+	}
+	// A reference to a patient that names none the leg can read (carriedMembersIn)
+	// leaves the request's patients unknown, never fewer: one unreadable member,
+	// recorded once as an omission beside the members it does name.
+	if unreadable {
+		out = append(out, namedMember{unreadable: true})
 	}
 	return out, nil
 }
@@ -133,9 +142,9 @@ func (paWorkstream) requestMembersIn(ctx context.Context, leg string, payload []
 var crdSubjectLegs = map[string]bool{"crd-order-select": true, "crd-order-dispatch": true}
 
 // crdPatientID is a CDS Hooks request's context.patientId as the leg's subject
-// binding reads it (a "Patient/" prefix taken off, as memberForPCI does), "" when
-// it names none or names it by a value that is not a string (which the
-// binding refuses).
+// binding reads it (crdContextPatientID), "" when it names none, names no
+// Patient by its structure, or names it by a value that is not a string (which
+// the binding refuses).
 func crdPatientID(payload []byte) string {
 	var req struct {
 		Context map[string]any `json:"context"`
@@ -144,17 +153,23 @@ func crdPatientID(payload []byte) string {
 		return ""
 	}
 	id, _ := req.Context["patientId"].(string)
-	return strings.TrimPrefix(id, "Patient/")
+	member, _, noPatient := crdContextPatientID(id)
+	if noPatient {
+		return ""
+	}
+	return member
 }
 
 // pasSubjectNames are the names a PAS submit or update request gives its own
 // patient, decided by the request's structure alone, never by what any name
 // binds to: the name the operative Claim's patient reference reads as (the id of a
 // Patient/<id> reference, else the reference itself, as carriedMembers names a
-// Patient by its fullUrl or #id), and, when that reference resolves to exactly
-// one Patient entry (shnsdk.BundleReferenceURL to the entry's fullUrl, or a
-// relative Patient/<id> to the entry's id), the names that entry is read under:
-// its fullUrl, its id and its member identifiers (shnsdk.MemberSystem). shared
+// Patient by its fullUrl or #id); the member the PAS binding binds a "#<id>" or
+// URN to (pasPatientRefMember), never a contained target's local id; and, when
+// that reference resolves to exactly one Patient entry
+// (shnsdk.BundleReferenceURL to the entry's fullUrl, or a relative Patient/<id>
+// to the entry's id), the names that entry is read under: its fullUrl, its id
+// and its member identifiers (shnsdk.MemberSystem). shared
 // are the entry's names another Patient the request carries is read under too,
 // at any depth: those are no name of the subject alone, so a member under one
 // is unknown, never the subject (two Patients are never one person), and so is
@@ -242,28 +257,22 @@ func pasSubjectNames(view canonicalView) (subject, shared map[string]bool) {
 	} else {
 		subject[own] = true
 	}
-	resolved := shnsdk.BundleReferenceURL(claimEntry, ref)
-	relativeID := ""
-	if strings.HasPrefix(ref, "Patient/") {
-		relativeID = pasMemberFromRef(ref)
-	}
-	var match []map[string]any
-	var matchURL string
-	for _, pe := range entries {
-		pm, _ := pe.(map[string]any)
-		p, _ := pm["resource"].(map[string]any)
-		if p == nil || p["resourceType"] != "Patient" {
-			continue
-		}
-		fullURL, _ := pm["fullUrl"].(string)
-		id, _ := p["id"].(string)
-		if (fullURL != "" && fullURL == resolved) || (relativeID != "" && id == relativeID) {
-			match = append(match, p)
-			matchURL = fullURL
+	// A "#<id>" or URN names the Patient it resolves to, by the request's
+	// structure: the member the PAS binding binds it to (pasPatientRefMember)
+	// is the subject's name too, under the same rule (a name another carried
+	// Patient goes by is shared, never the subject's alone). A contained
+	// Patient's own id is local to the Claim, never a member: a reference
+	// elsewhere naming Patient/<that id> names someone else.
+	claim, _ := claimEntry["resource"].(map[string]any)
+	if m, _, err := pasPatientRefMember(bundle, claim, ref); err == nil && m != "" && m != own {
+		if count[m] > 1 {
+			shared[m] = true
+		} else {
+			subject[m] = true
 		}
 	}
-	if len(match) == 1 {
-		for _, n := range patientNames(match[0], matchURL) {
+	if p, matchURL, ok := pasSubjectEntry(entries, claimEntry, ref); ok {
+		for _, n := range patientNames(p, matchURL) {
 			if count[n] > 1 {
 				shared[n] = true
 				continue
@@ -274,13 +283,82 @@ func pasSubjectNames(view canonicalView) (subject, shared map[string]bool) {
 	return subject, shared
 }
 
-// pasSubjectName is the name a reference or a fullUrl reads as: the id of a
-// Patient/<id>, else the reference itself (pasSubjectNames).
-func pasSubjectName(ref string) string {
-	if strings.Contains(ref, "Patient/") {
-		return pasMemberFromRef(ref)
+// pasSubjectEntry is the one Patient entry of a PAS Bundle that the operative Claim's
+// patient reference (ref, in claimEntry) names: the entry whose fullUrl the reference
+// resolves to (shnsdk.BundleReferenceURL), or, for a relative "Patient/<id>", the Patient
+// entry with that id. ok is false for none or more than one.
+func pasSubjectEntry(entries []any, claimEntry map[string]any, ref string) (patient map[string]any, fullURL string, ok bool) {
+	resolved := shnsdk.BundleReferenceURL(claimEntry, ref)
+	relativeID := ""
+	if id, _, ok := readPatientReference(ref); ok && strings.HasPrefix(ref, "Patient/") {
+		relativeID = id
 	}
-	return ref
+	var match []map[string]any
+	var matchURL string
+	for _, pe := range entries {
+		pm, _ := pe.(map[string]any)
+		p, _ := pm["resource"].(map[string]any)
+		if p == nil || p["resourceType"] != "Patient" {
+			continue
+		}
+		u, _ := pm["fullUrl"].(string)
+		id, _ := p["id"].(string)
+		if (u != "" && u == resolved) || (relativeID != "" && id == relativeID) {
+			match = append(match, p)
+			matchURL = u
+		}
+	}
+	if len(match) != 1 {
+		return nil, "", false
+	}
+	return match[0], matchURL, true
+}
+
+// pasSubjectResource is a PAS submission's, update's or inquiry's subject resource
+// (resolveSubjectPCIFrom): the one Patient its operative Claim's patient reference
+// resolves to. A "#<id>" or URN reference resolves as claimPatientTarget reads it, any
+// other as pasSubjectEntry does. nil when it resolves to none, or the Bundle cannot be
+// read as a JSON object.
+func pasSubjectResource(bundleJSON []byte) []byte {
+	var doc map[string]any
+	if json.Unmarshal(bundleJSON, &doc) != nil {
+		return nil
+	}
+	entries, _ := doc["entry"].([]any)
+	for _, e := range entries {
+		em, _ := e.(map[string]any)
+		claim, _ := em["resource"].(map[string]any)
+		if claim == nil || claim["resourceType"] != "Claim" {
+			continue
+		}
+		slot, _ := claim["patient"].(map[string]any)
+		ref, _ := slot["reference"].(string)
+		if ref == "" {
+			return nil
+		}
+		var p map[string]any
+		if strings.HasPrefix(ref, "#") || strings.HasPrefix(ref, "urn:") {
+			p, _ = claimPatientTarget(doc, claim, ref)
+		} else {
+			p, _, _ = pasSubjectEntry(entries, em, ref)
+		}
+		if p == nil {
+			return nil
+		}
+		raw, err := json.Marshal(p)
+		if err != nil {
+			return nil
+		}
+		return raw
+	}
+	return nil
+}
+
+// pasSubjectName is the name a reference or a fullUrl reads as: the id of a
+// Patient reference by FHIR's grammar, else the reference itself
+// (pasSubjectNames, pasMemberFromRef).
+func pasSubjectName(ref string) string {
+	return pasMemberFromRef(ref)
 }
 
 // pasPatientNames are the names a Patient is read under (pasSubjectNames):
@@ -310,8 +388,12 @@ func pasPatientNames(r map[string]any, fullURL string) []string {
 // subject does:
 //   - a reference with "Patient/" names what the leg's reader returns, the id
 //     without a version suffix: on the DTR package the id after it
-//     (patientMember); on every other leg the id after the last "Patient/"
-//     (pasMemberFromRef, the PAS and inquiry readers agreeing). A versioned
+//     (patientMember); on every other leg the id a Patient reference names
+//     by FHIR's grammar (readPatientReference, the PAS and inquiry readers
+//     agreeing). A reference to a patient (patientLike) that names no Patient
+//     so, and resolves to none the request carries, names no member: its
+//     patient is unknown, and the involved pass records the omission
+//     (carriedMembersIn's unreadable). A versioned
 //     reference names the patient it versions, so a version suffix neither
 //     hides another member nor names the leg's own patient a second time;
 //   - a carried Patient names what the leg binds it by: on PAS submit and
@@ -349,21 +431,21 @@ func carriedMembers(payload []byte, leg string) []string {
 	if err != nil {
 		return nil
 	}
-	return carriedMembersIn(view, leg)
+	members, _ := carriedMembersIn(view, leg)
+	return members
 }
 
 // carriedMembersIn is carriedMembers over a request's canonical view. Every
 // identity it takes and compares (the party entries and slots) is of that view.
-func carriedMembersIn(view canonicalView, leg string) []string {
+// unreadable reports a reference to a patient (patientLike) that names no
+// Patient by the leg's reader and resolves to none the request carries: its
+// patient is unknown, and the involved pass records the omission, never a
+// request naming fewer patients, on every leg.
+func carriedMembersIn(view canonicalView, leg string) (members []string, unreadable bool) {
 	doc := view.doc
 	read := func(ref string) (string, bool) {
-		if !strings.Contains(ref, "Patient/") {
-			return "", false
-		}
-		return pasMemberFromRef(ref), true
-	}
-	if leg == "dtr-questionnaire-fetch" {
-		read = patientMember
+		id, _, ok := readPatientReference(ref)
+		return id, ok
 	}
 	// Only the PAS binding names a carried Patient by the reference to it; the
 	// others (CRD, the DTR package, the inquiry) name it by its id.
@@ -475,6 +557,10 @@ func carriedMembersIn(view canonicalView, leg string) []string {
 		}
 		if m, ok := pointers[ref]; ok {
 			set[m] = true
+			continue
+		}
+		if patientLike(ref) {
+			unreadable = true
 		}
 	}
 	out := make([]string, 0, len(set))
@@ -482,7 +568,7 @@ func carriedMembersIn(view canonicalView, leg string) []string {
 		out = append(out, m)
 	}
 	sort.Strings(out)
-	return out
+	return out, unreadable
 }
 
 // entryPartyReads are, when the view is a Bundle, the resources of its Patient

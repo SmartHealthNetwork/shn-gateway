@@ -10,12 +10,15 @@
 set -euo pipefail
 : "${SHN_KIT_EVAL_LIVE:?set SHN_KIT_EVAL_LIVE=1 to run the live eval smoke}"
 : "${SHN_SECRETS:?set SHN_SECRETS to a provisioned provider bundle}"
-bash gateway/deploy/eval/brprovider/build.sh build            # image:, must exist before up
+# Every file this smoke uses is found from its own directory, so it runs alike from the
+# platform repository and from the published gateway module, started from any directory.
+eval_dir=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+bash "$eval_dir/brprovider/build.sh" build            # image:, must exist before up
 # THIS script is SHN's own gate, so it runs the gateway strict: a defect in the bundle we
 # ship must fail here rather than be recorded and relayed past us. compose.eval.yml leaves
 # the value to its operator precisely so this export can exist without imposing strict on
 # the other two things that boot that same file — a partner's `docker compose up` (README)
-# and SHN's payer self-test (payer/smoke.sh) against a payer's own deployment — which take the published default
+# and a payer's own self-test (payer/smoke.sh) against its deployment — which take the published default
 # (none from v1.0.0, observe before) and never see a partner's defect refused. Both halves are pinned by
 # the platform's invariants; do not move this export into the compose, and do not add one
 # to payer/smoke.sh.
@@ -33,12 +36,12 @@ export CONFORMANCE_TOLERATE_PEERS="urn:oid:2.16.840.1.113883.6.300|00001,urn:oid
 # provisioned bundle, so the bundle itself is never written; every request below is signed.
 # The copy goes in a work directory under TMPDIR, on the volume SHN_EVAL_KEYS_VOLUME names
 # when it is set, or the smoke refuses before copying anything (workdir.sh).
-. gateway/deploy/eval/workdir.sh
+. "$eval_dir/workdir.sh"
 eval_workdir provider "$SHN_SECRETS" || exit 1
 # The copy holds the bundle's private keys: remove it on every exit from here on.
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bundle" && cp -R "$SHN_SECRETS"/. "$work/bundle"
-if [ -d sdk ]; then ( cd sdk && go build -o "$work/shn" ./cmd/shn ); else cp "$(command -v shn)" "$work/shn"; fi
+if [ -n "$eval_sdk" ]; then ( cd "$eval_sdk" && go build -o "$work/shn" ./cmd/shn ); else cp "$(command -v shn)" "$work/shn"; fi
 "$work/shn" scenario-key --bundle "$work/bundle" --out "$work"
 export SHN_SECRETS="$work/bundle"
 # sign ROUTE BODY prints the assertion for one request; each request needs its own (one use).
@@ -47,12 +50,13 @@ sign() { "$work/shn" scenario-sign --key "$work/scenario-caller-send-test.sign" 
 # and fills, never by binding it (workdir.sh): set the trap that removes it before anything is made.
 trap 'eval_bundle_drop; rm -rf "$work"' EXIT
 eval_bundle_volume "$SHN_SECRETS" || exit 1
-compose="docker compose -f gateway/deploy/eval/compose.eval.yml $eval_bundle_override"
+# An array, so a directory whose path holds a space is one argument.
+compose=(docker compose -f "$eval_dir/compose.eval.yml" ${eval_bundle_override[@]+"${eval_bundle_override[@]}"})
 # Register teardown BEFORE `up` so a failing build/up (which set -e aborts on) still tears
 # down any containers that did start — otherwise leaked containers wedge the next run's ports.
 # set -e holds inside the trap too, so a failed down must not end it before the rest runs.
-trap '$compose down -v || echo "eval: compose down failed" >&2; eval_bundle_drop; rm -rf "$work"' EXIT
-$compose up -d --build
+trap '"${compose[@]}" down -v || echo "eval: compose down failed" >&2; eval_bundle_drop; rm -rf "$work"' EXIT
+"${compose[@]}" up -d --build
 
 # Every scenario request carries the persona the network's discovery descriptor states for
 # its route on this gateway's lane (provider-data): member, order and claim facts
@@ -61,7 +65,7 @@ $compose up -d --build
 disc_url="${SHN_DISCOVERY_URL:-https://accounts.shn-preview.org/discovery}"
 desc="$work/discovery.json"
 curl -fsS "$disc_url" -o "$desc"
-body() { gateway/deploy/eval/persona_body.sh "$desc" "$1" provider-data "$2" "${3:-{\}}"; }
+body() { "$eval_dir/persona_body.sh" "$desc" "$1" provider-data "$2" "${3:-{\}}"; }
 
 # Readiness = retry the first real scenario until it returns well-formed JSON.
 # (No GET /healthz exists; a successful uc01 POST proves gateway up + seeded + routing —
@@ -107,8 +111,8 @@ for _ in $(seq 1 60); do
 done
 [ "$brp_ready" = 1 ] || { echo "✗ br-provider BFF never became ready at $brp_bff"; fail=1; }
 
-bash gateway/deploy/eval/brprovider/reject_test.sh || fail=1          # (a) unauth → 401
-if [ "$brp_ready" = 1 ] && bash gateway/deploy/eval/brprovider/originate.sh uc02; then  # (b) valid cert → UC completes
+bash "$eval_dir/brprovider/reject_test.sh" || fail=1          # (a) unauth → 401
+if [ "$brp_ready" = 1 ] && bash "$eval_dir/brprovider/originate.sh" uc02; then  # (b) valid cert → UC completes
   echo "✓ conformant-lane (generated cert)"; else echo "✗ conformant-lane cert"; fail=1; fi
 
 [ "$fail" = 0 ] && echo "ALL EVAL SCENARIOS GREEN" || { echo "EVAL SMOKE FAILED"; exit 1; }

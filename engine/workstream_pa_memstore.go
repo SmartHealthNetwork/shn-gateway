@@ -23,7 +23,7 @@ import (
 
 // newMemState: the PA workstream's state in an in-memory Store.
 func (paWorkstream) newMemState() memState {
-	return &memPAState{ledger: newMemPendLedger(), continuations: NewMemContinuations()}
+	return &memPAState{ledger: newMemPendLedger(), continuations: NewMemContinuations(), cdexRequests: NewMemCDexRequests()}
 }
 
 // memPAState is the PA workstream's state in one in-memory Store. The ledger
@@ -33,6 +33,9 @@ func (paWorkstream) newMemState() memState {
 type memPAState struct {
 	ledger        *memPendLedger
 	continuations *MemContinuations
+	// cdexRequests is the record of the attachment requests this gateway
+	// carried (workstream_pa_cdex_pairing.go), with its own mutex.
+	cdexRequests *MemCDexRequests
 }
 
 // reset clears the ledger, then the continuation store. The continuation store
@@ -41,6 +44,7 @@ type memPAState struct {
 func (s *memPAState) reset() {
 	s.ledger.reset()
 	s.continuations.ResetContinuations()
+	s.cdexRequests.resetCDexRequests()
 }
 
 // claimUpdates: the ledger serves the Store seam's claim-update methods.
@@ -66,6 +70,9 @@ func (paWorkstream) checkStore(s Store) error {
 	}
 	if m := partialContinuationStore(s); m != "" {
 		return fmt.Errorf("the configured Store %T declares %s but not the whole ContinuationStore, and embeds an in-memory Store whose own continuation store would answer in its place: implement every ContinuationStore method", s, m)
+	}
+	if m := partialCDexRequestStore(s); m != "" {
+		return fmt.Errorf("the configured Store %T declares %s but not the whole CDexRequestStore, and embeds an in-memory Store whose own record would answer in its place: implement every CDexRequestStore method", s, m)
 	}
 	return nil
 }
@@ -97,6 +104,12 @@ type (
 		ReadContinuation(string, string) (Continuation, ContinuationLookup, error)
 	}
 	continuationDurable interface{ Durable() bool }
+	cdexRecordRequest   interface {
+		RecordCDexRequest(CDexRequestKey, CDexRequestRecord) error
+	}
+	cdexLookupRequest interface {
+		LookupCDexRequest(CDexRequestKey) (CDexRequestRecord, CDexRequestLookup, error)
+	}
 )
 
 var (
@@ -122,6 +135,14 @@ var (
 		continuationPut
 		continuationRead
 	} = ContinuationStore(nil)
+	_ CDexRequestStore = interface {
+		cdexRecordRequest
+		cdexLookupRequest
+	}(nil)
+	_ interface {
+		cdexRecordRequest
+		cdexLookupRequest
+	} = CDexRequestStore(nil)
 )
 
 // partialPendLedger is the first PendLedger method s declares when it is not
@@ -162,6 +183,21 @@ func partialContinuationStore(s Store) string {
 		return "ReadContinuation"
 	case implements[continuationDurable](s):
 		return "Durable"
+	}
+	return ""
+}
+
+// partialCDexRequestStore is the first CDexRequestStore method s declares when
+// it is not the whole CDexRequestStore, or "".
+func partialCDexRequestStore(s Store) string {
+	if _, whole := s.(CDexRequestStore); whole {
+		return ""
+	}
+	switch {
+	case implements[cdexRecordRequest](s):
+		return "RecordCDexRequest"
+	case implements[cdexLookupRequest](s):
+		return "LookupCDexRequest"
 	}
 	return ""
 }

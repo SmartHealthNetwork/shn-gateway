@@ -69,7 +69,12 @@ func fqManyRecords(n int) []string {
 // records Bundle, which holds nothing of the request, names the records. Records
 // past one search's per-answer bound (4 MiB, 200 entries) are refused the
 // same way, naming the requested type and the bound. The controls, just under
-// each, are fulfilled.
+// each, are fulfilled. Each row is a leaf: one whose input is at scale (the
+// million-token and 4 MiB rows) skips in a race build and make
+// gateway-at-scale runs it without -race, at every level (atscale_test.go). The
+// depth and entry-count rows race-check the fulfillment's and the bound's
+// refusal paths; the records Bundle's token limit is reached only by an input
+// at scale.
 func TestFederatedQueryInbound_AFulfillmentPastTheCarryingLimitsIsRefused502(t *testing.T) {
 	fulfillment, records, bound := refusalCDexFulfillmentPastLimits, refusalCDexRecordsPastLimits, refusalCDexRecordsPastBound("DiagnosticReport")
 	one := [][]byte{facPage("", facDR1)}
@@ -96,41 +101,48 @@ func TestFederatedQueryInbound_AFulfillmentPastTheCarryingLimitsIsRefused502(t *
 			p.g.cfg.ConsentURL = "http://consent.test"
 			p.g.cfg.Client = &http.Client{Transport: consentPermits{inner: p.g.cfg.Client.Transport}}
 			for _, row := range rows {
-				sor := &facilitySoR{censusSoR: newCensusSoR(), patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": row.pages}}
-				sor.ContextSystemOfRecord = ReadSystemOfRecord(sor.censusSoR)
-				p.g.cfg.SoR = sor
-				pci, _, ok := sor.ResolvePatient("MBR-UC05")
-				if !ok {
-					t.Fatal("the facility resolves no patient for MBR-UC05")
-				}
-				task := cdexTaskFor(t, "MBR-UC05")
-				if row.task > 0 {
-					task = replaceOnce(t, task, `"resourceType":"Task"`, `"resourceType":"Task","note":[{"text":"x","n":[`+strings.TrimSuffix(strings.Repeat("0,", row.task), ",")+`]}]`)
-				}
-				got.reset()
-				ans := sendConsented(t, p, "federated-query", task, pci, "Consent/c-1")
-				rec := got.only(t)
-				if row.refused == "" {
-					if ans.status != http.StatusOK || rec.Outcome != ExchangeAnswered || !bytes.Contains(ans.body, []byte(`"output"`)) {
-						t.Fatalf("%s: answered %d (%s), want the Task fulfilled", row.name, ans.status, rec.Outcome)
+				t.Run(row.name, func(t *testing.T) {
+					sor := &facilitySoR{censusSoR: newCensusSoR(), patient: facPatient, pages: map[string][][]byte{"DiagnosticReport": row.pages}}
+					sor.ContextSystemOfRecord = ReadSystemOfRecord(sor.censusSoR)
+					p.g.cfg.SoR = sor
+					pci, _, ok := sor.ResolvePatient("MBR-UC05")
+					if !ok {
+						t.Fatal("the facility resolves no patient for MBR-UC05")
 					}
-					continue
-				}
-				if ans.status != http.StatusBadGateway || !bytes.Contains(ans.body, []byte(row.refused)) {
-					t.Fatalf("%s: answered %d %.300s, want 502 %q", row.name, ans.status, ans.body, row.refused)
-				}
-				// Nothing of the fulfillment is sent: no output, no record.
-				for _, part := range []string{`"output"`, `"DiagnosticReport"`, `dr-1`, `dr-a`, `dr-b`, `fac-77`} {
-					if bytes.Contains(ans.body, []byte(part)) {
-						t.Fatalf("%s: the refusal carries %s of the fulfillment: %.300s", row.name, part, ans.body)
+					task := cdexTaskFor(t, "MBR-UC05")
+					if row.task > 0 {
+						task = replaceOnce(t, task, `"resourceType":"Task"`, `"resourceType":"Task","note":[{"text":"x","n":[`+strings.TrimSuffix(strings.Repeat("0,", row.task), ",")+`]}]`)
 					}
-				}
-				if v := ans.frame["Retry-After"]; v != "" {
-					t.Fatalf("%s: Retry-After %q, want none (no retry succeeds until the records change)", row.name, v)
-				}
-				if rec.Outcome != ExchangeRefused || rec.Status != http.StatusBadGateway || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageBuild {
-					t.Fatalf("%s: record %s %s/%s status %d, want refused 502 %s/%s", row.name, rec.Outcome, rec.Rule, rec.RefusalStage, rec.Status, RefusalFidelity, vocab.RefusalStageBuild)
-				}
+					size := len(task)
+					for _, page := range row.pages {
+						size += len(page)
+					}
+					atScaleAt(t, size)
+					got.reset()
+					ans := sendConsented(t, p, "federated-query", task, pci, "Consent/c-1")
+					rec := got.only(t)
+					if row.refused == "" {
+						if ans.status != http.StatusOK || rec.Outcome != ExchangeAnswered || !bytes.Contains(ans.body, []byte(`"output"`)) {
+							t.Fatalf("%s: answered %d (%s), want the Task fulfilled", row.name, ans.status, rec.Outcome)
+						}
+						return
+					}
+					if ans.status != http.StatusBadGateway || !bytes.Contains(ans.body, []byte(row.refused)) {
+						t.Fatalf("%s: answered %d %.300s, want 502 %q", row.name, ans.status, ans.body, row.refused)
+					}
+					// Nothing of the fulfillment is sent: no output, no record.
+					for _, part := range []string{`"output"`, `"DiagnosticReport"`, `dr-1`, `dr-a`, `dr-b`, `fac-77`} {
+						if bytes.Contains(ans.body, []byte(part)) {
+							t.Fatalf("%s: the refusal carries %s of the fulfillment: %.300s", row.name, part, ans.body)
+						}
+					}
+					if v := ans.frame["Retry-After"]; v != "" {
+						t.Fatalf("%s: Retry-After %q, want none (no retry succeeds until the records change)", row.name, v)
+					}
+					if rec.Outcome != ExchangeRefused || rec.Status != http.StatusBadGateway || rec.Rule != RefusalFidelity || rec.RefusalStage != vocab.RefusalStageBuild {
+						t.Fatalf("%s: record %s %s/%s status %d, want refused 502 %s/%s", row.name, rec.Outcome, rec.Rule, rec.RefusalStage, rec.Status, RefusalFidelity, vocab.RefusalStageBuild)
+					}
+				})
 			}
 		})
 	}

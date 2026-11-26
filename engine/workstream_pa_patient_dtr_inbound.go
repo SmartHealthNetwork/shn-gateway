@@ -5,7 +5,6 @@ package engine
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -26,6 +25,12 @@ type patientDTRResponse struct {
 	AttestedItem json.RawMessage `json:"attestedItem"`
 }
 
+// msgPatientDTRPatientIDNotFHIRID is the refusal of a patient-DTR request whose
+// patient reference names its Patient by an id that is not a FHIR id: the
+// request's own shape, refused only by a participant that opted into it
+// (structural and strict).
+const msgPatientDTRPatientIDNotFHIRID = "patient-dtr request names its Patient by an id that is not a FHIR id"
+
 // handlePatientDTRInbound is the Trust-operated PHG responder (UC-07). It binds the
 // token subject to the patient, builds the patient-authored attested item REQUEST-
 // SCOPED (questionnaireresponse-signature, who=Patient), and responds on the
@@ -42,16 +47,25 @@ func (g *Gateway) handlePatientDTRInbound(w http.ResponseWriter, r *http.Request
 	// it must be the one the leg's authority names: any other is refused at every
 	// level. One the PHG does not hold reads the same as one that is someone else,
 	// so the refusal does not tell the requester whether the PHG holds the patient.
-	member := strings.TrimPrefix(req.PatientRef, "Patient/")
 	if req.PatientRef == "" {
 		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, refusalPatientDTRNoPatient, nil)
 		return
 	}
-	// A reference that names no one ("Patient/" with no id, or a blank one) is
-	// refused as every route refuses it, on authority, before anything is read.
-	if memberNamesNoOne(member) {
+	// The patient is read by FHIR's reference grammar (readPatientReference),
+	// relative or absolute, versioned or not. A reference that names no Patient
+	// so ("urn:Patient/<id>", "Patient/<id>/x"), or names one by an id that
+	// names no one ("Patient/", a blank one), is refused as every route refuses
+	// it, on authority, before anything is read.
+	member, conforms, ok := readPatientReference(req.PatientRef)
+	if !ok || memberNamesNoOne(member) {
 		exchangeOf(r.Context()).refusingFor(RefusalAuthority, reasonMemberNamesNoOne)
 		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, msgMemberNamesNoOne, nil)
+		return
+	}
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !conforms && g.guard(r.Context(), KindContent, RuleRequestShape, reqJSON) {
+		g.refuseInbound(w, r, legPatientDTR, env, tok, answerTok, http.StatusBadRequest, msgPatientDTRPatientIDNotFHIRID, nil)
 		return
 	}
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)

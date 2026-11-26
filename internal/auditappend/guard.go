@@ -47,7 +47,8 @@ func HolderOK(id string) bool { return holderShape.MatchString(id) }
 // Check is the content guard: a record the gateway may store and send. It
 // is a version 2 record of a class a gateway writes (module-details or
 // gateway-start), sent by holder, whose every member has its class's closed
-// shape and bound, and whose members outside its class are empty. A record
+// shape and bound, and whose members outside its class are empty (involved,
+// a version 3 member only the Hub writes, among them). A record
 // it refuses is never stored (the outbox holds metadata only, never an
 // unchecked value), so its error says which rule, never the value.
 func Check(r shnsdk.AuditRecord, holder string) error {
@@ -73,6 +74,9 @@ func check(r shnsdk.AuditRecord, holder string) error {
 		return errors.New("carries a subject, an involvement or a consent reference")
 	case r.Resends != "" || r.Finding != nil:
 		return errors.New("carries resends or a finding")
+	case r.Involved != nil:
+		// involved is a version 3 member, and only the Hub writes it.
+		return errors.New("carries involved")
 	}
 	switch r.TransactionType {
 	case shnsdk.AuditTypeModuleDetails:

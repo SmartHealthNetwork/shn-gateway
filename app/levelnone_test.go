@@ -131,7 +131,7 @@ func builtValidator(t *testing.T, b built) reflect.Value {
 }
 
 // A provider gateway at none boots with no validator at all and says so, and
-// so does one that states no level, which is none (D116) and says that it is
+// so does one that states no level, which is none, and says that it is
 // none by default; the same gateway with any validator, a single per-line lane
 // or a default lane included, boots with it and does not.
 func TestBuildAtNoneBootsWithNoValidator(t *testing.T) {

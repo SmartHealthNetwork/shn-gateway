@@ -139,7 +139,7 @@ COPY support/shn.fhir.validation-support-1.5.0.tgz /packages/shn.fhir.validation
 # /etc/ssl/certs/java/cacerts, and the runtime stage copies this edited store
 # over it. The store comes from the same pinned base as the runtime stage.
 FROM eclipse-temurin:21.0.11_10-jdk-jammy@sha256:dbfd085220ae632a0830166e443747d1ee89e9038d92e3b48c3e5e9d8292b9a7 AS truststore
-COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d /etc/ssl/certs/java/cacerts /in/cacerts
+COPY --from=gcr.io/distroless/java21-debian13:nonroot@sha256:e331c420616bf4771ac477c1c5b6cfc92de3d07a7d59bb15235bf2a7955ae881 /etc/ssl/certs/java/cacerts /in/cacerts
 COPY truststore/drop-emsign-roots.sh /truststore/drop-emsign-roots.sh
 RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacerts
 
@@ -149,7 +149,7 @@ RUN --network=none bash /truststore/drop-emsign-roots.sh /in/cacerts /out/cacert
 # verify.sh checks that against the engine image. Upstream's bundled extras are left out
 # (an unused OpenTelemetry agent jar carries a CRITICAL advisory). Distroless defaults
 # differ from upstream's, so the user and directory are restated here once.
-FROM gcr.io/distroless/java21-debian13:nonroot@sha256:b22857e939bd95abd69d9d747f0421a274f9f70855ecfc335f7d97f6eeef578d AS hapi-runtime
+FROM gcr.io/distroless/java21-debian13:nonroot@sha256:e331c420616bf4771ac477c1c5b6cfc92de3d07a7d59bb15235bf2a7955ae881 AS hapi-runtime
 USER 65532:65532
 COPY --from=truststore /out/cacerts /etc/ssl/certs/java/cacerts
 WORKDIR /app

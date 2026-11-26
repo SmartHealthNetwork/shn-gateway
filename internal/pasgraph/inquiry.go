@@ -37,8 +37,8 @@ func decodeMessage(b []byte, v any) error {
 // `responseBundle` — recorded from the pinned image to
 // testdata/br-payer/pas-inquire-response.json and present on the unpatched
 // upstream commit too, so it is that implementation's own choice. An answer
-// arriving under it is READ and REPORTED as nonconformant (design §6.4 addendum,
-// 2026-09-18), never normalized and never dropped: a reader that only knew the
+// arriving under it is READ and REPORTED as nonconformant, never normalized and never dropped:
+// a reader that only knew the
 // declared name would take the payer's bytes to the requester and record nothing
 // from them, with no signal anywhere — silent loss, which this network forbids as
 // squarely as fabrication.

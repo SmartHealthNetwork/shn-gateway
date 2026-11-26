@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"hash/maphash"
 	"slices"
 	"strconv"
 	"strings"
@@ -202,57 +202,205 @@ func loneSurrogateEscape(raw []byte) bool {
 // oneSpellingPerMember refuses a JSON document any of whose objects names a
 // member twice, whatever its case: names are compared by foldName, so two
 // names strings.EqualFold matches ("subject" and "ſubject") are one.
+//
+// raw must be valid JSON (json.Valid, which uncarriableRecordBytes checks
+// first). It is read in one pass over its bytes, never a token at a time:
+// each open object's member names are folded into one buffer the walk
+// shares, and compared there, so a record near the relay's token bound costs
+// one pass and no allocation per token. A name holding an escape or a byte
+// past ASCII is decoded and folded by foldName; any other name is folded to
+// its ASCII upper case, which is what foldName gives it (each ASCII letter's
+// smallest case-folding partner is its upper case).
 func oneSpellingPerMember(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	type frame struct {
-		object  bool
-		wantKey bool
-		names   map[string]bool
+	var w memberWalk
+	return w.walk(raw)
+}
+
+// memberLinearMax is how many names an object holds before its names are
+// also kept in a set: below it a linear comparison is cheaper than hashing.
+const memberLinearMax = 16
+
+// memberWalk is oneSpellingPerMember's state: the open containers, and the
+// folded names of every open object, in the order they were read.
+type memberWalk struct {
+	folded []byte   // the open objects' folded names, back to back
+	names  [][2]int // each name's span in folded
+	// next chains a name to the previous name of its object with the same
+	// hash (-1: none), for an object whose names are in a set.
+	next  []int32
+	stack []memberFrame
+	// sets are the name sets of objects past memberLinearMax names, one per
+	// nesting depth, emptied when their object closes and used again by the
+	// next such object at that depth: a record of many wide objects does not
+	// allocate a set for each.
+	sets []map[uint64]int32
+	seed maphash.Seed
+	// hash is the name hash; nil is maphash under seed. A test sets a weak
+	// one, so names collide and the chains are walked.
+	hash func([]byte) uint64
+}
+
+// memberFrame is one open container. For an object, its names are
+// names[first:] and its folded bytes start at folded[at]; past
+// memberLinearMax names, each name's hash maps to the last of its names with
+// that hash, in set.
+type memberFrame struct {
+	object, wantKey bool
+	first, at       int
+	set             map[uint64]int32
+}
+
+func (w *memberWalk) walk(raw []byte) error {
+	if w.hash == nil {
+		w.seed = maphash.MakeSeed()
+		w.hash = func(b []byte) uint64 { return maphash.Bytes(w.seed, b) }
 	}
-	var stack []*frame
-	for {
-		t, err := dec.Token()
-		if err == io.EOF {
-			return nil
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '{':
+			w.stack = append(w.stack, memberFrame{object: true, wantKey: true, first: len(w.names), at: len(w.folded)})
+		case '[':
+			w.stack = append(w.stack, memberFrame{})
+		case '}', ']':
+			if len(w.stack) == 0 {
+				return fmt.Errorf("is not JSON: unbalanced %q", raw[i])
+			}
+			top := w.stack[len(w.stack)-1]
+			w.stack = w.stack[:len(w.stack)-1]
+			if top.object {
+				w.names, w.next, w.folded = w.names[:top.first], w.next[:top.first], w.folded[:top.at]
+				if top.set != nil {
+					clear(top.set)
+				}
+			}
+		case ',':
+			if n := len(w.stack); n > 0 && w.stack[n-1].object {
+				w.stack[n-1].wantKey = true
+			}
+		case '"':
+			end := jsonStringEnd(raw, i)
+			if end < 0 {
+				return fmt.Errorf("is not JSON: an unterminated string")
+			}
+			if n := len(w.stack); n > 0 && w.stack[n-1].object && w.stack[n-1].wantKey {
+				w.stack[n-1].wantKey = false
+				if err := w.admitName(n-1, raw[i:end+1]); err != nil {
+					return err
+				}
+			}
+			i = end
 		}
-		if err != nil {
+	}
+	return nil
+}
+
+// jsonStringEnd is the index of the quote that closes the JSON string
+// opening at raw[open], or -1 when there is none.
+func jsonStringEnd(raw []byte, open int) int {
+	for i := open + 1; i < len(raw); i++ {
+		switch raw[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+	return -1
+}
+
+// admitName records quoted, a member name as written (quotes included), as one
+// of the names of the object open at stack[depth], or refuses it when that
+// object already names it under case folding.
+func (w *memberWalk) admitName(depth int, quoted []byte) error {
+	f := &w.stack[depth]
+	start := len(w.folded)
+	if body := quoted[1 : len(quoted)-1]; plainASCIIName(body) {
+		for _, c := range body {
+			if 'a' <= c && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			w.folded = append(w.folded, c)
+		}
+	} else {
+		var name string
+		if err := json.Unmarshal(quoted, &name); err != nil {
 			return fmt.Errorf("is not JSON: %w", err)
 		}
-		top := (*frame)(nil)
-		if len(stack) > 0 {
-			top = stack[len(stack)-1]
-		}
-		if top != nil && top.object && top.wantKey {
-			if d, ok := t.(json.Delim); ok && d == '}' {
-				stack = stack[:len(stack)-1]
-				if n := len(stack); n > 0 && stack[n-1].object {
-					stack[n-1].wantKey = true
+		w.folded = append(w.folded, foldName(name)...)
+	}
+	name := w.folded[start:]
+	same := func(k int) bool { n := w.names[k]; return bytes.Equal(w.folded[n[0]:n[1]], name) }
+	dup := false
+	var h uint64
+	if f.set != nil {
+		h = w.hash(name)
+		if k, ok := f.set[h]; ok {
+			for ; k >= 0; k = w.next[k] {
+				if same(int(k)) {
+					dup = true
+					break
 				}
-				continue
 			}
-			name := foldName(t.(string))
-			if top.names[name] {
-				return fmt.Errorf("names the member %q twice, or in another case", t.(string))
+		}
+	} else {
+		for k := f.first; k < len(w.names); k++ {
+			if same(k) {
+				dup = true
+				break
 			}
-			top.names[name] = true
-			top.wantKey = false
-			continue
-		}
-		switch d, _ := t.(json.Delim); d {
-		case '{':
-			stack = append(stack, &frame{object: true, wantKey: true, names: map[string]bool{}})
-			continue
-		case '[':
-			stack = append(stack, &frame{})
-			continue
-		case ']':
-			stack = stack[:len(stack)-1]
-		}
-		if n := len(stack); n > 0 && stack[n-1].object {
-			stack[n-1].wantKey = true
 		}
 	}
+	if dup {
+		var shown string
+		_ = json.Unmarshal(quoted, &shown)
+		return fmt.Errorf("names the member %q twice, or in another case", shown)
+	}
+	at := int32(len(w.names))
+	w.names = append(w.names, [2]int{start, len(w.folded)})
+	w.next = append(w.next, -1)
+	switch {
+	case f.set != nil:
+		w.link(f.set, h, at)
+	case int(at)+1-f.first > memberLinearMax:
+		f.set = w.setAt(depth)
+		for k := f.first; k <= int(at); k++ {
+			n := w.names[k]
+			w.link(f.set, w.hash(w.folded[n[0]:n[1]]), int32(k))
+		}
+	}
+	return nil
+}
+
+// link adds name k, of hash h, to set.
+func (w *memberWalk) link(set map[uint64]int32, h uint64, k int32) {
+	if prev, ok := set[h]; ok {
+		w.next[k] = prev
+	} else {
+		w.next[k] = -1
+	}
+	set[h] = k
+}
+
+// setAt is the empty name set kept for objects at nesting depth.
+func (w *memberWalk) setAt(depth int) map[uint64]int32 {
+	for len(w.sets) <= depth {
+		w.sets = append(w.sets, nil)
+	}
+	if w.sets[depth] == nil {
+		w.sets[depth] = make(map[uint64]int32, 4*memberLinearMax)
+	}
+	return w.sets[depth]
+}
+
+// plainASCIIName reports whether body, a member name's bytes between its
+// quotes, is printable ASCII with no escape: its text is its bytes.
+func plainASCIIName(body []byte) bool {
+	for _, c := range body {
+		if c < 0x20 || c > 0x7e || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // foldName maps name to a canonical form such that foldName(a) == foldName(b)

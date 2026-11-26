@@ -159,7 +159,7 @@ var (
 	partner = shnsdk.PayerIdentifier{System: shnsdk.CMSPayerIdentity.System, Value: "00002"}
 )
 
-// No payer is exempt by default (D122): the network's reference payers, on either
+// No payer is exempt by default: the network's reference payers, on either
 // lane that relays their bytes, are judged at the gateway's level like any payer,
 // refused at structural and strict when their answer conforms to no line. A
 // participant that lists a payer in CONFORMANCE_TOLERATE_PEERS has a defect its

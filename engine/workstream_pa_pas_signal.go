@@ -10,8 +10,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The PAS topic's no-content notifications (pas-subscription-signal; the
-// notifications design §5, §6.2 step 5, §6.3, §6.5, §7.3, §7.4, §9): a payer's
+// The PAS topic's no-content notifications (pas-subscription-signal): a payer's
 // own system posts each notification of a provider's Subscription to the PAS
 // topic (a handshake, a heartbeat or an id-only event) to the notification
 // address its gateway wrote into that Subscription (E-19),
@@ -31,7 +30,7 @@ import (
 //     value beside it, or the notification is refused 401 on authentication;
 //   - a notification of the PAS topic by structure, or it is refused 400 on
 //     routing;
-//   - no content by structure (§5's test): a full-resource notification
+//   - no content by structure (the no-content test): a full-resource notification
 //     rides the topic's content leg instead (pas-subscription-notify, held to
 //     that leg's rules, workstream_pa_pas_notify.go), never this one;
 //   - no notification-event part named additional-context (the PAS topic's

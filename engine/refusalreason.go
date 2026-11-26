@@ -16,7 +16,9 @@ package engine
 // pins that no other file declares or converts one. Where an answer adds a
 // detail read from the request or one the gateway chose (an identifier, a
 // member name, a count, the contract lines), the answer is unchanged and the
-// reason is the fixed sentence in it.
+// reason is the fixed sentence in it. One reason says more than its answer:
+// a recipient whose registered encryption key is not usable is answered
+// without the cryptographic cause, which the reason adds, fixed as well.
 
 // refusalReason is one of the registered fixed sentences: the whole of the
 // answer a refusal writes, or, where the answer adds a detail read from the
@@ -29,6 +31,9 @@ const (
 	reasonScopeTaskCreate       refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits creating a Task, such as " + TaskWriteScope + ", system/Task.c, system/*.c or system/Task.*, with no query"
 	reasonScopeTaskRead         refusalReason = "insufficient_scope: this route takes a bearer granted a scope that permits reading a Task, such as " + TaskReadScope + ", system/Task.r, system/*.r or system/Task.*, with no query"
 	reasonScenarioCaller        refusalReason = errUnauthorizedCaller
+	// reasonRecipientKeyNotUsable is the answer's sentence with its cause,
+	// which the answer leaves out (msgRecipientKeyNotUsable).
+	reasonRecipientKeyNotUsable refusalReason = msgRecipientKeyNotUsable + ": " + recipientKeyCause
 )
 
 // Message integrity, authority and size, on every route.
@@ -37,6 +42,7 @@ const (
 	reasonPatientUnidentifiable     refusalReason = msgPatientUnidentifiable
 	reasonRequestPatientsUnreadable refusalReason = msgRequestPatientsUnreadable
 	reasonMemberNamesNoOne          refusalReason = msgMemberNamesNoOne
+	reasonPatientCarriesNoMember    refusalReason = msgPatientCarriesNoMember
 	reasonRequestTooLarge           refusalReason = errRequestTooLarge
 	reasonEnvelopeTooLarge          refusalReason = errRequestTooLarge + ": sealed for the network"
 )
@@ -55,8 +61,8 @@ const (
 // coreRefusalReasons are the core's registered reasons.
 func coreRefusalReasons() []refusalReason {
 	return []refusalReason{
-		reasonIngressAuthentication, reasonScopeTaskCreate, reasonScopeTaskRead, reasonScenarioCaller,
-		reasonUnsupportedCoding, reasonPatientUnidentifiable, reasonRequestPatientsUnreadable, reasonMemberNamesNoOne, reasonRequestTooLarge, reasonEnvelopeTooLarge,
+		reasonIngressAuthentication, reasonScopeTaskCreate, reasonScopeTaskRead, reasonScenarioCaller, reasonRecipientKeyNotUsable,
+		reasonUnsupportedCoding, reasonPatientUnidentifiable, reasonRequestPatientsUnreadable, reasonMemberNamesNoOne, reasonPatientCarriesNoMember, reasonRequestTooLarge, reasonEnvelopeTooLarge,
 		reasonNoPayerRouter, reasonNoPayerIdentifier, reasonCoverageNamesTwoPayers, reasonUnregisteredPayer,
 		reasonNoCoverageOnFile, reasonMemberCoverageTwoPayers, reasonNoSharedLine,
 	}

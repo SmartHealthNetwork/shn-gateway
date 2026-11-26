@@ -225,7 +225,7 @@ func rekeyRunTaking(t *testing.T, leg carriedAnswerLeg, level ConformanceEnforce
 
 // The provider's gateway re-keys a pended PAS answer's payer-url to its own
 // return path for the payer the leg was routed to, on every carried PAS leg
-// and at every conformance level, by default (D127): one value changes, the
+// and at every conformance level, by default: one value changes, the
 // forward names the edit in X-SHN-Edited, and the exchange records E-10.
 func TestPASIngress_PendPayerURLIsRekeyed(t *testing.T) {
 	t.Parallel()
@@ -268,7 +268,7 @@ func TestPASIngress_PendPayerURLIsRekeyed(t *testing.T) {
 	}
 }
 
-// A payer-url under a signature is re-keyed all the same (D127), and the
+// A payer-url under a signature is re-keyed all the same, and the
 // header names every signature that covered it, the Bundle's own signature
 // under its name in any case ("SIGNATURE").
 func TestPASIngress_SignedPendPayerURLIsRekeyedAndDisclosed(t *testing.T) {
@@ -299,7 +299,7 @@ func TestPASIngress_SignedPendPayerURLIsRekeyedAndDisclosed(t *testing.T) {
 }
 
 // A payer-url in a Task a signed Provenance in the answer targets is
-// re-keyed all the same (D127), and the header names the Provenance's own
+// re-keyed all the same, and the header names the Provenance's own
 // signature, its member named in any case ("Signature" as "signature"),
 // on every carried PAS leg and at every level.
 func TestPASIngress_PendPayerURLUnderAProvenanceSignatureIsDisclosed(t *testing.T) {
@@ -341,7 +341,7 @@ func TestPASIngress_PendPayerURLUnderAProvenanceSignatureIsDisclosed(t *testing.
 }
 
 // A payer-url in a Task that contains a signed Provenance targeting "#", its
-// container, is re-keyed all the same (D127), and the header names that
+// container, is re-keyed all the same, and the header names that
 // Provenance's own signature, its member named in any case, on every
 // carried PAS leg and at every level. "#" from a Provenance that is an entry,
 // not contained, names nothing: the re-key is disclosed with no signature
@@ -415,7 +415,7 @@ func TestPASIngress_PendPayerURLUnderAContainedProvenanceSignatureIsDisclosed(t 
 }
 
 // A payer-url in a Task a signed Provenance in the answer covers through
-// members named in another case is re-keyed all the same (D127), and the
+// members named in another case is re-keyed all the same, and the
 // header names that Provenance's signature, on every carried PAS leg and at
 // every level. Each case names the Task through one such member only: the
 // Provenance's target or its reference, the Task's id, its entry's fullUrl

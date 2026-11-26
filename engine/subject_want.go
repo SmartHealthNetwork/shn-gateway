@@ -2,8 +2,6 @@ package engine
 
 import (
 	"crypto/ed25519"
-	"errors"
-	"strings"
 	"time"
 
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -12,10 +10,9 @@ import (
 // subjectWant is what this gateway expects a token's subject to be, stated
 // structurally: from the leg's taxonomy row (whether its request, or its
 // answer, names a patient) and from what this gateway holds. It never rides
-// in an empty string: shnsdk.VerifyBound reads an empty expected subject as
-// "do not check", which reads the same whether the leg names no patient, the
-// gateway does not hold the patient, or the value came out empty by accident,
-// and unknown is not empty. The zero value states nothing and is refused.
+// in an empty string, since unknown is not empty, and it maps one to one onto
+// the SDK's own statement of it (shnsdk.SubjectWant, sdk below), which
+// verifies it. The zero value states nothing and is refused.
 type subjectWant struct {
 	kind subjectWantKind
 	pci  string
@@ -33,7 +30,7 @@ const (
 
 // subjectIs expects the patient this gateway holds: the token's subject must
 // be pci. A pci that is empty or blank states no patient and is refused
-// (errSubjectUnstated), never read as "do not check".
+// (shnsdk.ErrSubjectUnstated), never read as "do not check".
 func subjectIs(pci string) subjectWant { return subjectWant{kind: subjectWantIs, pci: pci} }
 
 // subjectNamed expects some patient, on a leg that names one, where this
@@ -49,58 +46,33 @@ func subjectNone() subjectWant { return subjectWant{kind: subjectWantNone} }
 // leg that takes its patient from the answer.
 func subjectFromAnswer() subjectWant { return subjectWant{kind: subjectWantFromAnswer} }
 
-// errSubjectUnstated is a verify whose expected subject states nothing: the
-// zero subjectWant, or subjectIs with no patient.
-var errSubjectUnstated = errors.New("no expected subject")
-
-// errSubjectMisfit is a token whose subject does not fit the leg's row or the
-// patient this gateway holds.
-var errSubjectMisfit = errors.New("token subject does not fit the leg")
-
-// namesPatient reports whether subject names a patient: a network patient
-// identifier ("pci:" and a value).
-func namesPatient(subject string) bool {
-	return strings.HasPrefix(subject, "pci:") && len(subject) > len("pci:")
-}
-
-// fits reports whether subject fits w; ok is false when w states nothing.
-func (w subjectWant) fits(subject string) (fits, ok bool) {
+// sdk is w as the SDK states it, one to one. The zero value maps to the SDK's
+// zero value, which states nothing and is refused (shnsdk.ErrSubjectUnstated);
+// the SDK's SubjectChecked, a caller that checks the subject itself, has no
+// counterpart here: this gateway always states what it expects.
+func (w subjectWant) sdk() shnsdk.SubjectWant {
 	switch w.kind {
 	case subjectWantIs:
-		if strings.TrimSpace(w.pci) == "" {
-			return false, false
-		}
-		return subject == w.pci, true
+		return shnsdk.SubjectIs(w.pci)
 	case subjectWantNamed:
-		return namesPatient(subject), true
+		return shnsdk.SubjectNamed()
 	case subjectWantNone:
-		return subject == "", true
+		return shnsdk.SubjectNone()
 	case subjectWantFromAnswer:
-		return subject == "" || namesPatient(subject), true
+		return shnsdk.SubjectFromAnswer()
 	}
-	return false, false
+	return shnsdk.SubjectWant{}
 }
 
-// verifyBoundWant is shnsdk.VerifyBound with the subject stated structurally
-// (subjectWant): an unstated expectation is refused before the token is read,
-// every other binding is VerifyBound's own, and the subject is then held to
-// the expectation. The SDK's VerifyBound is called with the held patient for
-// subjectIs, and with no subject otherwise, which this check then decides.
+// verifyBoundWant is shnsdk.VerifyBoundWant with the subject stated as this
+// gateway states it (subjectWant): every binding is required, an empty or
+// blank one refused (shnsdk.ErrBindingUnstated) and an unstated subject
+// refused (shnsdk.ErrSubjectUnstated), both before the token is read; a
+// subject that does not fit is shnsdk.ErrSubjectMismatch. Every token this
+// gateway verifies as a leg's own goes through it, and no engine file calls
+// the SDK's deprecated forms (TestEveryVerifyStatesItsSubject).
 func verifyBoundWant(t shnsdk.Token, pub ed25519.PublicKey, now time.Time, wantFrame, wantOp, wantCorr, wantHolder string, subject subjectWant, wantPayloadHash string) error {
-	if _, ok := subject.fits(""); !ok {
-		return errSubjectUnstated
-	}
-	held := ""
-	if subject.kind == subjectWantIs {
-		held = subject.pci
-	}
-	if err := shnsdk.VerifyBound(t, pub, now, wantFrame, wantOp, wantCorr, wantHolder, held, wantPayloadHash); err != nil {
-		return err
-	}
-	if fits, _ := subject.fits(t.Subject); !fits {
-		return errSubjectMisfit
-	}
-	return nil
+	return shnsdk.VerifyBoundWant(t, pub, now, wantFrame, wantOp, wantCorr, wantHolder, subject.sdk(), wantPayloadHash)
 }
 
 // requestSubjectWant is what a leg's request token must name, by the leg's
@@ -153,13 +125,14 @@ func (s legSpec) mintedSubjectWant(held string, answer bool) subjectWant {
 
 // verifyAnswerToken verifies the token an answer on leg txType arrived with:
 // bound to the leg's answer, to the original request's correlation and to the
-// responder, and naming the patient the leg's row says the answer names
+// responder, the holder the leg was routed to (never the answer envelope's own
+// claim of its sender), and naming the patient the leg's row says the answer names
 // (answerSubjectWant) for pci, the patient this gateway's request named. A
 // transaction type of no leg this gateway compiles is refused.
 func (g *Gateway) verifyAnswerToken(tok shnsdk.Token, txType, respFrame, respOp, corr, responder, pci, payloadHash string) error {
 	spec, ok := legSpecFor(txType)
 	if !ok {
-		return errSubjectUnstated
+		return shnsdk.ErrSubjectUnstated
 	}
 	return verifyBoundWant(tok, g.cfg.AuthzPub, g.cfg.Clock(), respFrame, respOp, corr, responder, spec.answerSubjectWant(pci), payloadHash)
 }
@@ -168,7 +141,9 @@ func (g *Gateway) verifyAnswerToken(tok shnsdk.Token, txType, respFrame, respOp,
 // bound to the leg's request, the envelope's correlation and its sender, and
 // naming the patient the leg's row says the request names: some patient on a
 // leg whose request names one, which this gateway binds afterwards, and none on
-// a leg that names none or takes its patient from the answer.
+// a leg that names none or takes its patient from the answer. An envelope
+// that states no sender, or a blank correlation, binds nothing and is refused
+// (shnsdk.ErrBindingUnstated) before the token is read.
 func (g *Gateway) verifyInboundToken(tok shnsdk.Token, spec legSpec, corr, sender, payloadHash string) error {
 	return verifyBoundWant(tok, g.cfg.AuthzPub, g.cfg.Clock(), spec.ReqFrame, spec.Op, corr, sender, spec.requestSubjectWant("", false), payloadHash)
 }

@@ -194,7 +194,7 @@ type config struct {
 	// recorded), "observe" (every check runs, each defect is recorded as a
 	// finding and the message is relayed as sent), "structural" (every check runs,
 	// a message whose structure is broken is refused and every other defect is
-	// recorded as at observe) or "strict" (a defect refuses the message). Absent means "none" (D116):
+	// recorded as at observe) or "strict" (a defect refuses the message). Absent means "none":
 	// loadConfig remaps it, and that remap is the ONLY place in the tree where
 	// a level that is not strict comes from an omission — engine.ConformanceEnforcement's zero
 	// value is strict everywhere else. Network rules (authentication,
@@ -208,7 +208,8 @@ type config struct {
 	ConformanceEnforcementUnset bool
 
 	// ConformanceToleratePeers (CONFORMANCE_TOLERATE_PEERS) is the payers whose
-	// answers this participant tolerates (D122): <system>|<value> payer
+	// answers this participant tolerates, its own opt-in, since no payer is
+	// exempt from the answer checks by default: <system>|<value> payer
 	// identities, comma-separated. A defect the FHIR profile check of a listed
 	// payer's DTR or PAS answer would refuse is recorded instead; unset tolerates
 	// no one.
@@ -1015,7 +1016,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	// ordinary loadConfig bool idiom, matching every other config bool.
 	cfg.DemoEdgeCapture = getenv("SHN_DEMO_EDGE_CAPTURE") == "true"
 
-	// THE default: an absent CONFORMANCE_ENFORCEMENT means none (D116). Payload
+	// THE default: an absent CONFORMANCE_ENFORCEMENT means none. Payload
 	// conformance is a participant's opt-in, never the network's default: a
 	// gateway that states no level runs no payload check and records no
 	// finding, exactly as at none (one code path), and needs no validator. A
@@ -1952,6 +1953,10 @@ type resolvedEndpoints struct {
 	// HubAcceptsInvolved: the network's Hub reads an envelope's involved list
 	// (the descriptor lists it in hubAccepts). Read once, at start.
 	HubAcceptsInvolved bool
+	// HubAcceptsInvolvedSummary: the network's Hub reads a gateway's signed
+	// summary of the involved list it sends (the descriptor lists
+	// involved-summary in hubAccepts). Read once, at start.
+	HubAcceptsInvolvedSummary bool
 	// Audit is discovery's endpoints.audit, where the audit outbox sends. Read
 	// once, at start, with no setting to override it; empty is "no audit
 	// endpoint known", never an empty endpoint.
@@ -2018,8 +2023,9 @@ func resolveDiscoveryWaiting(ctx context.Context, c discoveryClients, cfg config
 		FHIRValidate: disc.FHIRValidateURL,
 		Consent:      disc.Endpoints.Consent,
 
-		HubAcceptsInvolved: disc.HubAcceptsField(shnsdk.HubAcceptsInvolved),
-		Audit:              disc.Endpoints.Audit,
+		HubAcceptsInvolved:        disc.HubAcceptsField(shnsdk.HubAcceptsInvolved),
+		HubAcceptsInvolvedSummary: disc.HubAcceptsField(shnsdk.HubAcceptsInvolvedSummary),
+		Audit:                     disc.Endpoints.Audit,
 	}
 	return ta, ep, nil
 }
@@ -2327,6 +2333,7 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 	if err != nil {
 		return b, fmt.Errorf("load bundle: %w", err)
 	}
+	fmt.Fprintf(stdout, "gateway: %s\n", encKeyLine(bundle.EncKeyCheck()))
 
 	// Fail fast on a role/bundle mismatch: a bundle registered as one role but
 	// mounted under another ROLE boots today and then default-denies at runtime
@@ -2852,6 +2859,18 @@ func build(ctx context.Context, getenv func(string) string, stdout io.Writer, cl
 		log.Printf("gateway: the network's Hub reads involved patients — each prior-authorization leg names the other patients it involves, identified through this participant's system of record, so the exchange is recorded under each of them")
 	} else {
 		log.Printf("gateway: the network's Hub does not list involved patients in hubAccepts — legs carry no involved list; restart the gateway after the network starts listing it")
+	}
+	gwCfg.HubAcceptsInvolvedSummary = endpoints.HubAcceptsInvolvedSummary
+	// Stated in every state: whether this gateway signs a summary of each
+	// involved list it sends is the network's choice too, read from the same
+	// descriptor, and it is sent only beside a list the Hub reads.
+	switch {
+	case endpoints.HubAcceptsInvolved && endpoints.HubAcceptsInvolvedSummary:
+		log.Printf("gateway: the network's Hub reads involved summaries — beside each involved list, this gateway sends its own signed summary of it: how many patients it listed and, by reason, how many it left out")
+	case endpoints.HubAcceptsInvolvedSummary:
+		log.Printf("gateway: the network's Hub lists involved summaries but not involved patients in hubAccepts — no list is sent, so no summary is either")
+	default:
+		log.Printf("gateway: the network's Hub does not list involved summaries in hubAccepts — no summary of an involved list is sent; restart the gateway after the network starts listing it")
 	}
 	// Stated in every state, so whether a provider gateway runs module 1, and
 	// whom its /scenario routes admit, can be read from its boot line.
@@ -4381,6 +4400,27 @@ func moduleOneSettingsSet(cfg config) []string {
 		}
 	}
 	return set
+}
+
+// encKeyLine is the boot line about the bundle's encryption key: the verdict
+// of comparing manifest.json's encPub with the public key enc.key derives,
+// which is the key this gateway opens with, whatever the manifest states. A
+// warning unless they agree. Each key is named by its fingerprint only.
+func encKeyLine(c shnsdk.EncKeyReport) string {
+	const register = "; a peer seals to the key this holder's registration names, so it must be that one"
+	switch c.Verdict {
+	case shnsdk.EncKeyOK:
+		return fmt.Sprintf("encryption key %s: manifest.json's encPub is the key enc.key derives (%s)", c.Verdict, c.Derived)
+	case shnsdk.EncKeyManifestMissing:
+		return fmt.Sprintf("WARNING: encryption key %s: manifest.json states no encPub; this gateway opens with the key enc.key derives (%s)%s", c.Verdict, c.Derived, register)
+	case shnsdk.EncKeyManifestMalformed:
+		return fmt.Sprintf("WARNING: encryption key %s: manifest.json's encPub is not a 32-byte base64 key; this gateway opens with the key enc.key derives (%s)%s", c.Verdict, c.Derived, register)
+	case shnsdk.EncKeyManifestLowOrder:
+		return fmt.Sprintf("WARNING: encryption key %s: manifest.json's encPub (%s) is a small-order X25519 key, which cannot authenticate this holder; this gateway opens with the key enc.key derives (%s)%s", c.Verdict, c.Manifest, c.Derived, register)
+	case shnsdk.EncKeyManifestDiffers:
+		return fmt.Sprintf("WARNING: encryption key %s: manifest.json's encPub (%s) is not the key enc.key derives (%s); this gateway opens with the derived key%s", c.Verdict, c.Manifest, c.Derived, register)
+	}
+	return fmt.Sprintf("WARNING: encryption key %q: a verdict this gateway does not know; this gateway opens with the key enc.key derives (%s)%s", c.Verdict, c.Derived, register)
 }
 
 // scenarioCallersLine is the boot line about a provider gateway's /scenario

@@ -87,7 +87,7 @@ func paRefusalReasons() []refusalReason {
 		reasonEligibilityBatchLimit,
 		reasonCDexReadPlainBase, reasonCDexReadPath, reasonCDexReadBody,
 		reasonSubscriberHistory, reasonSubscriberTypeStatus, reasonSubscriberInteraction,
-		reasonSubscriberSearch, reasonSubscriberOneEndpoint, reasonSubscriberBody, reasonSubscriberIfMatch,
+		reasonSubscriberSearch, reasonSubscriberOneEndpoint, reasonSubscriberBody, reasonSubscriberIfMatch, reasonSubscriberPrefer,
 		reasonSubscriberEndpoint, reasonSubscriberEndpointLoop, reasonSubscriberSearchLoop, reasonSubscriberNotASubscription, reasonSubscriberHoldsResource,
 		reasonCDexSubscriptionPlainCreate, reasonCDexSubscriptionPlainRead,
 		reasonScopeSubscriptionCreate, reasonScopeSubscriptionRead, reasonScopeSubscriptionUpdate,
@@ -113,6 +113,7 @@ const (
 	reasonSubscriberOneEndpoint  refusalReason = errSubscriberOneEndpoint
 	reasonSubscriberBody         refusalReason = errSubscriberBody
 	reasonSubscriberIfMatch      refusalReason = errSubscriberIfMatch
+	reasonSubscriberPrefer       refusalReason = errSubscriberPrefer
 	reasonSubscriberEndpoint     refusalReason = "channel.endpoint must be an absolute https URL with no userinfo, fragment, space or backslash, where notifications are delivered with the network's integrity; nothing was sent"
 	reasonSubscriberEndpointLoop refusalReason = "channel.endpoint is a notification address of this network, which would deliver each notification back into the network; nothing was sent"
 	reasonSubscriberSearchLoop   refusalReason = "the search's url is a notification address of this network, under which no Subscription of this system is registered (the channel.endpoint its Subscriptions name is its own endpoint); nothing was sent"

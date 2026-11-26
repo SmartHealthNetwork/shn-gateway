@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -145,11 +146,34 @@ func TestPASRequestRejectsOtherPatientContainedEvidence(t *testing.T) {
 	}
 }
 
-func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
+// contextRecord is a record of kind with id, naming patientRef as its patient
+// in the member its type names it by (evidencePatientElement, the E-06 registry).
+func contextRecord(kind, id, patientRef string) []byte {
+	return []byte(`{"resourceType":"` + kind + `","id":"` + id + `","status":"active","` + evidencePatientElement[kind] + `":{"reference":"` + patientRef + `"}}`)
+}
+
+// contextReads is a policy's context reader serving records by reference,
+// noting each read.
+func contextReads(records map[string][]byte, reads *[]string) func(context.Context, string) ([]byte, bool, error) {
+	return func(_ context.Context, ref string) ([]byte, bool, error) {
+		*reads = append(*reads, ref)
+		raw, ok := records[ref]
+		return raw, ok, nil
+	}
+}
+
+// TestAuthoredPASOptionalContextIsReadAndCarried: a literal qr-context the
+// provider's QR names beside the exchange's own order and Coverage is read
+// once, at that occurrence, from the participant's own system and carried as
+// read (PAS spec-13), never invented and never left unresolved; the QR's
+// Reference stays as written. The clinical reader is never asked for it, a
+// QR changed after the policy was made is refused, and the same literal
+// outside the policy's occurrence is not read as a context.
+func TestAuthoredPASOptionalContextIsReadAndCarried(t *testing.T) {
 	t.Parallel()
 	for _, line := range []string{"2.0", "2.1", "2.2"} {
 		for _, orderType := range []string{"ServiceRequest", "DeviceRequest"} {
-			for _, optionalType := range []string{"ServiceRequest", "DeviceRequest"} {
+			for _, optionalType := range []string{"ServiceRequest", "DeviceRequest", "MedicationRequest", "NutritionOrder", "Encounter"} {
 				for _, absolute := range []bool{false, true} {
 					t.Run(fmt.Sprintf("%s/%s/%s/%t", line, orderType, optionalType, absolute), func(t *testing.T) {
 						in := attachmentInputs(orderType, line, absolute)
@@ -168,13 +192,11 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
+						record := contextRecord(optionalType, "optional-order", in.PatientRef)
 						check := func(body []byte, err error) {
 							t.Helper()
 							if err != nil {
 								t.Fatal(err)
-							}
-							if !bytes.Contains(body, []byte(optional)) {
-								t.Fatal("raw authored assembly changed optional Reference bytes")
 							}
 							if orderType == "DeviceRequest" {
 								supplier, e := buildHomeOxygenSupplier("org-dme-ox")
@@ -190,26 +212,28 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 							if err != nil {
 								t.Fatal("source verification", err)
 							}
-							calls := 0
-							read := func(context.Context, string) ([]byte, bool, error) {
-								calls++
-								return nil, false, fmt.Errorf("unexpected read")
+							var reads []string
+							policy.readContext = contextReads(map[string][]byte{optionalType + "/optional-order": record}, &reads)
+							clinical := func(_ context.Context, ref string) ([]byte, bool, error) {
+								return nil, false, fmt.Errorf("unexpected clinical read of %s", ref)
 							}
-							got, err := retainPASRequestEvidenceWithPolicy(context.Background(), body, read, policy)
+							got, err := retainPASRequestEvidenceWithPolicy(context.Background(), body, clinical, policy)
 							if err != nil {
 								t.Fatal("authored closure", err)
 							}
-							if calls != 0 || !optionalReferenceEquivalent(t, got, []byte(optional)) {
-								t.Fatal("optional context fetched or changed")
+							if !slices.Equal(reads, []string{optionalType + "/optional-order"}) {
+								t.Fatalf("context reads %v, want the optional record once", reads)
 							}
-							graph := optionalRequestGraph(t, got)
-							if err := graph.ValidateWithReferencePolicy(policy); err != nil {
-								t.Fatal("final graph rejected verified occurrence", err)
+							if !optionalReferenceEquivalent(t, got, []byte(optional)) {
+								t.Fatal("the QR's optional Reference changed")
 							}
-							if err := optionalRequestGraph(t, got).Validate(); err == nil {
-								t.Fatal("generic final graph accepted unresolved optional reference")
+							if !bytes.Contains(got, record) {
+								t.Fatal("the optional record is not carried as read")
 							}
-							// A retained policy cannot authorize a different QR, even when its references match.
+							if err := optionalRequestGraph(t, got).Validate(); err != nil {
+								t.Fatal("the completed graph leaves a reference unresolved", err)
+							}
+							// A policy cannot authorize a different QR, even when its references match.
 							var changed map[string]any
 							decodePASObject(body, &changed)
 							for _, entry := range changed["entry"].([]any) {
@@ -219,13 +243,14 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 								}
 							}
 							changedBody, _ := json.Marshal(changed)
-							if _, err := retainPASRequestEvidenceWithPolicy(context.Background(), changedBody, read, policy); err == nil {
-								t.Fatal("policy accepted changed non-reference QR member")
+							reads = nil
+							if _, err := retainPASRequestEvidenceWithPolicy(context.Background(), changedBody, clinical, policy); err == nil || len(reads) != 0 {
+								t.Fatalf("policy accepted a changed QR: %v reads %v", err, reads)
 							}
-							if _, err := retainPASRequestEvidence(context.Background(), body, read); err == nil {
-								t.Fatal("generic completion accepted unresolved context")
+							if _, err := retainPASRequestEvidence(context.Background(), body, clinical); err == nil {
+								t.Fatal("generic completion accepted an unresolved context")
 							}
-							// The same literal outside the authorized occurrence remains a required link.
+							// The same literal outside the policy's occurrence is no context.
 							var b map[string]any
 							decodePASObject(body, &b)
 							for _, entry := range b["entry"].([]any) {
@@ -235,9 +260,6 @@ func TestAuthoredPASOptionalEvidenceScope(t *testing.T) {
 								}
 							}
 							bad, _ := json.Marshal(b)
-							if _, err := retainPASRequestEvidenceWithPolicy(context.Background(), bad, read, policy); err == nil {
-								t.Fatal("same literal outside optional occurrence accepted")
-							}
 							if _, err := authoredPASReferencePolicyFor(bad, in.QR, in.SR, in.CoverageRef); err == nil {
 								t.Fatal("post-build source mutation accepted")
 							}
@@ -317,11 +339,14 @@ func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 	}
 	graph := optionalRequestGraph(t, body)
 	owner := graph.ByURL[policy.owner]
-	for path, encoded := range policy.references {
+	if len(policy.contexts) != 1 {
+		t.Fatalf("contexts %v, want the one optional occurrence", policy.contexts)
+	}
+	for path, encoded := range policy.contexts {
 		var node map[string]any
 		decodePASObject([]byte(encoded), &node)
-		if !policy.Allows(owner, path, node) {
-			t.Fatal("verified occurrence refused")
+		if !policy.namesContext(owner, path, node) {
+			t.Fatal("verified occurrence not read")
 		}
 		for name, test := range map[string]struct {
 			owner *pasGraphEntry
@@ -333,8 +358,8 @@ func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 			"same reference different extras": {owner, path, map[string]any{"reference": "DeviceRequest/optional-order", "type": "DeviceRequest", "display": "added"}},
 		} {
 			t.Run(name, func(t *testing.T) {
-				if policy.Allows(test.owner, test.path, test.node) {
-					t.Fatal("unauthorized occurrence accepted")
+				if policy.namesContext(test.owner, test.path, test.node) {
+					t.Fatal("an occurrence the policy does not name is read as a context")
 				}
 			})
 		}
@@ -352,8 +377,8 @@ func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 				ext := qr[field].([]any)
 				ext[0], ext[len(ext)-1] = ext[len(ext)-1], ext[0]
 			}
-			if changed.ValidateWithReferencePolicy(policy) == nil {
-				t.Fatal("final graph accepted stale descriptor")
+			if policy.Matches(changed) {
+				t.Fatal("policy matched a changed QR")
 			}
 			mutated, _ := json.Marshal(changed.Bundle)
 			reads := 0
@@ -364,12 +389,16 @@ func TestAuthoredPASReferenceOccurrenceRefusals(t *testing.T) {
 	}
 	missing := optionalRequestGraph(t, body)
 	delete(missing.ByURL, policy.owner)
-	if missing.ValidateWithReferencePolicy(policy) == nil {
-		t.Fatal("policy accepted missing QR owner")
+	if policy.Matches(missing) {
+		t.Fatal("policy matched a graph without its QR")
 	}
 }
 
-func TestAuthoredPASOptionalContextKeepsNestedReferencesStrict(t *testing.T) {
+// TestAuthoredPASOptionalContextNestedOccurrenceIsNoContext: the same
+// literal nested inside the context's Reference is not itself a context the
+// policy names: the record is read once, at the policy's occurrence, and the
+// nested reference then resolves to it.
+func TestAuthoredPASOptionalContextNestedOccurrenceIsNoContext(t *testing.T) {
 	for _, kind := range []string{"ServiceRequest", "DeviceRequest"} {
 		t.Run(kind, func(t *testing.T) {
 			in := attachmentInputs("ServiceRequest", "2.2", false)
@@ -392,16 +421,21 @@ func TestAuthoredPASOptionalContextKeepsNestedReferencesStrict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			calls := 0
-			if _, err := retainPASRequestEvidenceWithPolicy(context.Background(), body, func(context.Context, string) ([]byte, bool, error) { calls++; return nil, false, nil }, policy); err == nil || calls != 0 {
-				t.Fatalf("nested order reference bypassed clinical-only lookup: %v reads%d", err, calls)
+			var reads []string
+			policy.readContext = contextReads(map[string][]byte{kind + "/optional-order": contextRecord(kind, "optional-order", in.PatientRef)}, &reads)
+			got, err := retainPASRequestEvidenceWithPolicy(context.Background(), body, func(context.Context, string) ([]byte, bool, error) {
+				return nil, false, fmt.Errorf("unexpected clinical read")
+			}, policy)
+			if err != nil || len(reads) != 1 {
+				t.Fatalf("error %v reads %v: want the context read once", err, reads)
 			}
-			if optionalRequestGraph(t, body).ValidateWithReferencePolicy(policy) == nil {
-				t.Fatal("final graph skipped nested Reference")
+			if err := optionalRequestGraph(t, got).Validate(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
 }
+
 func TestAuthoredPASOptionalContextNeedsActiveIdentities(t *testing.T) {
 	for _, missing := range []string{"ServiceRequest/source-order", "Coverage/cov-MBR-OX"} {
 		t.Run(missing, func(t *testing.T) {
@@ -477,16 +511,22 @@ func TestAuthoredPASOptionalPolicyRejectsDotSegments(t *testing.T) {
 					policy, policyErr := authoredPASReferencePolicyFor(body, in.QR, in.SR, in.CoverageRef)
 					reject := id == "." || id == ".."
 					if policyErr != nil {
-						if !reject || policyErr.Error() != "invalid optional order identity" {
+						if !reject || policyErr.Error() != "invalid optional context identity" {
 							t.Fatal("unexpected policy refusal", policyErr)
 						}
 						return
 					}
-					_, err = retainPASRequestEvidenceWithPolicy(context.Background(), body, func(context.Context, string) ([]byte, bool, error) { reads++; return nil, false, nil }, policy)
+					policy.readContext = func(_ context.Context, ref string) ([]byte, bool, error) {
+						reads++
+						return contextRecord(kind, id, in.PatientRef), ref == kind+"/"+id, nil
+					}
+					_, err = retainPASRequestEvidenceWithPolicy(context.Background(), body, func(context.Context, string) ([]byte, bool, error) {
+						return nil, false, fmt.Errorf("unexpected clinical read")
+					}, policy)
 					if reject {
 						t.Fatalf("dot-segment policy admitted %s/%s: completion error=%v reads=%d", kind, id, err, reads)
 					}
-					if err != nil || reads != 0 {
+					if err != nil || reads != 1 {
 						t.Fatalf("valid dotted ID error=%v reads=%d", err, reads)
 					}
 				})

@@ -8,25 +8,23 @@ import (
 )
 
 // notifySegment is the notification address's first segment below the
-// notifier gateway's ingress (§6.2 step 2).
+// notifier gateway's ingress.
 const notifySegment = "notify"
 
 // ChannelHeader is the channel.header name E-19 writes the sealed headers
-// under, which the notifier's system echoes with every notification (§6.2
-// step 2, step 5).
+// under, which the notifier's system sends back with every notification it posts.
 const ChannelHeader = "X-SHN-Channel"
 
 // AuthorizationHeader is the channel.header name E-19 writes the notifier
-// gateway's credential under (§6.3).
+// gateway's credential under.
 const AuthorizationHeader = "Authorization"
 
-// Address is a notification address (§6.2 step 2): the notifier gateway's
+// Address is a notification address: the notifier gateway's
 // ingress, the topic's token, the subscriber's participant id, and the sealed
 // endpoint SealEndpoint made, whose key id is the part before its ".".
 type Address struct{ Ingress, Topic, Subscriber, SealedEndpoint string }
 
-// String writes the address as E-19 writes it into channel.endpoint (§6.2
-// step 2):
+// String writes the address as E-19 writes it into channel.endpoint:
 // "<ingress>/notify/<topic>/<subscriber>/<kid>/<sealed>", the ingress without
 // an ending slash, the topic and subscriber path-escaped, and the sealed
 // endpoint split at its "." into the key id and the sealed bytes.
@@ -37,7 +35,7 @@ func (a Address) String() string {
 }
 
 // ParseAddress reads raw as a notification address of the gateway whose
-// ingress is ingress, by structure (§6.2 step 3, §7.2): raw is an absolute URL
+// ingress is ingress, by structure: raw is an absolute URL
 // with no userinfo, query or fragment, under ingress by dtraddress.Under's
 // match (scheme, host and port, then path segment by segment), and its path
 // below ingress is exactly "/notify/<topic>/<subscriber>/<kid>/<sealed>",
@@ -69,7 +67,7 @@ func ParseAddress(raw, ingress string) (Address, bool) {
 }
 
 // ParseAddressTail reads raw as an address whose tail is a notification
-// address, by structure alone (§6.2 step 3, at the subscriber's gateway): raw
+// address, by structure alone (at the subscriber's gateway): raw
 // is a URL with no query or fragment whose path ends in exactly the five
 // segments "notify", a topic and a subscriber that each unescape to a
 // non-empty value, a key id's form and a non-empty base64url segment.
@@ -103,7 +101,7 @@ func ParseAddressTail(raw string) (Address, bool) {
 	return Address{Ingress: strings.Join(segs[:n-5], "/"), Topic: topic, Subscriber: subscriber, SealedEndpoint: kid + "." + sealed}, true
 }
 
-// LooksLikeNotificationAddress is §6.5's loop rule: raw is a notification
+// LooksLikeNotificationAddress is the loop rule: raw is a notification
 // address of some gateway, whatever its host, when its path holds, one after
 // another, the segments "notify", a topic token (isTopic), a registered
 // participant id (isParticipant) and a key id's form. The path is read both

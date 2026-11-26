@@ -98,7 +98,7 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 	req, err := shnsdk.ParseSubscriptionRequest(frame.request)
 	if err != nil {
 		// A search's or a page's query outside its set is the leg's
-		// authority (§7.2); every other value outside the grammar, a read's
+		// authority; every other value outside the grammar, a read's
 		// or a vread's query among them, is routing, as an id is.
 		if errors.Is(err, shnsdk.ErrSubscriptionRequestQuery) && !readsQuery(frame.request) {
 			refuse(RefusalAuthority, http.StatusForbidden, refusalCDexSubscribeRequest+err.Error())
@@ -128,6 +128,13 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 		refuse(RefusalIntegrity, http.StatusBadRequest, refusalCDexSubscribeIfMatch)
 		return
 	}
+	// A Prefer is the subscriber's one return preference, carried to the
+	// notifier's system as sent on the interaction's own forward; anything
+	// else framed as one is refused, so no other preference crosses.
+	if frame.hasPrefer && (!subscription.IsReturnPreference(frame.prefer) || !shnsdk.FrameCarriesHeaderValue(frame.prefer)) {
+		refuse(RefusalIntegrity, http.StatusBadRequest, refusalCDexSubscribePrefer)
+		return
+	}
 	subscriber := env.Metadata.Sender
 	holder, requester := sr.subscriber(g, subscriber)
 	topic := sr.topic
@@ -149,17 +156,21 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 	ctx = endpointcert.WithTag(ctx, endpointcert.Of(sr.endpoint))
 	r = r.WithContext(ctx)
 	empty := relay.Exact(relay.NewBody(nil, relay.OriginPeerFrame), "")
-	// send makes one call to the notifier's system, forwarding p.
-	// conditioned carries the subscriber's If-Match on it: the update's or the
-	// delete's own forward, never the gateway's own read before it.
+	// send makes one call to the notifier's system, forwarding p. own is the
+	// interaction's own forward, never the gateway's own read before it: it
+	// alone carries the subscriber's If-Match (framed on an update or a
+	// delete alone) and its return preference, Prefer, as sent.
 	// disclosed are EditedHeader values of edits the subscriber's gateway made to
 	// p's body, disclosed before this gateway's own.
-	send := func(method string, target *url.URL, p relay.Payload, conditioned bool, disclosed ...string) (upstreamReply, LegResult, bool) {
+	send := func(method string, target *url.URL, p relay.Payload, own bool, disclosed ...string) (upstreamReply, LegResult, bool) {
 		callCtx := ctx
-		if (conditioned && frame.hasIfMatch) || len(disclosed) > 0 {
+		if (own && (frame.hasIfMatch || frame.hasPrefer)) || len(disclosed) > 0 {
 			h := forwardHeaders()
-			if conditioned && frame.hasIfMatch {
+			if own && frame.hasIfMatch {
 				h[shnsdk.FrameHeaderIfMatch] = []string{frame.ifMatch}
+			}
+			if own && frame.hasPrefer {
+				h[shnsdk.FrameHeaderPrefer] = []string{frame.prefer}
 			}
 			for _, v := range disclosed {
 				h.Add(EditedHeader, v)
@@ -303,7 +314,7 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 		}
 		allOwned = true
 	}
-	up, bad, ok := send(method, at, p, req.Interaction == shnsdk.SubscriptionUpdate || req.Interaction == shnsdk.SubscriptionDelete, sealed...)
+	up, bad, ok := send(method, at, p, true, sealed...)
 	if !ok {
 		return
 	}
@@ -311,14 +322,19 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 		carry(up, bad)
 		return
 	}
-	// The answer check comes first, tied to the interaction it answers:
-	// nothing but that interaction's own shape is delivered on this leg.
+	// The answer check comes first: nothing but shapes that name no patient
+	// is delivered on this leg, whatever the interaction. Then whose each
+	// Subscription the answer carries is: a read's is exactly one, the
+	// subscriber's; a create's, an update's, a delete's or a $status's every
+	// one is the subscriber's, or the answer is the network's 404 (a create's
+	// or an update's at most one); a search's or a page's every one, or 403.
 	subs, rf := subscription.AnswerSubscriptions(up.raw, req.Interaction, req.ID, topic.NotificationShape())
 	if rf != nil {
 		refuseLib(rf)
 		return
 	}
 	createsOrUpdates := req.Interaction == shnsdk.SubscriptionCreate || req.Interaction == shnsdk.SubscriptionUpdate
+	deletesOrStatus := req.Interaction == shnsdk.SubscriptionDelete || req.Interaction == shnsdk.SubscriptionStatus
 	switch {
 	case checkOwn && !sub.ownsOne(subs, ingress, subscriber, topic):
 		g.refuseSubscriptionNotFound(w, r, env, tok, answerTok, leg)
@@ -326,6 +342,11 @@ func (g *Gateway) handleSubscribeInbound(w http.ResponseWriter, r *http.Request,
 	case createsOrUpdates && len(subs) > 0 && !sub.ownsOne(subs, ingress, subscriber, topic):
 		// A create's or an update's answer that carries a Subscription
 		// carries the subscriber's own, or it is the network's 404.
+		g.refuseSubscriptionNotFound(w, r, env, tok, answerTok, leg)
+		return
+	case deletesOrStatus && !sub.ownsAll(subs, ingress, subscriber, topic):
+		// A delete's or a $status's answer that carries a Subscription
+		// carries only the subscriber's own, or it is the network's 404.
 		g.refuseSubscriptionNotFound(w, r, env, tok, answerTok, leg)
 		return
 	case allOwned:

@@ -176,7 +176,7 @@ func TestCDexRequestByOwner_RoutesToTheOneProviderItsOwnerNames(t *testing.T) {
 			}
 		}, "owner-a"},
 	}
-	// The IG's questionnaire-request Tasks (D128), as published: each names the
+	// The IG's questionnaire-request Tasks, as published: each names the
 	// IG example's organization, so goes to owner-a.
 	fixtureOf := map[string]string{}
 	for _, f := range cdexQuestionnaireTasks {

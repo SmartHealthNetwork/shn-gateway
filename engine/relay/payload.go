@@ -111,27 +111,28 @@ const (
 	// payer's answer, as the provider's gateway relays it to its own
 	// system, to the gateway's network return path for the payer that
 	// answered, so documentation sent there stays on the network. It is
-	// made even where a signature covers the payer-url (signedExempt, D127).
+	// made even where a signature covers the payer-url, and disclosed
+	// (signedExempt).
 	EditPASPendReturnRekey EditID = "E-10"
 	// EditCDexTaskReturnRekey re-keys the payer-url input of a payer's CDex
 	// attachment-request Task, as the provider's gateway carries it to its
 	// own system, to the gateway's network return path for the payer that
 	// sent it, so the documentation the provider sends there stays on the
-	// network. It is made even where a signature covers the payer-url
-	// (signedExempt, D127).
+	// network. It is made even where a signature covers the payer-url, and
+	// disclosed (signedExempt).
 	EditCDexTaskReturnRekey EditID = "E-11"
 	// EditDTRAdaptiveAddressRekey re-keys the questionnaireAdaptive address
 	// of each Questionnaire in a questionnaire-fetch answer, as the
 	// provider's gateway relays it to its own DTR client, to the gateway's
 	// per-payer address for it, so the client's adaptive rounds stay on the
 	// network; a boolean true is made explicit as the address. It is made
-	// even where a signature covers the address (signedExempt, D128).
+	// even where a signature covers the address (signedExempt).
 	EditDTRAdaptiveAddressRekey EditID = "E-12"
 	// EditDTRAdaptiveAddressRestore restores, on a request the payer's
 	// gateway forwards to its own system, an address the re-key wrote to the
 	// one the payer issued, or to the boolean true, so the payer's system
 	// receives the bytes it wrote. It is made even where a signature covers
-	// the address (signedExempt, D128).
+	// the address (signedExempt).
 	EditDTRAdaptiveAddressRestore EditID = "E-13"
 	// EditFacilityReportSubjectRekey re-points the subject.reference of a
 	// facility's report, read on the federated-query leg, that a provider's
@@ -152,30 +153,31 @@ const (
 	// Subscription's channel.endpoint to the gateway's own notification
 	// address for the subscriber, and its channel.header to exactly two
 	// values: the gateway's credential for that address and the subscriber's
-	// sealed headers (the notifications design §6.2 step 2, §6.3). It is made
-	// even where a signature covers the channel (signedExempt, D132 N2).
+	// sealed headers. It is made
+	// even where a signature covers the channel, and disclosed, as a signed
+	// payer-url's re-key is (signedExempt).
 	EditSubscriptionEndpointRekey EditID = "E-19"
 	// EditSubscriptionURLSearchRekey re-keys, on a payer's Subscription search
 	// the provider's gateway forwards to its own system, the search's url
 	// parameter to the notification address EditSubscriptionEndpointRekey
-	// would write for the subscriber (§6.2 step 4). A query edit
+	// would write for the subscriber. A query edit
 	// (QueryEdited): no byte of the body changes; the request's query does.
 	EditSubscriptionURLSearchRekey EditID = "E-21"
 	// EditSubscriptionHeaderSeal seals the channel of a subscriber's topic
 	// Subscription create or update its own gateway sends to the network: it
 	// removes channel.endpoint and channel.header from the body, and both
-	// travel only sealed, in the request frame (the notifications design §6.2
-	// step 1). It is made even where a signature covers the channel
-	// (signedExempt, D132 N2).
+	// travel only sealed, in the request frame. It is made even where a signature covers the
+	// channel, and
+	// disclosed (signedExempt).
 	EditSubscriptionHeaderSeal EditID = "E-18"
 	// EditSubscriptionEndpointRestore restores, on the notifier's 2xx answer
 	// the subscriber's gateway relays to its own system, each Subscription's
 	// channel.endpoint and channel.header to what the subscriber wrote, from
 	// the sealed values its notification address and X-SHN-Channel header
 	// carry, and re-keys each fullUrl and paging link under the notifier's
-	// stated base to the subscriber's per-counterpart base (§6.2 step 3). It
-	// is made even where a signature covers what it changes (signedExempt,
-	// D132 N2).
+	// stated base to the subscriber's per-counterpart base. It
+	// is made even where a signature covers what it changes, and disclosed
+	// (signedExempt).
 	EditSubscriptionEndpointRestore EditID = "E-20"
 	// EditSubscriptionLocationRekey writes, on the notifier's 2xx answer to a
 	// subscriber's Subscription create or update that the subscriber's
@@ -192,16 +194,18 @@ const (
 	// frame (statedBase), to the payer gateway's own base for that provider:
 	// the SubscriptionStatus's subscription and notification-event focus
 	// references, each entry.request.url, and each entry.fullUrl that is not a
-	// urn:uuid (the CDex design §15.7, D129). It is made even where a
-	// signature covers what it changes (signedExempt), as E-12 is.
+	// urn:uuid (the payer reads its Task through the
+	// network). It is made even where a signature covers what it changes
+	// (signedExempt), as E-12 is.
 	EditCDexTaskNotificationAddressRekey EditID = "E-17"
 	// EditPASNotifiedReturnRekey makes EditPASPendReturnRekey's change on a
 	// payer's PAS content notification the provider's gateway delivers to its
 	// own system's notification endpoint: each PAS Task's payer-url input in
 	// the notified decision re-keyed to the gateway's network return path for
 	// the payer that sent it, so documentation sent there stays on the
-	// network (the notifications design §6.4, D127 decision 10). It is made
-	// even where a signature covers the payer-url (signedExempt, D127).
+	// network, as a pended PAS answer's payer-url is re-keyed. It is made even where a
+	// signature covers the
+	// payer-url, and disclosed (signedExempt).
 	EditPASNotifiedReturnRekey EditID = "E-22"
 	// EditRegisteredTransform carries a message the gateway built itself (an
 	// OwnershipAuthored payload) to the peer's IG line through the registered

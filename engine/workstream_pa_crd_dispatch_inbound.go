@@ -17,8 +17,11 @@ import (
 )
 
 type dispatchCDSRequest struct {
-	Hook    string `json:"hook"`
-	Context struct {
+	Hook string `json:"hook"`
+	// FHIRServer is the EHR's own server, whose absolute references name the
+	// EHR's patient as relative ones do (crdSubjectMember).
+	FHIRServer string `json:"fhirServer"`
+	Context    struct {
 		PatientID        string   `json:"patientId"`
 		DispatchedOrders []string `json:"dispatchedOrders"`
 		Performer        string   `json:"performer"`
@@ -127,10 +130,17 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 		return nil, nil, "", http.StatusBadRequest, "missing performer"
 	}
 	covJSON = req.Prefetch["coverage"]
-	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
+	member, conforms, noPatient := crdContextPatientID(req.Context.PatientID)
+	if noPatient {
+		status, msg := subjectBindingFailure(ctx, errMemberNamesNoOne)
+		return nil, nil, "", status, msg
+	}
+	if !conforms && refuses(RuleRequestShape) {
+		return nil, nil, "", http.StatusBadRequest, msgCRDPatientIDNotFHIRID
+	}
 	// pci is the payer's binding of the context member, for the payload's own
 	// consistency and for the responder.
-	pci, status, msg = g.bindInboundSubject(ctx, member, reqJSON)
+	pci, status, msg = g.bindInboundSubjectFrom(ctx, member, reqJSON, crdSubjectResource(reqJSON, member))
 	if status != 0 {
 		return nil, nil, "", status, msg
 	}
@@ -138,8 +148,9 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	// system of record cannot answer, strict refuses with its failure; below
 	// strict the check could not finish and the request is forwarded as sent
 	// (the second return is then true, with no refusal).
-	sameSubject := func(ref string) (bool, int, string) {
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, strings.TrimPrefix(ref, "Patient/"), reqJSON)
+	sameSubject := func(resource []byte, ref string) (bool, int, string) {
+		refMember := crdSubjectMember(resource, ref, req.FHIRServer)
+		rp, ok, readErr := g.resolveSubjectPCIFrom(ctx, refMember, reqJSON, crdSubjectResource(reqJSON, refMember))
 		if notProvablyThePatient(readErr) {
 			readErr, ok = nil, false // not provably the leg's patient
 		}
@@ -174,7 +185,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 			}
 			continue
 		}
-		same, status, msg := sameSubject(subj)
+		same, status, msg := sameSubject(order, subj)
 		if status != 0 {
 			return nil, nil, "", status, msg
 		}
@@ -184,7 +195,7 @@ func (g *Gateway) conformantCRDDispatchBindContext(ctx context.Context, reqJSON 
 	}
 	// Coverage beneficiary (when present) must bind to the same pci.
 	if ben := coverageBeneficiaryFromPrefetch(covJSON); ben != "" {
-		same, status, msg := sameSubject(ben)
+		same, status, msg := sameSubject(covJSON, ben)
 		if status != 0 {
 			return nil, nil, "", status, msg
 		}

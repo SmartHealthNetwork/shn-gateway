@@ -18,6 +18,8 @@ import (
 // every level, each exactly once.
 var levelSplitTests = []string{
 	"TestEligibility_ContainedPatientPastTheTokenBound",
+	"TestInvolvedSummary_ARequestAtItsLimitIsSentWithoutOne",
+	"TestInvolvedSummary_AnAnswerAtTheLimitIsSentWithoutOne",
 	"TestProviderData_EvidenceAboutAnotherPatientIsRefused",
 	"TestProviderData_TheResumeRefusesEvidenceAboutAnotherPatient",
 }

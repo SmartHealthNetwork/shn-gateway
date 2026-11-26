@@ -72,9 +72,12 @@ func evidencePrepareFailed(err error) bool { return errors.Is(err, errEvidencePr
 // build names the patient. The system of record holds the member's Patient
 // under sorID and the build names that patient member (patientRef), so a
 // clinical record the system answers about them names Patient/<sorID> where
-// the request names Patient/<member>. Each such record's root
-// subject.reference is re-pointed to Patient/<member> by registered edit E-06
-// (rekeyEvidenceSubject), exactly as the supplemental report's is. A record
+// the request names Patient/<member>. Each such record's patient reference,
+// at the member E-06's registry names for its type (evidencePatientElement:
+// a NutritionOrder's patient, every other registered type's subject), is
+// re-pointed to Patient/<member> by registered edit E-06
+// (rekeyEvidenceSubject), exactly as the supplemental report's is. A record of
+// a type outside the registry is never re-keyed: it is answered as held. A record
 // whose subject names anything else (another patient, Patient/<member> under
 // another record id, a versioned or absolute reference, a Group or any other
 // non-Patient reference, a contained or urn reference) is refused as a record
@@ -106,7 +109,14 @@ func evidenceReadByMember(read func(context.Context, string) ([]byte, bool, erro
 		if err := heldRecordFault(raw, ref); err != nil {
 			return nil, false, err
 		}
-		named, edited, err := rekeyEvidenceSubject(raw, "Patient/"+sorID, member)
+		// E-06 re-keys only at the element its registry names for the
+		// record's type; a type outside the registry is never re-keyed.
+		typ, _, _ := strings.Cut(ref, "/")
+		element, registered := evidencePatientElement[typ]
+		if !registered {
+			return raw, true, nil
+		}
+		named, edited, err := rekeyEvidenceSubject(raw, "Patient/"+sorID, member, element)
 		var signed *relay.SignedContentError
 		switch {
 		case errors.As(err, &signed):
@@ -117,7 +127,7 @@ func evidenceReadByMember(read func(context.Context, string) ([]byte, bool, erro
 			return nil, false, notThePatientsRecord(ref)
 		case errors.Is(err, errEvidenceNoSubject):
 			// Decided too: absent is not a match, and not "not held".
-			return nil, false, recordNamesNoSubject(ref)
+			return nil, false, recordNamesNoPatient(ref, patientElementOf(ref))
 		case errors.Is(err, errEvidenceUnreadable):
 			// heldRecordFault read it, under the relay's limits, as the
 			// re-point reads it: not reached unless the two disagree.
@@ -173,6 +183,154 @@ func (e *evidenceNotHeldError) Error() string {
 func (e *evidenceNotHeldError) Is(target error) bool { return target == errRecordNotCarried }
 
 func recordNotHeld(ref string) error { return &evidenceNotHeldError{ref: ref} }
+
+// evidencePatientElement is, for each type registered edit E-06 re-keys, the
+// member naming the record's patient (FHIR R4: a NutritionOrder's patient,
+// every other registered type's subject), read from E-06's registered places
+// ("<Type>.<element>.reference", package paedits), so the registry is the one
+// list. A type outside it is never re-keyed.
+var evidencePatientElement = func() map[string]string {
+	out := map[string]string{}
+	for _, e := range paRelayEdits {
+		if e.ID != relay.EditEvidenceSubjectRekey {
+			continue
+		}
+		for _, place := range e.Paths {
+			if parts := strings.Split(place, "."); len(parts) == 3 && parts[2] == "reference" {
+				out[parts[0]] = parts[1]
+			}
+		}
+	}
+	return out
+}()
+
+// patientElementOf is the member naming the patient of the record ref
+// (<type>/<id>) names, by E-06's registry: "subject" for a type outside it.
+func patientElementOf(ref string) string {
+	typ, _, _ := strings.Cut(ref, "/")
+	if element, ok := evidencePatientElement[typ]; ok {
+		return element
+	}
+	return "subject"
+}
+
+// qrContextTypes are the types a QR's qr-context may name that a request
+// can carry: each is in E-06's registry (evidencePatientElement), which names
+// the member its patient is in, read by structure, never by text. A type
+// outside it is not read for a context.
+var qrContextTypes = map[string]bool{
+	"ServiceRequest": true, "DeviceRequest": true, "MedicationRequest": true, "NutritionOrder": true, "Encounter": true,
+}
+
+// recordNamesNoPatient refuses ref, a record whose patient member (element:
+// subject, or a NutritionOrder's patient) names no reference: as
+// recordNamesNoSubject, which it is for subject.
+func recordNamesNoPatient(ref, element string) error {
+	if element == "subject" {
+		return recordNamesNoSubject(ref)
+	}
+	return fmt.Errorf("%w: %s names no %s.reference", errRecordNotCarried, ref, element)
+}
+
+// contextNotHeldError refuses ref, a record the provider's
+// QuestionnaireResponse names in a qr-context that the participant's system
+// definitely does not hold. It says what evidenceNotHeldError says, but what
+// is missing is what the gateway read from its own participant's system (its
+// $populate answer named the record), not what the caller's request named:
+// so it is not an evidenceNotHeldError, and buildFidelityStatus answers it
+// errRecordNotCarried's 502 where a record the request names is 422. The two
+// are told apart by where the reference came from, a qr-context occurrence
+// the policy names, never by text.
+type contextNotHeldError struct{ ref string }
+
+func (e *contextNotHeldError) Error() string {
+	return "a record the request references cannot be filled: " + e.ref + " is not held by the system of record"
+}
+
+func (e *contextNotHeldError) Is(target error) bool { return target == errRecordNotCarried }
+
+func contextNotHeld(ref string) error { return &contextNotHeldError{ref: ref} }
+
+// contextReferenceNotCarried refuses owner's reference to ref, made by the
+// QR (a context of a type no request carries) or by a record read for one of
+// its contexts (a reference outside the records a context carries): the
+// fidelity of the gateway's own build, 502.
+func contextReferenceNotCarried(owner, ref string) error {
+	return fmt.Errorf("%w: %s references %s, which a prior-authorization request this gateway builds cannot carry", errRecordNotCarried, owner, ref)
+}
+
+// appointmentContextNotCarried refuses an Appointment a QR names in a
+// qr-context: an Appointment names its patient as one of its participants,
+// not in a member of its own, so the build cannot bind it to the request's
+// patient yet. The fidelity of the gateway's own build, 502.
+func appointmentContextNotCarried(ref string) error {
+	return fmt.Errorf("%w: %s is an Appointment, which a prior-authorization request this gateway builds cannot carry yet: an Appointment names its patient as one of its participants", errRecordNotCarried, ref)
+}
+
+// contextRequesterRead reads the records the requester of record (a QR
+// context's record, as contextRequesterView gives it) leads to, by the
+// requester rule of the request's builder: the records, or why they cannot
+// be carried (fidelity, the reason), or the system's failure to answer
+// (readErr).
+type contextRequesterRead func(ctx context.Context, record []byte) (records [][]byte, fidelity string, readErr error)
+
+// contextRequesterView is raw, a QR context's record of type typ (decoded,
+// r), as the requester rule reads it: the request types name the clinician
+// who ordered in requester, a NutritionOrder in orderer (FHIR R4). An
+// Encounter names none; the records its participants, service provider or
+// location name are not carried, so a context Encounter referencing one is
+// refused by name.
+func contextRequesterView(typ string, r map[string]any, raw []byte) []byte {
+	if typ != "NutritionOrder" {
+		return raw
+	}
+	view, err := json.Marshal(map[string]any{"requester": r["orderer"]})
+	if err != nil {
+		return raw
+	}
+	return view
+}
+
+// unresolvedContext is the first of the QR's contexts policy names that the
+// request, as built, does not carry: one that resolves to an entry already
+// is no record to read. ok is false when every one resolves.
+func unresolvedContext(body []byte, policy *authoredPASReferencePolicy) (string, bool) {
+	var bundle map[string]any
+	if decodePASObject(body, &bundle) != nil {
+		return "", false
+	}
+	entries, _ := bundle["entry"].([]any)
+	graph := &pasGraph{Bundle: bundle, Entries: entries, ByURL: map[string]*pasGraphEntry{}}
+	for i, raw := range entries {
+		e, _ := raw.(map[string]any)
+		full, _ := e["fullUrl"].(string)
+		r, _ := e["resource"].(map[string]any)
+		if full != "" && r != nil {
+			graph.ByURL[full] = &pasGraphEntry{FullURL: full, Resource: r, Index: i}
+		}
+	}
+	owner := graph.ByURL[policy.owner]
+	for _, ref := range policy.named {
+		if owner == nil || graph.Resolve(ref, owner, nil, false) != "" {
+			return ref, true
+		}
+	}
+	return "", false
+}
+
+// contextNotReadOnProfile refuses ref, a QR context on an origination profile
+// that reads no orders from a system of record (demo): the fidelity of the
+// gateway's own build, 502.
+func contextNotReadOnProfile(ref string) error {
+	return fmt.Errorf("%w: %s cannot be filled: this gateway's demo profile reads no orders from a system of record", errRecordNotCarried, ref)
+}
+
+// contextRequesterNotCarried refuses ref, a record read for a QR context,
+// whose requester's records cannot be carried (the requester rule's own
+// refusal, why): the fidelity of the gateway's own build, 502, naming ref.
+func contextRequesterNotCarried(ref, why string) error {
+	return fmt.Errorf("%w: %s: %s", errRecordNotCarried, ref, why)
+}
 
 // evidenceUnreadableError is the participant's system answering a read of a
 // clinical record with something other than that resource: not a JSON
@@ -266,7 +424,23 @@ func retainPASRequestEvidence(ctx context.Context, body []byte, read func(contex
 // completeAuthoredPASRequest is completePASRequest for a request whose
 // questionnaire response the build links (authoredPASReferencePolicyFor),
 // with the same input edits.
-func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, sorID, member string) ([]byte, []relay.EditID, error) {
+//
+// A request on another origination profile (demo) reads no records from a
+// system of record, so a QR naming a context beside the exchange's own order
+// and Coverage is refused there, on the fidelity of the gateway's own build:
+// nothing can supply the record the request would have to carry.
+//
+// requesterOf reads the records a context's requester leads to, by the
+// caller's own requester rule (module 1 supplies its own); nil reads none, so
+// a context naming a requester the request does not carry is refused.
+func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR, sourceOrder []byte, coverageRef string, sorID, member string, requesterOf contextRequesterRead) ([]byte, []relay.EditID, error) {
+	if len(sourceQR) != 0 && g.cfg.OriginationProfile != "provider-data" {
+		if policy, err := authoredPASReferencePolicyFor(body, sourceQR, sourceOrder, coverageRef); err == nil {
+			if ref, ok := unresolvedContext(body, policy); ok {
+				return nil, nil, contextNotReadOnProfile(ref)
+			}
+		}
+	}
 	if len(sourceQR) == 0 || g.cfg.OriginationProfile != "provider-data" {
 		return g.completePASRequest(ctx, body, sorID, member)
 	}
@@ -277,8 +451,14 @@ func (g *Gateway) completeAuthoredPASRequest(ctx context.Context, body, sourceQR
 	if err != nil {
 		return nil, nil, err
 	}
+	sor := ReadSystemOfRecord(g.cfg.SoR)
 	var note inputEditNote
-	out, err := retainPASRequestEvidenceWithPolicy(ctx, body, evidenceReadByMember(ReadSystemOfRecord(g.cfg.SoR).ResolveByReferenceContext, sorID, member, &note), policy)
+	// A QR context's record is read as the clinical evidence is: through
+	// E-06, which re-keys it at the element its type names its patient by.
+	read := evidenceReadByMember(sor.ResolveByReferenceContext, sorID, member, &note)
+	policy.readContext = read
+	policy.requesterOf = requesterOf
+	out, err := retainPASRequestEvidenceWithPolicy(ctx, body, read, policy)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -354,6 +534,9 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 	if patient == "" || !policy.Matches(graph) {
 		return fail()
 	}
+	// contextRecords are the records read for one of the QR's contexts, by
+	// fullUrl: what they reference is carried by a context's rules.
+	contextRecords := map[string]bool{}
 	refs := 0
 	// resources counts every object naming a resourceType, contained ones
 	// included, as the graph's own validation counts them.
@@ -374,7 +557,14 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 		// is refused naming it; the request as built is the gateway's own.
 		fromRead := i >= had
 		ownerRef := owner.Resource["resourceType"].(string) + "/" + owner.Resource["id"].(string)
-		var selected []string
+		// selected is each reference the record makes, and whether it is one
+		// of the QR's contexts the policy names (read as that, by its path).
+		type selection struct {
+			ref     string
+			context bool
+		}
+		var selected []selection
+		ownerIsContext := contextRecords[owner.FullURL]
 		pastRefs, pastResources := false, false
 		var walk func(any, int, string) bool
 		walk = func(v any, depth int, path string) bool {
@@ -399,9 +589,7 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 					if !ok || refs > pasGraphMaxReferences {
 						return false
 					}
-					if !policy.Allows(owner, path, x) {
-						selected = append(selected, s)
-					}
+					selected = append(selected, selection{s, policy.namesContext(owner, path, x)})
 				}
 				keys := make([]string, 0, len(x))
 				for k := range x {
@@ -431,21 +619,42 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			}
 			return fail()
 		}
-		for _, ref := range selected {
+		for _, sel := range selected {
+			ref := sel.ref
 			if strings.HasPrefix(ref, "#") {
 				continue
 			}
 			if graph.Resolve(ref, owner, nil, false) == "" {
 				continue
 			}
-			// Only unversioned relative clinical identities are eligible for local lookup.
+			// Only unversioned relative identities are eligible for local lookup.
 			// Absolute references stay exact and are never reduced to a different authority.
 			parts := strings.Split(ref, "/")
 			if len(parts) != 2 || !pasSafeResourceID(parts[1]) {
+				if sel.context || ownerIsContext {
+					return nil, contextReferenceNotCarried(ownerRef, ref)
+				}
 				return fail()
 			}
-			switch parts[0] {
-			case "Condition", "ClinicalImpression", "Goal", "Observation", "DiagnosticReport":
+			// patientAt is the member of the record read that names its
+			// patient, by its type: a clinical record's subject, or a QR
+			// context's (evidencePatientElement, the E-06 registry).
+			patientAt, readRecord := "subject", read
+			switch {
+			case sel.context && parts[0] == "Appointment":
+				return nil, appointmentContextNotCarried(ref)
+			case sel.context:
+				element, ok := evidencePatientElement[parts[0]]
+				if !ok || !qrContextTypes[parts[0]] || policy.readContext == nil {
+					return nil, contextReferenceNotCarried(ownerRef, ref)
+				}
+				patientAt, readRecord = element, policy.readContext
+			case parts[0] == "Condition", parts[0] == "ClinicalImpression", parts[0] == "Goal", parts[0] == "Observation", parts[0] == "DiagnosticReport":
+			case ownerIsContext:
+				// A QR context's record carries only its requester's records
+				// and clinical evidence it references; anything else it names
+				// that the request does not carry cannot be carried.
+				return nil, contextReferenceNotCarried(ownerRef, ref)
 			default:
 				return fail()
 			}
@@ -462,10 +671,11 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			if err := ctx.Err(); err != nil {
 				return nil, safeSoRError(err)
 			}
-			raw, found, err := read(ctx, ref)
+			raw, found, err := readRecord(ctx, ref)
 			var signed *relay.SignedContentError
 			if errors.As(err, &signed) {
-				// E-06 would change a record a signature covers (D113).
+				// E-06 would change a record a signature covers: a fidelity
+				// refusal of SHN's own edit.
 				return nil, signed
 			}
 			if errors.Is(err, errEvidencePrepare) {
@@ -490,7 +700,13 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			}
 			if !found {
 				// A definite absence, never a read that failed to answer
-				// (that is err, above): the build cannot fill it.
+				// (that is err, above): the build cannot fill it. A QR
+				// context's absence is what the gateway read from its own
+				// participant's system (the $populate answer named it), not
+				// what the caller's request named.
+				if sel.context {
+					return nil, contextNotHeld(ref)
+				}
 				return nil, recordNotHeld(ref)
 			}
 			// The record is decided before the request's size bound, in the
@@ -503,13 +719,13 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			if decodePASObject(raw, &r) != nil {
 				return nil, recordUnreadable(ref)
 			}
-			subject, ok := r["subject"].(map[string]any)
+			subject, ok := r[patientAt].(map[string]any)
 			if !ok {
-				return nil, recordNamesNoSubject(ref)
+				return nil, recordNamesNoPatient(ref, patientAt)
 			}
 			s, ok := subject["reference"].(string)
 			if !ok {
-				return nil, recordNamesNoSubject(ref)
+				return nil, recordNamesNoPatient(ref, patientAt)
 			}
 			if s != patient && base+"/"+s != patient {
 				// Not the request's patient's record: the fidelity
@@ -531,11 +747,70 @@ func retainPASRequestEvidenceWithPolicy(ctx context.Context, body []byte, read f
 			}
 			added = append(added, bundleEntryBytes{fullURL: encodedURL, resource: raw})
 			lastRead = ref
+			if !sel.context {
+				continue
+			}
+			// A QR context's record carries the records its requester leads
+			// to, by the rule the exchange's own order's requester is read by
+			// (contextRequesterRead); one the request already carries is
+			// not read into it twice.
+			contextRecords[full] = true
+			if policy.requesterOf == nil {
+				continue
+			}
+			records, fidelity, readErr := policy.requesterOf(ctx, contextRequesterView(parts[0], r, raw))
+			switch {
+			case fidelity != "":
+				return nil, contextRequesterNotCarried(ref, fidelity)
+			case readErr != nil:
+				return nil, safeReadErr(readErr)
+			}
+			for _, rec := range records {
+				var head struct {
+					ResourceType string `json:"resourceType"`
+					ID           string `json:"id"`
+				}
+				if decodeMessage(rec, &head) != nil {
+					return nil, recordUnreadable(ref)
+				}
+				recRef := head.ResourceType + "/" + head.ID
+				recFull := base + "/" + recRef
+				if graph.ByURL[recFull] != nil {
+					continue
+				}
+				if err := heldRecordFault(rec, recRef); err != nil {
+					return nil, err
+				}
+				var rr map[string]any
+				if decodePASObject(rec, &rr) != nil {
+					return nil, recordUnreadable(recRef)
+				}
+				if len(entries) >= pasGraphMaxResources {
+					return nil, recordPastLimit(ref, limitGraphResources)
+				}
+				total += len(rec)
+				if total > pasGraphMaxBytes {
+					return nil, recordPastLimit(recRef, limitGraphBytes)
+				}
+				re := map[string]any{"fullUrl": recFull, "resource": rr}
+				if !add(len(entries), re) {
+					return fail()
+				}
+				entries = append(entries, re)
+				encodedRec, err := json.Marshal(recFull)
+				if err != nil {
+					return fail()
+				}
+				added = append(added, bundleEntryBytes{fullURL: encodedRec, resource: rec})
+				lastRead = recRef
+			}
 		}
 	}
 	graph.Entries = entries
 	bundle["entry"] = entries
-	if graph.ValidateWithReferencePolicy(policy) != nil || !consistentPASGraphSubjects(graph, patient) {
+	// Every reference now resolves, a QR's contexts included: nothing the
+	// request names is left for the payer to find missing (PAS spec-13).
+	if graph.Validate() != nil || !consistentPASGraphSubjects(graph, patient) {
 		return fail()
 	}
 	// The request leaves as built, with the records read added: it is

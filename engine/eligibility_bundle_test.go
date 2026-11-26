@@ -280,10 +280,10 @@ func TestEligibilityBundle_RefusesWhatIsNeitherForm(t *testing.T) {
 		"absolute reference to an entry of another id": {eligFAISBundle(t, [2]any{"", withPatientRef(request, "http://ehr.example/fhir/Patient/MBR-COVERED")},
 			[2]any{"http://ehr.example/fhir/Patient/MBR-COVERED", map[string]any{"resourceType": "Patient", "id": "MBR-OX"}},
 			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), "parse member failed"},
-		// A reference no Patient entry answers names no patient: it is not
-		// read as a member id.
+		// A reference no Patient entry answers, and that names no Patient by
+		// FHIR's reference grammar, names no one: it is not read as a member id.
 		"patient reference no entry answers": {eligFAISBundle(t, [2]any{"", request}, [2]any{"urn:uuid:patient-mistyped", patient},
-			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), "parse member failed"},
+			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), errEligibilityNamesNoOne},
 		"patient reference naming an Organization": {eligFAISBundle(t, [2]any{"", withPatientRef(request, "urn:uuid:payer")}, [2]any{"urn:uuid:patient", patient},
 			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), "parse member failed"},
 		// A request in a Bundle is read by its exact member names: a patient
@@ -296,9 +296,9 @@ func TestEligibilityBundle_RefusesWhatIsNeitherForm(t *testing.T) {
 		"empty patient reference": {eligFAISBundle(t, [2]any{"", withPatientRef(request, "")}, [2]any{"urn:uuid:patient", patient},
 			[2]any{"urn:uuid:coverage", coverage}, [2]any{"urn:uuid:payer", payer}), errEligibilityNamesNoOne},
 		// A request alone in a batch carries no entries: a reference that is
-		// neither Patient/<id> nor #id names no patient.
+		// neither a Patient reference nor #id names no one.
 		"a batch's request naming its patient by urn:uuid": {eligBatch(t, cer, mustJSON(t, withPatientRef(request, "urn:uuid:patient"))),
-			"parse member failed (request 1 of the batch)"},
+			errEligibilityNamesNoOne + " (request 1 of the batch)"},
 		// Its contained resources too: a request whose contained cannot be
 		// read one way only is not read by a reading that skips them.
 		"a batch's request with contained named in another case": {eligBatch(t, cer, eligBundledOddly(t, request, "Contained", []any{containedMember("p", "MBR-OX")}, "#p")),
@@ -547,6 +547,8 @@ func TestEligibilityBundle_PayerReadsBundledPatientsExactly(t *testing.T) {
 		"a batch's request with contained named in another case": "member names are case-sensitive, so the request names no patient to bind",
 		// A reference that names no one is refused as a request sent alone is.
 		"empty patient reference": errEligibilityNamesNoOne,
+		// A request alone in a batch carries no entries: a urn:uuid: names no one.
+		"a batch's request naming its patient by urn:uuid": errEligibilityNamesNoOne,
 	}
 	for name, body := range map[string][]byte{
 		"patient named in another case":   bytes.Replace(eligFAIS(t, dtrFrameMember, "00001"), []byte(`"patient":{"reference":"urn:uuid:patient"}`), []byte(`"PATIENT":{"reference":"urn:uuid:patient"}`), 1),

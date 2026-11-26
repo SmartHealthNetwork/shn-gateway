@@ -102,11 +102,11 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Require the binding-critical metadata fields even though the Hub already
 	// guards them — the payer must not assume an implicitly-trusted Hub channel
-	// (network-separation). An empty CorrelationID would otherwise skip the token's
-	// correlation binding below (VerifyBound treats "" as skip) AND be echoed into
-	// the response leg (respondLeg reuses it), so a downstream audit could carry an
-	// empty correlation. AuthorityFrame is required for the same defense-in-depth
-	// reason; the token is bound below to the leg's own request frame and
+	// (network-separation). An empty CorrelationID binds nothing (the token's
+	// verify below refuses an empty or blank one, shnsdk.ErrBindingUnstated)
+	// AND would be echoed into the response leg (respondLeg reuses it), so a
+	// downstream audit could carry an empty correlation. AuthorityFrame is
+	// required for the same defense-in-depth reason; the token is bound below to the leg's own request frame and
 	// operation (the catalog row's ReqFrame and Op).
 	if env.Metadata.AuthorityFrame == "" {
 		exchangeOf(r.Context()).refused(RefusalIntegrity)
@@ -177,7 +177,9 @@ func (g *Gateway) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// (pinned per TransactionType), frame, correlationID, AND Holder (the envelope
 	// Sender) must match the envelope it arrived in. This stops a valid token being
 	// lifted into a different envelope/operation and replayed, and stops one holder
-	// routing using another holder's token.
+	// routing using another holder's token. An envelope that states no sender,
+	// or a blank correlation, binds nothing: it is refused here on authority
+	// (shnsdk.ErrBindingUnstated), before the requester is looked up.
 	// The token's patient is held to the leg's row (requestSubjectWant): some
 	// patient on a leg whose request names one, which this gateway binds
 	// afterwards, and none on a leg that names none or takes its patient from

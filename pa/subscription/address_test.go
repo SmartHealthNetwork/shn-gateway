@@ -66,7 +66,7 @@ func TestParseAddress_Rejects(t *testing.T) {
 	}
 }
 
-// §6.5's loop rule: the four segments in order, whatever the host and
+// The loop rule: the four segments in order, whatever the host and
 // whatever comes before or after them, read unescaped.
 func TestLooksLikeNotificationAddress(t *testing.T) {
 	isParticipant := func(s string) bool { return s == "provider-1" || s == "payer-1" || s == "p/1" }

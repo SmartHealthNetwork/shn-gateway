@@ -4,7 +4,7 @@ package engine
 
 // workstream_pa_cdex_subscription_test.go — the provider gateway's side of
 // the payer's topic Subscription to its CDex Tasks' changes
-// (cdex-task-subscribe; the notifications design §5 to §9): each interaction
+// (cdex-task-subscribe): each interaction
 // carried to the provider's own Subscription endpoint, the channel re-keyed
 // (E-19) and a search's url re-keyed (E-21), the ownership test on what is
 // read back, the answer check, and every refusal by its primitive, each row
@@ -299,8 +299,11 @@ func (p *subProvider) storedFor(t testing.TB, subscriber, sub string) []byte {
 type subFrame struct {
 	request, endpoint, channel string
 	contentType, ifMatch       string
+	prefer                     string
 	body                       []byte
-	leg                        string // the subscribe leg unless set
+	raw                        []byte // the frame exactly, in place of one built from the rest
+
+	leg string // the subscribe leg unless set
 }
 
 // subAnswer is what the payer's gateway receives.
@@ -328,14 +331,18 @@ func (p *cdexRequestProvider) subscribe(t *testing.T, f subFrame) subAnswer {
 	corr := "corr-" + leg
 	headers := map[string]string{}
 	for k, v := range map[string]string{shnsdk.FrameHeaderSubscriptionRequest: f.request, shnsdk.FrameHeaderSubscriptionEndpoint: f.endpoint,
-		shnsdk.FrameHeaderSubscriptionChannel: f.channel, "Content-Type": f.contentType, shnsdk.FrameHeaderIfMatch: f.ifMatch} {
+		shnsdk.FrameHeaderSubscriptionChannel: f.channel, "Content-Type": f.contentType, shnsdk.FrameHeaderIfMatch: f.ifMatch,
+		shnsdk.FrameHeaderPrefer: f.prefer} {
 		if v != "" {
 			headers[k] = v
 		}
 	}
-	payload, err := shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, headers, f.body)
-	if err != nil {
-		t.Fatal(err)
+	payload := f.raw
+	if payload == nil {
+		var err error
+		if payload, err = shnsdk.EncodeHTTPFrameHeaders(http.StatusOK, headers, f.body); err != nil {
+			t.Fatal(err)
+		}
 	}
 	env, err := shnsdk.Seal(shnsdk.Metadata{
 		Sender: p.payer.ID, Recipient: p.g.cfg.HolderID, TransactionType: spec.WireName,
@@ -621,7 +628,7 @@ func TestCDexSubscribe_E18IsDisclosedFromTheFramesSealedValues(t *testing.T) {
 	}
 }
 
-// A signed Subscription is re-keyed all the same (D132, N2), and the forward
+// A signed Subscription is re-keyed all the same, and the forward
 // names the signature that covered the channel. The closed shape allows no
 // extension but the Backport IG's (the HRex Task topic defines none), so a
 // signature in an extension is refused by the shape first; one the shape
@@ -1115,13 +1122,13 @@ func TestCDexSubscribe_TheAnswerCheckComesFirst(t *testing.T) {
 	}
 }
 
-// Each interaction is answered with its own shape only, at every level: a
-// shape valid for another interaction, or one holding a resource, is refused
-// 502 on authority, with nothing of it delivered. A read answered with an
-// OperationOutcome, with a searchset holding the payer's Subscription and
-// another's, or with no body is refused, so a read never indexes an answer
-// that carries no Subscription. Each interaction's own shape is delivered.
-func TestCDexSubscribe_TheAnswerIsTheInteractionsOwn(t *testing.T) {
+// The answer check, at every level: a shape that names no patient is
+// delivered whatever the interaction, and one holding a resource, a $status
+// Bundle on an interaction naming no Subscription by id, or anything that is
+// not FHIR JSON is refused 502 on authority, with nothing of it delivered. What each
+// shape gets on each interaction, ownership included, is the matrix on both
+// topics (TestSubscribe_TheAnswerMatrix).
+func TestCDexSubscribe_TheAnswerCheck(t *testing.T) {
 	const patient = `{"resourceType":"Patient","id":"p1","name":[{"family":"Doe"}]}`
 	outcome := `{"resourceType":"OperationOutcome","issue":[{"severity":"information","code":"informational"}]}`
 	outcomeContained := `{"resourceType":"OperationOutcome","contained":[` + patient + `],"issue":[{"severity":"information","code":"informational"}]}`
@@ -1139,19 +1146,12 @@ func TestCDexSubscribe_TheAnswerIsTheInteractionsOwn(t *testing.T) {
 			status    int
 			delivered bool
 		}{
-			"a read answered with an OperationOutcome": {func(*subProvider) subFrame { return subFrame{request: "GET Subscription/sub-1"} },
-				func(*subProvider) string { return outcome }, http.StatusOK, false},
-			"a read answered with the payer's and another's": {func(*subProvider) subFrame { return subFrame{request: "GET Subscription/sub-1"} },
-				func(p *subProvider) string {
-					return `{"resourceType":"Bundle","type":"searchset","entry":[{"resource":` + string(p.storedFor(t, "payer-x", cdexSubscriptionJSON(nil))) +
-						`},{"resource":` + string(p.storedFor(t, "payer-y", cdexSubscriptionJSON(nil))) + `}]}`
-				}, http.StatusOK, false},
-			"a read answered with no body": {func(*subProvider) subFrame { return subFrame{request: "GET Subscription/sub-1"} },
-				func(*subProvider) string { return "" }, http.StatusOK, false},
 			"a search answered with a status Bundle": {func(*subProvider) subFrame { return searchFrame(t, payerEndpoint) },
 				func(*subProvider) string { return status(statusEntry("sub-1", "")) }, http.StatusOK, false},
-			"a delete answered with a Subscription": {func(*subProvider) subFrame { return subFrame{request: "DELETE Subscription/sub-1"} },
-				func(p *subProvider) string { return string(p.storedFor(t, "payer-x", cdexSubscriptionJSON(nil))) }, http.StatusOK, false},
+			"a delete answered with the payer's Subscription": {func(*subProvider) subFrame { return subFrame{request: "DELETE Subscription/sub-1"} },
+				func(p *subProvider) string { return string(p.storedFor(t, "payer-x", cdexSubscriptionJSON(nil))) }, http.StatusOK, true},
+			"a delete answered with a $status Bundle": {func(*subProvider) subFrame { return subFrame{request: "DELETE Subscription/sub-1"} },
+				func(*subProvider) string { return status(statusEntry("sub-1", "")) }, http.StatusOK, true},
 			"a delete answered with no body": {func(*subProvider) subFrame { return subFrame{request: "DELETE Subscription/sub-1"} },
 				func(*subProvider) string { return "" }, http.StatusNoContent, true},
 			"a create answered with no body": {func(*subProvider) subFrame { return createFrame(t, cdexSubscriptionJSON(nil)) },
@@ -1594,8 +1594,8 @@ func TestCDexSubscribe_RefusalsByPrimitive(t *testing.T) {
 		"no subscriptionRequest": {func(t *testing.T) subFrame { f := createFrame(t, cdexSubscriptionJSON(nil)); f.request = ""; return f },
 			http.StatusBadRequest, RefusalRouting, refusalCDexSubscribeNoRequest, "", false, false},
 		"an id that is not a FHIR id": {func(*testing.T) subFrame { return subFrame{request: "GET Subscription/a_b"} }, http.StatusBadRequest, RefusalRouting, "not a FHIR id", "", false, false},
-		// The interactions the leg never carries, by their own rules (§7.2,
-		// §9): a PATCH on fidelity, history and type-level $status on
+		// The interactions the leg never carries, by their own rules: a PATCH on fidelity,
+		// history and type-level $status on
 		// authority; a type-level history is no interaction at all.
 		"PATCH":                          {func(*testing.T) subFrame { return subFrame{request: "PATCH Subscription/sub-1"} }, http.StatusMethodNotAllowed, RefusalFidelity, "PATCH is not carried", "", false, true},
 		"PATCH at the type":              {func(*testing.T) subFrame { return subFrame{request: "PATCH Subscription"} }, http.StatusMethodNotAllowed, RefusalFidelity, "PATCH is not carried", "", false, true},
@@ -1854,7 +1854,7 @@ func TestCDexSubscribe_RefusalsByPrimitive(t *testing.T) {
 // the payer's read of its Task, they are refused 400, on message integrity.
 func TestCDexSubscribe_TheHeadersOnAnotherLegAreRefused(t *testing.T) {
 	for _, level := range allLevels {
-		for _, h := range []string{shnsdk.FrameHeaderSubscriptionRequest, shnsdk.FrameHeaderSubscriptionEndpoint, shnsdk.FrameHeaderSubscriptionChannel, shnsdk.FrameHeaderIfMatch} {
+		for _, h := range []string{shnsdk.FrameHeaderSubscriptionRequest, shnsdk.FrameHeaderSubscriptionEndpoint, shnsdk.FrameHeaderSubscriptionChannel, shnsdk.FrameHeaderIfMatch, shnsdk.FrameHeaderPrefer} {
 			t.Run(level.String()+"/"+h, func(t *testing.T) {
 				sys := newSubStore(t)
 				p := newSubProvider(t, level, sys, func(c *Config) { c.ProviderCDexReadScope, c.ProviderCDexReadClient = "system/Task.r", sys.srv.Client() })
@@ -1866,6 +1866,8 @@ func TestCDexSubscribe_TheHeadersOnAnotherLegAreRefused(t *testing.T) {
 					f.endpoint = "a.b"
 				case shnsdk.FrameHeaderIfMatch:
 					f.ifMatch = `W/"1"`
+				case shnsdk.FrameHeaderPrefer:
+					f.prefer = "return=minimal"
 				default:
 					f.channel = "a.b"
 				}

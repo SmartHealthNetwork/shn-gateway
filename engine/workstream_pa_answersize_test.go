@@ -213,3 +213,66 @@ func TestPostEnvelope_AHubAnswerOverTheLimitIsRefusedForSize(t *testing.T) {
 		}
 	}
 }
+
+// REJECTION (network rule, authentication), on PA's coverage eligibility leg: a
+// payer's gateway refuses to send an answer whose requester's registered encryption key is of small order, in
+// every encoding, or absent, at every level, before the answer's token is minted: 502,
+// the status of every refusal of an answer, with the rule and no
+// cryptographic detail. Once its system has answered, the refusal is attested
+// delivered, as every refusal of a system's answer is; an answer built from
+// the payer's records, before its system was asked, is refused unattested.
+// The record names the rule; the log names the cause. The same answer to a
+// requester with a usable key is sealed and sent.
+func TestPAAnswer_ARequesterKeyNotUsableIsRefusedOnAuthentication(t *testing.T) {
+	logged := captureLog(t)
+	keys := lowOrderKeys(t)
+	for _, level := range allLevels {
+		for _, systemAnswers := range []bool{true, false} {
+			attested := map[bool]string{true: "attested", false: "unattested"}[systemAnswers]
+			for _, name := range sortedKeyNames(keys) {
+				t.Run(level.String()+"/"+attested+"/"+name, func(t *testing.T) {
+					p := eligibilityPayer(t, level, systemAnswers)
+					p.partner.respByPath[eligibilityPath] = payersEligibilityAnswer("Patient/" + dtrFrameMember)
+					var got exchangeRecords
+					p.g.cfg.ExchangeObserved = got.observe
+					tokens := countTokens(p.g)
+					registerEncKey(t, p.g.cfg.Reg, p.requester.ID, keys[name])
+					a := p.send(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember))
+					if a.status != http.StatusBadGateway || a.framed || string(bytes.TrimSpace(a.body)) != recipientKeyNotUsableBody {
+						t.Fatalf("answer %d (framed %v) %s, want 502 %s", a.status, a.framed, a.body, recipientKeyNotUsableBody)
+					}
+					if bytes.Contains(a.body, []byte("X25519")) || bytes.Contains(a.body, []byte("order")) {
+						t.Fatalf("the answer carries the cryptographic detail: %s", a.body)
+					}
+					wantDelivered := map[bool]string{true: "yes", false: ""}[systemAnswers]
+					if d := a.header.Get(HubDeliveredHeader); d != wantDelivered {
+						t.Fatalf("%s %q, want %q", HubDeliveredHeader, d, wantDelivered)
+					}
+					if systemAnswers != (p.partner.lastPath == eligibilityPath) {
+						t.Fatalf("the payer's system was asked %q; want it asked: %v", p.partner.lastPath, systemAnswers)
+					}
+					if n := tokens.Load(); n != 0 {
+						t.Fatalf("the refused answer asked for %d tokens", n)
+					}
+					r := got.only(t)
+					wantRefusal(t, r, http.StatusBadGateway, RefusedByPayerGateway, RefusalAuthentication)
+					if strings.Contains(r.RefusalReason, "X25519") {
+						t.Fatalf("an inbound record carries a reason: %q", r.RefusalReason)
+					}
+					if !strings.Contains(logged.String(), "coverage-eligibility answer not sealed to requester: "+string(reasonRecipientKeyNotUsable)) {
+						t.Fatalf("the log does not name the cause:\n%s", logged.String())
+					}
+				})
+			}
+			t.Run(level.String()+"/"+attested+"/control: a usable key", func(t *testing.T) {
+				p := eligibilityPayer(t, level, systemAnswers)
+				p.partner.respByPath[eligibilityPath] = payersEligibilityAnswer("Patient/" + dtrFrameMember)
+				tokens := countTokens(p.g)
+				a := p.send(t, "coverage-eligibility", "", eligibilityRequest(t, dtrFrameMember))
+				if a.status != http.StatusOK || !a.framed || tokens.Load() == 0 {
+					t.Fatalf("answer %d (framed %v) %s after %d tokens, want the answer sealed and sent", a.status, a.framed, a.body, tokens.Load())
+				}
+			})
+		}
+	}
+}

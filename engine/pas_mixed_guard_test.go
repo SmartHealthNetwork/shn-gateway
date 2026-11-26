@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -64,6 +65,28 @@ func TestPASCarriesAnotherPatientGuard(t *testing.T) {
 			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","extension":[{"url":"http://example.org/amount","valueDecimal":1e400}],"patient":{"reference":"Patient/MBR-COVERED"}}}`), false},
 		{"a decimal outside float64's range beside another member",
 			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","extension":[{"url":"http://example.org/amount","valueDecimal":1e400}],"patient":{"reference":"Patient/MBR-NOTCOVERED"}}}`), true},
+		// A reference that carries a "Patient" segment but names no Patient by
+		// FHIR's reference grammar is compared as written: another patient.
+		{"a malformed Patient reference elsewhere, with a trailing slash",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Patient/MBR-COVERED/"}}}`), true},
+		{"a Patient reference inside another type's",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Basic/1/Patient/MBR-COVERED"}}}`), true},
+		{"a URN that reads as a Patient reference",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"urn:Patient/MBR-COVERED"}}}`), true},
+		{"a contained reference that reads as a Patient reference",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"#Patient/MBR-COVERED"}}}`), true},
+		{"a Patient reference behind white space",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":" Patient/MBR-COVERED"}}}`), true},
+		{"a Patient reference whose separator is escaped",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"https://ehr.example/fhir/Patient%2FMBR-COVERED"}}}`), true},
+		{"a contained Patient whose id is Patient, the member",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","contained":[{"resourceType":"Patient","id":"Patient","identifier":[{"system":"urn:shn:member","value":"MBR-COVERED"}]}],"patient":{"reference":"#Patient"}}}`), false},
+		{"another type's reference whose id is Patient",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Practitioner/Patient"}}}`), false},
+		{"another type's reference under a base with a Patient segment",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"https://h.example/Patient/fhir/Group/1"}}}`), false},
+		{"another type's reference with no Patient segment, about the member only",
+			pasGuardBundle("", `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"Group/1"}}}`), false},
 		{"a bundle it cannot read", `{"resourceType":"Bundle","entry":[`, true},
 		// A dependent's parent carried as a Patient entry of its own is the
 		// Coverage's party (CoverageEntryParties) when only the subscriber or
@@ -94,6 +117,42 @@ func TestPASCarriesAnotherPatientGuard(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			if got := pasCarriesAnotherPatient([]byte(row.bundle), "MBR-COVERED"); got != row.another {
 				t.Fatalf("pasCarriesAnotherPatient = %v, want %v", got, row.another)
+			}
+		})
+	}
+}
+
+// pasOtherPatients reads the two answers pasCarriesAnotherPatient joins apart:
+// a reference that only looks like a patient's is unreadable, never another
+// patient, and each is listed once, in byte order.
+func TestPASOtherPatients_UnreadableIsNotAnother(t *testing.T) {
+	rel := func(ref string) string {
+		return `{"resource":{"resourceType":"RelatedPerson","id":"rp","patient":{"reference":"` + jsonEscaped(ref) + `"}}}`
+	}
+	for _, row := range []struct {
+		name       string
+		bundle     string
+		another    bool
+		unreadable []string
+	}{
+		{"the member only", pasGuardBundle("", ""), false, nil},
+		{"urn:Patient", pasGuardBundle("", rel("urn:Patient/MBR-COVERED")), false, []string{"urn:Patient/MBR-COVERED"}},
+		{"two, one twice", pasGuardBundle("", rel("urn:Patient/B")+","+rel("#Patient/A")+","+rel("urn:Patient/B")), false, []string{"#Patient/A", "urn:Patient/B"}},
+		{"another patient beside one", pasGuardBundle("", rel("Patient/MBR-OTHER")+","+rel(" Patient/A")), true, nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			another, unreadable := pasOtherPatients([]byte(row.bundle), "MBR-COVERED")
+			if another != row.another {
+				t.Fatalf("another = %v, want %v", another, row.another)
+			}
+			if row.another {
+				return // the read may stop at the first other patient
+			}
+			if !reflect.DeepEqual(unreadable, row.unreadable) {
+				t.Fatalf("unreadable = %q, want %q", unreadable, row.unreadable)
+			}
+			if carries := pasCarriesAnotherPatient([]byte(row.bundle), "MBR-COVERED"); carries != (len(row.unreadable) > 0) {
+				t.Fatalf("pasCarriesAnotherPatient = %v, want the two answers joined", carries)
 			}
 		})
 	}

@@ -23,7 +23,7 @@
 // is read, because an answer that carries several authorizations decides several.
 //
 // WHAT PROFILE-VALIDATES AN INBOUND PEER'S INQUIRY: on the payer hop, the
-// payer's own conformance level (owner decision D47(2), carriedRequestAccepted).
+// payer's own conformance level (carriedRequestAccepted).
 // At structural and strict the inquiry is judged before the payer's system sees
 // it, against what it declares or, declaring nothing, its line's inquiry request
 // Bundle profile, at its candidate lines: valid when any line accepts it, so a
@@ -68,6 +68,9 @@ const pasExtItemTraceNumberURL = "http://hl7.org/fhir/us/davinci-pas/StructureDe
 // patient reference in the inquiry names.
 type pasInquiryFacts struct {
 	member string
+	// noMember is the binding's refusal when Claim.patient resolves to a Patient
+	// that holds no member key (errPatientCarriesNoMember); member is then "".
+	noMember error
 }
 
 // parsePASInquiryFacts is readPASInquiryFacts refusing every defect it finds.
@@ -139,6 +142,7 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 	var (
 		facts     pasInquiryFacts
 		claimSeen bool
+		conforms  bool
 		members   = map[string]bool{}
 	)
 	// A Coverage's party carried as a Patient entry of its own (a dependent's
@@ -149,7 +153,7 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 	_ = decodeMessage(bundleJSON, &doc)
 	entryParties := shnsdk.CoverageEntryParties(doc)
 	note := func(ref string) {
-		if m := patientMemberFromRef(ref); m != "" {
+		if m, names := patientRefCompared(ref); names {
 			members[m] = true
 		}
 	}
@@ -176,11 +180,15 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 		}
 		if head.ResourceType == "Patient" && !entryParties[e.FullURL] {
 			// A Patient entry IS a patient reference target: its own identity
-			// counts, unless it is a Coverage's party.
+			// counts, unless it is a Coverage's party. One with no id goes by
+			// the Patient id its fullUrl names, else by its member identifier,
+			// as a Claim.patient naming it by that fullUrl reads it.
 			if head.ID != "" {
 				members[head.ID] = true
-			} else {
-				note(e.FullURL)
+			} else if m := patientMemberFromRef(e.FullURL); m != "" {
+				members[m] = true
+			} else if m := entryPatientMember(e.Resource); m != "" {
+				members[m] = true
 			}
 		}
 		// Every patient-bearing reference on this resource, whatever its type.
@@ -227,10 +235,30 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 		if claim.Patient.Reference == "" {
 			return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Claim missing patient"
 		}
-		facts.member = patientMemberFromRef(claim.Patient.Reference)
+		facts.member, conforms, facts.noMember = pasPatientRefMember(doc, firstClaim(doc), claim.Patient.Reference)
+		if strings.HasPrefix(claim.Patient.Reference, "#") && !memberNamesNoOne(facts.member) {
+			// The one Patient the Claim contains, which its Claim.patient
+			// names, is a patient this inquiry names: its member counts.
+			members[facts.member] = true
+		}
 	}
-	if !claimSeen || facts.member == "" {
+	if !claimSeen {
 		return pasInquiryFacts{}, http.StatusBadRequest, "PAS inquiry Bundle missing Claim.patient"
+	}
+	// A Claim.patient that names no Patient by FHIR's reference grammar, or
+	// names it by an id that names no one, is bound to no one: the inquiry is
+	// read no further, and the binding refuses it on authority at every level
+	// (errMemberNamesNoOne), before any check of the inquiry's consistency.
+	if facts.noMember != nil {
+		return pasInquiryFacts{noMember: facts.noMember}, 0, ""
+	}
+	if memberNamesNoOne(facts.member) {
+		return pasInquiryFacts{member: facts.member}, 0, ""
+	}
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !conforms && refuses(RuleRequestShape) {
+		return pasInquiryFacts{}, http.StatusBadRequest, msgInquiryPatientIDNotFHIRID
 	}
 	// An inquiry that names NO item line is accepted. A requester may ask by the
 	// authorization number alone — which the later prior-authorization lines carry
@@ -253,14 +281,28 @@ func readPASInquiryFacts(bundleJSON []byte, refuses func(rule string) bool) (pas
 	return facts, 0, ""
 }
 
-// patientMemberFromRef returns the bare member id of a Patient reference,
-// tolerating a relative ref and an absolute fullUrl the same way the submit legs
-// do. "" for a reference that names no Patient.
+// patientMemberFromRef is the Patient id a reference names by FHIR's
+// reference grammar (readPatientReference), relative or absolute, versioned
+// or not. "" for a reference that names no Patient so.
 func patientMemberFromRef(ref string) string {
-	if ref == "" || !strings.Contains(ref, "Patient/") {
+	id, _, _ := readPatientReference(ref)
+	return id
+}
+
+// msgInquiryPatientIDNotFHIRID is an inquiry whose Claim.patient names one
+// Patient by an id that is not a FHIR id: the inquiry's own shape
+// (RuleRequestShape), refused only where the participant's level refuses it.
+const msgInquiryPatientIDNotFHIRID = "PAS inquiry Claim.patient names its Patient by an id that is not a FHIR id"
+
+// entryPatientMember is a Patient entry's member identifier
+// (containedPatientMember), "" when it carries none or cannot be read.
+func entryPatientMember(resource json.RawMessage) string {
+	var p map[string]any
+	if decodeMessage(resource, &p) != nil {
 		return ""
 	}
-	return pasMemberFromRef(ref)
+	m, _ := containedPatientMember(p)
+	return m
 }
 
 // refMember reads resource.<field>.reference, for the patient-bearing fields.
@@ -549,9 +591,14 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
 		return
 	}
+	if facts.noMember != nil {
+		status, msg := subjectBindingFailure(r.Context(), facts.noMember)
+		g.refuseInbound(w, r, legPASClaimInquire, env, tok, answerTok, status, msg, nil)
+		return
+	}
 	// Everything the payer records about the inquiry is keyed by its own binding
 	// of the member the inquiry names, never by the token.
-	subjectPCI, status, msg := g.bindInboundSubject(r.Context(), facts.member, bundleJSON)
+	subjectPCI, status, msg := g.inquiryInboundSubject(r.Context(), facts.member, bundleJSON)
 	if status != 0 {
 		// A system-of-record failure is this gateway's own 5xx, framed by
 		// refuseInbound like every other leg's.
@@ -560,7 +607,7 @@ func (g *Gateway) handlePASInquireInbound(w http.ResponseWriter, r *http.Request
 	}
 	boundPatientRef := "Patient/" + facts.member
 	g.noteSubjectBinding(r.Context(), "pas-claim-inquire", env.Metadata.CorrelationID, tok.Subject, subjectPCI)
-	// The carried inquiry, judged at the payer's own level (D47(2)).
+	// The carried inquiry, judged at the payer's own level.
 	if !g.carriedRequestAccepted(w, r, legPASClaimInquire, env, tok, answerTok, bundleJSON) {
 		return
 	}
@@ -901,7 +948,12 @@ func (g *Gateway) handlePASInquireIngress(w http.ResponseWriter, r *http.Request
 		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), facts.member, body)
+	if facts.noMember != nil {
+		status, msg := subjectBindingFailure(r.Context(), facts.noMember)
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	pci, found, readErr := g.inquiryIngressSubject(r.Context(), facts.member, body)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(r.Context(), readErr)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -1055,4 +1107,15 @@ func pasInquiryOutputCarries(name string) (carries, deviant bool) {
 // consistentPASInquiryAnswerSubjects is pasgraph.ConsistentInquiryAnswerSubjects.
 func consistentPASInquiryAnswerSubjects(answer []byte) bool {
 	return pasgraph.ConsistentInquiryAnswerSubjects(answer)
+}
+
+// inquiryIngressSubject binds an inquiry's member on the requester's gateway from its
+// subject resource (pasSubjectResource), as a submission's is bound.
+func (g *Gateway) inquiryIngressSubject(ctx context.Context, member string, body []byte) (pci string, found bool, readErr error) {
+	return g.resolveSubjectPCIFrom(ctx, member, body, pasSubjectResource(body))
+}
+
+// inquiryInboundSubject is inquiryIngressSubject on the payer's gateway (bindInboundSubjectFrom).
+func (g *Gateway) inquiryInboundSubject(ctx context.Context, member string, body []byte) (pci string, status int, msg string) {
+	return g.bindInboundSubjectFrom(ctx, member, body, pasSubjectResource(body))
 }

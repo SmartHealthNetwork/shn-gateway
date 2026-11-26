@@ -27,8 +27,9 @@ const Unstamped = "v0.0.0-unstamped"
 // back by running the binary (`gateway -version`).
 var stamp string
 
-// pattern is the gateway-start record's bound on gateway.version (the v1.0.0
-// signable-content design §3.5).
+// pattern is the gateway-start record's bound on gateway.version: a semantic
+// version, optionally followed by "-" or "+" and 1 to 64 letters, digits, dots
+// or hyphens.
 var pattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]{1,64})?$`)
 
 // Source names where Version came from.

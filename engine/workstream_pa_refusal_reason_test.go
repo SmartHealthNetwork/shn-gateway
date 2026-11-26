@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -247,5 +248,103 @@ func TestRefusalReason_FramedDTRIsTheSDKsText(t *testing.T) {
 func TestEligibilityBatch_BoundTextIsTheBound(t *testing.T) {
 	if eligibilityBatchBoundText != strconv.Itoa(maxEligibilityBatch) {
 		t.Fatalf("eligibilityBatchBoundText %q, maxEligibilityBatch %d", eligibilityBatchBoundText, maxEligibilityBatch)
+	}
+}
+
+// REJECTION (network rule, authentication), through PA's CDS Hooks ingress: a
+// provider's gateway refuses a leg whose recipient's registered encryption key is of small order, in every
+// encoding, or absent, at every level, before a token is minted or anything is sent: its
+// caller is answered 502 with the rule and no cryptographic detail, and the
+// record names the rule and, in its reason, the cause. The log names the
+// cause. The same request to a recipient with a usable key is carried.
+func TestPAIngress_ARecipientKeyNotUsableIsRefusedOnAuthentication(t *testing.T) {
+	logged := captureLog(t)
+	keys := lowOrderKeys(t)
+	for _, level := range allLevels {
+		for _, name := range sortedKeyNames(keys) {
+			t.Run(level.String()+"/"+name, func(t *testing.T) {
+				env := newInProcessExchange(t)
+				env.originator.cfg.ConformanceEnforcement = level
+				var got exchangeRecords
+				env.originator.cfg.ExchangeObserved = got.observe
+				tokens := countTokens(env.originator)
+				registerEncKey(t, env.originator.cfg.Reg, env.payerID, keys[name])
+				rec := httptest.NewRecorder()
+				env.originator.ingressRoute(RouteCRD)(rec, env.crdIngressRequest(t))
+				if rec.Code != http.StatusBadGateway || string(bytes.TrimSpace(rec.Body.Bytes())) != recipientKeyNotUsableBody {
+					t.Fatalf("answer %d %s, want 502 %s", rec.Code, rec.Body.String(), recipientKeyNotUsableBody)
+				}
+				if strings.Contains(rec.Body.String(), "X25519") || strings.Contains(rec.Body.String(), "order") {
+					t.Fatalf("the answer carries the cryptographic detail: %s", rec.Body.String())
+				}
+				if n := env.routeHitCount(); n != 0 || env.substrate.authorizeHits != 0 || tokens.Load() != 0 {
+					t.Fatalf("the refused leg crossed the network (%d), was authorized (%d) or asked for a token (%d)", n, env.substrate.authorizeHits, tokens.Load())
+				}
+				r := got.only(t)
+				wantRefusal(t, r, http.StatusBadGateway, RefusedByProviderGateway, RefusalAuthentication)
+				if r.RefusalReason != string(reasonRecipientKeyNotUsable) || !strings.Contains(r.RefusalReason, cryptoDetail) {
+					t.Fatalf("record reason %q, want %q, naming the %s", r.RefusalReason, reasonRecipientKeyNotUsable, cryptoDetail)
+				}
+				if !strings.Contains(logged.String(), "crd-order-select not sealed to payer: "+string(reasonRecipientKeyNotUsable)) {
+					t.Fatalf("the log does not name the cause:\n%s", logged.String())
+				}
+			})
+		}
+		t.Run(level.String()+"/control: a usable key", func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			var got exchangeRecords
+			env.originator.cfg.ExchangeObserved = got.observe
+			env.payerReturns(LegResult{})
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteCRD)(rec, env.crdIngressRequest(t))
+			if rec.Code != http.StatusOK || env.routeHitCount() != 1 {
+				t.Fatalf("answer %d %s, %d legs routed; want the leg sealed, sent and answered", rec.Code, rec.Body.String(), env.routeHitCount())
+			}
+			if r := got.only(t); r.Outcome != ExchangeAnswered {
+				t.Fatalf("record %+v, want answered", r)
+			}
+		})
+	}
+}
+
+// On a FHIR operation route the same refusal is the route's OperationOutcome,
+// as each of its refusals is: the same text, no cryptographic detail, the same
+// record, nothing sent and no token asked for. The same request to a
+// recipient with a usable key is carried and answered.
+func TestPAIngress_ARecipientKeyNotUsableOnAFHIROperationRoute(t *testing.T) {
+	cer := eligibilityRequest(t, "MBR-COVERED")
+	answer := payersEligibilityAnswer("Patient/MBR-COVERED")
+	for _, level := range allLevels {
+		t.Run(level.String(), func(t *testing.T) {
+			env := newInProcessExchange(t)
+			env.originator.cfg.ConformanceEnforcement = level
+			var got exchangeRecords
+			env.originator.cfg.ExchangeObserved = got.observe
+			tokens := countTokens(env.originator)
+			registerEncKey(t, env.originator.cfg.Reg, env.payerID, new([32]byte))
+			rec := httptest.NewRecorder()
+			env.originator.ingressRoute(RouteEligibility)(rec, eligibilityIngressPost(cer))
+			if rec.Code != http.StatusBadGateway || answerText(rec.Body.String()) != msgRecipientKeyNotUsable || strings.Contains(rec.Body.String(), "X25519") {
+				t.Fatalf("answer %d %s, want 502 %q alone", rec.Code, rec.Body.String(), msgRecipientKeyNotUsable)
+			}
+			if n := env.routeHitCount(); n != 0 || env.substrate.authorizeHits != 0 || tokens.Load() != 0 {
+				t.Fatalf("the refused leg crossed the network (%d), was authorized (%d) or asked for a token (%d)", n, env.substrate.authorizeHits, tokens.Load())
+			}
+			r := got.only(t)
+			wantRefusal(t, r, http.StatusBadGateway, RefusedByProviderGateway, RefusalAuthentication)
+			if r.RefusalReason != string(reasonRecipientKeyNotUsable) {
+				t.Fatalf("record reason %q, want %q", r.RefusalReason, reasonRecipientKeyNotUsable)
+			}
+		})
+		t.Run(level.String()+"/control: a usable key", func(t *testing.T) {
+			env, rec, x := runEligibilityIngress(t, level, cer, answer)
+			if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), answer) || env.routeHitCount() != 1 || env.substrate.authorizeHits == 0 {
+				t.Fatalf("answer %d %s after %d legs, %d authorizations; want the payer's answer carried", rec.Code, rec.Body.String(), env.routeHitCount(), env.substrate.authorizeHits)
+			}
+			if x.Outcome != ExchangeAnswered {
+				t.Fatalf("record %+v, want answered", x)
+			}
+		})
 	}
 }

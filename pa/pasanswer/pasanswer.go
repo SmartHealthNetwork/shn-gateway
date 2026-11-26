@@ -117,7 +117,9 @@ const (
 	// PASRefusalBound: more bytes, entries, resources, references or depth
 	// than the rule reads.
 	PASRefusalBound = "bound"
-	// PASRefusalPolicy: a Bundle another reference policy was made for.
+	// PASRefusalPolicy: a Bundle another reference policy was made for. No
+	// answer is refused with it from shn-gateway v1.17.0, which has no such
+	// policy; the name stays in the closed set.
 	PASRefusalPolicy = "policy"
 	// PASRefusalNoDecision: a ClaimResponse that states no outcome and no
 	// item, so there is no decision to read.

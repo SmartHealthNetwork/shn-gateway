@@ -94,23 +94,31 @@ func Rows() []relay.Edit {
 				"Observation.subject.reference",
 				"ClinicalImpression.subject.reference",
 				"Goal.subject.reference",
+				"ServiceRequest.subject.reference",
+				"DeviceRequest.subject.reference",
+				"MedicationRequest.subject.reference",
+				"NutritionOrder.patient.reference",
+				"Encounter.subject.reference",
 			},
 			Kind: relay.EditKindReplaceValue,
 			Precondition: "Only on a prior-authorization request the provider's gateway builds for its own workflow, to a " +
 				"clinical record it reads from the provider's own system for that request: the supplemental report a claim " +
 				"update attaches, and, on the provider-data origination profile, each Condition, Observation, " +
-				"ClinicalImpression, Goal or DiagnosticReport the submission or update references. Only when that record's " +
-				"own subject.reference is exactly the Patient that system holds the member under, and that Patient's id is " +
-				"not the member id. A record with no subject.reference, or one naming any other subject, is refused, and so " +
-				"is one a signature covers. A record contained in another is not edited. A request the provider's own " +
+				"ClinicalImpression, Goal or DiagnosticReport the submission or update references, and each ServiceRequest, " +
+				"DeviceRequest, MedicationRequest, NutritionOrder or Encounter the provider's questionnaire response names in " +
+				"a qr-context. Only at the element each type names its patient by (a NutritionOrder's patient, every other " +
+				"type's subject), and only when that element's reference is exactly the Patient that system holds the member " +
+				"under, and that Patient's id is not the member id. A record with no such reference, or one naming any other " +
+				"subject, is refused, and so is one a signature covers. A record contained in another is not edited. A request the provider's own " +
 				"client sends is never edited this way.",
 			Authority: "The provider's own system: the Patient it holds the member under. The value written is the " +
 				"member's network patient reference, Patient/<member id>.",
 			Disclosure: "When a provider's gateway carries a clinical record from the provider's own system in a " +
-				"prior-authorization request it builds (a claim update's supplemental report, or the evidence a " +
-				"provider-data request references), and that system names the patient by its own id, the gateway changes " +
-				"only the record's subject.reference, to the member's network patient, and only when the record names that " +
-				"patient. The record is otherwise read exactly as the system holds it. In a claim update the supplemental " +
+				"prior-authorization request it builds (a claim update's supplemental report, the evidence a " +
+				"provider-data request references, or a record its questionnaire response names as a context), and that " +
+				"system names the patient by its own id, the gateway changes only the reference naming the record's patient " +
+				"(subject, or a NutritionOrder's patient), to the member's network patient, and only when the record names " +
+				"that patient. The record is otherwise read exactly as the system holds it. In a claim update the supplemental " +
 				"report is then given its bundle-local id and no declared profile by the update bundle the gateway builds; " +
 				"provider-data evidence keeps the id and profile the system holds it under.",
 		},

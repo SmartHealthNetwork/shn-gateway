@@ -217,12 +217,13 @@ func TestFederatedQueryIngress_RefusesWhatIsNoDataRequest(t *testing.T) {
 		msg  string
 		rule string // what reads as no data request is the leg's scope; what reads two ways, integrity
 	}{
-		"not JSON":                    {[]byte("{"), unreadable, RefusalIntegrity},
-		"another resource":            {[]byte(`{"resourceType":"Claim"}`), `expected Task, got \"Claim\"`, RefusalAuthority},
-		"no patient":                  {fqTaskWith(t, "MBR-UC05", map[string]any{"for": nil}), "Task.for missing/invalid", RefusalAuthority},
-		"two data queries":            {fqTaskWith(t, "MBR-UC05", map[string]any{"input": append(append([]any{}, inputs...), dataQuery)}), "exactly one data-query input required", RefusalAuthority},
-		"another task code":           {fqTaskWith(t, "MBR-UC05", map[string]any{"code": map[string]any{"coding": []any{map[string]any{"system": "http://example.org", "code": "x"}}}}), "Task.code is not data-request-query", RefusalAuthority},
-		"contained patient not there": {fqTaskWith(t, "MBR-UC05", map[string]any{"for": map[string]any{"reference": "#pt"}}), "federated query rejected: ", RefusalAuthority},
+		"not JSON":          {[]byte("{"), unreadable, RefusalIntegrity},
+		"another resource":  {[]byte(`{"resourceType":"Claim"}`), `expected Task, got \"Claim\"`, RefusalAuthority},
+		"no patient":        {fqTaskWith(t, "MBR-UC05", map[string]any{"for": nil}), "Task.for missing/invalid", RefusalAuthority},
+		"two data queries":  {fqTaskWith(t, "MBR-UC05", map[string]any{"input": append(append([]any{}, inputs...), dataQuery)}), "exactly one data-query input required", RefusalAuthority},
+		"another task code": {fqTaskWith(t, "MBR-UC05", map[string]any{"code": map[string]any{"coding": []any{map[string]any{"system": "http://example.org", "code": "x"}}}}), "Task.code is not data-request-query", RefusalAuthority},
+		// A Task.for that names no Patient ("#pt" with nothing contained under
+		// it) names no one: TestFederatedQuery_TaskForNamingNoPatientIsRefusedAtEveryLevel.
 		// A value of the wrong type reads one way: refused as the leg's scope.
 		"for a string": {fqTaskWith(t, "MBR-UC05", map[string]any{"for": "Patient/MBR-UC05"}), "federated query rejected: ", RefusalAuthority},
 		// Member names are read exactly, the owner's among them: a Task a FHIR

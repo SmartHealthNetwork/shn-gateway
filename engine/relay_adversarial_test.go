@@ -15,7 +15,7 @@
 // This row proves the relay path is not a bypass of per-leg authorization
 // (AI-11 on errors): a relayed response whose response-leg authz token is
 // MUTATED — re-signed with a key the originator's cfg.AuthzPub does not
-// correspond to — is rejected by roundTripInner's VerifyBound check
+// correspond to — is rejected by roundTripInner's VerifyBoundWant check
 // ("response leg authorization failed") BEFORE the frame is ever decoded.
 // The mutated relay is dropped, never surfaced as a *RelayError.
 //

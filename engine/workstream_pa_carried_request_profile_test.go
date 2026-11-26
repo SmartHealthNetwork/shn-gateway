@@ -17,8 +17,8 @@ import (
 )
 
 // The PAS request profiles a carried request that declares none is judged
-// against at the payer's gateway at structural and strict (owner decision
-// D47(2)), without a version.
+// against at the payer's gateway at structural and strict (at the payer's
+// own level), without a version.
 const (
 	pasRequestBundleLineProfile = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle"
 	pasInquiryRequestProfile    = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-request-bundle"
@@ -101,7 +101,7 @@ func requestBundleShaped(t *testing.T, body []byte) []byte {
 	if err := json.Unmarshal(body, &b); err != nil {
 		t.Fatal(err)
 	}
-	b["identifier"] = map[string]any{"system": "urn:example:pas-request", "value": "REQ-D47-1"}
+	b["identifier"] = map[string]any{"system": "urn:example:pas-request", "value": "REQ-CARRIED-1"}
 	b["timestamp"] = "2026-11-13T00:00:00Z"
 	entries, _ := b["entry"].([]any)
 	var claims, rest []any
@@ -250,8 +250,8 @@ func (run carriedRequestRun) requestPeerFinding(leg string) bool {
 }
 
 // A payer's gateway judges the carried PAS request it receives, on $submit,
-// the update and $inquire, at the payer's own level before its system sees it
-// (owner decision D47(2)), and never changes a byte:
+// the update and $inquire, at the payer's own level before its system sees it,
+// and never changes a byte:
 //   - none and observe call no validator for it and carry it exactly as sent;
 //   - structural refuses a structural fault 422 "ingress validation failed"
 //     (nothing reaches the payer's system), and records and carries a deeper

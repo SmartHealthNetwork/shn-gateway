@@ -11,7 +11,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
-// The HRex Task topic's filter rule (§7.1 rule 3): exactly one
+// The HRex Task topic's filter rule: exactly one
 // requester:identifier naming the payer's attested identifiers, each as
 // system|value, and at most one each of owner:identifier, code and status. A
 // payer holding identifiers in two systems names each with its own system,

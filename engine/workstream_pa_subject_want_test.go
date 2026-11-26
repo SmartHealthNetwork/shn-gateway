@@ -38,18 +38,18 @@ func TestVerifyBoundWant_HoldsTheSubjectToItsExpectation(t *testing.T) {
 		"the held patient":                      {wantPCI, subjectIs(wantPCI), nil},
 		"another patient than the held one":     {"pci:00000000000000000000000000000002", subjectIs(wantPCI), errors.New("any")},
 		"no patient where one is held":          {"", subjectIs(wantPCI), errors.New("any")},
-		"a held patient that came out empty":    {"", subjectIs(""), errSubjectUnstated},
-		"a held patient that is blank":          {" ", subjectIs(" "), errSubjectUnstated},
+		"a held patient that came out empty":    {"", subjectIs(""), shnsdk.ErrSubjectUnstated},
+		"a held patient that is blank":          {" ", subjectIs(" "), shnsdk.ErrSubjectUnstated},
 		"some patient, named":                   {wantPCI, subjectNamed(), nil},
-		"some patient, none named":              {"", subjectNamed(), errSubjectMisfit},
-		"some patient, not a pci":               {"member-1", subjectNamed(), errSubjectMisfit},
+		"some patient, none named":              {"", subjectNamed(), shnsdk.ErrSubjectMismatch},
+		"some patient, not a pci":               {"member-1", subjectNamed(), shnsdk.ErrSubjectMismatch},
 		"no patient, none named":                {"", subjectNone(), nil},
-		"no patient, one named":                 {wantPCI, subjectNone(), errSubjectMisfit},
+		"no patient, one named":                 {wantPCI, subjectNone(), shnsdk.ErrSubjectMismatch},
 		"the answer's patient":                  {wantPCI, subjectFromAnswer(), nil},
 		"the answer's, none":                    {"", subjectFromAnswer(), nil},
-		"the answer's, not a pci":               {"member-1", subjectFromAnswer(), errSubjectMisfit},
-		"an expectation never stated":           {wantPCI, subjectWant{}, errSubjectUnstated},
-		"never stated, and a token naming none": {"", subjectWant{}, errSubjectUnstated},
+		"the answer's, not a pci":               {"member-1", subjectFromAnswer(), shnsdk.ErrSubjectMismatch},
+		"an expectation never stated":           {wantPCI, subjectWant{}, shnsdk.ErrSubjectUnstated},
+		"never stated, and a token naming none": {"", subjectWant{}, shnsdk.ErrSubjectUnstated},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := verifyBoundWant(tok(row.subject), pub, now, "f", "op", "c", "h", row.want, "hash")
@@ -58,7 +58,7 @@ func TestVerifyBoundWant_HoldsTheSubjectToItsExpectation(t *testing.T) {
 				t.Fatalf("refused: %v; want accepted", err)
 			case row.err != nil && err == nil:
 				t.Fatal("accepted; want refused")
-			case row.err == errSubjectUnstated || row.err == errSubjectMisfit:
+			case row.err == shnsdk.ErrSubjectUnstated || row.err == shnsdk.ErrSubjectMismatch:
 				if !errors.Is(err, row.err) {
 					t.Fatalf("err %v; want %v", err, row.err)
 				}

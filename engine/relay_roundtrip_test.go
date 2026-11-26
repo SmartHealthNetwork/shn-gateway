@@ -84,6 +84,8 @@ type relaySubstrate struct {
 	involved       []string
 	refuseInvolved map[string]bool
 	authorizeHits  int
+	// sent is each request envelope as the gateway sent it, byte for byte.
+	sent [][]byte
 }
 
 // setResult configures what the NEXT (and subsequent, until changed) /route
@@ -179,6 +181,7 @@ func (s *relaySubstrate) handleRoute(body []byte) (*http.Response, error) {
 	s.lastCorr = env.Metadata.CorrelationID
 	s.sentNames = append(s.sentNames, env.Metadata.TransactionType)
 	s.involved = append(s.involved, env.Metadata.Involved)
+	s.sent = append(s.sent, bytes.Clone(body))
 	s.mu.Unlock()
 	if s.recipientEncPub != nil && s.recipientEncPriv != nil {
 		if plain, oerr := shnsdk.Open(env, s.recipientEncPub, s.recipientEncPriv); oerr == nil {
@@ -334,7 +337,7 @@ func (e *inProcessExchange) routeHitCount() int {
 // re-signs the response-leg Token with a FRESH ed25519 key the originator's
 // cfg.AuthzPub does NOT correspond to (modeling a token never minted by the
 // real Authorization Framework), and re-encodes. The token still unmarshals
-// fine (same JSON shape) — it fails at roundTripInner's VerifyBound
+// fine (same JSON shape) — it fails at roundTripInner's VerifyBoundWant
 // signature check, not at json.Unmarshal — so this is the ONE mutation on an
 // otherwise-valid relayed leg (adversarial-row discipline: valid exchange −
 // one mutation → reject).

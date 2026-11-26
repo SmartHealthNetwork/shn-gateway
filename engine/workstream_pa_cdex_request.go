@@ -15,8 +15,8 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The payer's CDex attachment request (CDex 2.1.0 Task Attachment Request,
-// D127): a payer's system asks a provider for documentation for a prior
+// The payer's CDex attachment request (CDex 2.1.0 Task Attachment Request):
+// a payer's system asks a provider for documentation for a prior
 // authorization, through its own gateway, the Hub and the provider's gateway,
 // to the provider's own Task endpoint. The network carries the Task as sent,
 // apart from re-keying its payer-url to the provider gateway's return path for
@@ -94,7 +94,9 @@ func (g *Gateway) handleCDexRequestInbound(w http.ResponseWriter, r *http.Reques
 		refuse(RefusalAuthority, http.StatusUnprocessableEntity, errCDexRequestNoPatient)
 		return
 	}
-	subjectPCI, status, msg, recorded := g.bindInboundSubjectRecorded(ctx, member, body, http.StatusUnprocessableEntity)
+	// Bound from the Task's own subject Patient, the contained Patient
+	// Task.for names, as the payer's ingress binds it (resolveSubjectPCIFrom).
+	subjectPCI, status, msg, recorded := g.bindSubjectRecorded(ctx, member, body, task.Patient.Resource, http.StatusUnprocessableEntity, true)
 	if status != 0 {
 		// A member the system of record reports without an identifier
 		// names no one patient: refused on the leg's authority, as a Task
@@ -126,6 +128,9 @@ func (g *Gateway) handleCDexRequestInbound(w http.ResponseWriter, r *http.Reques
 		g.responderFailed(w, r, legCDexAttachmentRequest, env, tok, answerTok, err)
 		return
 	}
+	// Carried and answered by the provider's system: the submission that
+	// answers it pairs with it.
+	g.recordCDexRequest(task, payer, member, subjectPCI)
 	if result.Status != 0 {
 		g.respondLegError(w, r, legCDexAttachmentRequest.frame, legCDexAttachmentRequest.op, legCDexRequest,
 			env.Metadata.CorrelationID, result, tok.Subject, payer, "", answerTok)

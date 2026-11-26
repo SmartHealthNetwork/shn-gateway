@@ -73,6 +73,10 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 			unread(err)
 			return
 		}
+		if !eligibilityPatientIDConforms(sub) && g.guard(ctx, KindContent, RuleRequestShape, sub.request) {
+			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, msgEligibilityPatientIDNotFHIRID, nil)
+			return
+		}
 	}
 
 	// A payer that declares its own eligibility endpoint answers the requests
@@ -107,6 +111,11 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 	// payer's binding is observed and named on the answer's involved list
 	// (noteSubjectBinding).
 	pci, _, found, readErr := ReadSystemOfRecord(g.cfg.SoR).ResolvePatientContext(r.Context(), member)
+	// The binding's course, for the answer's summary, read as the core
+	// binding reads its own: a read that failed, a member not held, one held
+	// with no identifier (a member this gateway cannot identify), or the
+	// member bound (involvedCollector.bindingRead).
+	involvedCollectorFrom(ctx).bindingRead(pci, true, found, readErr)
 	if g.refuseSoRFailure(w, r, legEligibility, env, tok, answerTok, readErr) {
 		return
 	}
@@ -114,7 +123,6 @@ func (g *Gateway) handleEligibilityInbound(w http.ResponseWriter, r *http.Reques
 		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, http.StatusBadRequest, refusalUnknownMember, nil)
 		return
 	}
-	involvedCollectorFrom(ctx).bound(pci, true)
 	g.noteSubjectBinding(ctx, "coverage-eligibility", env.Metadata.CorrelationID, tok.Subject, pci)
 
 	// Only AFTER the subject binds is the request validated
@@ -310,17 +318,14 @@ func (g *Gateway) validateEligibilityRequest(w http.ResponseWriter, r *http.Requ
 func (g *Gateway) forwardEligibilityInbound(w http.ResponseWriter, r *http.Request, env shnsdk.Envelope, tok shnsdk.Token, cerJSON []byte, subs []eligibilitySubmission, members []string, answerTok string, f eligibilityForwarder) {
 	ctx := r.Context()
 	const leg = "coverage-eligibility"
-	for i, sub := range subs {
-		pci, status, msg := g.bindInboundSubject(ctx, members[i], sub.scope)
-		if status != 0 {
-			g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
-			return
-		}
-		if i == 0 {
-			g.noteSubjectBinding(ctx, leg, env.Metadata.CorrelationID, tok.Subject, pci)
-		} else if pci != tok.Subject {
-			involvedCollectorFrom(ctx).differs(pci)
-		}
+	// Each request's member is bound in order; a refusal stops the batch, and
+	// when requests remain after it the answer's involved list is left open,
+	// so no summary of it is sent (bindEachMember).
+	if status, msg := g.bindEachMember(ctx, leg, env.Metadata.CorrelationID, tok.Subject, len(subs), func(i int) (string, int, string) {
+		return g.eligibilityInboundSubject(ctx, members[i], subs[i])
+	}); status != 0 {
+		g.refuseInbound(w, r, legEligibility, env, tok, answerTok, status, msg, nil)
+		return
 	}
 	for _, sub := range subs {
 		if !g.validateEligibilityRequest(w, r, env, tok, sub.request, answerTok) {

@@ -50,6 +50,10 @@ type homeOxygenSoR struct {
 	performerRef string
 	supplierJSON []byte
 
+	// extra are records the system holds beyond the fixture's own, by
+	// reference (a QR context's record, its requester's).
+	extra map[string][]byte
+
 	// coverages, when set, answer the member's Coverage search.
 	coverages [][]byte
 	// payer, when set, is the payer identity the member's Coverage names in place of
@@ -124,6 +128,9 @@ func (s *homeOxygenSoR) SearchPatientContext(ctx context.Context, resourceType, 
 
 func (s *homeOxygenSoR) ResolveByReference(ref string) ([]byte, bool) {
 	s.resolveByRefCall = append(s.resolveByRefCall, ref)
+	if raw, ok := s.extra[ref]; ok {
+		return raw, true
+	}
 	if ref != s.performerRef {
 		return s.censusSoR.ResolveByReference(ref)
 	}

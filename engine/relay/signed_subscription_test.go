@@ -27,9 +27,9 @@ const (
 )
 
 // TestSignedContentSubscriptionRekeyExemption: E-19 re-keys a signed
-// Subscription's channel.endpoint and channel.header (D132, N2): a replace of
-// the endpoint with a string, a replace of the header array with an array of
-// strings, and the insert of a header array into a channel with none, each
+// Subscription's channel.endpoint and channel.header: a replace of the endpoint
+// with a string, a replace of the header array with an array of strings, and
+// the insert of a header array into a channel with none, each
 // disclosed by the signature's carrier. Any other change E-19 makes to signed
 // content is refused, as is every other edit's change of the channel.
 func TestSignedContentSubscriptionRekeyExemption(t *testing.T) {

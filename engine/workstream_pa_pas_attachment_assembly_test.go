@@ -11,9 +11,10 @@ import (
 	"go/parser"
 	"go/token"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -379,9 +380,13 @@ func TestAuthoredPASUnsupportedLinePreservesSDKError(t *testing.T) {
 // The numeric specimen traverses population, DTR composition, supplier/evidence
 // completion, adaptation, final validation and the actual holder-to-Hub send.
 type attachmentPrecisionPopulator struct {
-	optionalType string
-	canonical    string
-	returned     []byte
+	// optional is a qr-context valueReference the QR carries beside the
+	// exchange's own ("" none).
+	optional string
+	// contained, when set, is a resource the QR contains.
+	contained string
+	canonical string
+	returned  []byte
 }
 
 func (p *attachmentPrecisionPopulator) Populate(ctx context.Context, request []byte, pc PopulateContext) ([]byte, []FilledItem, error) {
@@ -391,25 +396,121 @@ func (p *attachmentPrecisionPopulator) Populate(ctx context.Context, request []b
 	}
 	raw = bytes.Replace(raw, []byte(`"valueDecimal":86`), []byte(`"valueDecimal":86.0000`), 1)
 	raw = append([]byte(`{"opaqueDecimal":9007199254740993.2300,"extension":[{"url":"https://example.test/precision","valueDecimal":1.20e+03}],`), raw[1:]...)
-	if p.optionalType != "" {
-		raw = appendAuthoredTestContext(raw, `{"reference":"`+p.optionalType+`/optional-order","type":"`+p.optionalType+`","display":"Preserve optional order"}`)
+	if p.optional != "" {
+		raw = appendAuthoredTestContext(raw, p.optional)
+	}
+	if p.contained != "" {
+		raw = append([]byte(`{"contained":[`+p.contained+`],`), raw[1:]...)
 	}
 	p.returned = bytes.Clone(raw)
 	return raw, filled, nil
 }
 
 func TestAuthoredPASFinalOutgoingPreservesPrecision(t *testing.T) {
-	testAuthoredPASFinalOutgoing(t, "")
+	got := runAuthoredHomeOxygen(t, authoredHomeOxygenRun{})
+	wantAuthoredHomeOxygenSent(t, got)
 }
+
+// optionalContextReference is the provider's QR's literal qr-context naming
+// kind/id beside the exchange's own order and Coverage.
+func optionalContextReference(kind, id string) string {
+	return `{"reference":"` + kind + `/` + id + `","type":"` + kind + `","display":"Preserve optional order"}`
+}
+
+// TestAuthoredPASProviderDataOptionalOrder: on the provider-data profile, a
+// literal qr-context of each type a request can carry is read once from the
+// provider's own system and carried as read, the payer's request then
+// naming nothing it does not carry (PAS spec-13), at every conformance level.
+// A context's requester's records are carried with it.
 func TestAuthoredPASProviderDataOptionalOrder(t *testing.T) {
 	t.Parallel()
-	for _, typ := range []string{"ServiceRequest", "DeviceRequest"} {
-		t.Run(typ, func(t *testing.T) { testAuthoredPASFinalOutgoing(t, typ) })
+	for _, level := range allLevels {
+		for _, kind := range []string{"ServiceRequest", "DeviceRequest", "MedicationRequest", "NutritionOrder", "Encounter"} {
+			t.Run(level.String()+"/"+kind, func(t *testing.T) {
+				t.Parallel()
+				record := contextRecord(kind, "optional-order", "Patient/MBR-OX")
+				got := runAuthoredHomeOxygen(t, authoredHomeOxygenRun{level: level, optional: optionalContextReference(kind, "optional-order"),
+					records: map[string][]byte{kind + "/optional-order": record}})
+				wantAuthoredHomeOxygenSent(t, got)
+				if !bytes.Contains(got.outgoing, record) {
+					t.Fatalf("the %s the QR names is not carried as read", kind)
+				}
+				if n := countReads(got.reads, kind+"/optional-order"); n != 1 {
+					t.Fatalf("read %s %d times, want once", kind, n)
+				}
+			})
+		}
+		t.Run(level.String()+"/a NutritionOrder with its orderer", func(t *testing.T) {
+			t.Parallel()
+			record := []byte(`{"resourceType":"NutritionOrder","id":"optional-order","status":"active","intent":"order","patient":{"reference":"Patient/MBR-OX"},"orderer":{"reference":"Practitioner/opt-ord"}}`)
+			practitioner := []byte(`{"resourceType":"Practitioner","id":"opt-ord","name":[{"family":"Orderer"}]}`)
+			got := runAuthoredHomeOxygen(t, authoredHomeOxygenRun{level: level, optional: optionalContextReference("NutritionOrder", "optional-order"),
+				records: map[string][]byte{"NutritionOrder/optional-order": record, "Practitioner/opt-ord": practitioner}})
+			wantAuthoredHomeOxygenSent(t, got)
+			if !bytes.Contains(got.outgoing, record) || !bytes.Contains(got.outgoing, practitioner) {
+				t.Fatal("the NutritionOrder and its orderer are not carried as read")
+			}
+		})
+		t.Run(level.String()+"/with its requester", func(t *testing.T) {
+			t.Parallel()
+			record := []byte(`{"resourceType":"ServiceRequest","id":"optional-order","status":"active","intent":"order","subject":{"reference":"Patient/MBR-OX"},"requester":{"reference":"Practitioner/opt-req"}}`)
+			practitioner := []byte(`{"resourceType":"Practitioner","id":"opt-req","name":[{"family":"Optional"}]}`)
+			got := runAuthoredHomeOxygen(t, authoredHomeOxygenRun{level: level, optional: optionalContextReference("ServiceRequest", "optional-order"),
+				records: map[string][]byte{"ServiceRequest/optional-order": record, "Practitioner/opt-req": practitioner}})
+			wantAuthoredHomeOxygenSent(t, got)
+			if !bytes.Contains(got.outgoing, record) || !bytes.Contains(got.outgoing, practitioner) {
+				t.Fatal("the context and its requester are not carried as read")
+			}
+		})
 	}
 }
-func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
+
+func countReads(reads []string, ref string) int {
+	n := 0
+	for _, r := range reads {
+		if r == ref {
+			n++
+		}
+	}
+	return n
+}
+
+// authoredHomeOxygenRun is one run of the home-oxygen route through the
+// authored PAS assembly: the conformance level, the provider QR's optional
+// context Reference ("" none), the records the system holds beside the
+// fixture's own, a read of one record that fails, and the origination
+// profile ("": provider-data).
+type authoredHomeOxygenRun struct {
+	level    ConformanceEnforcement
+	optional string
+	records  map[string][]byte
+	failRef  string
+	failErr  error
+	profile  string
+	// contained, when set, is a resource the provider's QR contains.
+	contained string
+	// sorID, when set, is the id the system holds the member's Patient under
+	// (recordIDSoR), where E-06 re-keys what the build carries.
+	sorID string
+}
+
+// authoredHomeOxygenResult is what the run answered and sent.
+type authoredHomeOxygenResult struct {
+	level     ConformanceEnforcement
+	code      int
+	body      string
+	recs      []ExchangeRecord
+	events    []ObserverEvent
+	outgoing  []byte
+	populated []byte
+	reads     []string
+}
+
+func runAuthoredHomeOxygen(t *testing.T, run authoredHomeOxygenRun) authoredHomeOxygenResult {
+	t.Helper()
+	var mu sync.Mutex
 	var events []ObserverEvent
-	populator := attachmentPrecisionPopulator{canonical: "http://smarthealth.network/fhir/Questionnaire/home-oxygen", optionalType: optionalType}
+	populator := attachmentPrecisionPopulator{canonical: "http://smarthealth.network/fhir/Questionnaire/home-oxygen", optional: run.optional, contained: run.contained}
 
 	authzPub, authzPriv := genED25519(t)
 	provEncPub, provEncPriv := genKeyPair(t)
@@ -442,6 +543,14 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 		orderJSON:    orderJSON,
 		performerRef: performerRef,
 		supplierJSON: supplierJSON,
+		extra:        run.records,
+	}
+	var system SystemOfRecord = sor
+	if run.sorID != "" {
+		system = &recordIDSoR{recordIDInner: sor, member: "MBR-OX", recordID: run.sorID, demo: sor.demo, evidence: map[string][]byte{}}
+	}
+	if run.failRef != "" {
+		system = evidenceReadFails{refReadFails{SystemOfRecord: sor, ref: run.failRef}, run.failErr}
 	}
 
 	const canonical = "http://smarthealth.network/fhir/Questionnaire/home-oxygen"
@@ -457,6 +566,10 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 	reg.Set("provider", shnsdk.RegistryEntry{ID: "provider", Role: "provider", EncPub: provEncPub, SignPub: authzPub})
 	reg.Set("payer", shnsdk.RegistryEntry{ID: "payer", Role: "payer", EncPub: payerEncPub, SignPub: payerSignPub, RequestFrames: dtrOperationFrames})
 
+	profile := run.profile
+	if profile == "" {
+		profile = "provider-data"
+	}
 	const fakeBase = "http://stub.test"
 	gw := mustNew(t, Config{
 		Role:        "provider",
@@ -468,56 +581,76 @@ func testAuthoredPASFinalOutgoing(t *testing.T, optionalType string) {
 			EncPub:   provEncPub,
 			EncPriv:  provEncPriv,
 		},
-		AuthzURL:           fakeBase,
-		AuthzPub:           authzPub,
-		HubTransportPub:    authzPub,
-		HubURL:             fakeBase,
-		Reg:                reg,
-		Validator:          shnsdk.NewFakeValidator(),
-		SoR:                sor,
-		Store:              base,
-		Clock:              clock,
-		NPI:                "1234567893",
-		OriginationProfile: "provider-data",
-		Observer:           func(e ObserverEvent) { e.Payload = bytes.Clone(e.Payload); events = append(events, e) },
-		Client:             &http.Client{Transport: stub},
+		AuthzURL:               fakeBase,
+		AuthzPub:               authzPub,
+		HubTransportPub:        authzPub,
+		HubURL:                 fakeBase,
+		Reg:                    reg,
+		Validator:              shnsdk.NewFakeValidator(),
+		SoR:                    system,
+		Store:                  base,
+		Clock:                  clock,
+		NPI:                    "1234567893",
+		OriginationProfile:     profile,
+		ConformanceEnforcement: run.level,
+		Observer: func(e ObserverEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			e.Payload = bytes.Clone(e.Payload)
+			events = append(events, e)
+		},
+		Client: &http.Client{Transport: stub},
 	}, WithPopulator(&populator))
 
-	req := httptest.NewRequest(http.MethodPost, "/scenario/homeoxygen", strings.NewReader(testRouteBody(gw, "/scenario/homeoxygen", "")))
-	rec := httptest.NewRecorder()
-	gw.handleHomeOxygen(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("full outgoing path status=%d: %s", rec.Code, rec.Body.String())
-	}
-	var outgoing, finalQR []byte
+	rec, recs := serveRecorded(t, gw, "POST /scenario/homeoxygen", testRouteBody(gw, "/scenario/homeoxygen", ""))
+	mu.Lock()
+	defer mu.Unlock()
+	got := authoredHomeOxygenResult{level: run.level, code: rec.Code, body: rec.Body.String(), recs: recs, events: events, populated: populator.returned, reads: slices.Clone(sor.resolveByRefCall)}
 	for _, e := range events {
 		if e.Kind == "leg.originated" && e.LegType == "pas-claim" {
-			outgoing = e.Payload
-			finalQR = attachmentResource(t, attachmentEntries(t, outgoing), "QuestionnaireResponse").Resource
+			got.outgoing = e.Payload
 		}
 	}
-	if len(outgoing) == 0 {
+	return got
+}
+
+// wantAuthoredHomeOxygenSent fails unless the run sent its PAS request with
+// the provider QR's bytes as populated, and, at a level that validates before
+// it sends (structural, strict), every outgoing byte validated.
+func wantAuthoredHomeOxygenSent(t *testing.T, got authoredHomeOxygenResult) {
+	t.Helper()
+	if got.code != http.StatusOK {
+		t.Fatalf("full outgoing path status=%d: %s", got.code, got.body)
+	}
+	if len(got.outgoing) == 0 {
 		t.Fatal("no actual PAS leg")
 	}
+	finalQR := attachmentResource(t, attachmentEntries(t, got.outgoing), "QuestionnaireResponse").Resource
 	for _, literal := range []string{"9007199254740993.2300", "86.0000", "1.20e+03"} {
 		if !bytes.Contains(finalQR, []byte(literal)) {
 			t.Errorf("final outgoing QR lost %s: %s", literal, finalQR)
 		}
-		if !bytes.Contains(populator.returned, []byte(literal)) {
+		if !bytes.Contains(got.populated, []byte(literal)) {
 			t.Errorf("source specimen lost %s", literal)
 		}
 	}
+	if got.level == EnforcementNone || got.level == EnforcementObserve {
+		if len(got.reads) == 0 {
+			t.Fatal("supplier/evidence path was not reached")
+		}
+		return
+	}
 	qrChecked, bundleChecked := false, false
-	for _, e := range events {
+	for _, e := range got.events {
 		if e.Kind == "validate.result" && e.Detail == "valid" {
 			qrChecked = qrChecked || bytes.Equal(e.Payload, finalQR)
-			bundleChecked = bundleChecked || bytes.Equal(e.Payload, outgoing)
+			bundleChecked = bundleChecked || bytes.Equal(e.Payload, got.outgoing)
 		}
 	}
 	if !qrChecked || !bundleChecked {
 		t.Fatalf("actual outgoing bytes validated: QR=%t Bundle=%t", qrChecked, bundleChecked)
 	}
-	if len(sor.resolveByRefCall) == 0 {
+	if len(got.reads) == 0 {
 		t.Fatal("supplier/evidence path was not reached")
 	}
 }

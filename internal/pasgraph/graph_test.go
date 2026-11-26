@@ -17,40 +17,14 @@ func danglingGraph(t *testing.T) *Graph {
 	return g
 }
 
-// policy is a ReferencePolicy that matches or not, and allows or not.
-type policy struct{ match, allow bool }
-
-func (p policy) Matches(*Graph) bool                        { return p.match }
-func (p policy) Allows(*Entry, string, map[string]any) bool { return p.allow }
-
-// A nil policy allows no reference; a policy allows only what it names, and
-// a policy made for another graph is refused by its own cause.
-func TestReferencePolicy(t *testing.T) {
-	err := danglingGraph(t).ValidateWithReferencePolicy(nil)
+// Validate refuses a reference nothing in the Bundle resolves, naming its
+// holder and path.
+func TestValidateRefusesADanglingReference(t *testing.T) {
+	err := danglingGraph(t).Validate()
 	r := RefusalOf(err)
 	if r == nil || r.Holder() != "ClaimResponse" || r.Path != "/insurer" || RefusalCause(err) != RefusalReference {
-		t.Fatalf("nil policy: %v", err)
+		t.Fatalf("dangling reference: %v", err)
 	}
-	if err := danglingGraph(t).ValidateWithReferencePolicy(policy{match: true, allow: false}); RefusalOf(err) == nil {
-		t.Fatalf("a policy allowing nothing let the reference go: %v", err)
-	}
-	if err := danglingGraph(t).ValidateWithReferencePolicy(policy{match: true, allow: true}); err != nil {
-		t.Fatalf("a policy allowing the reference: %v", err)
-	}
-	err = danglingGraph(t).ValidateWithReferencePolicy(policy{match: false, allow: true})
-	var c *CauseError
-	if err == nil || RefusalCause(err) != RefusalPolicy || !asCause(err, &c) || c.Cause() != RefusalPolicy {
-		t.Fatalf("a policy for another graph: %v", err)
-	}
-	if err.Error() != "engine: invalid or incomplete PAS response graph" {
-		t.Fatalf("refusal text changed: %q", err.Error())
-	}
-}
-
-func asCause(err error, c **CauseError) bool {
-	v, ok := err.(*CauseError)
-	*c = v
-	return ok
 }
 
 // A trailing version is one segment pair; a base holding /_history/ elsewhere

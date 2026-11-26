@@ -16,7 +16,7 @@ func identity(t *testing.T, seed byte) ed25519.PrivateKey {
 var addr = Address{Family: FamilyPayer, Payer: "payer-1", Provider: "provider-1", Line: "2.2", Base: "https://payer.example/fhir/dtr", Remainder: "/forms/a"}
 
 // Two replicas of one gateway hold the same identity, so they derive the same
-// key and each verifies the other's tags. A rotated identity (D125) derives a
+// key and each verifies the other's tags. A rotated identity derives a
 // new key, under which a tag issued before it does not verify.
 func TestDeriveKey_ReplicasAgreeAndARotationRefusesOldTags(t *testing.T) {
 	a, err := DeriveKey(identity(t, 1))

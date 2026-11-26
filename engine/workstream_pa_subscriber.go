@@ -14,8 +14,8 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The subscriber's half of a topic Subscription (the notifications design §6,
-// §7.2, §9): the subscriber's own system creates, reads, updates, deletes and
+// The subscriber's half of a topic Subscription: the subscriber's own system creates, reads,
+// updates, deletes and
 // searches its Subscription at its gateway's per-counterpart base for that
 // counterpart, as it would at the counterpart's own base, and asks its
 // $status; the gateway carries each interaction on the topic's subscribe leg,
@@ -39,7 +39,7 @@ import (
 //   - a search is read with shnsdk.ParseSubscriptionSearch: one naming more
 //     than one endpoint is refused 400 on routing, as only one sealed
 //     endpoint can be carried; any other query outside its set 403 on
-//     authority (§7.2); its endpoint is sealed (both seals during a key
+//     authority; its endpoint is sealed (both seals during a key
 //     overlap) and its query framed without url, so the clear endpoint never
 //     leaves this gateway;
 //   - a page (Subscription?_getpages=…, the link E-20 writes) is framed in its
@@ -50,14 +50,17 @@ import (
 //     resource, or a Subscription holding one, 403 on authority; one it
 //     cannot read 415 or 400 on the fidelity of SHN's own edit), its
 //     channel.endpoint held to the delivery rule
-//     (subscription.CheckEndpoint, §6.5: 422 on integrity or routing), each
+//     (subscription.CheckEndpoint: 422 on integrity or routing), each
 //     channel.header value to an HTTP field the delivery can present
 //     (subscription.HeaderFields: 422, the fidelity of SHN's own edit), and its
 //     channel sealed (E-18): channel.endpoint and channel.header removed from
 //     the body and framed sealed;
 //   - only a create and an update carry a body (400 on integrity otherwise);
-//   - an update's or delete's If-Match is framed as sent; the network carries
-//     no Prefer on any leg.
+//   - an update's or delete's If-Match is framed as sent;
+//   - the first return preference in the subscriber's Prefer
+//     (subscription.ReturnPreference) is framed as sent on any interaction,
+//     and no other preference (400 on integrity when a frame cannot carry
+//     it).
 //
 // The notifier's 2xx answer is restored (E-20): each Subscription in it whose
 // address ends in a notification address for this subscriber and topic, and
@@ -71,11 +74,11 @@ import (
 // The subscriber's own refusals of its system's Subscription interaction.
 const (
 	// errSubscriberPatch: a PATCH could rewrite the channel in a form the
-	// gateway cannot seal (§7.2).
+	// gateway cannot seal.
 	errSubscriberPatch = "a Subscription is not patched through this network: its channel is sealed before it is sent, which a patch cannot be (fidelity of SHN's own edit); send the whole Subscription with PUT [base]/Subscription/[id]"
-	// errSubscriberHistory: an instance _history (§7.2).
+	// errSubscriberHistory: an instance _history.
 	errSubscriberHistory = "a Subscription's history is not read through this network: a past version may name another subscriber's endpoint (per-leg authority); read the Subscription with GET [base]/Subscription/[id]"
-	// errSubscriberTypeStatus: a type-level $status (§7.2).
+	// errSubscriberTypeStatus: a type-level $status.
 	errSubscriberTypeStatus = "a type-level $status is not carried: it answers for other subscribers' Subscriptions (per-leg authority); ask one Subscription's with GET [base]/Subscription/[id]/$status"
 	// errSubscriberInteraction opens the refusal of a request outside the
 	// subscribe leg's closed set.
@@ -89,6 +92,8 @@ const (
 	errSubscriberBody = "a Subscription read, vread, delete, $status, search or page carries no body; nothing was sent"
 	// errSubscriberIfMatch: an If-Match that a frame cannot carry.
 	errSubscriberIfMatch = "the If-Match cannot be carried as an HTTP field value; nothing was sent"
+	// errSubscriberPrefer: a return preference that a frame cannot carry.
+	errSubscriberPrefer = "the Prefer field's return preference cannot be carried as an HTTP field value; nothing was sent"
 	// errSubscriberSeal opens the refusal of a Subscription the gateway
 	// cannot seal (E-18).
 	errSubscriberSeal = "the Subscription's channel cannot be sealed (fidelity of SHN's own edit), so it is not sent: "
@@ -120,10 +125,10 @@ var restoreNotMade = map[string]string{
 // body (Content.SubscribeFrame, its headers): the interaction (subscriptionRequest), the sealed
 // endpoint (subscriptionEndpoint, two values space-separated for a search
 // during a key overlap) and sealed headers (subscriptionChannel) when the
-// interaction carries them, the subscriber's If-Match, and the body's media
-// type.
+// interaction carries them, the subscriber's If-Match, its return preference
+// (Prefer), and the body's media type.
 type subscribeRequest struct {
-	request, endpoint, channel, ifMatch, contentType string
+	request, endpoint, channel, ifMatch, prefer, contentType string
 }
 
 // frameHeaders are the request-frame headers s carries (Content.SubscribeFrame):
@@ -131,7 +136,7 @@ type subscribeRequest struct {
 func (s *subscribeRequest) frameHeaders() map[string]string {
 	headers := map[string]string{shnsdk.FrameHeaderSubscriptionRequest: s.request}
 	for name, v := range map[string]string{shnsdk.FrameHeaderSubscriptionEndpoint: s.endpoint, shnsdk.FrameHeaderSubscriptionChannel: s.channel,
-		shnsdk.FrameHeaderIfMatch: s.ifMatch, "Content-Type": s.contentType} {
+		shnsdk.FrameHeaderIfMatch: s.ifMatch, shnsdk.FrameHeaderPrefer: s.prefer, "Content-Type": s.contentType} {
 		if v != "" {
 			headers[name] = v
 		}
@@ -140,7 +145,7 @@ func (s *subscribeRequest) frameHeaders() map[string]string {
 }
 
 // subscriptionTopics are the topics a gateway serves a subscribe leg for: the
-// topic tokens a notification address may name (§6.5's loop rule).
+// topic tokens a notification address may name (the loop rule).
 var subscriptionTopics = []subscription.Topic{cdexTopic, pasTopic}
 
 // isSubscriptionTopic reports whether tok is a served topic's token.
@@ -150,7 +155,7 @@ func isSubscriptionTopic(tok string) bool {
 
 // subscriberKeys are the keys this gateway seals and restores its own
 // participant's Subscriptions with: derived from its identity, under its
-// holder, and the predecessor a rotation kept (§6.2 "Key rotation"). ok is
+// holder, and the predecessor a rotation kept. ok is
 // false when the identity names another holder or yields no keys.
 func (g *Gateway) subscriberKeys() (subscription.Keys, bool) {
 	st := g.paState()
@@ -252,7 +257,7 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 			refuse(RefusalAuthority, http.StatusForbidden, errSubscriberSearch+err.Error(), reasonSubscriberSearch)
 			return
 		}
-		// The loop rule a create's channel.endpoint is held to (§6.5): a
+		// The loop rule a create's channel.endpoint is held to: a
 		// notification address is never a payer system's own endpoint, so a
 		// search by one would find nothing; it is refused, never carried as
 		// a search that silently answers empty.
@@ -266,7 +271,7 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 		}
 		// The endpoint travels only sealed: under the current key, and the
 		// predecessor's during its overlap, so a Subscription made under
-		// either is found (§6.2 step 4).
+		// either is found.
 		search = subscription.Search{Endpoint: q.Endpoint, Sealed: keys.SealEndpointForSearch(binding, q.Endpoint)}
 		frame.endpoint = strings.Join(search.Sealed, " ")
 		req = q.Request
@@ -300,6 +305,16 @@ func (g *Gateway) serveSubscriptions(w http.ResponseWriter, r *http.Request, t s
 			refuse(RefusalIntegrity, http.StatusBadRequest, errSubscriberIfMatch, reasonSubscriberIfMatch)
 			return
 		}
+	}
+	// The subscriber's return preference is framed as its system sent it, on
+	// any interaction: the first in its Prefer field lines, read as one list
+	// as HTTP reads them. No other preference is carried.
+	if pref, ok := subscription.ReturnPreference(r.Header.Values("Prefer")); ok {
+		if !shnsdk.FrameCarriesHeaderValue(pref) {
+			refuse(RefusalIntegrity, http.StatusBadRequest, errSubscriberPrefer, reasonSubscriberPrefer)
+			return
+		}
+		frame.prefer = pref
 	}
 	payload := relay.Exact(relay.NewBody(nil, relay.OriginIngressRequest), "")
 	if writes {
@@ -405,7 +420,7 @@ func (g *Gateway) subscriberOwnFailure(w http.ResponseWriter, r *http.Request) {
 //     leg names no patient on either side (subscription.CheckNoResource).
 //
 // Its channel.endpoint is then held to the delivery rule
-// (subscription.CheckEndpoint, §6.5), and its channel sealed (E-18): the
+// (subscription.CheckEndpoint), and its channel sealed (E-18): the
 // library seals the endpoint and the headers and decides the edit can be made
 // (subscription.SealOutbound), and relay removes the two members and verifies
 // the change, made even on signed content. A refusal with notMade set is the

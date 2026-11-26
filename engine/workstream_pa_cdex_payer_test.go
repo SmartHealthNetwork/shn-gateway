@@ -59,7 +59,7 @@ func TestCDexPayer_RelaysThePayersError(t *testing.T) {
 // The payer evaluates authority on its own leg: a submission it cannot read
 // one MemberId from (none, two that differ, or a body that is not a
 // Parameters) is refused before its system is called, at every level, on
-// per-leg authority (D121); one that repeats a member name is refused on
+// per-leg authority; one that repeats a member name is refused on
 // message integrity. A member its system does not hold is carried unless it
 // opted into checking members, which it records as conformance.
 func TestCDexPayer_BindsTheMemberItNames(t *testing.T) {

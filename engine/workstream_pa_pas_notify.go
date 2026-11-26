@@ -21,8 +21,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The PAS topic's content notifications (pas-subscription-notify; the
-// notifications design §5, §7.3, §7.4, §8): a payer's own system posts a
+// The PAS topic's content notifications (pas-subscription-notify): a payer's own system posts a
 // full-resource notification of a provider's Subscription (its decision, a
 // PAS Response Bundle) to the notification address its gateway wrote, as it
 // posts every notification of that Subscription; the payer's gateway sends it
@@ -41,7 +40,7 @@ import (
 //     wherever it sits, names an applicationReceiverCode attested for the
 //     subscriber, or the notification is refused 403 on authority, an absent
 //     code as a mismatched one, and so is one whose resources cannot be read;
-//   - the patient (D121): each decision's ClaimResponses' patients, read by
+//   - the patient: each decision's ClaimResponses' patients, read by
 //     the identity rules every PAS answer is read by (pasgraph.ReadNotified),
 //     the leg token's patient the first decision's first, bound by the member
 //     it names (resolveSubjectPCI) from the Patient entry it resolves to when
@@ -63,7 +62,8 @@ import (
 //     and refused 422 at the levels that refuse answer.shape (structural and
 //     strict), the refusal naming each line and its failure;
 //   - a notification naming more than one patient (pasNotifiedMixed) is
-//     carried, the others on the involved list (D31, pasNotifiedMembers), and
+//     carried, the others on the involved list (an exchange is recorded under
+//     every patient involved; pasNotifiedMembers), and
 //     refused 422 at the levels that refuse patient.mixed (strict).
 
 // legPASSubscriptionNotify is the PAS topic's notify (content) leg.
@@ -700,7 +700,8 @@ func (g *Gateway) handlePASNotifyInbound(w http.ResponseWriter, r *http.Request,
 }
 
 // pasNotifiedMembers are the members a PAS decision notification names, for
-// the involved list (D31), base the payer's FHIR base its gateway states
+// the involved list (an exchange is recorded under every patient involved),
+// base the payer's FHIR base its gateway states
 // (withNotifiedBase): pasNotifiedIdentities, the reading the binding's
 // patient.mixed check uses too. A notification whose patients cannot be read
 // is errRequestPatientsUnreadable, never read as naming no one, as on every

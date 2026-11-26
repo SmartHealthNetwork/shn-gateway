@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -168,19 +167,21 @@ var (
 		"questionnaire-package request carries a Patient resource with no id, which cannot be bound to the authorized patient"}
 )
 
-// patientMember returns the member id a Patient reference names, relative
-// ("Patient/<id>") or absolute (".../Patient/<id>"), with any _history
-// suffix removed; ok is false when ref names no Patient.
+// msgDTRPatientIDNotFHIRID is the refusal of a DTR request whose patient
+// reference names its Patient by an id that is not a FHIR id: the request's own
+// shape, refused only by a participant that opted into it (structural and
+// strict).
+const msgDTRPatientIDNotFHIRID = "DTR request names its Patient by an id that is not a FHIR id"
+
+// patientMember returns the member id a Patient reference names by FHIR's
+// reference grammar (readPatientReference): relative ("Patient/<id>") or
+// absolute (".../Patient/<id>"), with any _history suffix; ok is false when
+// ref names no Patient so, "Patient/" found inside another reference
+// ("Group/1/Patient/2", "Basic/1/_history/x/Patient/2") or followed by a
+// trailing path ("Patient/2/x") included.
 func patientMember(ref string) (string, bool) {
-	i := strings.LastIndex(ref, "Patient/")
-	if i < 0 || (i > 0 && ref[i-1] != '/') {
-		return "", false
-	}
-	id := ref[i+len("Patient/"):]
-	if j := strings.IndexByte(id, '/'); j >= 0 {
-		id = id[:j]
-	}
-	return id, id != ""
+	id, _, ok := readPatientReference(ref)
+	return id, ok
 }
 
 // packagePatients collects the patients a questionnaire request names.
@@ -402,8 +403,12 @@ func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte) (pci s
 	case refused != nil:
 		return "", refused.status, refused.msg
 	case subject == "" && len(p.defects) > 0:
+		// No reference names the request's patient: the leg's authority
+		// cannot be bound.
+		exchangeOf(ctx).refusing(RefusalAuthority)
 		return "", p.defects[0].refused.status, p.defects[0].refused.msg
 	case subject == "":
+		exchangeOf(ctx).refusing(RefusalAuthority)
 		return "", severalPatients.status, severalPatients.msg
 	}
 	if len(p.members) > 1 {
@@ -425,9 +430,15 @@ func (g *Gateway) bindPackageParameters(ctx context.Context, body []byte) (pci s
 func (g *Gateway) bindNextQuestionSubjectContext(ctx context.Context, subject string, body []byte) (pci string, status int, msg string) {
 	member, ok := patientMember(subject)
 	if !ok {
+		exchangeOf(ctx).refusing(RefusalAuthority)
 		return "", http.StatusBadRequest, "next-question request carries no patient subject"
 	}
-	return g.bindInboundSubject(ctx, member, body)
+	// An id that names one Patient by structure but is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if !memberNamesNoOne(member) && !idShape.MatchString(member) && g.guard(ctx, KindContent, RuleRequestShape, body) {
+		return "", http.StatusBadRequest, msgDTRPatientIDNotFHIRID
+	}
+	return g.bindInboundSubjectFrom(ctx, member, body, dtrSubjectResource(body, member))
 }
 
 // fenceNextQuestionSubject is the (C) outbound fence for an adaptive $next-question round:

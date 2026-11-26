@@ -179,7 +179,7 @@ func (g *Gateway) submitPASClaim(ctx context.Context, r *http.Request, in pasFol
 		return out, status, msg, err
 	}
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, in.sorID, member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, qrJSON, orderJSON, coverageRef, in.sorID, member, g.contextRequesterRead)
 	if err != nil {
 		// Answered as failEvidenceLinkage answers it: evidence the gateway's
 		// own edit cannot carry with buildFidelityStatus's status (502, or 422

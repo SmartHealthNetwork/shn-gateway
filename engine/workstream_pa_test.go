@@ -296,16 +296,17 @@ func TestPAInvolvement_Pinned(t *testing.T) {
 
 // TestPARequestMembers_EachLegReadsAsItsBinding: the questionnaire package
 // reads a reference as its own binding does (patientMember), which takes
-// "Patient/" only at the start of a path segment; the other legs read it as
-// the PAS and inquiry readers do (pasMemberFromRef). A reference that only
-// contains "Patient/" names a member on CRD but none on the DTR package.
+// "Patient/" only at the start of a path segment; the other legs read it by
+// FHIR's reference grammar, as the PAS and inquiry readers do
+// (readPatientReference). A reference that only contains "Patient/" names no
+// member on either.
 func TestPARequestMembers_EachLegReadsAsItsBinding(t *testing.T) {
 	payload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"x","valueReference":{"reference":"urn:Patient/m9"}}]}`)
 	if got := carriedMembers(payload, "dtr-questionnaire-fetch"); len(got) != 0 {
 		t.Errorf("dtr-questionnaire-fetch: members %v, want none (the package's binding reads no Patient there)", got)
 	}
-	if got := carriedMembers(payload, "crd-order-select"); !slices.Equal(got, []string{"m9"}) {
-		t.Errorf("crd-order-select: members %v, want [m9]", got)
+	if got := carriedMembers(payload, "crd-order-select"); len(got) != 0 {
+		t.Errorf("crd-order-select: members %v, want none (urn:Patient/m9 names no Patient)", got)
 	}
 }
 

@@ -19,8 +19,8 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// A provider's topic Subscription to the PAS topic (pas-subscription-subscribe;
-// the notifications design §5, §6, §7, §9): a provider's system creates,
+// A provider's topic Subscription to the PAS topic (pas-subscription-subscribe):
+// a provider's system creates,
 // reads, updates, deletes and searches a Subscription on the PAS topic at the
 // payer's own Subscription endpoint, through its own gateway, the Hub and the
 // payer's gateway, and asks its $status. The leg names no patient on either

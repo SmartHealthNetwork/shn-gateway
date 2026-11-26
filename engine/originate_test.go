@@ -924,10 +924,11 @@ func TestTargetsBrPayer(t *testing.T) {
 	}
 }
 
-// No skip (D122): on both lanes that relay reference-payer bytes, a reference payer's
-// answer is $validated at the gateway's level like any payer's; a participant that
-// tolerates it lists it (CONFORMANCE_TOLERATE_PEERS). recordingValidator's invalid
-// verdict and its call count prove the check ran and decided.
+// No skip, since no payer is exempt by default: on both lanes that relay
+// reference-payer bytes, a reference payer's answer is $validated at the
+// gateway's level like any payer's; a participant that tolerates it lists it
+// (CONFORMANCE_TOLERATE_PEERS). recordingValidator's invalid verdict and its
+// call count prove the check ran and decided.
 func TestValidateFHIR_ReferencePayerIngressIsJudged(t *testing.T) {
 	for _, profile := range []string{"provider-data", "demo"} {
 		for _, payer := range []shnsdk.PayerIdentifier{shnsdk.CMSPayerIdentity, {System: shnsdk.CMSPayerIdentity.System, Value: "00301"}} {
@@ -969,7 +970,7 @@ func (v *recordingValidator) Validate(_ context.Context, resourceJSON []byte, _ 
 // pins.
 //
 // This predicate answers only "does this LANE relay reference-payer bytes at all", which
-// shapes module 1's PAS requests; it decides nothing about checking an answer (D122).
+// shapes module 1's PAS requests; it decides nothing about checking an answer.
 func TestRelaysReferencePayerBytes(t *testing.T) {
 	for _, p := range []string{"provider-data", "demo"} {
 		if !relaysReferencePayerBytes(p) {

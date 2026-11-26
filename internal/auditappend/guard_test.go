@@ -152,6 +152,12 @@ func cases() []guardCase {
 		refuse("a finding on a module record", mod(authored, func(r *shnsdk.AuditRecord) {
 			r.Finding = &shnsdk.Finding{Kind: "fhir-ingress", Level: "observe", Whose: "peer"}
 		})),
+		refuse("involved on a module record", mod(authored, func(r *shnsdk.AuditRecord) {
+			r.Involved = &shnsdk.Involved{Completeness: shnsdk.InvolvedComplete}
+		})),
+		refuse("involved on a start record", mod(started, func(r *shnsdk.AuditRecord) {
+			r.Involved = &shnsdk.Involved{Completeness: shnsdk.InvolvedUnknown}
+		})),
 		refuse("a gateway on a module record", mod(authored, func(r *shnsdk.AuditRecord) { r.Gateway = started().Gateway })),
 		refuse("a module on a start record", mod(started, func(r *shnsdk.AuditRecord) { r.Module = authored().Module })),
 

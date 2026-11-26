@@ -1,9 +1,9 @@
-// Package cdextopic is the HRex Task topic as the network carries it (the
-// notifications design §5, §7.1; the CDex design §15.1): a payer's topic
+// Package cdextopic is the HRex Task topic as the network carries it: a payer's
+// topic
 // Subscription to the changes of the Tasks it created at a provider. Its
 // subscribe leg is cdex-task-subscribe, and every notification rides
-// cdex-task-signal: CDex subscriptions are id-only (N11, D132), so the topic
-// has no content leg.
+// cdex-task-signal: CDex subscriptions are id-only, so the topic has no
+// content leg.
 package cdextopic
 
 import (
@@ -46,15 +46,17 @@ func (Topic) Token() string { return TokenValue }
 // Canonical is the topic's criteria canonical.
 func (Topic) Canonical() string { return Canonical }
 
-// Contents is id-only alone: a CDex notification is not gated by D129's
-// payer-url rule, so it carries no Task (N11, D132).
+// Contents is id-only alone: a CDex notification is not gated by the Task
+// read's rule (a provider's gateway delivers the answer to a payer's read only
+// for a Task whose payer-url is that gateway's own return path for the payer),
+// so it carries no Task.
 func (Topic) Contents() []string { return []string{"id-only"} }
 
 // Extensions is none: HRex defines no Subscription profile of the Task
 // topic's own, so only the Backport IG's allowlisted extensions are carried.
 func (Topic) Extensions() []string { return nil }
 
-// CheckFilter is §7.1 rule 3 for the HRex Task topic: exactly one
+// CheckFilter is the filter rule for the HRex Task topic: exactly one
 // requester:identifier, every value of it a system|value pair the registry
 // attests for the authenticated payer (subscription.MatchIdentifiers). A bare
 // value is refused: it names no system, so it matches that value in every
@@ -63,7 +65,7 @@ func (Topic) Extensions() []string { return nil }
 // parameter or modifier, or one named twice, is refused 403, recorded
 // authority. The requester filter keeps a payer from subscribing to every
 // payer's Tasks; it is not the authority gate on what a notification
-// discloses, which id-only and the read's payer-url rule are (§7.1).
+// discloses, which id-only and the read's payer-url rule are.
 func (Topic) CheckFilter(subscriber subscription.Holder, params []subscription.FilterParam) *subscription.Refusal {
 	seen := map[[2]string]bool{}
 	var requester []subscription.FilterValue

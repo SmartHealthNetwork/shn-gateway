@@ -10,7 +10,7 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/jsonmember"
 )
 
-// A notified decision (the notifications design §7.4): a PAS Response Bundle,
+// A notified decision: a PAS Response Bundle,
 // or a bare ClaimResponse, that a payer's content notification carries. The
 // payer's gateway binds the notification's patients from it by the identity
 // rules every PAS answer is read by (readEntry, SubjectIdentity), reading only

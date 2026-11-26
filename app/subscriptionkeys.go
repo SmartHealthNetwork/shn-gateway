@@ -60,8 +60,8 @@ func loadPredecessor(dir string) (string, ed25519.PrivateKey, error) {
 	return man.ID, priv, nil
 }
 
-// subscriptionKeys derives the gateway's topic Subscription keys (the
-// notifications design, §6.2 and §6.3) from its identity and, when
+// subscriptionKeys derives the gateway's topic Subscription keys from its
+// identity and, when
 // IDENTITY_PREDECESSOR_DIR is set, from the predecessor signing key shn
 // rotate kept there, which is used only to open and verify what was made
 // under it during the rotation's overlap. The gateway does not start when

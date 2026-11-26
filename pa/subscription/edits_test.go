@@ -184,7 +184,7 @@ func headerAsObject(s string) string {
 	return s[:i] + `"header":{"v":` + s[i+9:j+1] + `}` + s[j+1:]
 }
 
-// §7.2's ownership test.
+// The ownership test.
 func TestOwns(t *testing.T) {
 	sub, not := edgeKeys(t)
 	stored, a, sh := throughBoth(t, sub, not, binding, baseSubscription)

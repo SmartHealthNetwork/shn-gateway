@@ -688,7 +688,7 @@ func TestInvolvedForAnswer_AnOmissionIsOnTheRecord(t *testing.T) {
 	authz.tamper = map[string]func(*shnsdk.Token){"pci:held": func(k *shnsdk.Token) { k.Subject = "pci:another" }}
 	x := &exchangeRecorder{}
 	c := &involvedCollector{held: map[string]bool{}}
-	c.bound("pci:held", true)
+	c.bindingRead("pci:held", true, true, nil)
 	c.differs("pci:held")
 	ctx := context.WithValue(context.WithValue(context.Background(), exchangeRecorderKey{}, x), involvedCollectorKey{}, c)
 	r := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)

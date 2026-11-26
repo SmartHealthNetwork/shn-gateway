@@ -12,8 +12,8 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/internal/legtaxonomy"
 )
 
-// workstream is one workstream compiled into this gateway: its adapter
-// (design §4.2). The core reads a workstream's legs and routes through it and
+// workstream is one workstream compiled into this gateway: its adapter. The
+// core reads a workstream's legs and routes through it and
 // names none of them itself.
 type workstream interface {
 	// id is the WorkstreamType the workstream's content is tagged with.

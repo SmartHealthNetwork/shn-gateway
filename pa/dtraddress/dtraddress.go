@@ -71,7 +71,7 @@ func (k Key) IsZero() bool { return len(k.k) == 0 }
 // DeriveKey derives the address-tag key from the gateway's identity signing
 // key by HKDF-SHA-256 under a label of its own, never using the signing key
 // as an HMAC key. Every replica of a gateway holds the same identity, so each
-// derives the same key; a rotation of the identity (D125) gives a new key,
+// derives the same key; a rotation of the identity gives a new key,
 // under which the addresses issued before it no longer verify.
 func DeriveKey(signPriv ed25519.PrivateKey) (Key, error) {
 	if len(signPriv) != ed25519.PrivateKeySize {

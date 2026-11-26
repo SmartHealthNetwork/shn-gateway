@@ -69,7 +69,77 @@ func patientRefOf(resource json.RawMessage) string {
 func (g *Gateway) memberForPCI(body []byte) string {
 	var req ingressCDSRequest
 	_ = decodeMessage(body, &req)
-	return strings.TrimPrefix(req.Context.PatientID, "Patient/")
+	member, _, _ := crdContextPatientID(req.Context.PatientID)
+	return member
+}
+
+// crdContextPatientID reads a CDS Hooks context.patientId, which is a Patient's id,
+// not a reference. The one relative "Patient/<id>", with no version, is read as
+// its id (readPatientReference), as earlier releases read it. A value that holds no
+// "/" is the id as written; conforms reports whether it is a FHIR id. Any other
+// value names no Patient by its structure ("Patient/1/x", "Patient/1/_history/2",
+// "Group/1", "a/b", "Patient/a%2Fb", "Patient/$op"): noPatient, refused on
+// authority at every level. A blank one ("", "Patient/", "Patient/ ") is the member as earlier
+// releases read it, which names no one (memberNamesNoOne), for the leg's own
+// reading of an absent patient.
+func crdContextPatientID(patientID string) (member string, conforms, noPatient bool) {
+	rest, relative := strings.CutPrefix(patientID, "Patient/")
+	if memberNamesNoOne(rest) {
+		return rest, true, false
+	}
+	if id, conforms, ok := readPatientReference(patientID); ok && relative && strings.Count(patientID, "/") == 1 {
+		return id, conforms, false
+	}
+	if relative || strings.Contains(patientID, "/") {
+		return "", true, true
+	}
+	return patientID, idShape.MatchString(patientID), false
+}
+
+// msgCRDPatientIDNotFHIRID is the refusal of a CDS Hooks request whose
+// context.patientId is not a FHIR id: the request's own shape, refused only by a
+// participant that opted into it (structural and strict).
+const msgCRDPatientIDNotFHIRID = "context.patientId is not a FHIR id"
+
+// crdSubjectMember is the member a CDS Hooks resource's patient reference ref
+// names, read as the patient-consistency check reads it. An absolute reference
+// on the EHR's own server (fhirServer) names the EHR's patient as a relative one
+// does; one on any other server names a resource there, another patient, and is
+// compared as written (the prefetch fence reads it the same way). A relative
+// Patient reference by FHIR's reference grammar names its id, versioned or not;
+// a "#<id>" naming the one contained Patient of resource names its member
+// identifier; any other reference (another type, or one that only looks like a
+// patient's, "urn:Patient/<id>") is compared as written, so it is never the
+// member.
+func crdSubjectMember(resource []byte, ref, fhirServer string) string {
+	relative := ref
+	if strings.Contains(ref, "://") {
+		base := strings.TrimRight(fhirServer, "/")
+		rest, ok := strings.CutPrefix(ref, base+"/")
+		if base == "" || !strings.Contains(base, "://") || !ok {
+			return ref
+		}
+		relative = rest
+	}
+	// A blank one ("Patient/", "Patient/ ") is the blank member, which names
+	// no one, as earlier releases read it.
+	if rest, ok := strings.CutPrefix(relative, "Patient/"); ok && memberNamesNoOne(rest) {
+		return rest
+	}
+	if id, _, ok := readPatientReference(relative); ok && strings.HasPrefix(relative, "Patient/") {
+		return id
+	}
+	if strings.HasPrefix(ref, "#") {
+		var r struct {
+			Contained []any `json:"contained"`
+		}
+		if decodeMessage(resource, &r) == nil {
+			if member, ok := patientRefMember(ref, containedObjects(r.Contained)); ok {
+				return member
+			}
+		}
+	}
+	return ref
 }
 
 // crdAnswerOutcome certifies the payer's CDS Hooks answer at line (the same
@@ -130,8 +200,15 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 	if req.Context.PatientID == "" {
 		return "", http.StatusBadRequest, "missing context.patientId"
 	}
-	member := strings.TrimPrefix(req.Context.PatientID, "Patient/")
-	pci, found, readErr := g.resolveSubjectPCI(ctx, member, body)
+	member, conforms, noPatient := crdContextPatientID(req.Context.PatientID)
+	if noPatient {
+		status, msg := subjectBindingFailure(ctx, errMemberNamesNoOne)
+		return "", status, msg
+	}
+	if !conforms && g.guard(ctx, KindContent, RuleRequestShape, body) {
+		return "", http.StatusBadRequest, msgCRDPatientIDNotFHIRID
+	}
+	pci, found, readErr := g.resolveSubjectPCIFrom(ctx, member, body, crdSubjectResource(body, member))
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
 		return "", status, msg
@@ -146,7 +223,9 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 	if !g.conformance().Runs(KindContent, RulePatientMixed) {
 		return pci, 0, ""
 	}
-	var refs []string
+	// members are the members every other patient reference names
+	// (crdSubjectMember), in document order.
+	var members []string
 	// A draft order is the order this PA is FOR — it MUST carry a patient subject. A
 	// missing/renamed subject is a defect here (not skipped), so at strict an order with no
 	// recognizable patient can never ride into the sealed request behind the bound subject's
@@ -159,7 +238,7 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 			}
 			return pci, 0, ""
 		}
-		refs = append(refs, ref)
+		members = append(members, crdSubjectMember(e.Resource, ref, req.FHIRServer))
 	}
 	// A prefetch value that is a Bundle has no top-level patient reference, so
 	// it is not read here: every prefetch value, Bundle or not, is fenced
@@ -171,25 +250,15 @@ func (g *Gateway) ingressCRDSubjectPCIContext(ctx context.Context, body []byte) 
 		// else a kept `prefetch.patient:{id:B}` for a different person rides into A's
 		// sealed exchange.
 		if id := patientResourceID(res); id != "" {
-			refs = append(refs, "Patient/"+strings.TrimPrefix(id, "Patient/"))
+			members = append(members, strings.TrimPrefix(id, "Patient/"))
 			continue
 		}
 		if ref := patientRefOf(res); ref != "" {
-			refs = append(refs, ref)
+			members = append(members, crdSubjectMember(res, ref, req.FHIRServer))
 		}
 	}
-	base := strings.TrimRight(req.FHIRServer, "/")
-	for _, ref := range refs {
-		// An absolute reference on the EHR's own server names the EHR's
-		// patient, as a relative one does (the prefetch fence reads it the
-		// same way).
-		if base != "" && strings.Contains(base, "://") {
-			if rest, ok := strings.CutPrefix(ref, base+"/"); ok && strings.HasPrefix(rest, "Patient/") {
-				ref = rest
-			}
-		}
-		m := strings.TrimPrefix(ref, "Patient/")
-		rp, ok, readErr := g.resolveSubjectPCI(ctx, m, body)
+	for _, m := range members {
+		rp, ok, readErr := g.resolveSubjectPCIFrom(ctx, m, body, crdSubjectResource(body, m))
 		if notProvablyThePatient(readErr) {
 			readErr, ok = nil, false // not provably the leg's patient
 		}

@@ -3,7 +3,7 @@
 package engine
 
 // workstream_pa_cdex_read_ingress_test.go — the payer gateway's side of the
-// payer's read of its CDex Task (cdex-task-status, D129): the payer's own
+// payer's read of its CDex Task (cdex-task-status): the payer's own
 // system reads and vreads its Task at a provider's base, the read is carried
 // exactly in its frame's readPath with no body and no patient, the provider's
 // answer is delivered as it came, and, after a 2xx answer naming a patient,
@@ -638,7 +638,7 @@ func TestCDexReadIngress_TheFrameworksRefusalSendsNothing(t *testing.T) {
 // A Task the payer's gateway cannot bind is reported unavailable, with no
 // token and no request for one, and why stays on its own record, at every
 // level; the answer is still delivered: a Task.for that is only a reference
-// into the provider's own server (§15.5's 2026-11-11 line), one naming two
+// into the provider's own server, one naming two
 // member numbers that differ, an answer that is not a Task, a member the
 // payer's records do not hold when it requires known members, a member
 // number shared with a Coverage's subscriber and no Patient of the member's

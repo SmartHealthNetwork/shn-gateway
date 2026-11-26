@@ -15,9 +15,9 @@ import (
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 )
 
-// The Subscriptions R5 Backport IG's canonicals (§7.1 rules 1, 2 and 4).
+// The Subscriptions R5 Backport IG's canonicals.
 // BackportSubscriptionProfile is the profile a topic subscription's
-// meta.profile names (§7.1 rule 1).
+// meta.profile names.
 const (
 	BackportSubscriptionProfile = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription"
 	extFilterCriteria           = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-filter-criteria"
@@ -28,7 +28,7 @@ const (
 )
 
 // backportExtensionAt is where each allowlisted Backport extension may sit in
-// a Subscription (§7.1 rule 4), as the member path of the extension array
+// a Subscription, as the member path of the extension array
 // holding it: the filter criteria on criteria, the payload content on
 // channel.payload, the others on channel.
 var backportExtensionAt = map[string]string{
@@ -40,7 +40,7 @@ var backportExtensionAt = map[string]string{
 }
 
 // backportValueType is the one value[x] each allowlisted Backport extension
-// carries (§7.1 rule 4), and the JSON kind of that value: a reader that keeps
+// carries, and the JSON kind of that value: a reader that keeps
 // the first value[x] it meets could read another than the one checked here.
 var backportValueType = map[string]struct {
 	name string
@@ -53,7 +53,7 @@ var backportValueType = map[string]struct {
 	extMaxCount:        {"valuePositiveInt", '0'},
 }
 
-// backportValue is an allowlisted Backport extension's value (§7.1 rule 4):
+// backportValue is an allowlisted Backport extension's value:
 // the extension holds its url, optionally an id, and exactly its one value[x]
 // of its type, and nothing else (no other value[x], no _value, no nested
 // extension or modifierExtension). Anything else is refused 403, authority.
@@ -74,7 +74,7 @@ func backportValue(e *jnode, url string) (*jnode, *Refusal) {
 	return v, nil
 }
 
-// The channel this network carries (§7.1 rule 2; PAS spec-56).
+// The channel this network carries (PAS spec-56).
 const (
 	channelRestHook   = "rest-hook"
 	channelPayload    = "application/fhir+json"
@@ -83,7 +83,7 @@ const (
 	refusalShapeFirst = "the Subscription is outside the shape this network carries: "
 )
 
-// Refusal is a refusal the caller answers and records (§9): the HTTP status, the
+// Refusal is a refusal the caller answers and records: the HTTP status, the
 // network primitive it is refused on (one of gateway/recording's refusal
 // rules: routing, authority, authentication, integrity or fidelity), and the
 // reason.
@@ -105,7 +105,7 @@ func forbidden(reason string) *Refusal {
 	return refuse(http.StatusForbidden, recording.RefusalAuthority, reason)
 }
 
-// Topic is one notification topic the network carries (§5, §7.1): PAS's and
+// Topic is one notification topic the network carries: PAS's and
 // the HRex Task topic, each implemented in its own lane's file.
 type Topic interface {
 	// Token is the topic's notification-address segment, also Binding.Topic:
@@ -117,9 +117,9 @@ type Topic interface {
 	// PAS {"full-resource", "id-only"}, CDex {"id-only"}.
 	Contents() []string
 	// Extensions are the extension URLs the topic's Subscription profile
-	// defines, allowed beside the Backport IG's (§7.1 rule 4).
+	// defines, allowed beside the Backport IG's.
 	Extensions() []string
-	// CheckFilter is §7.1 rule 3, whole: the filter holds only the topic's
+	// CheckFilter is the filter rule, whole: the filter holds only the topic's
 	// parameters, each naming values the subscriber may name.
 	CheckFilter(subscriber Holder, params []FilterParam) *Refusal
 	// SubscribeLeg is the subscribe leg's flat transaction type.
@@ -130,7 +130,8 @@ type Topic interface {
 	// SignalLeg is the signal leg's flat transaction type.
 	SignalLeg() string
 	// CheckContent is the topic's authority check on a content notification
-	// (PAS: §7.3's N6). It is never called for a no-content one.
+	// (PAS: every ClaimResponse it carries names the subscriber as its receiver). It is never
+	// called for a no-content one.
 	CheckContent(subscriber Holder, n *Notification) *Refusal
 	// NotificationShape is the reference types a notification-event's focus
 	// and additional-context may name, as the topic's pinned definition
@@ -150,11 +151,10 @@ type NotificationShape struct {
 	Focus, AdditionalContext []string
 }
 
-// Identifier is a (system, value) pair as the registry attests it (§7.1,
-// N4).
+// Identifier is a (system, value) pair as the registry attests it (N4).
 type Identifier struct{ System, Value string }
 
-// Holder is the authenticated subscriber as the registry attests it (§7.1): its
+// Holder is the authenticated subscriber as the registry attests it: its
 // participant id, and a provider's organization identifiers or a payer's
 // payer identifiers.
 type Holder struct {
@@ -163,15 +163,15 @@ type Holder struct {
 	PayerIDs    []Identifier
 }
 
-// Subscription is a parsed Subscription body (§6.2, §7.1), kept as its bytes and their
+// Subscription is a parsed Subscription body, kept as its bytes and their
 // structure so an edit rewrites only the members it edits.
 type Subscription struct {
 	body []byte
 	root *jnode
 }
 
-// ParseSubscription reads a Subscription body (§6.2 "An unreadable
-// Subscription"): a media type other than FHIR JSON (application/fhir+json or
+// ParseSubscription reads a Subscription body: a media type other than FHIR JSON
+// (application/fhir+json or
 // application/json, any parameters), or none, is refused 415, and a body that
 // is not one unambiguous JSON object whose resourceType is "Subscription" is
 // refused 400; each is recorded as the fidelity of SHN's own edit, which
@@ -202,7 +202,7 @@ func ParseSubscription(body []byte, contentType string) (*Subscription, *Refusal
 //     only, are refused 415, and any other body that is not one JSON value
 //     (plain text, HTML, XML in no or another namespace) 415, each recorded as
 //     the fidelity of SHN's own edit, which cannot be made on a body it cannot
-//     read (§6.2 "An unreadable Subscription");
+//     read;
 //   - no body, a JSON value holding no resource, a JSON object or array
 //     followed by anything but whitespace, and FHIR JSON that cannot
 //     be read one way only (a repeated member name, a byte order mark, a
@@ -241,7 +241,7 @@ func ReadSubscription(body []byte) (*Subscription, *Refusal) {
 }
 
 // Endpoint is the Subscription's channel.endpoint, and whether it states
-// one as a string: what CheckEndpoint judges (§6.5).
+// one as a string: what CheckEndpoint judges.
 func (s *Subscription) Endpoint() (string, bool) {
 	return s.channel().member("endpoint").stringOf()
 }
@@ -286,8 +286,7 @@ func headerValue(headers []string, name string) (string, bool) {
 }
 
 // canonicalIs reports whether v is canonical, with or without a |version
-// suffix whose version is non-empty and holds no "|", "?" or "#" (§7.1 rule
-// 1; a FHIR canonical's version).
+// suffix whose version is non-empty and holds no "|", "?" or "#" (a FHIR canonical's version).
 func canonicalIs(v, canonical string) bool {
 	if v == canonical {
 		return true
@@ -296,7 +295,7 @@ func canonicalIs(v, canonical string) bool {
 	return ok && ver != "" && !strings.ContainsAny(ver, "|?# \t\r\n")
 }
 
-// CheckShape is §7.1's closed shape, a network rule at every level, at the
+// CheckShape is the closed shape, a network rule at every level, at the
 // notifier's gateway on a Subscription create or update. It refuses 403,
 // recorded authority:
 //   - rule 1: a Subscription whose meta.profile does not name the Backport
@@ -331,7 +330,7 @@ func CheckShape(s *Subscription, t Topic, subscriber Holder) *Refusal {
 	return t.CheckFilter(subscriber, params)
 }
 
-// checkTopicSubscription is §7.1 rule 1.
+// checkTopicSubscription is the closed shape's topic rule.
 func checkTopicSubscription(s *Subscription, t Topic) *Refusal {
 	profiled := false
 	if p := s.root.member("meta").member("profile"); p != nil && p.kind == '[' {
@@ -351,7 +350,7 @@ func checkTopicSubscription(s *Subscription, t Topic) *Refusal {
 	return nil
 }
 
-// checkChannel is §7.1 rule 2.
+// checkChannel is the closed shape's channel rule.
 func checkChannel(s *Subscription, t Topic) *Refusal {
 	ch := s.channel()
 	if typ, _ := ch.member("type").stringOf(); typ != channelRestHook {
@@ -407,7 +406,7 @@ func foldedPath(p string) string {
 	return strings.Join(parts, ".")
 }
 
-// checkExtensions is §7.1 rule 4 over n and everything below it. path is the
+// checkExtensions is the closed shape's extension rule over n and everything below it. path is the
 // folded member names from the Subscription's root to n.
 func checkExtensions(n *jnode, path []string, topic []string) *Refusal {
 	switch n.kind {
@@ -482,8 +481,7 @@ func containsMember(n *jnode, folded string) bool {
 	return false
 }
 
-// FilterValue is one comma-separated value of a filter parameter (§7.1 rule
-// 3), read as a
+// FilterValue is one comma-separated value of a filter parameter, read as a
 // token: "system|value" has HasSystem, and "|value" is HasSystem with an
 // empty System.
 type FilterValue struct {
@@ -492,7 +490,7 @@ type FilterValue struct {
 	Value     string
 }
 
-// FilterParam is one filter parameter (§7.1 rule 3): its name, its modifier ("" when none)
+// FilterParam is one filter parameter: its name, its modifier ("" when none)
 // and its values.
 type FilterParam struct {
 	Name, Modifier string
@@ -505,7 +503,7 @@ var (
 	filterModifier     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9\-]*$`)
 )
 
-// ParseFilters reads a Subscription's filter (§7.1 rule 3) exactly as the
+// ParseFilters reads a Subscription's filter exactly as the
 // notifier matches it: each Backport filter-criteria extension on criteria
 // (_criteria), one or more, whose valueString is an optional
 // "<ResourceType>?" then parameters joined by "&", each
@@ -601,7 +599,7 @@ func parseFilterCriteria(v string) ([]FilterParam, *Refusal) {
 	return out, nil
 }
 
-// MatchIdentifiers is §7.1 rule 3's tie between a subscriber and the
+// MatchIdentifiers is the filter rule's tie between a subscriber and the
 // identifiers its filter may name (N4): a bare value matches on value against
 // any attested identifier; an explicit system, the empty one included, must
 // equal an attested (system, value) pair. A value that matches none, or no
@@ -625,7 +623,7 @@ func MatchIdentifiers(values []FilterValue, attested []Identifier) *Refusal {
 	return nil
 }
 
-// CheckEndpoint is §6.5's rule on a Subscription's channel.endpoint, at the
+// CheckEndpoint is the rule on a Subscription's channel.endpoint, at the
 // subscriber's gateway on a create or update, a network rule at every level.
 // It refuses 422: an endpoint that is not an absolute https URL with a host,
 // that holds a space or a backslash (which url.Parse would take, but a url
@@ -651,12 +649,12 @@ func CheckEndpoint(endpoint string, loop func(string) bool) *Refusal {
 	return nil
 }
 
-// Owns is §7.2's ownership test, decided from the Subscription alone, at the
+// Owns is the ownership test, decided from the Subscription alone, at the
 // notifier's gateway whose ingress is ingress: the Subscription belongs to
 // subscriber when its channel.endpoint is a notification address of this
 // gateway for that subscriber and t, and its channel.header holds exactly one
 // Authorization and one X-SHN-Channel value whose credential verifies for
-// that address and those sealed headers (§6.3).
+// that address and those sealed headers.
 func (k Keys) Owns(s *Subscription, ingress, subscriber string, t Topic) bool {
 	ep, ok := s.Endpoint()
 	if !ok {
@@ -675,8 +673,7 @@ func (k Keys) Owns(s *Subscription, ingress, subscriber string, t Topic) bool {
 	return okA && okC && k.VerifyCredential(a, sealed, auth) == nil
 }
 
-// The search and result parameters a Subscription search may carry (§7.2,
-// N7), and a page's (§7.2 "Pages").
+// The search and result parameters a Subscription search may carry (N7), and a page's.
 var (
 	searchParams = []string{"url", "status", "_id", "_count", "_elements"}
 	pageParams   = []string{"_getpages", "_getpagesoffset", "_count", "_bundletype", "_elements"}
@@ -684,7 +681,7 @@ var (
 	elementName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]*$`)
 )
 
-// CheckSearch is §7.2's search rule, at the notifier's gateway before
+// CheckSearch is the search rule, at the notifier's gateway before
 // anything is sent. A search is forwarded only when it carries exactly one
 // non-empty url, and otherwise only the search parameters status and _id and
 // the result parameters _count and _elements, each _elements keeping channel.
@@ -707,7 +704,7 @@ func CheckSearch(q url.Values) *Refusal {
 	return nil
 }
 
-// CheckPageQuery is §7.2's rule for a page of a search's answer: exactly one
+// CheckPageQuery is the rule for a page of a search's answer: exactly one
 // non-empty _getpages, and otherwise only _getpagesoffset, _count,
 // _bundletype and, as a HAPI FHIR server's page link copies it from the
 // search, _elements, none with a modifier. An _elements is given at most once,
@@ -752,7 +749,7 @@ func checkParams(q url.Values, allowed []string, what string) *Refusal {
 	return nil
 }
 
-// CheckID is §6.1's id rule, at both gateways: a Subscription id or version
+// CheckID is the id rule, at both gateways: a Subscription id or version
 // outside [A-Za-z0-9\-\.]{1,64}, or the dot segment "." or "..", which a
 // server reading the path below its base would take as a step out of it, is
 // refused 400, recorded routing.

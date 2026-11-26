@@ -9,7 +9,7 @@ import (
 )
 
 // statusEntry is a SubscriptionStatus entry as the capture recorded br-payer
-// writing it (the notifications design, §3 "Captured"): a relative fullUrl
+// writing it: a relative fullUrl
 // (Parameters/<uuid>), subscription Subscription/{id}, the topic, the type,
 // and a focus part with no value.
 func statusEntry(typ, topicValue string) string {
@@ -89,7 +89,7 @@ func TestParseNotification_Refuses(t *testing.T) {
 	}
 }
 
-// §5's no-content test, by structure, and the leg it picks.
+// The no-content test, by structure, and the leg it picks.
 func TestNoContentAndLeg(t *testing.T) {
 	status := statusEntry("event-notification", testCanonical)
 	for name, row := range map[string]struct {
@@ -161,7 +161,7 @@ func TestNoContentAndLeg(t *testing.T) {
 func noLoop(string) bool { return false }
 
 // The subscriber's gateway opens a notification's sealed values under the
-// leg's own binding only, and delivers only to an endpoint §6.5 accepts.
+// leg's own binding only, and delivers only to an endpoint the endpoint rule accepts.
 func TestOpenDelivery(t *testing.T) {
 	sub := mustKeys(t, "provider-1", curKey, nil)
 	se := sub.SealEndpoint(binding, subEndpoint)
@@ -193,8 +193,8 @@ func TestOpenDelivery(t *testing.T) {
 			t.Errorf("%s: delivered %+v", name, d)
 		}
 	}
-	// A value a search sealed opens under the same key, but an endpoint §6.5
-	// refuses is never delivered to.
+	// A value a search sealed opens under the same key, but an endpoint the endpoint
+	// rule refuses is never delivered to.
 	for name, row := range map[string]struct {
 		endpoint  string
 		loop      func(string) bool

@@ -71,9 +71,9 @@ func signedSubscriber() Body {
 		`"channel":{"type":"rest-hook","endpoint":"https://payer.example/notify","payload":"application/fhir+json","header":["Authorization: Bearer s3cret"]}}`), OriginPeerFrame)
 }
 
-// E-18 seals a signed Subscription's channel all the same (D132, N2): the
-// removal of channel.endpoint and channel.header, each disclosed by the
-// signature's carrier. Any other change E-18 makes to signed content is
+// E-18 seals a signed Subscription's channel all the same: the removal of
+// channel.endpoint and channel.header, each disclosed by the signature's
+// carrier. Any other change E-18 makes to signed content is
 // refused, as is the same removal by any other edit.
 func TestSignedContentSubscriptionSealExemption(t *testing.T) {
 	b := signedSubscriber()
@@ -151,7 +151,7 @@ func signedAnswer() Body {
 		`{"fullUrl":"http://payer.example/fhir/Basic/b1","resource":{"resourceType":"Basic","channel":{"endpoint":"https://x.example"}}}]}`), OriginPeerFrame)
 }
 
-// E-20 restores a signed answer all the same (D132, N2): an entry's
+// E-20 restores a signed answer all the same: an entry's
 // Subscription's channel.endpoint and channel.header, its header's removal,
 // the entry's fullUrl and the link's url, each disclosed by the signature's
 // carrier; a single signed Subscription too. Any other change E-20 makes to

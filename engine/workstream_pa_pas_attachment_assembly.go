@@ -4,6 +4,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -390,16 +391,32 @@ func completeAuthoredPASAttachment(body, sourceQR, sourceOrder []byte, coverageR
 	return out, nil
 }
 
-// The policy describes exact occurrences in a verified holder-authored attachment.
-// It is local to request evidence completion and never authorizes a foreign graph.
+// The policy describes exact occurrences in a verified holder-authored
+// attachment: the QR's literal qr-context references that name neither the
+// exchange's order nor its Coverage. Each is a record the request must carry
+// (PAS spec-13), so the completion reads it from the participant's own system
+// at that occurrence and only there, by its path in the QR, never by its type
+// elsewhere. It is local to request evidence completion and never authorizes
+// a foreign graph.
 type authoredPASReferencePolicy struct {
-	owner      string
-	resource   string
-	references map[string]string
+	owner    string
+	resource string
+	// contexts are the occurrences: each path in the QR, and the Reference
+	// written there, encoded; named is each occurrence's reference, in the
+	// QR's order.
+	contexts map[string]string
+	named    []string
+	// readContext reads a context's record from the participant's own
+	// system, and requesterOf the records its requester leads to
+	// (the builder's requester rule, contextRequesterRead);
+	// completeAuthoredPASRequest sets both. With no
+	// readContext a context is refused, never left unresolved.
+	readContext func(context.Context, string) ([]byte, bool, error)
+	requesterOf contextRequesterRead
 }
 
-// Matches reports whether the policy was made for g (pasgraph.ReferencePolicy):
-// a nil policy matches every graph.
+// Matches reports whether the policy was made for g: a nil policy matches
+// every graph.
 func (p *authoredPASReferencePolicy) Matches(g *pasGraph) bool {
 	if p == nil {
 		return true
@@ -412,19 +429,24 @@ func (p *authoredPASReferencePolicy) Matches(g *pasGraph) bool {
 	return err == nil && string(raw) == p.resource
 }
 
-// Allows reports whether node, at path inside owner, is an occurrence the
-// policy names (pasgraph.ReferencePolicy): a nil policy allows none.
-func (p *authoredPASReferencePolicy) Allows(owner *pasGraphEntry, path string, node map[string]any) bool {
+// namesContext reports whether node, at path inside owner, is one of the QR's
+// contexts the policy names, its record to be read and carried: a nil policy
+// names none.
+func (p *authoredPASReferencePolicy) namesContext(owner *pasGraphEntry, path string, node map[string]any) bool {
 	if p == nil || owner == nil || owner.FullURL != p.owner {
 		return false
 	}
-	expected, ok := p.references[path]
+	expected, ok := p.contexts[path]
 	if !ok {
 		return false
 	}
 	raw, err := json.Marshal(node)
 	return err == nil && string(raw) == expected
 }
+
+// qrContextReference is a relative Type/id a QR's context may name.
+var qrContextReference = regexp.MustCompile(`^[A-Z][A-Za-z]{1,63}/[A-Za-z0-9.-]{1,64}$`)
+
 func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageRef string) (*authoredPASReferencePolicy, error) {
 	verified, err := completeAuthoredPASAttachment(body, sourceQR, sourceOrder, coverageRef)
 	if err != nil || !bytes.Equal(verified, body) {
@@ -443,7 +465,7 @@ func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageR
 		return nil, err
 	}
 	active := typ + "/" + id
-	policy := &authoredPASReferencePolicy{references: map[string]string{}}
+	policy := &authoredPASReferencePolicy{contexts: map[string]string{}}
 	var bundle map[string]any
 	if decodePASObject(body, &bundle) != nil {
 		return nil, fmt.Errorf("invalid authored bundle")
@@ -484,6 +506,10 @@ func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageR
 		if err != nil {
 			return nil, err
 		}
+		if _, present := reference["reference"]; !present {
+			// A logical context, named by identifier: no entry to carry.
+			continue
+		}
 		ref := dtrString(reference["reference"].raw)
 		if ref == active {
 			activeCount++
@@ -493,15 +519,24 @@ func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageR
 			coverageCount++
 			continue
 		}
-		kind, optionalID, _ := strings.Cut(ref, "/")
-		if canonical != dtrExtensionBase+"qr-context" || (kind != "ServiceRequest" && kind != "DeviceRequest") {
+		if canonical != dtrExtensionBase+"qr-context" {
 			continue
 		}
-		if !dtrLocalReference.MatchString(ref) || !pasSafeResourceID(optionalID) {
-			return nil, fmt.Errorf("invalid optional order identity")
+		if strings.HasPrefix(ref, "#") {
+			// A resource the QR contains: the graph resolves it inside the QR.
+			continue
 		}
-		if supplied, present := reference["type"]; present && dtrReferenceType(dtrString(supplied.raw)) != kind {
-			return nil, fmt.Errorf("optional order type mismatch")
+		// A relative Type/id is checked here. Any other literal shape (an
+		// absolute address, a urn) is named too: the completion carries it
+		// only if the request already does, and otherwise refuses it by name.
+		if qrContextReference.MatchString(ref) {
+			kind, optionalID, _ := strings.Cut(ref, "/")
+			if !pasSafeResourceID(optionalID) {
+				return nil, fmt.Errorf("invalid optional context identity")
+			}
+			if supplied, present := reference["type"]; present && dtrReferenceType(dtrString(supplied.raw)) != kind {
+				return nil, fmt.Errorf("optional context type mismatch")
+			}
 		}
 		actualExt := actual["extension"].([]any)[i].(map[string]any)
 		node, ok := actualExt["valueReference"].(map[string]any)
@@ -512,9 +547,10 @@ func authoredPASReferencePolicyFor(body, sourceQR, sourceOrder []byte, coverageR
 		if err != nil {
 			return nil, err
 		}
-		policy.references["/extension/"+strconv.Itoa(i)+"/valueReference"] = string(encoded)
+		policy.contexts["/extension/"+strconv.Itoa(i)+"/valueReference"] = string(encoded)
+		policy.named = append(policy.named, ref)
 	}
-	if len(policy.references) > 0 && (activeCount != 1 || coverageCount != 1) {
+	if len(policy.contexts) > 0 && (activeCount != 1 || coverageCount != 1) {
 		return nil, fmt.Errorf("optional context lacks unique active identities")
 	}
 	return policy, nil

@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/engine/relay"
@@ -118,7 +117,7 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte) 
 			return nil, nil, "", http.StatusBadRequest, noOrderSubject
 		}
 	} else {
-		srMember, haveSR = strings.TrimPrefix(srSubjectRef, "Patient/"), true
+		srMember, haveSR = crdSubjectMember(srJSON, srSubjectRef, req.FHIRServer), true
 	}
 	covJSON = req.Prefetch["coverage"]
 	if covBeneRef, err := shnsdk.ParseCoverageBeneficiary(covJSON); err != nil {
@@ -126,9 +125,19 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte) 
 			return nil, nil, "", http.StatusBadRequest, noBeneficiary
 		}
 	} else {
-		covMember, haveCov = strings.TrimPrefix(covBeneRef, "Patient/"), true
+		covMember, haveCov = crdSubjectMember(covJSON, covBeneRef, req.FHIRServer), true
 	}
-	ctxMember := strings.TrimPrefix(req.Context.PatientID, "Patient/")
+	ctxMember, conforms, noPatient := crdContextPatientID(req.Context.PatientID)
+	if noPatient {
+		// A context.patientId that names no Patient by its structure names
+		// no one: refused on authority at every level, before the request's
+		// consistency is checked.
+		status, msg := subjectBindingFailure(ctx, errMemberNamesNoOne)
+		return nil, nil, "", status, msg
+	}
+	if !conforms && g.guard(ctx, KindContent, RuleRequestShape, reqJSON) {
+		return nil, nil, "", http.StatusBadRequest, msgCRDPatientIDNotFHIRID
+	}
 	if ctxMember == "" {
 		// No subject to bind: refused at every level, with the refusal strict
 		// gives (the first content defect carried, else the inconsistency
@@ -155,7 +164,7 @@ func (g *Gateway) conformantCRDBindContext(ctx context.Context, reqJSON []byte) 
 			return nil, nil, "", http.StatusBadRequest, inconsistent
 		}
 	}
-	subjectPCI, status, msg = g.bindInboundSubject(ctx, ctxMember, reqJSON)
+	subjectPCI, status, msg = g.bindInboundSubjectFrom(ctx, ctxMember, reqJSON, crdSubjectResource(reqJSON, ctxMember))
 	if status != 0 {
 		return nil, nil, "", status, msg
 	}

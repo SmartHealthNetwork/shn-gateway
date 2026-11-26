@@ -1053,15 +1053,21 @@ leg refuses it before your system is asked, at every conformance level:
   A request that also names its patient or reference only in another case is
   refused for that first.
 - A leg that reads a reference leaving no id (`Patient/`, `Patient/Patient/`)
-  as naming no patient answers with its own refusal: the payer's PAS inquiry
-  (`400 PAS inquiry Bundle missing Claim.patient`) and DTR questionnaire
+  as naming no patient answers with its own refusal: the DTR questionnaire
   package (a coverage beneficiary or order subject that is not a Patient
   reference); on the payer's CRD order-select, `Patient/` while the order or
   coverage names a patient is `400 inconsistent patient in order-select`.
+- From shn-gateway v1.17.0, a PAS submission, update or inquiry whose
+  `Claim.patient` names no one, or names no Patient by FHIR's reference forms
+  ("A PAS request's Claim.patient is read by FHIR's reference grammar",
+  below), is refused `400 cannot identify the patient: …` at every level,
+  before its consistency is checked. One that names a Patient the request
+  carries that holds no member key is refused with the text that says what to
+  carry, `400 cannot identify the patient: the request names its patient by a
+  reference to a Patient it carries that holds no member identifier; …`.
 - The patient-mixed check refuses first at strict where another reference in
   the request names the patient: CRD order-select `400 inconsistent patient in
-  order-select`, PAS submission and update `403 inconsistent patient in PAS
-  bundle`. An order whose own subject names no one is that check's: carried
+  order-select`. An order whose own subject names no one is that check's: carried
   below strict, and at strict refused `403` on the provider's CRD ingress, the
   payer's order-dispatch and PAS, and `400 inconsistent patient in
   order-select` on the payer's order-select.
@@ -1072,6 +1078,105 @@ leg refuses it before your system is asked, at every conformance level:
   `authority`, never as your system's failure.
 - Your own system-of-record connector refuses such a member as a failed read,
   never as a member it does not hold (`docs/INTEGRATION.md`).
+
+### A PAS request's Claim.patient is read by FHIR's reference grammar
+
+**Behavior change in v1.17.0.**
+
+On a PAS submission, update and inquiry, on every role, `Claim.patient` names
+its patient only in FHIR's reference forms, read by their structure, never by
+finding `Patient/` in its text:
+
+- `Patient/<id>`, or an `http` or `https` URL under any base (a host, with no
+  user, query, fragment or empty path segment; the base is never matched
+  against another) whose path ends in `Patient/<id>`, either with an optional
+  `/_history/<version>`: the member is the id;
+- `#<id>`, naming the one resource the Claim contains with that id, when it is
+  a Patient;
+- a `urn:` reference, naming the one Bundle entry with that `fullUrl`, when it
+  is a Patient.
+
+A `#<id>` or `urn:` names the Patient it resolves to, on the submission, the
+update and the inquiry alike, and binds that Patient's member as `Patient/<id>`
+would, on the requester's gateway and the payer's, whether your system of
+record holds the member or not: a contained Patient's member is its member
+identifier (a contained resource's id is local to the Claim, never a member
+id), and an entry's member is its id, else its member identifier. The request's
+other subjects that name the same Patient so name the same member. A referenced
+Patient that holds no member key (a contained Patient with no member identifier
+or two different ones, or an entry with neither an id nor a member identifier)
+names no one: refused `400 cannot identify the patient: the request names its
+patient by a reference to a Patient it carries that holds no member identifier;
+name the patient by Patient/<id>, or give that Patient one member identifier`,
+recorded as `authority`, at every conformance level, and nothing is read from
+your system of record.
+
+Anything else names no Patient: another resource type, another number of
+segments, an empty id or version, an operation or an escaped character where
+the id goes, a `#` whose id holds a `/`, or a reference that resolves to no
+Patient or to more than one. Such a `Claim.patient` is refused `400 cannot
+identify the patient: the request names its patient by a reference that names
+no one`, recorded as `authority`, at every conformance level, before the
+request's consistency is checked, and nothing is read from your system of
+record.
+
+An id that names one Patient by structure but is not a FHIR id (letters,
+digits, `-` and `.`, at most 64), or whose version is not one, binds as written. It is the request's own
+shape (`request.shape`): carried at `none`, recorded at `observe`, and refused
+`400` at `structural` and `strict` (`PAS bundle Claim.patient names its Patient
+by an id that is not a FHIR id`, on the inquiry `PAS inquiry Claim.patient
+names its Patient by an id that is not a FHIR id`).
+
+Every other patient reference in a PAS request, and on the involved list of
+every leg that takes one (the DTR questionnaire package's too), is read by the
+same `Patient/<id>` and URL forms. One that carries a `Patient` segment but
+names no Patient by them, and resolves to no Patient the request carries,
+leaves its patient unknown: the involved list names the members the request
+does name, and records the omission once (`request-unreadable`). The PAS
+patient-mixed check compares it as written, so it names another patient than
+the request's. On the involved list and in that check of the request's other
+references, a `#<id>`, which names a contained resource by its id, and a
+well-formed reference to another type, whatever its base or id spells, are
+neither: each is read as the resource it names.
+
+### Every leg's patient reference is read by FHIR's reference grammar
+
+**Behavior change in v1.17.0.**
+
+Coverage eligibility, the federated query, the CRD order legs, the DTR
+questionnaire package and next question, and the patient-authored DTR item read
+their patient by the forms above, on every role:
+
+- A patient reference that names no Patient by them (another resource type, a
+  `urn:`, a trailing path, an operation or an escaped character where the id
+  goes, `Patient/` inside another reference, a bare id) names no one. It is
+  refused on `authority` at every level, before your system is asked, with the
+  leg's text for a reference that names no one: `400 cannot identify the
+  patient: …`; coverage eligibility's `400 eligibility request names its
+  patient by a reference that names no one, so the request names no patient to
+  bind`; the DTR questionnaire package's own refusal of a reference that is not
+  a Patient reference, when nothing else in it names the patient. Earlier
+  releases read the member from the text after `Patient/`.
+- A CDS Hooks `context.patientId` is a Patient's id. The one relative
+  `Patient/<id>` is read as its id; any other value holding a `/` names no
+  Patient.
+- An `http` or `https` reference names its Patient's id under any base. The CRD
+  order legs declare the EHR's own server (`fhirServer`): there an absolute
+  reference names the EHR's patient only on that server, and on any other names
+  a resource there, another patient. A leg that declares no base of its own
+  reads it as above.
+- The CRD order legs' consistency check reads a versioned reference to the
+  request's patient, an absolute one on the EHR's own server, and a `#<id>`
+  naming the order's one contained Patient for the member, as the request's
+  patient: carried at every level. One that only looks like a reference to a
+  patient is compared as written, as on PAS.
+- An id that names one Patient by structure but is not a FHIR id binds as
+  written. It is the request's own shape (`request.shape`): carried at `none`,
+  recorded at `observe`, refused `400` at `structural` and `strict` (`context.patientId
+  is not a FHIR id`; `eligibility request names its Patient by an id that is not
+  a FHIR id`; `federated query Task.for names its Patient by an id that is not a
+  FHIR id`; `DTR request names its Patient by an id that is not a FHIR id`;
+  `patient-dtr request names its Patient by an id that is not a FHIR id`).
 
 ### Optional diagnostic events (test tooling)
 
@@ -1307,6 +1412,24 @@ with a bearer token, a client CA or both:
 | Item | Class | Owner |
 |---|---|---|
 | `GET /metrics` | monitoring | core |
+
+### A subscribe leg's answers and the subscriber's return preference
+
+From v1.17.0, on both subscribe legs (`cdex-task-subscribe`, `pas-subscription-subscribe`,
+evolving), at every conformance level:
+- the notifier's gateway passes a `2xx` answer that holds nothing but shapes naming no patient,
+  whatever the interaction it answers (a Subscription, an OperationOutcome, no body, a searchset
+  of Subscriptions and OperationOutcomes, and on an interaction naming the Subscription by id a
+  `$status` Bundle naming it); one holding a resource anywhere else is refused `502` on
+  `authority`, as before. The ownership test then decides each Subscription the answer carries:
+  the network's `404` on `authority` for a read's or vread's answer that does not carry exactly
+  one Subscription, the subscriber's, and for a create's, update's, delete's or `$status`'s
+  carrying another's; `403` on `authority` for a search's or page's.
+- the subscriber's gateway frames the first return preference in its system's `Prefer` as sent
+  (`Prefer`, shn-sdk v1.17.0), and refuses one a frame cannot carry `400` on message
+  `integrity`, nothing sent; the notifier's gateway sends it on the interaction's own forward,
+  never on its own read, and refuses `400` on message `integrity`, nothing sent, a framed
+  `Prefer` that is not exactly one return preference, and one on any other leg.
 
 ### Native PAS response contract
 
@@ -1717,6 +1840,66 @@ a provider-data request carries"). A refusal answering another participant names
   is made to the record before the build. Earlier releases re-pointed the supplemental
   report's subject but did not name the edit there; the provider-data evidence is
   re-pointed only from v1.7.0.
+
+### The records a QuestionnaireResponse's contexts name
+
+**Behavior change in shn-gateway v1.17.0.**
+
+- On the provider-data origination profile, a PAS submission or update the gateway builds
+  carries each record your QuestionnaireResponse names in a DTR `qr-context` beside the
+  exchange's own order and Coverage, as your system of record holds it. Under PAS spec-13, a
+  record the Claim's supporting information references is an entry of the request.
+- The record is read once from your system, at that `qr-context` occurrence only. It may be a
+  ServiceRequest, DeviceRequest, MedicationRequest, NutritionOrder or Encounter.
+  - It must name exactly the request's patient: in `subject`, or for a NutritionOrder in
+    `patient`. When your system holds the member's Patient under its own id, registered edit
+    E-06 re-points that reference, when it is exactly that Patient, to `Patient/<member id>`,
+    as it does a clinical record's, and the request names E-06. A record a signature covers
+    there is refused `502 signed content cannot be edited (E-06, <carrier>)`.
+  - The records its `requester` leads to (a NutritionOrder's `orderer`) are carried by the
+    rule the exchange's own order's requester is. An Encounter's participants, service
+    provider and location are not carried, so an Encounter naming one is refused as below.
+  - A Coverage it references must be the exchange's.
+  - A clinical record it references is read as "The evidence a provider-data request carries"
+    describes.
+  - Nothing is minted.
+- Your QuestionnaireResponse's own Reference is carried as written, and a logical context
+  (named by `identifier` alone) names no record and is carried as before. So is a context
+  naming a resource the QuestionnaireResponse contains, or a record the request already
+  carries.
+- Each of these is refused before the payer, `502`, recorded as the fidelity of the gateway's
+  own build (refusal rule `fidelity`, stage `build`), at every conformance level, with no
+  `Retry-After` and nothing sent on the PAS leg:
+  - a record your system definitely does not hold: `502 a record the request references
+    cannot be filled: <type>/<id> is not held by the system of record`. The same words for a
+    record the request itself names stay `422`: the status follows where the reference came
+    from, your QuestionnaireResponse (what the gateway read from your system) or the
+    caller's request ("What the gateway cannot carry or edit");
+  - a record about another patient, one naming no patient, one whose bytes cannot be carried
+    as read, or one past the gateway's carrying limits: as for the clinical evidence. A
+    NutritionOrder naming no patient says `<type>/<id> names no patient.reference`;
+  - one whose requester's records cannot be carried: `502 a record read from the system of
+    record cannot be carried as read: <type>/<id>: <the requester rule's reason>`;
+  - one referencing a record no context carries, such as another Coverage, a performer or a
+    medication: `502 a record read from the system of record cannot be carried as read:
+    <type>/<id> references <reference>, which a prior-authorization request this gateway
+    builds cannot carry`. A `qr-context` of a type outside those above, or in another shape
+    (an absolute address, a `urn`) naming a record the request does not carry, is refused
+    the same way, naming the QuestionnaireResponse;
+  - an Appointment, which names its patient as one of its participants: `502 a record read
+    from the system of record cannot be carried as read: Appointment/<id> is an Appointment,
+    which a prior-authorization request this gateway builds cannot carry yet: an
+    Appointment names its patient as one of its participants`.
+- A read your system fails to answer is your system's failure, as for the clinical evidence.
+- On the `demo` origination profile, which reads no orders from a system of record, a
+  literal context is refused `502 a record read from the system of record cannot be carried
+  as read: <type>/<id> cannot be filled: this gateway's demo profile reads no orders from a
+  system of record`, recorded the same way.
+- **Compatibility:** earlier releases carried such a context unread. On provider-data, a
+  ServiceRequest or DeviceRequest was sent naming a record the request did not carry, which a
+  payer holding the request to spec-13 refuses, and any other type was refused `502 PAS
+  evidence linkage failed`, under no named rule. On demo, every literal context was sent
+  unread.
 
 ### Refusals of a request frame are framed
 
@@ -2135,6 +2318,16 @@ and the checks on their answers module 3's (`module 1`, `module 3`).
   v1.1.0), raises the observer event `involved.omitted` (Detail: the reason)
   and, with `METRICS_SERVICE` set, counts in the EMF metric
   `InvolvedOmitted{reason}`.
+- **Additive (v1.17.0):** to a network whose descriptor lists both `involved`
+  and `involved-summary`, the gateway signs a summary of each list it sends.
+  When one due is not sent, the call's exchange record and access line say
+  why (`ExchangeRecord.InvolvedSummaryNotSent`, `involvedSummaryNotSent`), as
+  one value of the closed set `engine.InvolvedSummaryNotSentReasons`:
+  `involved-summary-over-limit` (the envelope was sent without it, which alone
+  would have taken it over its size limit), `involved-summary-unsigned` (it
+  could not be made) or `involved-summary-binding-unsettled` (an answer's, its
+  gateway's own binding of the member not settled). On a call that sends more
+  than one leg it is the first such leg's. Evolving; not a metric dimension.
 - The descriptor is read once, at start, and the boot line says which way it
   went. A gateway started before the network lists `involved` sends nothing
   until it restarts.
@@ -2265,9 +2458,15 @@ lists the event kinds. The second lists the values an `ingress.received` or
 `ingress.responded` event carries in `legType`, naming the ingress route the
 call arrived on. The third lists the values a `pend.amendment-unbound` event
 carries in `detail`: why the amendment bound no pend this gateway recorded
-(`docs/CONFIGURATION.md`). An event's `detail` is free text for an operator,
-except for `pend.amendment-unbound`, whose `detail` is one value of the third
-table.
+(`docs/CONFIGURATION.md`). The fourth lists the values a
+`cdex.request-unpaired` event carries in `detail`: why a CDex attachment
+submission, for a member the system of record does not hold, paired with no
+attachment request this gateway carried. It is raised for every such
+submission, one that answers a pended prior authorization rather than an
+attachment request included (`no-record`): no request was carried for it. An
+event's `detail` is free text for an operator, except for
+`pend.amendment-unbound` and `cdex.request-unpaired`, whose `detail` is one
+value of the third or the fourth table.
 
 | Item | Class | Owner |
 |---|---|---|
@@ -2287,6 +2486,7 @@ table.
 | `sor.read` | core | core |
 | `conformance.observed` | module 3 | module 3 |
 | `involved.omitted` | core | core |
+| `involved.summary-not-sent` | core | core |
 | `subject.binding-differs` | core | core |
 | `cdex.requester-differs` | PA workstream, evolving | PA workstream |
 | `cdex.owner-differs` | PA workstream, evolving | PA workstream |
@@ -2312,6 +2512,7 @@ table.
 | `decision.stale-answer` | PA workstream | PA workstream |
 | `cdex.payer-id-differs` | PA workstream, evolving | PA workstream |
 | `pas.subscription-unsupported` | PA workstream, evolving | PA workstream |
+| `cdex.request-unpaired` | PA workstream, evolving | PA workstream |
 
 | Item | Class | Owner |
 |---|---|---|
@@ -2337,6 +2538,15 @@ table.
 | `ledger-unavailable` | PA workstream | PA workstream |
 | `no-prior-claim` | PA workstream | PA workstream |
 | `other-requester` | PA workstream | PA workstream |
+
+| Item | Class | Owner |
+|---|---|---|
+| `no-tracking-id` | PA workstream | PA workstream |
+| `no-record` | PA workstream | PA workstream |
+| `counterparty-differs` | PA workstream | PA workstream |
+| `member-differs` | PA workstream | PA workstream |
+| `member-conflict` | PA workstream | PA workstream |
+| `store-error` | PA workstream | PA workstream |
 
 ### The observer stream
 
@@ -2578,6 +2788,7 @@ classify is written as `other`.
 | `answerError` | core | core |
 | `authorizeError` | core | core |
 | `involvedOmitted` | core | core |
+| `involvedSummaryNotSent` | core | core |
 | `findings.count` | module 3 | module 3 |
 | `findings.refused` | module 3 | module 3 |
 | `findings.kinds` | module 3 | module 3 |
@@ -2617,6 +2828,7 @@ classify is written as `other`.
 | `answerError` | core | core |
 | `authorizeError` | core | core |
 | `involvedOmitted` | core | core |
+| `involvedSummaryNotSent` | core | core |
 | `requesterBinding.outcome` | core | core |
 | `requesterBinding.unbound` | core | core |
 | `requesterBinding.notSent` | core | core |

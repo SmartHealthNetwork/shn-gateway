@@ -20,7 +20,7 @@ const questionnaireAdaptiveExtension = "http://hl7.org/fhir/uv/sdc/StructureDefi
 // errRoundAddressNotIssued refuses a round whose operationSubpath does not
 // verify at this payer's gateway: an address the payer never issued to the
 // requesting provider, one whose base or line changed, or one issued under a
-// key since rotated (D125). The client recovers by fetching the package
+// key since rotated. The client recovers by fetching the package
 // again.
 const errRoundAddressNotIssued = "not an address this payer issued, or its base or key changed; fetch the package again"
 
@@ -110,7 +110,7 @@ func addressIssuerOf(ctx context.Context) (addressIssuer, bool) {
 }
 
 // addressHeaders are the address headers a payer gateway states on a 2xx
-// answer to a framed DTR operation (§14.5 of the CDex design): the base the
+// answer to a framed DTR operation: the base the
 // operation was delivered under (operationBase), when any questionnaireAdaptive
 // valueUrl in the answer is under it however spelled, and the tag of each
 // address it issued (operationAddressTags):

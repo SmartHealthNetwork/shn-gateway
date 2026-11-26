@@ -8,7 +8,7 @@ package engine
 // to the payer the path names). The submission is carried to the payer exactly
 // as sent, and the payer's answer is relayed exactly. The network refuses one
 // only on its own primitives: no registered payer to route to, and no
-// readable MemberId to identify the patient by (D121).
+// readable MemberId to identify the patient by.
 
 import (
 	"bytes"
@@ -184,7 +184,7 @@ func TestCDexIngress_ReturnPathPayerIdThatDiffersIsCarriedAndObserved(t *testing
 // A submission the network cannot route, or whose patient it cannot
 // identify, is refused before anything is sent, at every level, recorded on
 // the primitive it fails: routing (no registered payer to route to; there is
-// no default payer), per-leg authority (no readable MemberId, D121), and
+// no default payer), per-leg authority (no readable MemberId), and
 // message integrity (a body that can be read two ways).
 func TestCDexIngress_RefusesOnlyOnTheNetworksPrimitives(t *testing.T) {
 	t.Parallel()

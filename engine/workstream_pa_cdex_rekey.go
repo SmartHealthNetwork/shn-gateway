@@ -16,7 +16,7 @@ import (
 // cdexTaskReturnRekey returns a payer's attachment-request Task as this
 // provider's gateway carries it to its own system's Task endpoint: its one
 // payer-url input re-keyed to this gateway's documentation return path for
-// payer, the authenticated payer that sent the Task (E-11, D127), so the
+// payer, the authenticated payer that sent the Task (E-11), so the
 // documentation the provider sends there reaches that payer through the
 // network. The value is rebuilt from the ingress base and payer alone, never
 // read from the Task. It is made even where a signature covers the payer-url,

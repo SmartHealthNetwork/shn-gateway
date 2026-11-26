@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/SmartHealthNetwork/shn-gateway/recording"
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
@@ -311,7 +310,7 @@ func TestDeclaresFHIRNamespace_ReadsReferences(t *testing.T) {
 		"&#x68;ttp://hl7.org" + dec('/') + "fhir",
 		"http:&#x2F;&#x2f;hl7.org/fhir",
 	} {
-		if !declaresFHIRNamespace([]byte(`<x xmlns="` + v + `"/>`)) {
+		if !declaresFHIRNamespace([]byte(`<x xmlns="`+v+`"/>`), nil) {
 			t.Errorf("%q: not read as the FHIR namespace", v)
 		}
 	}
@@ -321,39 +320,105 @@ func TestDeclaresFHIRNamespace_ReadsReferences(t *testing.T) {
 		"http:&amp;#x2F;/hl7.org/fhir",
 		"http://hl7.org/fhi&#x72",
 	} {
-		if declaresFHIRNamespace([]byte(`<x xmlns="` + v + `"/>`)) {
+		if declaresFHIRNamespace([]byte(`<x xmlns="`+v+`"/>`), nil) {
 			t.Errorf("%q: read as the FHIR namespace", v)
 		}
 	}
 }
 
+// ClassifyBody's cost is linear in a body's length, whatever the body. It is
+// counted, never timed (walk: every pass adds the bytes it walks), so the
+// bound holds on any machine under any load. Each row is a body built to
+// defeat a bound, at a size n of its repeated part:
+//   - at n and 2n, both small but past encoding/json's own depth limit
+//     (10000), so each body takes the path it takes at full size, the count
+//     at 2n is at most twice the count at n, give or take the body's fixed
+//     text: no pass grows faster than the body, by any factor, however
+//     slowly;
+//   - at the row's own size, as much as any body on a leg holds or more, the
+//     count is at most maxPasses walks of the body, and at least one.
 func TestClassifyBody_Bounds(t *testing.T) {
-	big := strings.Repeat("a", 32<<20)
-	for name, body := range map[string]string{
-		"a huge JSON member":    `{"resourceType":"Patient","text":"` + big + `"}`,
-		"a huge XML attribute":  `<Patient xmlns="http://hl7.org/fhir"><id value="` + big + `"/></Patient>`,
-		"huge text":             big,
-		"JSON nested very deep": `{"resourceType":"Patient","a":` + strings.Repeat("[", 1<<20) + strings.Repeat("]", 1<<20) + `}`,
-		"XML nested very deep":  `<Patient xmlns="http://hl7.org/fhir">` + strings.Repeat("<a>", 1<<20) + strings.Repeat("</a>", 1<<20) + `</Patient>`,
-		"XML outside the FHIR namespace nested very deep":       `<html>` + strings.Repeat("<a>", 1<<20) + strings.Repeat("</a>", 1<<20) + `</html>`,
-		"a JSON array nested very deep":                         strings.Repeat("[", 1<<20) + strings.Repeat("]", 1<<20),
-		"many JSON scalars":                                     strings.Repeat("1 ", 8<<20),
-		"XML outside the FHIR namespace, unreadable throughout": `<html>` + strings.Repeat("< ", 8<<20) + `</html>`,
-		"a broken page of near declarations":                    `<html>&x;` + strings.Repeat(`<a xmlns="http://hl7.org/fhi">`, 1<<20),
-		"a broken page with a reference of many zeros":          `<html>&x;<a xmlns="&#x` + strings.Repeat("0", 16<<20) + `68;ttp://hl7.org/fhir">`,
-		"XML outside the FHIR namespace, unreadable often":      `<html>` + strings.Repeat("<p>1 < 2</p>", 2<<20) + `</html>`,
-		"a huge string after a scalar":                          `1 "` + big + `"`,
+	const (
+		small = 1 << 14
+		// maxPasses bounds how often ClassifyBody's passes walk any one byte
+		// of a body, a decoder's pass counted once. The most is a DOCTYPE's
+		// bytes in a broken XML page: two in classifyBody, the token, the
+		// directive's fields, its internal subset, the DTD's fields and
+		// literals, the markup's four (its "<" and a read for a declaration
+		// of the FHIR namespace: the tag scan, the values, the references),
+		// and two reads of the whole page for a declaration, three each.
+		maxPasses = 17
+		// slack is what the count at 2n may exceed twice the count at n by:
+		// what a body's fixed text, outside its repeated part, adds.
+		slack = 1 << 10
+	)
+	a := func(n int) string { return strings.Repeat("a", n) }
+	rows := []struct {
+		name string
+		n    int
+		body func(n int) string
+	}{
+		{"a huge JSON member", 32 << 20, func(n int) string { return `{"resourceType":"Patient","text":"` + a(n) + `"}` }},
+		{"a huge XML attribute", 32 << 20, func(n int) string { return `<Patient xmlns="http://hl7.org/fhir"><id value="` + a(n) + `"/></Patient>` }},
+		{"huge text", 32 << 20, a},
+		{"JSON nested very deep", 1 << 20, func(n int) string {
+			return `{"resourceType":"Patient","a":` + strings.Repeat("[", n) + strings.Repeat("]", n) + `}`
+		}},
+		{"XML nested very deep", 1 << 20, func(n int) string {
+			return `<Patient xmlns="http://hl7.org/fhir">` + strings.Repeat("<a>", n) + strings.Repeat("</a>", n) + `</Patient>`
+		}},
+		{"XML outside the FHIR namespace nested very deep", 1 << 20, func(n int) string {
+			return `<html>` + strings.Repeat("<a>", n) + strings.Repeat("</a>", n) + `</html>`
+		}},
+		{"a JSON array nested very deep", 1 << 20, func(n int) string { return strings.Repeat("[", n) + strings.Repeat("]", n) }},
+		// A JSON array that never ends is read for its depth to its end.
+		{"a JSON array of strings that never ends", (shnsdk.MaxResponseBytes - 1) / 4, func(n int) string { return "[" + strings.Repeat(`"a",`, n) }},
+		{"many JSON scalars", 8 << 20, func(n int) string { return strings.Repeat("1 ", n) }},
+		{"XML outside the FHIR namespace, unreadable throughout", 8 << 20, func(n int) string { return `<html>` + strings.Repeat("< ", n) + `</html>` }},
+		{"a broken page of near declarations", 1 << 20, func(n int) string { return `<html>&x;` + strings.Repeat(`<a xmlns="http://hl7.org/fhi">`, n) }},
+		// A value is read only while it still reads as the FHIR namespace.
+		{"a broken page of another namespace's declarations", 1 << 20, func(n int) string {
+			return `<html>&x;` + strings.Repeat(`<a xmlns="http://www.w3.org/1999/xhtml">`, n)
+		}},
+		// A DOCTYPE naming a DTD of its own, and a page that is not
+		// well-formed, is read for a declaration twice.
+		{"a broken page whose DOCTYPE holds many literals", shnsdk.MaxResponseBytes / 10, func(n int) string {
+			return `<!DOCTYPE html PUBLIC ` + strings.Repeat(`"-//x//y" `, n) + `><html>&x;</html>`
+		}},
+		{"a broken page with a reference of many zeros", 16 << 20, func(n int) string {
+			return `<html>&x;<a xmlns="&#x` + strings.Repeat("0", n) + `68;ttp://hl7.org/fhir">`
+		}},
+		{"XML outside the FHIR namespace, unreadable often", 2 << 20, func(n int) string { return `<html>` + strings.Repeat("<p>1 < 2</p>", n) + `</html>` }},
+		// Markup holding markup is read for a declaration of the FHIR
+		// namespace, each comment on its own.
+		{"many comments holding near declarations", shnsdk.MaxResponseBytes / 36, func(n int) string {
+			return `<html>` + strings.Repeat(`<!--<a xmlns="http://hl7.org/fhi">-->`, n) + `</html>`
+		}},
+		{"a huge string after a scalar", 32 << 20, func(n int) string { return `1 "` + a(n) + `"` }},
 		// Bodies of many small JSON values, each read as a value of its
 		// own, at the most any body on the leg can be (an answer or a
 		// request envelope, 8 MiB): the most values a body can hold.
-		"many JSON objects":                 strings.Repeat(`{"error":"x"} `, shnsdk.MaxResponseBytes/14),
-		"many empty JSON objects":           strings.Repeat(`{}`, shnsdk.MaxResponseBytes/2),
-		"many JSON arrays, then a resource": strings.Repeat("[1]", shnsdk.MaxResponseBytes/3) + patientJSON,
-	} {
-		start := time.Now()
-		_, _, _ = ClassifyBody([]byte(body))
-		if d := time.Since(start); d > 20*time.Second {
-			t.Errorf("%s: classified in %s", name, d)
+		{"many JSON objects", shnsdk.MaxResponseBytes / 14, func(n int) string { return strings.Repeat(`{"error":"x"} `, n) }},
+		{"many empty JSON objects", shnsdk.MaxResponseBytes / 2, func(n int) string { return strings.Repeat(`{}`, n) }},
+		{"many JSON arrays, then a resource", shnsdk.MaxResponseBytes / 3, func(n int) string { return strings.Repeat("[1]", n) + patientJSON }},
+	}
+	walked := func(body string) int {
+		var w walk
+		_, _, _ = classifyBody([]byte(body), &w)
+		return w.n
+	}
+	for _, r := range rows {
+		if w1, w2 := walked(r.body(small)), walked(r.body(2*small)); w2 > 2*w1+slack {
+			t.Errorf("%s: %d bytes walked at %d, %d at twice that: a pass grows faster than the body", r.name, w1, small, w2)
+		}
+	}
+	if t.Failed() {
+		t.Fatal("not read at full size, where a pass that grows faster than the body may not finish")
+	}
+	for _, r := range rows {
+		body := r.body(r.n)
+		if w := walked(body); w < len(body) || w > maxPasses*len(body) {
+			t.Errorf("%s: %d bytes walked for a body of %d, not 1 to %d walks of it", r.name, w, len(body), maxPasses)
 		}
 	}
 }
@@ -504,7 +569,7 @@ func TestInternalSubset(t *testing.T) {
 		`DOCTYPE x SYSTEM "a.dtd`:                      true,
 		`DOCTYPE x SYSTEM 'a.dtd" [`:                   true,
 	} {
-		if got := internalSubset([]byte(d)); got != want {
+		if got := internalSubset([]byte(d), nil); got != want {
 			t.Errorf("%q: %v, want %v", d, got, want)
 		}
 	}

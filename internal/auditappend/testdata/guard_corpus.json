@@ -1140,6 +1140,74 @@
       }
     },
     {
+      "name": "involved on a module record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "payer-b",
+        "transactionType": "module-details",
+        "authorityFrame": "provider-tpo",
+        "scope": "pas-bundle",
+        "outcome": "authored",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "2e7c9a1f4b6d8e0a3c5f7b9d1e3a5c7f9b2d4e6a8c0f1b3d5e7a9c2e4b6d8f0a",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA03",
+        "version": 2,
+        "correlationId": "7d2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a",
+        "module": {
+          "body": "request",
+          "leg": "pa.pas-claim",
+          "ownership": "authored",
+          "builder": "sdk-pas-submit",
+          "edits": [],
+          "lineFrom": "",
+          "lineTo": "",
+          "loss": []
+        },
+        "involved": {
+          "completeness": "complete",
+          "omitted": null
+        }
+      }
+    },
+    {
+      "name": "involved on a start record",
+      "holder": "provider-a",
+      "accept": false,
+      "record": {
+        "timestamp": "2026-06-04T00:00:00Z",
+        "sender": "provider-a",
+        "recipient": "provider-a",
+        "transactionType": "gateway-start",
+        "authorityFrame": "",
+        "scope": "",
+        "outcome": "started",
+        "consentRef": "",
+        "subjectPCI": "",
+        "payloadBundleHash": "",
+        "recordId": "01JZX5A7B8C9D0E1F2G3H4JA05",
+        "version": 2,
+        "gateway": {
+          "version": "v1.0.0",
+          "wireVersions": [
+            "1.1.0",
+            "2.0.0"
+          ],
+          "modules": [
+            "conformance",
+            "on-behalf"
+          ]
+        },
+        "involved": {
+          "completeness": "unknown",
+          "omitted": null
+        }
+      }
+    },
+    {
       "name": "a gateway on a module record",
       "holder": "provider-a",
       "accept": false,

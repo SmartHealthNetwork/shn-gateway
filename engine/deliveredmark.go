@@ -12,7 +12,7 @@ import (
 // writes on the call states it delivered yes (writeRefusal), whatever refused
 // it and whichever leg it was at. It is set at one point only, roundTrip's
 // success return (legAnswered), which comes after the answer passed
-// VerifyBound, the sender and correlation checks, decryption and the frame
+// the sender check, VerifyBoundWant, the correlation check, decryption and the frame
 // decode. A call before that point, or with no leg answered, states no
 // delivery of its own (a refusal before the send is unmarked).
 type deliveryMark struct{ answered atomic.Bool }

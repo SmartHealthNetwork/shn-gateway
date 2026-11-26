@@ -17,8 +17,8 @@ import (
 )
 
 // The payer gateway's side of the payer's topic Subscription to its CDex
-// Tasks' changes (cdex-task-subscribe; the notifications design §6.1, §7.2,
-// §10): the payer's own system manages its Subscription at a provider's base
+// Tasks' changes (cdex-task-subscribe): the payer's own system manages its Subscription at a
+// provider's base
 // on its gateway (POST, GET, PUT and DELETE <base>/Subscription[/…], with
 // <base> /cdex/provider/{provider}, the base its Tasks are created and read
 // at), as it would at the provider's own base, and the network carries each
@@ -33,7 +33,9 @@ import (
 //     for, is refused on routing: 422 for a create, 404 otherwise;
 //   - at the plain base, which names no provider, a create is refused 422
 //     naming the providers' bases, and a read or search 404, each on routing
-//     (D132 N8's mirror, as D129 Q5 answers the plain Task read): sending it
+//     (as a provider's gateway answers its own system's PAS Subscription at
+//     its plain base, which names no payer; and, for a read or search, as the
+//     plain Task read is answered, FHIR's 404 naming the bases): sending it
 //     to every provider would tell providers the payer never chose that it
 //     subscribes, and with what filter.
 //
@@ -137,8 +139,10 @@ func (g *Gateway) handleCDexSubscriptionIngress(w http.ResponseWriter, r *http.R
 }
 
 // handleCDexSubscriptionPlain is the payer system's Subscription interaction
-// at the plain base, which names no provider (N8, as D129 Q5 answers the
-// plain Task read): once the bearer is admitted, a create is answered 422 and
+// at the plain base, which names no provider (as a provider's gateway answers
+// its own system's PAS Subscription at its plain base, and, for a read or
+// search, as the plain Task read is answered): once the bearer is admitted, a
+// create is answered 422 and
 // a read or search 404, each this gateway's own OperationOutcome naming where
 // a Subscription is made, recorded as routing. Sending it to every provider
 // is not done.
@@ -170,7 +174,7 @@ func (g *Gateway) handleCDexSubscriptionPlain(w http.ResponseWriter, r *http.Req
 }
 
 // cdexSubscribeSearchParams are the search parameters a provider's base
-// serves for a Subscription search (§7.2, §10; N7 with the owner's
+// serves for a Subscription search (N7 with the owner's
 // addition): exactly url, status and _id.
 var cdexSubscribeSearchParams = []shnsdk.CapabilitySearchParam{
 	{Name: "url", Definition: "http://hl7.org/fhir/SearchParameter/Subscription-url", Type: "uri"},
@@ -182,7 +186,7 @@ var cdexSubscribeSearchParams = []shnsdk.CapabilitySearchParam{
 // Subscription declared (shnsdk.WithSubscription): create, read, vread,
 // update, delete, search-type with exactly url, status and _id, and the
 // instance $status. It names no SubscriptionTopic: the HRex Task topic is
-// named where the provider's own statement advertises it (§10), which this
+// named where the provider's own statement advertises it, which this
 // gateway cannot learn from the network today, so it is owed with PRV-7 and
 // never guessed.
 func withCDexSubscription(stmt []byte) ([]byte, error) {

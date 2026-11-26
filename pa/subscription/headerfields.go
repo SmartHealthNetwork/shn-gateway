@@ -9,7 +9,7 @@ import (
 
 // HeaderFields reads a Subscription's channel.header values as the HTTP
 // fields the subscriber's gateway presents to the subscriber's endpoint with
-// each notification (the notifications design §6.2 step 5, §6.3): each
+// each notification: each
 // "name: value", split at the first colon, the value's surrounding spaces and
 // tabs trimmed, as a server reads a field line. ok is false when a value is
 // not one (no colon, a name that is not an HTTP token, or a value an HTTP
@@ -30,7 +30,7 @@ func HeaderFields(values []string) (http.Header, bool) {
 }
 
 // PresentableHeaders reports whether s's channel.header values, when it
-// states any, are each an HTTP field HeaderFields reads (§6.5 at create: the
+// states any, are each an HTTP field HeaderFields reads (at create, the
 // subscriber's gateway refuses a channel it could never deliver with). A
 // header that is not an array of strings is not judged here: the seal
 // (SealOutbound) refuses it on its own rule.

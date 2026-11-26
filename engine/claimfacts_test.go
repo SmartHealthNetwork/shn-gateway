@@ -620,7 +620,7 @@ func TestCompleteAuthoredPASRequest_Deterministic(t *testing.T) {
 	}
 	complete := func(b []byte) []byte {
 		t.Helper()
-		out, _, err := g.completeAuthoredPASRequest(context.Background(), b, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID)
+		out, _, err := g.completeAuthoredPASRequest(context.Background(), b, in.QR, in.SR, in.CoverageRef, in.MemberID, in.MemberID, g.contextRequesterRead)
 		if err != nil {
 			t.Fatal(err)
 		}

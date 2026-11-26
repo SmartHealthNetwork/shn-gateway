@@ -78,7 +78,7 @@ func (g *Gateway) handleNotifyIngress(w http.ResponseWriter, r *http.Request, nt
 		refuse(RefusalRouting, http.StatusBadRequest, string(nt.reasons.notANotification)+rf.Reason, nt.reasons.notANotification)
 		return
 	}
-	// The leg by structure (§5's no-content test): no content rides the
+	// The leg by structure (the no-content test): no content rides the
 	// signal leg; content rides the content leg of a topic that has one,
 	// and is refused on a topic that has none.
 	subject := ""

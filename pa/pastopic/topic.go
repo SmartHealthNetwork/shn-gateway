@@ -1,5 +1,5 @@
-// Package pastopic is the PAS topic as the network carries it (the
-// notifications design §5, §7.1): a provider's topic Subscription, at a
+// Package pastopic is the PAS topic as the network carries it: a provider's topic
+// Subscription, at a
 // payer's base, to the results of the prior authorizations its system sent.
 // Its subscribe leg is pas-subscription-subscribe; a full-resource
 // notification rides pas-subscription-notify, and every other notification
@@ -51,7 +51,7 @@ func (Topic) Canonical() string { return Canonical }
 
 // Contents are full-resource and id-only: the network carries every line, and
 // refusing a 2.0.1 pair's id-only for 2.2.1's full-resource rule would refuse
-// a pair for its line (§7.1 rule 2). Which content a pair uses is the
+// a pair for its line. Which content a pair uses is the
 // notifier's to accept or refuse by its line.
 func (Topic) Contents() []string { return []string{"full-resource", "id-only"} }
 
@@ -61,7 +61,7 @@ func (Topic) Contents() []string { return []string{"full-resource", "id-only"} }
 // extensions are carried.
 func (Topic) Extensions() []string { return nil }
 
-// CheckFilter is §7.1 rule 3 for the PAS topic: exactly one org-identifier
+// CheckFilter is the filter rule for the PAS topic: exactly one org-identifier
 // parameter, with no modifier, and no other parameter, each of its values an
 // identifier the registry attests for the authenticated provider
 // (subscription.Holder.ProviderIDs). A system|value pair must equal an
@@ -150,7 +150,7 @@ func (Topic) NotificationShape() subscription.NotificationShape {
 	return subscription.NotificationShape{Topic: Canonical, Focus: []string{"Bundle", "ClaimResponse"}}
 }
 
-// CheckContent is §7.3's N6 check on a content notification, a network rule
+// CheckContent is the authority check on a content notification, a network rule
 // at every conformance level: every ClaimResponse the notification carries,
 // wherever it sits (subscription.Notification.Resources: an entry's resource,
 // an entry of a PAS Response Bundle at any depth, a parameter's resource, an

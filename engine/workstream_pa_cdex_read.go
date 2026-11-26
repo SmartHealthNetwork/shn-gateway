@@ -19,7 +19,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The payer's read of its CDex Task (cdex-task-status, D129): a payer's system
+// The payer's read of its CDex Task (cdex-task-status): a payer's system
 // reads the attachment-request Task it created at a provider, through its own
 // gateway, the Hub and the provider's gateway, to learn the Task's status. The
 // read is a plain FHIR read or vread. It names no patient, so the leg is
@@ -37,9 +37,9 @@ import (
 //  2. a 2xx answer is delivered only when it is one JSON Task whose one
 //     structural payer-url is this gateway's own return path for the reading
 //     payer (E-11's value): every other answer gets the network's 404, the
-//     same bytes in every case, before any patient lookup (D129, Q2);
-//  3. a Task that passes is bound to its patient by D121's rule, and one that
-//     cannot be bound is refused 502 (D129, Q1);
+//     same bytes in every case, before any patient lookup;
+//  3. a Task that passes is bound to its patient by the network's
+//     patient-match rule, and one that cannot be bound is refused 502;
 //  4. the Task is relayed exactly, under that patient.
 
 const legCDexTaskStatus = "cdex-task-status"
@@ -59,7 +59,7 @@ const (
 	// Task's read or vread.
 	refusalCDexReadPath = "the request's readPath is not a Task read or vread (Task/{id} or Task/{id}/_history/{vid}, each a FHIR id, then an optional query): "
 	// refusalCDexReadUnbound opens the refusal of a delivered Task the
-	// provider's gateway cannot bind to a patient (D121): the network cannot
+	// provider's gateway cannot bind to a patient: the network cannot
 	// then identify the patient whose record it would disclose.
 	refusalCDexReadUnbound = "the provider's gateway cannot bind the Task to a patient, so it is not delivered: "
 	// refusalCDexReadTarget: the read's address below the Task endpoint
@@ -84,7 +84,7 @@ const (
 )
 
 // cdexReadNotFound is the network's answer to a provider's 2xx that the
-// reading payer may not be delivered (D129, Q2): an OperationOutcome this
+// reading payer may not be delivered: an OperationOutcome this
 // gateway writes, the same bytes whatever is wrong with the answer, so it
 // says nothing of the Task or of why. FHIR R4 allows a 404 for access denied
 // (security.html, Access Denied Response Handling).
@@ -207,7 +207,7 @@ func (g *Gateway) refuseCDexReadNotFound(w http.ResponseWriter, r *http.Request,
 }
 
 // cdexReadDelivers reports whether a provider's 2xx answer may be delivered
-// to payer (D129, Q2), and the Task it reads as when it may: exactly one JSON
+// to payer, and the Task it reads as when it may: exactly one JSON
 // Task, carrying exactly one structural payer-url input whose valueUrl is this
 // gateway's own return path for payer (cdexroute.ReturnBase, the value E-11
 // writes), compared byte for byte. Nothing else of the answer is read first.
@@ -224,7 +224,8 @@ func (g *Gateway) cdexReadDelivers(answer relay.Body, payer string) (cdextask.Ta
 	return task, true
 }
 
-// bindCDexReadSubject binds a delivered Task to its patient by D121's rule,
+// bindCDexReadSubject binds a delivered Task to its patient by the network's
+// patient-match rule,
 // returning the patient's identifier, or the status and text the read is
 // refused with:
 //   - a member number Task.for names (cdexTaskMember), bound as the

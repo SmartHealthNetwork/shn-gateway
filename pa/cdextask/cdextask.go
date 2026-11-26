@@ -11,7 +11,10 @@
 //     Organization it names;
 //   - Task.requester: its reference and identifier;
 //   - the payer-url input: the input whose type is PASTempCodes#payer-url,
-//     and its valueUrl.
+//     and its valueUrl;
+//   - the tracking identifier: the Task.identifier whose type is
+//     CDexTempCodes#tracking-id, its system and value, for pairing the
+//     submission that answers the request with it.
 //
 // Unknown is not empty. Each field reads as Absent (the Task does not carry
 // it), Unreadable (it carries it in a form this reader cannot read, or
@@ -54,6 +57,12 @@ const (
 	// InputPayerURL is the input type code of the address the provider sends
 	// its answer to.
 	InputPayerURL = "payer-url"
+	// CDexTempCodes is the CDex code system CDex 2.1.0 types a Task's
+	// tracking identifier with.
+	CDexTempCodes = "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp"
+	// IdentifierTrackingID is the identifier type code of the tracking
+	// identifier the provider's submission repeats as its TrackingId.
+	IdentifierTrackingID = "tracking-id"
 )
 
 // ErrNotTask is the error of a body that is not a Task resource.
@@ -213,6 +222,14 @@ type Task struct {
 	Owner     Owner
 	Requester Requester
 	PayerURL  PayerURL
+	// Tracking is the Task's tracking identifier: Present with the one
+	// identifier typed CDexTempCodes#tracking-id (two or more that are the
+	// same system and value read as one); Absent when Task.identifier holds
+	// none so typed, or the Task has no identifier; Unreadable when two so
+	// typed differ, or Task.identifier or one of its identifiers cannot be
+	// read (an identifier that cannot be read could be a tracking
+	// identifier: unknown, never none).
+	Tracking IdentifierField
 }
 
 // Read reads body, a Task. It returns an error, and reads nothing, when body
@@ -253,6 +270,7 @@ func Read(body relay.Body) (Task, error) {
 		Owner:     r.owner(top.Owner),
 		Requester: r.requester(top.Requester),
 		PayerURL:  r.payerURL(top.Input),
+		Tracking:  trackingOf(whole, r.origin),
 	}
 	if r.twoWays != nil {
 		return Task{}, fmt.Errorf("cdextask: %w", r.twoWays)
@@ -399,6 +417,76 @@ func (r *reader) identifier(raw json.RawMessage) (Identifier, bool) {
 		return Identifier{}, false
 	}
 	return id, true
+}
+
+// trackingOf reads whole, the Task, as its one tracking identifier.
+// Task.identifier is read only to pair a submission with the request, never
+// to refuse the request, so it is read apart from the members the Task is
+// decided on, by its own reader: a Task.identifier named in another case, or
+// one naming a member of its own in another case, reads as an unreadable
+// tracking identifier, never as the Task reading two ways, and the Task is
+// decided on exactly as when Task.identifier was not read. whole has been
+// scanned strictly (relay.Decode), so it repeats no member name.
+func trackingOf(whole json.RawMessage, origin relay.Origin) IdentifierField {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(whole, &members) != nil {
+		return IdentifierField{State: Unreadable}
+	}
+	raw, ok := members["identifier"]
+	if !ok {
+		for k := range members {
+			if strings.EqualFold(k, "identifier") {
+				return IdentifierField{State: Unreadable}
+			}
+		}
+		return IdentifierField{State: Absent}
+	}
+	sub := &reader{origin: origin}
+	return sub.trackingField(raw)
+}
+
+// trackingField is tracking's reading. Every identifier is decoded before the
+// whole is decided.
+func (r *reader) trackingField(raw json.RawMessage) IdentifierField {
+	items, ok := r.list(raw)
+	if !ok {
+		return IdentifierField{State: Unreadable}
+	}
+	var found *Identifier
+	bad := false
+	for _, item := range items {
+		id, ok := r.identifier(item)
+		if !ok {
+			bad = true
+			continue
+		}
+		if !hasCoding(id.Type, CDexTempCodes, IdentifierTrackingID) {
+			continue
+		}
+		switch {
+		case found == nil:
+			found = &id
+		case found.System != id.System || found.Value != id.Value:
+			bad = true
+		}
+	}
+	switch {
+	case bad:
+		return IdentifierField{State: Unreadable}
+	case found == nil:
+		return IdentifierField{State: Absent}
+	}
+	return IdentifierField{State: Present, Identifier: *found}
+}
+
+// hasCoding reports whether codings holds one of system and code.
+func hasCoding(codings []Coding, system, code string) bool {
+	for _, c := range codings {
+		if c.System == system && c.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *reader) identifierField(raw json.RawMessage) IdentifierField {

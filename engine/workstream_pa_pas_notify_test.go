@@ -64,8 +64,8 @@ func decision(typ string, entries ...string) string {
 }
 
 // contentEvent is a full-resource notification of the PAS topic carrying
-// resource as its decision, its second entry in the shape the notifications
-// design §3 records from a captured br-payer notification: request.method
+// resource as its decision, its second entry in the shape a captured br-payer
+// notification has: request.method
 // PUT beside the resource, no request.url and no fullUrl.
 func contentEvent(resource string) []byte {
 	return []byte(`{"resourceType":"Bundle","type":"history","entry":[{"fullUrl":"urn:uuid:0b6a1f8e-2c3d-4e5f-8a9b-0c1d2e3f4a5b","resource":{"resourceType":"Parameters","parameter":[` +

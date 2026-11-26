@@ -147,7 +147,7 @@ func (g *Gateway) scenarioToPend(w http.ResponseWriter, r *http.Request, scenari
 	// chain has an independent record to verify against. Everything else about
 	// this call is unchanged.
 	var evidenceEdits []relay.EditID
-	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member)
+	bundleJSON, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, bundleJSON, pasQR, res.srJSON, res.coverageRef, res.sorID, res.member, g.contextRequesterRead)
 	if err != nil {
 		failEvidenceLinkage(ctx, w, err)
 		return pendState{}, false
@@ -478,7 +478,7 @@ func (g *Gateway) completeClinician(w http.ResponseWriter, r *http.Request, st p
 			return nil, nil, true, nil
 		}
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member, g.contextRequesterRead)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil
@@ -762,7 +762,7 @@ func (g *Gateway) completePatient(w http.ResponseWriter, r *http.Request, st pen
 			return nil, nil, true, nil
 		}
 		var evidenceEdits []relay.EditID
-		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member)
+		updateBundle, evidenceEdits, err = g.completeAuthoredPASRequest(ctx, updateBundle, pasQR, st.srJSON, st.coverageRef, st.sorID, st.member, g.contextRequesterRead)
 		if err != nil {
 			failEvidenceLinkage(ctx, w, err)
 			return nil, nil, true, nil

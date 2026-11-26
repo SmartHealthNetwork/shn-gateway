@@ -1,12 +1,10 @@
 // Package subscription holds what both gateways share about a topic
-// Subscription that crosses the network (the notifications design; each §
-// below is a section of it): the keys a
-// gateway seals a subscriber's channel under and issues a notification
-// address's credential with (§6.2, §6.3), the notification address (§6.2),
-// the topic interface each topic implements, the filter matcher and the closed
-// shape (§7.1), the ownership test and the search rules (§7.2), the edits
-// E-18 to E-21 as library functions (§8), and the notification route's
-// structural checks (§7.3, §5).
+// Subscription that crosses the network: the keys a gateway seals a
+// subscriber's channel under and issues a notification address's credential
+// with, the notification address, the topic interface each topic implements,
+// the filter matcher and the closed shape, the ownership test and the search
+// rules, the edits E-18 to E-21 as library functions, and the notification
+// route's structural checks.
 //
 // It reads and writes no exchange: the engine calls it, records what it
 // returns, and registers the edits.
@@ -33,7 +31,7 @@ import (
 // takes a new tag, so no value made under one is valid under the other.
 const labelVersion = "shn-subscription/v1"
 
-// The HKDF info labels, each followed by the holder id (§6.2, §6.3): the SIV's
+// The HKDF info labels, each followed by the holder id: the SIV's
 // MAC key and cipher key, the header seal's GCM key, and the credential key
 // are each derived under a label of their own, so no key is ever used for two
 // purposes or by two holders.
@@ -55,7 +53,7 @@ const (
 
 // Sizes.
 const (
-	// KeyIDLen is the length of a key id (§6.2 step 2, §6.3): 11 base64url characters (66 bits)
+	// KeyIDLen is the length of a key id: 11 base64url characters (66 bits)
 	// of SHA-256 over the kid label and the identity's public key.
 	KeyIDLen = 11
 	// sivLen is the SIV's synthetic IV: HMAC-SHA-256 truncated to 128 bits,
@@ -76,16 +74,15 @@ const (
 var b64 = base64.RawURLEncoding.Strict()
 
 // ErrKeyRetired is a value made under a key that is neither this gateway's
-// current key nor its configured predecessor (§6.2 "Key rotation"). It is
+// current key nor its configured predecessor. It is
 // fail-closed: the caller records a not-made or refusal reason.
 var ErrKeyRetired = errors.New("subscription: the value's key is retired")
 
 // ErrSealInvalid is a sealed value that does not open: malformed, truncated,
-// altered, or sealed for other associated data (§6.2).
+// altered, or sealed for other associated data.
 var ErrSealInvalid = errors.New("subscription: the sealed value does not open")
 
-// ErrCredentialInvalid is a notification credential that does not verify
-// (§6.3).
+// ErrCredentialInvalid is a notification credential that does not verify.
 var ErrCredentialInvalid = errors.New("subscription: the credential does not verify")
 
 // keySet is one identity's derived keys and its key id.
@@ -94,7 +91,7 @@ type keySet struct {
 	mac, enc, gcm, cred []byte
 }
 
-// Keys is a gateway's subscription keys (§6.2, §6.3): the current identity's,
+// Keys is a gateway's subscription keys: the current identity's,
 // and, when the predecessor setting is configured, the predecessor's for a
 // rotation's overlap. Its bytes never leave the package: it formats as
 // redacted, so it cannot reach a log, a record or an error.
@@ -102,16 +99,16 @@ type Keys struct {
 	cur, pred *keySet
 }
 
-// String is redacted (§6.2: the keys never leave the gateway).
+// String is redacted (the keys never leave the gateway).
 func (Keys) String() string { return "subscription.Keys{redacted}" }
 
-// GoString is redacted (§6.2).
+// GoString is redacted.
 func (Keys) GoString() string { return "subscription.Keys{redacted}" }
 
-// Format is redacted for every verb (§6.2).
+// Format is redacted for every verb.
 func (Keys) Format(f fmt.State, _ rune) { fmt.Fprint(f, "subscription.Keys{redacted}") }
 
-// DeriveKeys derives a gateway's subscription keys (§6.2, §6.3) by
+// DeriveKeys derives a gateway's subscription keys by
 // HKDF-SHA-256 from each identity signing key's seed, never using the signing
 // key itself as a MAC or cipher key. Four keys are derived per identity, each
 // under an info label of its own holding the version tag and the holder id
@@ -187,7 +184,7 @@ func keyID(pub ed25519.PublicKey) string {
 }
 
 // KeyID is the current identity's key id: 11 base64url characters from its
-// public key, usable as a path segment (§6.2's notification address). It is
+// public key, usable as a path segment (the notification address). It is
 // "" for zero Keys.
 func (k Keys) KeyID() string {
 	if k.cur == nil {
@@ -216,7 +213,7 @@ func lp(dst []byte, s string) []byte {
 	return append(dst, s...)
 }
 
-// Binding is what a sealed value is bound to (§6.2 step 1): the subscriber's
+// Binding is what a sealed value is bound to: the subscriber's
 // and the notifier's participant ids, and the topic's token ("pas",
 // "cdex-task"), the same string as the notification address's topic segment.
 // It is the associated data of both seals.
@@ -296,12 +293,12 @@ func (s *keySet) ctr(iv, in []byte) []byte {
 }
 
 // SealEndpoint seals a Subscription's channel.endpoint, its exact bytes, under
-// the current key (§6.2 step 1). It is a deterministic AEAD, the generic SIV
+// the current key. It is a deterministic AEAD, the generic SIV
 // composition: IV = HMAC-SHA-256(k_mac, LP(ad) ‖ LP(endpoint)) truncated to
 // 16 bytes, where ad length-prefixes a label with the version tag and b's
 // three fields; then AES-256-CTR(k_enc) over the endpoint with the whole IV as
 // the counter block. One endpoint always seals to one value under one key and
-// Binding, so a search by url can name it (§6.2 step 4).
+// Binding, so a search by url can name it.
 //
 // The value is "<kid>.<base64url(IV ‖ ciphertext)>". It is "" for zero Keys,
 // an empty endpoint, or one whose sealed value would be longer than an open
@@ -337,8 +334,8 @@ func (s *keySet) sealEndpoint(b Binding, endpoint string) string {
 	return s.kid + "." + b64.EncodeToString(raw)
 }
 
-// SealEndpointForSearch is the endpoint sealed as a search by url names it
-// (§6.2 step 4): under the current key, and, during a rotation's overlap,
+// SealEndpointForSearch is the endpoint sealed as a search by url names it:
+// under the current key, and, during a rotation's overlap,
 // under the predecessor's as well, so the search finds a Subscription made
 // under either. It is nil when SealEndpoint would be "".
 //
@@ -360,7 +357,7 @@ func (k Keys) SealEndpointForSearch(b Binding, endpoint string) []string {
 	return out
 }
 
-// OpenEndpoint opens a value SealEndpoint made (§6.2 step 3, step 5). The key
+// OpenEndpoint opens a value SealEndpoint made, on E-20's restore and at delivery. The key
 // is chosen by the value's key id alone, the current one or the configured
 // predecessor; any other key id is ErrKeyRetired. The value is decrypted, the
 // IV recomputed over the plaintext and b's associated data, and compared in
@@ -444,7 +441,7 @@ func (s *keySet) aead() cipher.AEAD {
 }
 
 // SealHeaders seals a Subscription's channel.header values, in order, under
-// the current key (§6.2 step 1), so the subscriber's secret never crosses the
+// the current key, so the subscriber's secret never crosses the
 // network in clear. An empty set seals too, so every Subscription carries one.
 //
 // It is AES-256-GCM under k_gcm with a 96-bit nonce from crypto/rand, over the
@@ -473,11 +470,11 @@ func (k Keys) SealHeaders(b Binding, sealedEndpoint string, headers []string) (s
 	return k.cur.kid + "." + b64.EncodeToString(append(nonce, ct...)), nil
 }
 
-// OpenHeaders opens a value SealHeaders made beside sealedEndpoint (§6.2 step
-// 3, step 5), choosing the key by the value's key id alone, as OpenEndpoint
-// does. A value that is malformed, truncated, altered, sealed for another
-// Binding or beside another sealed endpoint is ErrSealInvalid; an empty set
-// opens as a non-nil empty slice.
+// OpenHeaders opens a value SealHeaders made beside sealedEndpoint, on E-20's
+// restore and at delivery, choosing the key by the value's key id alone, as
+// OpenEndpoint does. A value that is malformed, truncated, altered, sealed for
+// another Binding or beside another sealed endpoint is ErrSealInvalid; an empty
+// set opens as a non-nil empty slice.
 func (k Keys) OpenHeaders(b Binding, sealedEndpoint, sealed string) ([]string, error) {
 	kid, raw, ok := splitSealed(sealed)
 	if !ok {
@@ -512,7 +509,7 @@ func (s *keySet) credentialTag(address, sealedHeaders string) string {
 }
 
 // Credential is the notifier gateway's own credential for a notification
-// address (§6.3), which E-19 writes into channel.header beside the sealed
+// address, which E-19 writes into channel.header beside the sealed
 // headers: "Bearer <kid>.<tag>", the tag a MAC under the current credential
 // key over the address (a.String()) and sealedHeaders. It is "" for zero
 // Keys, and for inputs that are not what E-19 writes (issuable): nothing is
@@ -537,7 +534,7 @@ func issuable(a Address, sealedHeaders string) bool {
 }
 
 // VerifyCredential verifies an Authorization value against the notification
-// address and sealed headers it was issued for (§6.3). The key is chosen by
+// address and sealed headers it was issued for. The key is chosen by
 // the value's key id alone, the current one or the configured predecessor;
 // any other key id is ErrKeyRetired. The tag is compared in constant time.
 // Anything else that does not verify, a missing or malformed value included,

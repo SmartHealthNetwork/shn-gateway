@@ -72,20 +72,13 @@ const (
 	RefusalEmptyReference   = "empty-reference"
 	RefusalReference        = "reference"
 	RefusalBound            = "bound"
-	RefusalPolicy           = "policy"
-	RefusalNoDecision       = "no-decision"
-	RefusalDecision         = "decision"
+	// RefusalPolicy is no longer produced: the reference policy that a
+	// Bundle could be refused against is gone. It stays a cause name,
+	// since pa/pasanswer publishes it.
+	RefusalPolicy     = "policy"
+	RefusalNoDecision = "no-decision"
+	RefusalDecision   = "decision"
 )
-
-// ReferencePolicy names the exact references a verified holder-authored
-// attachment may leave unresolved (the engine's authored attachment policy).
-// A nil ReferencePolicy matches every graph and allows no reference.
-type ReferencePolicy interface {
-	// Matches reports whether the policy was made for g.
-	Matches(g *Graph) bool
-	// Allows reports whether node, at path inside owner, may stay unresolved.
-	Allows(owner *Entry, path string, node map[string]any) bool
-}
 
 // Refuse is a refusal of a response graph this rule could not read at
 // all, with its cause (the Refusal* constants).
@@ -358,7 +351,7 @@ func FoldedMember(m map[string]any, name string) any {
 }
 
 // Validate applies the rule with every reference required to resolve.
-func (g *Graph) Validate() error { return g.ValidateWithReferencePolicy(nil) }
+func (g *Graph) Validate() error { return g.validateReferences() }
 
 // ValidateBundleAt is ValidateBundle for a PAS $submit or
 // amendment answer exchanged at IG line (ValidateAnswerAt).
@@ -485,18 +478,15 @@ func (g *Graph) referenceIdentity(ref string, owner *Entry) string {
 	return base.String()
 }
 
-// ValidateWithReferencePolicy is Validate with the references policy allows
-// left unresolved; a policy made for another graph is refused (RefusalPolicy).
-func (g *Graph) ValidateWithReferencePolicy(policy ReferencePolicy) error {
-	if policy != nil && !policy.Matches(g) {
-		return Refuse(RefusalPolicy)
-	}
+// validateReferences walks the graph for Validate: every reference must
+// resolve to something the Bundle carries.
+func (g *Graph) validateReferences() error {
 	// Bundle and entry metadata have no RESTful containing resource fullUrl.
 	// Their references must therefore be explicit absolute identities.
 	for _, key := range SortedKeys(g.Bundle) {
 		value := g.Bundle[key]
 		if key != "entry" && key != "resourceType" {
-			if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, ReferencePath("", key), policy); err != nil {
+			if err := g.walkReferences(value, nil, nil, 0, false, ReferencePath("", key)); err != nil {
 				return err
 			}
 		}
@@ -506,7 +496,7 @@ func (g *Graph) ValidateWithReferencePolicy(policy ReferencePolicy) error {
 		for _, key := range SortedKeys(fields) {
 			value := fields[key]
 			if key != "resource" {
-				if err := g.walkWithReferencePolicy(value, nil, nil, 0, false, ReferencePath(ReferencePath("/entry", strconv.Itoa(i)), key), policy); err != nil {
+				if err := g.walkReferences(value, nil, nil, 0, false, ReferencePath(ReferencePath("/entry", strconv.Itoa(i)), key)); err != nil {
 					return err
 				}
 			}
@@ -536,14 +526,14 @@ func (g *Graph) ValidateWithReferencePolicy(policy ReferencePolicy) error {
 				contained[id] = r
 			}
 		}
-		if err := g.walkWithReferencePolicy(e.Resource, e, contained, 0, false, "", policy); err != nil {
+		if err := g.walkReferences(e.Resource, e, contained, 0, false, ""); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (g *Graph) walkWithReferencePolicy(v any, owner *Entry, contained map[string]map[string]any, depth int, inContained bool, path string, policy ReferencePolicy) error {
+func (g *Graph) walkReferences(v any, owner *Entry, contained map[string]map[string]any, depth int, inContained bool, path string) error {
 	if depth > MaxDepth {
 		return Structural(RefusalBound, "%s nests deeper than %d levels", owner.Label(), MaxDepth)
 	}
@@ -573,18 +563,18 @@ func (g *Graph) walkWithReferencePolicy(v any, owner *Entry, contained map[strin
 			if g.refs > MaxReferences {
 				return Structural(RefusalBound, "the Bundle carries more than %d references", MaxReferences)
 			}
-			if why := g.Resolve(s, owner, contained, inContained); why != "" && !(policy != nil && policy.Allows(owner, path, x)) && (g.unresolvedAllowed == nil || !g.unresolvedAllowed(owner, path, s)) {
+			if why := g.Resolve(s, owner, contained, inContained); why != "" && (g.unresolvedAllowed == nil || !g.unresolvedAllowed(owner, path, s)) {
 				return &Refusal{Owner: owner.Label(), Path: path, Target: ReferenceTarget(s), Reference: s, Why: why, holder: owner.ResourceType()}
 			}
 		}
 		for _, key := range SortedKeys(x) {
-			if err := g.walkWithReferencePolicy(x[key], owner, contained, depth+1, inContained, ReferencePath(path, key), policy); err != nil {
+			if err := g.walkReferences(x[key], owner, contained, depth+1, inContained, ReferencePath(path, key)); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for index, child := range x {
-			if err := g.walkWithReferencePolicy(child, owner, contained, depth+1, inContained, ReferencePath(path, strconv.Itoa(index)), policy); err != nil {
+			if err := g.walkReferences(child, owner, contained, depth+1, inContained, ReferencePath(path, strconv.Itoa(index))); err != nil {
 				return err
 			}
 		}

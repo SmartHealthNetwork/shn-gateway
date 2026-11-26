@@ -1455,7 +1455,8 @@ func assertJSONObject(t *testing.T, raw []byte) {
 // inquiry's OWN profiles, at every candidate line, which makes a line-specific
 // defect (a 2.0.1 inquiry naming no item, say) visible as evidence. Whether the
 // payer's gateway refuses the inquiry is its conformance level's, at structural
-// and strict only (owner decision D47(2); TestCarriedPASRequest_JudgedAtThePayersLevel).
+// and strict only (each side judges a carried request at its own level;
+// TestCarriedPASRequest_JudgedAtThePayersLevel).
 func TestPASInquire_NotProfileValidatedButObserved(t *testing.T) {
 	request := inquiryFixture(t, "pas-inquiry-request-2.0.json")
 	answer := inquiryFixture(t, "pas-inquiry-response-2.0.json")

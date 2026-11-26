@@ -78,7 +78,7 @@ func (g *Gateway) supplementalReport(ctx context.Context, member, sorID string) 
 // which must be sorRef, becomes Patient/<member>; edited reports whether that
 // changed it. See supplementalReport.
 func rekeySupplementalSubject(report []byte, sorRef, member string) (out []byte, edited bool, refusal *supplementalRefusal) {
-	out, edited, err := rekeyEvidenceSubject(report, sorRef, member)
+	out, edited, err := rekeyEvidenceSubject(report, sorRef, member, supplementalReportPatientElement)
 	var signed *relay.SignedContentError
 	switch {
 	case err == nil:
@@ -110,22 +110,24 @@ var (
 
 // rekeyEvidenceSubject applies registered edit E-06 to record, a clinical
 // record the provider's gateway read from its participant's own system for a
-// request it builds: its root subject.reference, which must be exactly sorRef
-// (Patient/<the id the system holds the member under>), is re-pointed to
-// Patient/<member>, and nothing else changes. A record with no
-// subject.reference, or one naming anything else (another patient, the member
+// request it builds: the reference at its root member element (the member
+// E-06's registry names for its type: a NutritionOrder's patient, every other
+// registered type's subject), which must be exactly sorRef (Patient/<the id
+// the system holds the member under>), is re-pointed to Patient/<member>, and
+// nothing else changes. A record with no reference there, or one naming
+// anything else (another patient, the member
 // id itself under another record id, a versioned or absolute reference), is
 // refused, as is one a signature covers (*relay.SignedContentError). A record
 // the system already names by the member id is returned exactly as held: the
 // replace changes nothing, so Apply returns the body relayed, and edited is
 // false: edited is true only when E-06 changed the record.
-func rekeyEvidenceSubject(record []byte, sorRef, member string) (out []byte, edited bool, err error) {
+func rekeyEvidenceSubject(record []byte, sorRef, member, element string) (out []byte, edited bool, err error) {
 	body := relay.NewBody(record, relay.OriginUpstreamResponse)
 	doc, err := relay.Doc(body)
 	if err != nil || doc.Kind(doc.Root()) != relay.KindObject {
 		return nil, false, errEvidenceUnreadable
 	}
-	subject, ok := doc.Member(doc.Root(), "subject")
+	subject, ok := doc.Member(doc.Root(), element)
 	if !ok || doc.Kind(subject) != relay.KindObject {
 		return nil, false, errEvidenceNoSubject
 	}
@@ -151,6 +153,12 @@ func rekeyEvidenceSubject(record []byte, sorRef, member string) (out []byte, edi
 	}
 	return out, p.Ownership() == relay.OwnershipEdited, nil
 }
+
+// supplementalReportPatientElement is the member naming a supplemental
+// report's patient: a DiagnosticReport's subject, E-06's registered place
+// for that type (package paedits; TestE06Registry_SupplementalReportPlace
+// holds the two equal).
+const supplementalReportPatientElement = "subject"
 
 // supplementalReportCheck admits an evidence record (the supplemental report,
 // or a record the PAS completion reads) exactly as held, or with E-06 alone.

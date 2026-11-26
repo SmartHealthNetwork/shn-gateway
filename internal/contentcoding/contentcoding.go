@@ -8,8 +8,8 @@
 // Content coding is transport, not payload. What a handler reads, carries,
 // verifies, hashes and records is the decoded (identity) body, and what it
 // writes is coded only on the way out, so a coded exchange is the exchange
-// it would have been uncoded (relay fidelity, as the relay-fidelity design
-// treats the gateway's own outbound calls, which Go's client already codes).
+// it would have been uncoded (relay fidelity, as for the gateway's own
+// outbound calls, which Go's client already codes).
 //
 // gzip is the only coding accepted. A body sent in any other coding, or in
 // any stack of codings, fails its first read with ErrUnsupported, and none

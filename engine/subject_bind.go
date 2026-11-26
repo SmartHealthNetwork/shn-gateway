@@ -28,8 +28,10 @@ import (
 // FHIR system of record makes of its own Patient), or from the member id alone when the
 // request carries no such Patient. Nothing is minted: every fact is one the partner sent.
 // The payer side binds the member the same way, by its own system first
-// (bindInboundSubject). A request carrying Patients for the member that disagree with
-// each other binds by id alone. A participant that opts in to Config.RequireKnownMembers
+// (bindInboundSubject). Where the leg's subject reference resolves to a Patient the
+// request carries (its subject resource, resolveSubjectPCIFrom), that Patient alone
+// decides: its demographics, else the member id alone. Otherwise a request carrying
+// Patients for the member that disagree with each other binds by id alone. A participant that opts in to Config.RequireKnownMembers
 // refuses such a member instead. Everything else on these legs is untouched: member-mixing
 // refusals, prefetch read only from this system or the request, and the payer's own
 // independent member resolution.
@@ -45,6 +47,20 @@ func (g *Gateway) resolveSubjectPCI(ctx context.Context, member string, payload 
 // system of record holds the member (held) or the identifier was derived.
 func (g *Gateway) resolveSubjectBinding(ctx context.Context, member string, payload []byte) (pci string, held, found bool, readErr error) {
 	return g.resolveBinding(ctx, member, payload, false)
+}
+
+// resolveSubjectPCIFrom is resolveSubjectPCI for a leg whose subject reference resolves to
+// subject, the one Patient the request carries for it (the leg's subject resource; nil
+// when it resolves to none, or to several that differ). That Patient alone decides the
+// binding of a member the system of record does not hold: from its birth date and family
+// name, else from the member id alone, never from another Patient the request carries
+// under the member's id. A subject without both, in a request that carries
+// another person under the member's number (a coverage's party), identifies no one
+// patient: refused (errSubjectUnidentifiable). With no subject the binding is
+// resolveSubjectPCI's.
+func (g *Gateway) resolveSubjectPCIFrom(ctx context.Context, member string, payload, subject []byte) (pci string, found bool, readErr error) {
+	pci, _, found, readErr = g.resolveBindingSubject(ctx, member, payload, subject, false, true)
+	return pci, found, readErr
 }
 
 // resolveBinding binds member as resolveSubjectBinding does. ownRecord reads a Patient the
@@ -64,6 +80,12 @@ func (g *Gateway) resolveBinding(ctx context.Context, member string, payload []b
 // is recorded as a system-of-record read that failed while the answer was still built
 // (ExchangeRecord.ReadsFailed, BackendMalformed).
 func (g *Gateway) resolveBindingFrom(ctx context.Context, member string, payload []byte, ownRecord, message bool) (pci string, held, found bool, readErr error) {
+	return g.resolveBindingSubject(ctx, member, payload, nil, ownRecord, message)
+}
+
+// resolveBindingSubject is resolveBindingFrom with the leg's subject resource
+// (resolveSubjectPCIFrom; nil for none).
+func (g *Gateway) resolveBindingSubject(ctx context.Context, member string, payload, subject []byte, ownRecord, message bool) (pci string, held, found bool, readErr error) {
 	// A member that names no one is bound to no one: never read, and never
 	// derived from (derivedPCI), which every such request would share.
 	if memberNamesNoOne(member) {
@@ -92,6 +114,21 @@ func (g *Gateway) resolveBindingFrom(ctx context.Context, member string, payload
 		}
 		view = v
 	}
+	if subject != nil {
+		// The leg's own subject resource decides: another Patient the request
+		// carries under the member's id is someone the request names, never the
+		// source of this patient's identity.
+		if demo, ok := PatientDemographics(subject); ok {
+			return derivedPCI(member, demo.BirthDate, demo.FamilyName), false, true, nil
+		}
+		if carriesMembersPartyIn(view, member, ownRecord) {
+			if carriesMemberDemographicsIn(view, member, ownRecord) {
+				return "", false, false, errSubjectUnidentifiable
+			}
+			return "", false, false, errPatientUnidentifiable
+		}
+		return derivedPCI(member, "", ""), false, true, nil
+	}
 	demo, ok := carriedDemographicsIn(view, member, ownRecord)
 	if !ok && carriesMembersPartyIn(view, member, ownRecord) {
 		return "", false, false, errPatientUnidentifiable
@@ -108,6 +145,20 @@ var errPatientUnidentifiable = errors.New(msgPatientUnidentifiable)
 
 const msgPatientUnidentifiable = "cannot identify the patient: the request carries no Patient for its member with a birth date and name, and its member number is shared with another person it carries (a coverage's subscriber, policyholder or payor)"
 
+// errSubjectUnidentifiable is errPatientUnidentifiable for a request whose own subject
+// resource (resolveSubjectPCIFrom) carries no birth date and name: another Patient the
+// request carries under the member's id is not the subject's identity, and the member's
+// number is shared with another person the request carries. It is errPatientUnidentifiable
+// (errors.Is), refused and recorded alike, with its own text.
+var errSubjectUnidentifiable = subjectUnidentifiable{}
+
+type subjectUnidentifiable struct{}
+
+func (subjectUnidentifiable) Error() string { return msgSubjectUnidentifiable }
+func (subjectUnidentifiable) Unwrap() error { return errPatientUnidentifiable }
+
+const msgSubjectUnidentifiable = "cannot identify the patient: the request's own Patient for its member has no birth date and name, and its member number is shared with another person it carries (a coverage's subscriber, policyholder or payor)"
+
 // subjectBindingFailure is the answer to a failed bind of the member a request names:
 // a patient the request cannot identify is refused 400, recorded as authority (the
 // patient the exchange is for cannot be identified); a request whose patients cannot be
@@ -119,11 +170,18 @@ const msgPatientUnidentifiable = "cannot identify the patient: the request carri
 func subjectBindingFailure(ctx context.Context, err error) (int, string) {
 	if errors.Is(err, errPatientUnidentifiable) {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonPatientUnidentifiable)
+		if errors.Is(err, errSubjectUnidentifiable) {
+			return http.StatusBadRequest, msgSubjectUnidentifiable
+		}
 		return http.StatusBadRequest, msgPatientUnidentifiable
 	}
 	if errors.Is(err, errRequestPatientsUnreadable) {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonRequestPatientsUnreadable)
 		return http.StatusUnprocessableEntity, msgRequestPatientsUnreadable
+	}
+	if errors.Is(err, errPatientCarriesNoMember) {
+		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonPatientCarriesNoMember)
+		return http.StatusBadRequest, msgPatientCarriesNoMember
 	}
 	if errors.Is(err, errMemberNamesNoOne) {
 		exchangeOf(ctx).refusingFor(RefusalAuthority, reasonMemberNamesNoOne)
@@ -227,6 +285,24 @@ func carriedDemographicsIn(view canonicalView, member string, ownRecord bool) (D
 		return Demo{}, false
 	}
 	return demo, true
+}
+
+// carriesMemberDemographicsIn reports whether the request carries a Patient for the
+// member, not a Coverage's party, with a birth date and family name (PatientDemographics),
+// whether or not two such disagree.
+func carriesMemberDemographicsIn(view canonicalView, member string, ownRecord bool) bool {
+	found := false
+	visitCarriedPatients(view, member, ownRecord, func(patient map[string]any, party bool) {
+		if party || found {
+			return
+		}
+		raw, err := json.Marshal(patient)
+		if err != nil {
+			return
+		}
+		_, found = PatientDemographics(raw)
+	})
+	return found
 }
 
 // carriesPatient reports whether the request carries a Patient resource for the member
@@ -987,6 +1063,13 @@ func (g *Gateway) bindInboundSubject(ctx context.Context, member string, payload
 	return g.bindInboundSubjectAs(ctx, member, payload, http.StatusBadRequest)
 }
 
+// bindInboundSubjectFrom is bindInboundSubject for a leg whose subject reference resolves
+// to subject, the request's subject resource (resolveSubjectPCIFrom; nil for none).
+func (g *Gateway) bindInboundSubjectFrom(ctx context.Context, member string, payload, subject []byte) (pci string, status int, msg string) {
+	pci, status, msg, _ = g.bindSubjectRecorded(ctx, member, payload, subject, http.StatusBadRequest, true)
+	return pci, status, msg
+}
+
 // bindInboundSubjectAs is bindInboundSubject answering a patient the request
 // cannot identify with unidentifiable, the status its leg refuses one with:
 // 400 on every delivered leg, 422 on the payer's attachment request, as the
@@ -1000,32 +1083,45 @@ func (g *Gateway) bindInboundSubjectAs(ctx context.Context, member string, paylo
 // the rule of the refusal it returns: a caller whose leg refuses every
 // failure on a network primitive names one where none was recorded.
 func (g *Gateway) bindInboundSubjectRecorded(ctx context.Context, member string, payload []byte, unidentifiable int) (pci string, status int, msg string, recorded bool) {
-	return g.bindSubjectRecorded(ctx, member, payload, unidentifiable, true)
+	return g.bindSubjectRecorded(ctx, member, payload, nil, unidentifiable, true)
 }
 
 // bindRecordSubjectRecorded is bindInboundSubjectRecorded for a member bound from the
 // system of record's own answer (record) rather than the request's bytes: a record the
 // binding cannot decode binds the member by its id alone (resolveBindingFrom).
 func (g *Gateway) bindRecordSubjectRecorded(ctx context.Context, member string, record []byte, unidentifiable int) (pci string, status int, msg string, recorded bool) {
-	return g.bindSubjectRecorded(ctx, member, record, unidentifiable, false)
+	return g.bindSubjectRecorded(ctx, member, record, nil, unidentifiable, false)
 }
 
-func (g *Gateway) bindSubjectRecorded(ctx context.Context, member string, payload []byte, unidentifiable int, message bool) (pci string, status int, msg string, recorded bool) {
+func (g *Gateway) bindSubjectRecorded(ctx context.Context, member string, payload, subject []byte, unidentifiable int, message bool) (pci string, status int, msg string, recorded bool) {
+	pci, _, status, msg, recorded = g.bindSubjectHeld(ctx, member, payload, subject, unidentifiable, message)
+	return pci, status, msg, recorded
+}
+
+// bindSubjectHeld is bindSubjectRecorded, also reporting whether the system of
+// record holds the member (held) or the identifier was derived.
+func (g *Gateway) bindSubjectHeld(ctx context.Context, member string, payload, subject []byte, unidentifiable int, message bool) (pci string, held bool, status int, msg string, recorded bool) {
 	// A member that names no one (blank, or "Patient/" with no id) is the
 	// request's: refused on authority, as every route refuses it
 	// (subjectBindingFailure), before anything is read.
 	if memberNamesNoOne(member) {
+		involvedCollectorFrom(ctx).bindingRead("", false, false, errMemberNamesNoOne)
 		status, msg := subjectBindingFailure(ctx, errMemberNamesNoOne)
-		return "", status, msg, true
+		return "", false, status, msg, true
 	}
-	pci, held, found, readErr := g.resolveBindingFrom(ctx, member, payload, false, message)
+	pci, held, found, readErr := g.resolveBindingSubject(ctx, member, payload, subject, false, message)
+	// The binding's course, for the answer's summary: failed, no member
+	// found, held with no identifier (a member this gateway cannot identify,
+	// unknown-member, as the request side's identifyNamed counts it), or
+	// resolved (involvedCollector.bindingRead).
+	involvedCollectorFrom(ctx).bindingRead(pci, held, found, readErr)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(ctx, readErr)
 		unident := errors.Is(readErr, errPatientUnidentifiable)
 		if unident {
 			status = unidentifiable
 		}
-		return "", status, msg, unident || errors.Is(readErr, errRequestPatientsUnreadable)
+		return "", false, status, msg, unident || errors.Is(readErr, errRequestPatientsUnreadable)
 	}
 	if !found || pci == "" {
 		// A member not held is refused only by a participant that requires
@@ -1038,12 +1134,11 @@ func (g *Gateway) bindSubjectRecorded(ctx context.Context, member string, payloa
 		// platform repository; it is not a choice of no rule.
 		if !found && g.cfg.RequireKnownMembers {
 			exchangeOf(ctx).refusing(RefusalConformance)
-			return "", http.StatusBadRequest, "unknown member", true
+			return "", false, http.StatusBadRequest, "unknown member", true
 		}
-		return "", http.StatusBadRequest, "unknown member", false
+		return "", false, http.StatusBadRequest, "unknown member", false
 	}
-	involvedCollectorFrom(ctx).bound(pci, held)
-	return pci, 0, "", false
+	return pci, held, 0, "", false
 }
 
 // SubjectBindingDiffersEvent is the observer event a payer leg raises when its
@@ -1063,4 +1158,42 @@ func (g *Gateway) noteSubjectBinding(ctx context.Context, leg, corrID, tokenSubj
 		g.observe(ObserverEvent{Kind: SubjectBindingDiffersEvent, Direction: "ingress", LegType: leg, CorrelationID: corrID})
 		involvedCollectorFrom(ctx).differs(pci)
 	}
+	// The binding is now reflected in the answer's list, so its summary may
+	// say so (involvedAnswerSide).
+	involvedCollectorFrom(ctx).settled()
+}
+
+// bindEachMember binds, in order, each of the n members a leg's request names
+// (a coverage-eligibility batch's requests), bind(i) being the leg's own
+// binding of the i-th (through the core binding, which records each one's
+// course for the answer's summary). The first member's binding is the leg's
+// patient (noteSubjectBinding); every other one is named on the answer's
+// involved list when it is not the leg token's patient, and is then reflected
+// in the list. It stops at the first member bind refuses and returns that
+// refusal. When members remain after it, their bindings never ran: the
+// answer's list may be missing their patients, so it is left open
+// (involvedCollector.leftUnbound) and no summary is sent, which the Hub reads
+// as not knowing whether the list was complete, never as complete. A refusal
+// at the last member leaves its own course as recorded: a failed binding is
+// stated as that member left out, by reason.
+func (g *Gateway) bindEachMember(ctx context.Context, leg, corrID, tokenSubject string, n int, bind func(i int) (pci string, status int, msg string)) (status int, msg string) {
+	c := involvedCollectorFrom(ctx)
+	for i := range n {
+		pci, status, msg := bind(i)
+		if status != 0 {
+			if i < n-1 {
+				c.leftUnbound()
+			}
+			return status, msg
+		}
+		if i == 0 {
+			g.noteSubjectBinding(ctx, leg, corrID, tokenSubject, pci)
+			continue
+		}
+		if pci != tokenSubject {
+			c.differs(pci)
+		}
+		c.settled()
+	}
+	return 0, ""
 }

@@ -16,9 +16,9 @@ import (
 // 400 msgMemberNamesNoOne recorded as authority, where earlier releases
 // answered "unknown member" with no rule for "Patient/". Where the leg reads
 // its patient first, its own refusal answers: order-select's patient-mixed
-// check, the PAS inquiry's missing Claim.patient, and the questionnaire
-// package's Patient reference; a PAS bundle at strict is refused by the
-// patient-mixed check first.
+// check and the questionnaire package's Patient reference. A PAS submission,
+// update or inquiry whose Claim.patient names no one is refused so at every
+// level, before the patient-mixed check.
 func TestPayerInboundRefusesAPatientReferenceNamingNoOne(t *testing.T) {
 	t.Parallel()
 	sel := conformantCRD("MBR-COVERED", "72148")
@@ -38,20 +38,12 @@ func TestPayerInboundRefusesAPatientReferenceNamingNoOne(t *testing.T) {
 		}{
 			"crd-order-dispatch": {leg: "crd-order-dispatch", body: crdDispatchWith(t, `"patientId":"MBR-COVERED"`, `"patientId":"`+ref+`"`),
 				want: func(ConformanceEnforcement) want { return none }},
+			// A Claim.patient that names no one is refused so at every level,
+			// before the patient-mixed check.
 			"pas-claim": {leg: "pas-claim", body: []byte(strings.Replace(base, `"resourceType":"Claim","patient":{"reference":"Patient/MBR-COVERED"}`, `"resourceType":"Claim","patient":{"reference":"`+ref+`"}`, 1)),
-				want: func(level ConformanceEnforcement) want {
-					if level == EnforcementStrict {
-						return want{http.StatusForbidden, "inconsistent patient in PAS bundle"}
-					}
-					return none
-				}},
+				want: func(ConformanceEnforcement) want { return none }},
 			"pas-claim-update": {leg: "pas-claim-update", body: updateBundleSetting(t, "Claim", "patient", map[string]any{"reference": ref}),
-				want: func(level ConformanceEnforcement) want {
-					if level == EnforcementStrict {
-						return want{http.StatusForbidden, "inconsistent patient in PAS bundle"}
-					}
-					return none
-				}},
+				want: func(ConformanceEnforcement) want { return none }},
 			"crd-order-select": {leg: "crd-order-select", body: bytes.Replace(sel, []byte(`"patientId":"MBR-COVERED"`), []byte(`"patientId":"`+ref+`"`), 1),
 				want: func(level ConformanceEnforcement) want {
 					if ref == "Patient/" || level == EnforcementStrict {
@@ -59,13 +51,10 @@ func TestPayerInboundRefusesAPatientReferenceNamingNoOne(t *testing.T) {
 					}
 					return none
 				}},
+			// "Patient/" and "Patient/Patient/" name no Patient by FHIR's
+			// reference grammar: no one, as a blank id names no one.
 			"pas-claim-inquire": {leg: "pas-claim-inquire", body: inquiryBundle(id, id, "TRN-1", "72148"),
-				want: func(ConformanceEnforcement) want {
-					if readsAsNoPatient {
-						return want{http.StatusBadRequest, "PAS inquiry Bundle missing Claim.patient"}
-					}
-					return none
-				}},
+				want: func(ConformanceEnforcement) want { return none }},
 			"dtr-questionnaire-package": {leg: "dtr-questionnaire-fetch", operation: "questionnaire-package", body: dtrPackage(resourceParam("coverage", dtrCoverage("cov-1", id))),
 				want: func(ConformanceEnforcement) want {
 					if readsAsNoPatient {

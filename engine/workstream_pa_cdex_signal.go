@@ -9,8 +9,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The subscriber's half of a notification (the notifications design §6.2
-// step 5, §6.5, §7.4, §9): a provider's CDex Task notification the Hub
+// The subscriber's half of a notification: a provider's CDex Task notification the Hub
 // delivers to the payer's gateway on the HRex Task topic's signal leg
 // (cdex-task-signal), which the gateway delivers to the notification endpoint
 // the payer's own system wrote into its Subscription, with the header values
@@ -23,13 +22,13 @@ import (
 //     missing, altered, sealed for another notifier, topic or endpoint, or
 //     under a key past its rotation's overlap, it is refused 403 on
 //     authority, nothing delivered;
-//   - the opened endpoint is held to the delivery rule (§6.5,
-//     subscription.CheckEndpoint): one that is not an absolute https URL with
+//   - the opened endpoint is held to the delivery rule (subscription.CheckEndpoint): one that
+//     is not an absolute https URL with
 //     no userinfo or fragment is refused 422 on integrity, and a notification
 //     address of this network 422 on routing;
-//   - the notification must be no-content by structure (§5's test): one that
+//   - the notification must be no-content by structure (the no-content test): one that
 //     is not, or is no notification of the topic, is refused 403 on
-//     authority, since the leg carries no patient's data (§7.4), and so is
+//     authority, since the leg carries no patient's data, and so is
 //     one with a notification-event part named additional-context, which
 //     the topic's notification shape declares none of;
 //   - a notification whose places E-17 re-keys cannot be read one way only

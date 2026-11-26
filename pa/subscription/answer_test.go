@@ -9,8 +9,8 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// statusAnswerEntry is a SubscriptionStatus Parameters as HAPI FHIR writes it (the
-// notifications design §3, the capture): subscription, topic, status, type,
+// statusAnswerEntry is a SubscriptionStatus Parameters as HAPI FHIR writes it (as
+// captured): subscription, topic, status, type,
 // events-since-subscription-start, and a notification-event whose focus part
 // has no value.
 const statusAnswerEntry = `{"fullUrl":"Parameters/3f1d","resource":{"resourceType":"Parameters","meta":{"profile":["http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4"]},` +
@@ -47,11 +47,13 @@ var (
 	read, vread, create, update = shnsdk.SubscriptionRead, shnsdk.SubscriptionVRead, shnsdk.SubscriptionCreate, shnsdk.SubscriptionUpdate
 	del, status, search, page   = shnsdk.SubscriptionDelete, shnsdk.SubscriptionStatus, shnsdk.SubscriptionSearch, shnsdk.SubscriptionPage
 	every                       = []shnsdk.SubscriptionInteraction{read, vread, create, update, del, status, search, page}
+	// namingAnID are the interactions that name the Subscription by id: a
+	// $status Bundle naming it passes the check on them alone (on a read or
+	// a vread the ownership test, which needs a Subscription, then refuses
+	// it).
+	namingAnID = []shnsdk.SubscriptionInteraction{read, vread, update, del, status}
 )
 
-// Each interaction's own answers pass, and the Subscriptions an answer
-// carries are returned for the ownership test; every other interaction
-// refuses the same answer (the cross-interaction smuggle).
 // withFocus is statusAnswerEntry with its focus part valued with ref, a
 // Reference's JSON, and parts appended to the notification-event.
 func withFocus(ref string, parts ...string) string {
@@ -63,7 +65,13 @@ func withFocus(ref string, parts ...string) string {
 	return strings.Replace(statusAnswerEntry, `{"name":"focus"}`, strings.Join(all, ","), 1)
 }
 
-func TestCheckSubscribeAnswer_EachInteractionsOwnShape(t *testing.T) {
+// Each shape that names no patient passes whatever the interaction, and the
+// Subscriptions it carries are returned for the ownership test: a
+// Subscription, an OperationOutcome, no body, a searchset of Subscriptions
+// and OperationOutcomes. A $status Bundle naming the Subscription passes on
+// an interaction that names one by id, and is refused on a create, a search
+// or a page.
+func TestCheckSubscribeAnswer_AnyShapeNamingNoPatient(t *testing.T) {
 	ss := searchset(entryOf(answerSubscription, "match"), entryOf(answerSubscription, "match"))
 	for _, c := range []struct {
 		name string
@@ -71,31 +79,31 @@ func TestCheckSubscribeAnswer_EachInteractionsOwnShape(t *testing.T) {
 		subs int
 		ok   []shnsdk.SubscriptionInteraction
 	}{
-		{"a Subscription", answerSubscription, 1, []shnsdk.SubscriptionInteraction{read, vread, create, update}},
-		{"a Subscription after a byte order mark", "\xEF\xBB\xBF" + answerSubscription, 1, []shnsdk.SubscriptionInteraction{read, vread, create, update}},
-		{"a searchset after a byte order mark", "\xEF\xBB\xBF" + ss, 2, []shnsdk.SubscriptionInteraction{search, page}},
-		{"no body", "", 0, []shnsdk.SubscriptionInteraction{create, update, del}},
-		{"an OperationOutcome", answerOutcome, 0, []shnsdk.SubscriptionInteraction{create, update, del}},
-		{"a searchset of Subscriptions", ss, 2, []shnsdk.SubscriptionInteraction{search, page}},
-		{"a searchset with an outcome entry", searchset(entryOf(answerSubscription, "match"), entryOf(answerOutcome, "outcome")), 1, []shnsdk.SubscriptionInteraction{search, page}},
-		{"an empty searchset", `{"resourceType":"Bundle","type":"searchset","total":0}`, 0, []shnsdk.SubscriptionInteraction{search, page}},
-		{"a $status searchset (STU 1.1)", statusSearchset(statusAnswerEntry), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose focus is a Task", statusSearchset(withFocus(`{"reference":"Task/t1"}`)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose focus is a Task version", statusSearchset(withFocus(`{"reference":"Task/t1/_history/2"}`)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose focus is a Task by its address", statusSearchset(withFocus(`{"reference":"https://ehr.example/fhir/Task/t1"}`)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose focus is a Task, typed", statusSearchset(withFocus(`{"reference":"Task/t1","type":"Task"}`)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status with the Parameters' and Bundle's own members", strings.Replace(statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"parameter":[`, `"id":"st1","language":"en","parameter":[`, 1)), `"type":"searchset",`, `"type":"searchset","id":"b1","meta":{"lastUpdated":"2026-11-13T10:00:00Z","tag":[{"code":"x"}]},"timestamp":"2026-11-13T10:00:00Z","total":1,"link":[{"relation":"self","url":"https://ehr.example/fhir/Subscription/sub-1/$status"}],`, 1), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status history whose entry carries its own request and response", historyOf(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"fullUrl":"Parameters/3f1d",`, `{"fullUrl":"Parameters/3f1d","request":{"method":"GET","url":"Subscription/sub-1/$status"},"response":{"status":"200"},`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status reporting an error", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"name":"type","valueCode":"query-status"}`, `{"name":"type","valueCode":"query-status"},{"name":"error","valueCodeableConcept":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/subscription-error","code":"timeout"}],"text":"timed out"}}`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status counting events as a number", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"valueString":"3"},{"name":"notification-event"`, `"valueInteger":3},{"name":"notification-event"`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status naming its topic with a version", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"valueCanonical":"http://hl7.org/fhir/us/davinci-hrex/SubscriptionTopic/Task"`, `"valueCanonical":"http://hl7.org/fhir/us/davinci-hrex/SubscriptionTopic/Task|1.1.0"`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose subscription reference is typed", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"reference":"Subscription/sub-1"}`, `{"reference":"Subscription/sub-1","type":"Subscription"}`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose Bundle and meta carry their own members", strings.Replace(statusSearchset(statusAnswerEntry), `"type":"searchset",`, `"type":"searchset","id":"b1","meta":{"versionId":"1","lastUpdated":"2026-11-13T10:00:00Z","source":"#a","tag":[{"system":"http://x","code":"y","display":"z","userSelected":false}]},"timestamp":"2026-11-13T10:00:00Z","total":1,`, 1), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status whose focus is a Task, typed by canonical", statusSearchset(withFocus(`{"reference":"Task/t1","type":"http://hl7.org/fhir/StructureDefinition/Task"}`)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status history (before STU 1.1)", historyOf(statusAnswerEntry), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status, its status without a profile", historyOf(strings.Replace(statusAnswerEntry, `"meta":{"profile":["http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4"]},`, "", 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status, a versioned profile", historyOf(strings.Replace(statusAnswerEntry, `status-r4"]`, `status-r4|1.1.0"]`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
-		{"a $status naming the Subscription by its absolute address", statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"https://ehr.example/fhir/Subscription/sub-1"`, 1)), 0, []shnsdk.SubscriptionInteraction{status}},
+		{"a Subscription", answerSubscription, 1, every},
+		{"a Subscription after a byte order mark", "\xEF\xBB\xBF" + answerSubscription, 1, every},
+		{"a searchset after a byte order mark", "\xEF\xBB\xBF" + ss, 2, every},
+		{"no body", "", 0, every},
+		{"an OperationOutcome", answerOutcome, 0, every},
+		{"a searchset of Subscriptions", ss, 2, every},
+		{"a searchset with an outcome entry", searchset(entryOf(answerSubscription, "match"), entryOf(answerOutcome, "outcome")), 1, every},
+		{"an empty searchset", `{"resourceType":"Bundle","type":"searchset","total":0}`, 0, every},
+		{"a $status searchset (STU 1.1)", statusSearchset(statusAnswerEntry), 0, namingAnID},
+		{"a $status whose focus is a Task", statusSearchset(withFocus(`{"reference":"Task/t1"}`)), 0, namingAnID},
+		{"a $status whose focus is a Task version", statusSearchset(withFocus(`{"reference":"Task/t1/_history/2"}`)), 0, namingAnID},
+		{"a $status whose focus is a Task by its address", statusSearchset(withFocus(`{"reference":"https://ehr.example/fhir/Task/t1"}`)), 0, namingAnID},
+		{"a $status whose focus is a Task, typed", statusSearchset(withFocus(`{"reference":"Task/t1","type":"Task"}`)), 0, namingAnID},
+		{"a $status with the Parameters' and Bundle's own members", strings.Replace(statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"parameter":[`, `"id":"st1","language":"en","parameter":[`, 1)), `"type":"searchset",`, `"type":"searchset","id":"b1","meta":{"lastUpdated":"2026-11-13T10:00:00Z","tag":[{"code":"x"}]},"timestamp":"2026-11-13T10:00:00Z","total":1,"link":[{"relation":"self","url":"https://ehr.example/fhir/Subscription/sub-1/$status"}],`, 1), 0, namingAnID},
+		{"a $status history whose entry carries its own request and response", historyOf(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"fullUrl":"Parameters/3f1d",`, `{"fullUrl":"Parameters/3f1d","request":{"method":"GET","url":"Subscription/sub-1/$status"},"response":{"status":"200"},`, 1)), 0, namingAnID},
+		{"a $status reporting an error", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"name":"type","valueCode":"query-status"}`, `{"name":"type","valueCode":"query-status"},{"name":"error","valueCodeableConcept":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/subscription-error","code":"timeout"}],"text":"timed out"}}`, 1)), 0, namingAnID},
+		{"a $status counting events as a number", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"valueString":"3"},{"name":"notification-event"`, `"valueInteger":3},{"name":"notification-event"`, 1)), 0, namingAnID},
+		{"a $status naming its topic with a version", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `"valueCanonical":"http://hl7.org/fhir/us/davinci-hrex/SubscriptionTopic/Task"`, `"valueCanonical":"http://hl7.org/fhir/us/davinci-hrex/SubscriptionTopic/Task|1.1.0"`, 1)), 0, namingAnID},
+		{"a $status whose subscription reference is typed", statusSearchset(strings.Replace(withFocus(`{"reference":"Task/t1"}`), `{"reference":"Subscription/sub-1"}`, `{"reference":"Subscription/sub-1","type":"Subscription"}`, 1)), 0, namingAnID},
+		{"a $status whose Bundle and meta carry their own members", strings.Replace(statusSearchset(statusAnswerEntry), `"type":"searchset",`, `"type":"searchset","id":"b1","meta":{"versionId":"1","lastUpdated":"2026-11-13T10:00:00Z","source":"#a","tag":[{"system":"http://x","code":"y","display":"z","userSelected":false}]},"timestamp":"2026-11-13T10:00:00Z","total":1,`, 1), 0, namingAnID},
+		{"a $status whose focus is a Task, typed by canonical", statusSearchset(withFocus(`{"reference":"Task/t1","type":"http://hl7.org/fhir/StructureDefinition/Task"}`)), 0, namingAnID},
+		{"a $status history (before STU 1.1)", historyOf(statusAnswerEntry), 0, namingAnID},
+		{"a $status, its status without a profile", historyOf(strings.Replace(statusAnswerEntry, `"meta":{"profile":["http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4"]},`, "", 1)), 0, namingAnID},
+		{"a $status, a versioned profile", historyOf(strings.Replace(statusAnswerEntry, `status-r4"]`, `status-r4|1.1.0"]`, 1)), 0, namingAnID},
+		{"a $status naming the Subscription by its absolute address", statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"https://ehr.example/fhir/Subscription/sub-1"`, 1)), 0, namingAnID},
 	} {
 		for _, in := range every {
 			subs, r := AnswerSubscriptions([]byte(c.body), in, "sub-1", taskShape)
@@ -131,12 +139,13 @@ func TestCheckSubscribeAnswer_RefusesSmuggling(t *testing.T) {
 		body string
 	}{
 		{"a Patient on a read", read, patientJSON},
-		{"no body on a read", read, ""},
-		{"an OperationOutcome on a read", read, answerOutcome},
-		{"a searchset on a read", read, searchset(entryOf(answerSubscription, "match"))},
+		{"a $status Bundle naming another Subscription on a read", read, statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"Subscription/sub-2"`, 1))},
+		{"a $status Bundle holding a Patient on a vread", vread, historyOf(statusAnswerEntry, `{"resource":`+patientJSON+`}`)},
+		{"a $status history on a create", create, historyOf(statusAnswerEntry)},
 		{"not JSON on a create", create, `<Subscription xmlns="http://hl7.org/fhir"/>`},
 		{"an array on a read", read, `[` + answerSubscription + `]`},
-		{"a Subscription on a delete", del, answerSubscription},
+		{"a $status Bundle on a search", search, statusSearchset(statusAnswerEntry)},
+		{"a $status history on a page", page, historyOf(statusAnswerEntry)},
 		{"a Patient on a create", create, patientJSON},
 		{"an OperationOutcome with a contained resource on a create", create, strings.Replace(answerOutcome, `"issue"`, `"contained":[`+patientJSON+`],"issue"`, 1)},
 		{"an OperationOutcome with a contained resource on an update", update, strings.Replace(answerOutcome, `"issue"`, `"contained":[`+patientJSON+`],"issue"`, 1)},
@@ -161,9 +170,9 @@ func TestCheckSubscribeAnswer_RefusesSmuggling(t *testing.T) {
 		{"a Bundle with no type on a page", page, `{"resourceType":"Bundle","entry":[` + entryOf(answerSubscription, "match") + `]}`},
 		{"a status Bundle on a search (the cross-interaction smuggle)", search, statusSearchset(statusAnswerEntry)},
 		{"a status Bundle on a page", page, statusSearchset(statusAnswerEntry)},
-		{"a searchset of Subscriptions on a $status", status, searchset(entryOf(answerSubscription, "match"))},
+		{"a $status Bundle naming another Subscription on a delete", del, statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"Subscription/sub-2"`, 1))},
 		{"a collection Bundle on a $status", status, strings.Replace(statusSearchset(statusAnswerEntry), `"searchset"`, `"collection"`, 1)},
-		{"no entry on a $status", status, `{"resourceType":"Bundle","type":"searchset"}`},
+		{"a history Bundle with no entry on a $status", status, `{"resourceType":"Bundle","type":"history"}`},
 		{"two status entries", status, statusSearchset(statusAnswerEntry, statusAnswerEntry)},
 		{"a status naming another id", status, statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"Subscription/sub-2"`, 1))},
 		{"a status naming a version of the id", status, statusSearchset(strings.Replace(statusAnswerEntry, `"Subscription/sub-1"`, `"Subscription/sub-1/_history/2"`, 1))},

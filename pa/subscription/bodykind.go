@@ -91,6 +91,20 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // resource.
 var wideBOMs = [][]byte{{0x00, 0x00, 0xFE, 0xFF}, {0xFF, 0xFE, 0x00, 0x00}, {0xFE, 0xFF}, {0xFF, 0xFE}}
 
+// walk counts the bytes a reading of a body walks, pass by pass: each pass
+// over a body or a part of one adds what it walked, the standard library's
+// passes (a decoder's, a scan for a byte) by the bytes they are handed or
+// consume, this package's own loops by the bytes their index passes. A nil
+// walk counts nothing; only the test that bounds ClassifyBody's cost by
+// structure, never by a clock, passes one (TestClassifyBody_Bounds).
+type walk struct{ n int }
+
+func (w *walk) add(n int) {
+	if w != nil {
+		w.n += n
+	}
+}
+
 // ClassifyBody is the one structural reading of a body every check on a
 // subscribe leg shares, the error answer's, the 2xx answer's and the request's,
 // exported for every topic's lane. It reads the body after an optional UTF-8
@@ -144,6 +158,13 @@ var wideBOMs = [][]byte{{0x00, 0x00, 0xFE, 0xFF}, {0xFF, 0xFE, 0x00, 0x00}, {0xF
 // A body's media type is never read. Its cost is linear in its length, and
 // its nesting is bounded by the scanner's depth bound.
 func ClassifyBody(body []byte) (kind BodyKind, resourceType string, err error) {
+	return classifyBody(body, nil)
+}
+
+// classifyBody is ClassifyBody, counting in w the bytes its passes walk.
+func classifyBody(body []byte, w *walk) (BodyKind, string, error) {
+	// The byte order marks' and the NUL byte's pass, and the trim's.
+	w.add(2 * len(body))
 	for _, bom := range wideBOMs {
 		if bytes.HasPrefix(body, bom) {
 			return BodyFHIRJSON, "", ErrBodyUnreadable
@@ -162,11 +183,11 @@ func ClassifyBody(body []byte) (kind BodyKind, resourceType string, err error) {
 	case len(b) == 0:
 		return BodyEmpty, "", nil
 	case b[0] == '<':
-		x, err := readXML(b)
+		x, err := readXML(b, w)
 		switch {
 		case x.subset, x.encoding:
 			return BodyFHIRXML, "", ErrBodyUnreadable
-		case x.dtd && declaresFHIRNamespace(b):
+		case x.dtd && declaresFHIRNamespace(b, w):
 			// An external DTD can default an xmlns attribute onto an
 			// element for a reader that fetches it: beside a declaration of
 			// the FHIR namespace, what such a reader sees cannot be read one
@@ -181,12 +202,12 @@ func ClassifyBody(body []byte) (kind BodyKind, resourceType string, err error) {
 			return BodyFHIRXML, x.root, nil
 		case x.fhirBelow:
 			return BodyFHIRXML, "", nil
-		case x.hidden, err != nil && declaresFHIRNamespace(b):
+		case x.hidden, err != nil && declaresFHIRNamespace(b, w):
 			return BodyFHIRXML, "", ErrBodyUnreadable
 		}
 		return BodyNotFHIR, "", nil
 	}
-	return classifyJSON(b)
+	return classifyJSON(b, w)
 }
 
 // classifyJSON classifies b, a body that begins with neither '<' nor
@@ -213,23 +234,27 @@ func ClassifyBody(body []byte) (kind BodyKind, resourceType string, err error) {
 //     ("[error] upstream timed out").
 //
 // One decoder reads the run, and each value is scanned once, so its cost is
-// linear in b's length.
-func classifyJSON(b []byte) (BodyKind, string, error) {
+// linear in b's length (w counts it).
+func classifyJSON(b []byte, w *walk) (BodyKind, string, error) {
 	d := json.NewDecoder(bytes.NewReader(b))
 	kind, rt := BodyNotFHIR, ""
 	for first := true; ; first = false {
 		rest := bytes.TrimLeft(b[d.InputOffset():], " \t\r\n")
+		w.add(len(b) - int(d.InputOffset()) - len(rest))
 		if len(rest) == 0 {
 			return kind, rt, nil
 		}
 		start := len(b) - len(rest)
 		if d.Decode(&skipJSONValue{}) != nil {
-			if rest[0] == '{' || (rest[0] == '[' && nestsPastBound(rest)) {
+			// The decoder may have read the rest before it failed.
+			w.add(len(rest))
+			if rest[0] == '{' || (rest[0] == '[' && nestsPastBound(rest, w)) {
 				return BodyFHIRJSON, "", ErrBodyUnreadable
 			}
 			return kind, rt, nil
 		}
-		vk, vrt, err := classifyJSONValue(b[start:d.InputOffset()])
+		w.add(int(d.InputOffset()) - start)
+		vk, vrt, err := classifyJSONValue(b[start:d.InputOffset()], w)
 		switch {
 		case err != nil, vk == BodyFHIRJSON && !first:
 			return BodyFHIRJSON, "", ErrBodyUnreadable
@@ -253,19 +278,20 @@ func (*skipJSONValue) UnmarshalJSON([]byte) error { return nil }
 // is not FHIR; and a value this network cannot read one way only (a repeated
 // member name, bytes that are not UTF-8, nesting past the depth bound) is
 // ErrBodyUnreadable.
-func classifyJSONValue(raw []byte) (BodyKind, string, error) {
+func classifyJSONValue(raw []byte, w *walk) (BodyKind, string, error) {
 	if raw[0] != '{' && raw[0] != '[' {
 		return BodyNotFHIR, "", nil
 	}
-	root, err := scanDecodedJSON(raw)
+	root, err := scanDecodedJSON(raw, w)
 	if err != nil {
 		return BodyFHIRJSON, "", ErrBodyUnreadable
 	}
+	w.add(len(root.members))
 	if rt := root.memberFolded("resourceType"); rt != nil {
 		s, _ := rt.stringOf()
 		return BodyFHIRJSON, s, nil
 	}
-	if holdsResource(root, true) {
+	if holdsResourceWalked(root, true, w) {
 		return BodyFHIRJSON, "", nil
 	}
 	return BodyNotFHIR, "", nil
@@ -305,9 +331,10 @@ func jsonValueThenMore(body []byte) bool {
 // nestsPastBound reports whether b, read as JSON text, nests arrays and
 // objects past the depth bound anywhere: brackets and braces outside strings
 // are counted, a string's escapes skipped. It reads b once.
-func nestsPastBound(b []byte) bool {
-	depth, inString := 0, false
-	for i := 0; i < len(b); i++ {
+func nestsPastBound(b []byte, w *walk) bool {
+	depth, inString, i := 0, false, 0
+	defer func() { w.add(i) }()
+	for ; i < len(b); i++ {
 		c := b[i]
 		switch {
 		case inString && c == '\\':
@@ -371,19 +398,24 @@ func namedXMLNS(e xml.StartElement) bool { return e.Name.Local == "xmlns" && e.N
 // read without fetching it, which may put an element in the FHIR namespace
 // for a reader that does: ClassifyBody refuses it beside a declaration of
 // that namespace alone.
-func knownDTD(d []byte) bool {
+func knownDTD(d []byte, w *walk) bool {
+	w.add(len(d)) // Fields' pass
 	f := bytes.Fields(d)
 	if len(f) < 3 {
 		return true
 	}
 	var quoted [][]byte
-	for rest := d; ; {
+	rest := d
+	defer func() { w.add(len(d) - len(rest)) }()
+	for {
 		i := bytes.IndexAny(rest, `"'`)
 		if i < 0 {
+			rest = nil
 			break
 		}
 		j := bytes.IndexByte(rest[i+1:], rest[i])
 		if j < 0 {
+			rest = nil
 			return false
 		}
 		quoted, rest = append(quoted, rest[i+1:i+1+j]), rest[i+2+j:]
@@ -410,12 +442,15 @@ func w3cSystemID(s string) bool {
 // (a Shift_JIS character's trail byte may read as "[", and a system id may
 // name one). A literal that is not closed cannot be read, and is taken for
 // a subset.
-func internalSubset(d []byte) bool {
-	for i := 0; i < len(d); i++ {
+func internalSubset(d []byte, w *walk) bool {
+	i := 0
+	defer func() { w.add(i) }()
+	for ; i < len(d); i++ {
 		switch c := d[i]; c {
 		case '"', '\'':
 			j := bytes.IndexByte(d[i+1:], c)
 			if j < 0 {
+				i = len(d)
 				return true
 			}
 			i += j + 1
@@ -453,10 +488,23 @@ func repeatsAttribute(e xml.StartElement) bool {
 // HTML and XHTML ones is noted (dtd) and read past; and an element that
 // names an attribute twice is an error (repeatsAttribute). An error after a
 // root in the FHIR namespace is the document's.
-func readXML(b []byte) (xmlBody, error) {
+//
+// w counts each token's bytes, and the whole rest of the document when a
+// token cannot be read, since the decoder may have read it.
+func readXML(b []byte, w *walk) (xmlBody, error) {
 	var x xmlBody
 	d := xml.NewDecoder(bytes.NewReader(b))
 	d.Strict = true
+	token := func() (xml.Token, error) {
+		before := d.InputOffset()
+		tok, err := d.Token()
+		if err != nil {
+			w.add(len(b) - int(before))
+		} else {
+			w.add(int(d.InputOffset() - before))
+		}
+		return tok, err
+	}
 	// A declared encoding is read only when the registry names it, each
 	// one reading ASCII as ASCII, so the document's markup is where its
 	// bytes show it; any other (UTF-7, EBCDIC, ISO-2022-JP, a label no
@@ -478,14 +526,16 @@ func readXML(b []byte) (xmlBody, error) {
 	// inside), which another reader may read as elements, and that declares
 	// the FHIR namespace.
 	markup := func(before int64) {
-		if raw := b[before:d.InputOffset()]; len(raw) > 1 && raw[0] == '<' && bytes.IndexByte(raw[1:], '<') >= 0 && declaresFHIRNamespace(raw) {
+		raw := b[before:d.InputOffset()]
+		w.add(len(raw))
+		if len(raw) > 1 && raw[0] == '<' && bytes.IndexByte(raw[1:], '<') >= 0 && declaresFHIRNamespace(raw, w) {
 			x.hidden = true
 		}
 	}
 prolog:
 	for {
 		before := d.InputOffset()
-		tok, err := d.Token()
+		tok, err := token()
 		if err != nil {
 			return x, err
 		}
@@ -495,8 +545,9 @@ prolog:
 				return x, errors.New("text before the root")
 			}
 		case xml.Directive:
+			w.add(len(t))
 			if f := bytes.Fields(t); len(f) > 0 && strings.EqualFold(string(f[0]), "DOCTYPE") {
-				if internalSubset(t) {
+				if internalSubset(t, w) {
 					x.subset = true
 					return x, errors.New("a DOCTYPE with an internal subset")
 				}
@@ -505,7 +556,7 @@ prolog:
 				// HTML and XHTML DTDs, which declare no FHIR namespace, is
 				// noted, and refuses the document beside a declaration of
 				// that namespace alone (ClassifyBody).
-				if !knownDTD(t) {
+				if !knownDTD(t, w) {
 					x.dtd = true
 				}
 			}
@@ -526,7 +577,7 @@ prolog:
 				// namespace and markup naming it.
 				for {
 					before := d.InputOffset()
-					tok, err := d.Token()
+					tok, err := token()
 					if err == io.EOF {
 						return x, nil
 					}
@@ -559,7 +610,7 @@ prolog:
 	var path []string
 	types := 0
 	for depth := 1; depth > 0; {
-		tok, err := d.Token()
+		tok, err := token()
 		if err != nil {
 			return x, err
 		}
@@ -605,7 +656,7 @@ prolog:
 		}
 	}
 	for {
-		tok, err := d.Token()
+		tok, err := token()
 		if err == io.EOF {
 			return x, nil
 		}
@@ -644,14 +695,16 @@ func xmlHoldsResource(x xmlBody) bool { return x.resource }
 // (&lt;Patient xmlns=…&gt;), is in no tag by either reading, and declares
 // nothing. A value is quoted or not; it is read only while it still matches
 // the namespace, so b is read in time linear in its length.
-func declaresFHIRNamespace(b []byte) bool {
+func declaresFHIRNamespace(b []byte, w *walk) bool {
 	const name = "xmlns"
 	var (
 		inTag   = false // in a tag ...
 		afterEq = false // ... after "=", awaiting a value
 		quote   byte    // ... inside a value quoted with quote
+		i       = 0
 	)
-	for i := 0; i < len(b); i++ {
+	defer func() { w.add(i) }()
+	for ; i < len(b); i++ {
 		c := b[i]
 		if !inTag && c == '<' && i+1 < len(b) && isNameStart(b[i+1]) {
 			inTag, afterEq, quote = true, false, 0
@@ -673,7 +726,7 @@ func declaresFHIRNamespace(b []byte) bool {
 				afterEq = false
 			}
 		}
-		if inTag && c == 'x' && bytes.HasPrefix(b[i:], []byte(name)) && (i == 0 || !isNameChar(b[i-1])) && namespaceDeclared(b, i+len(name)) {
+		if inTag && c == 'x' && bytes.HasPrefix(b[i:], []byte(name)) && (i == 0 || !isNameChar(b[i-1])) && namespaceDeclared(b, i+len(name), w) {
 			return true
 		}
 	}
@@ -683,7 +736,9 @@ func declaresFHIRNamespace(b []byte) bool {
 // namespaceDeclared reports whether what follows an attribute named xmlns at
 // k in b (an optional ":<prefix>", "=", and a value, quoted or not, with
 // whitespace around "=") is a value that reads as exactly the FHIR namespace.
-func namespaceDeclared(b []byte, k int) bool {
+func namespaceDeclared(b []byte, k int, w *walk) bool {
+	k0 := k
+	defer func() { w.add(k - k0) }()
 	if k < len(b) && b[k] == ':' {
 		for k++; k < len(b) && isNameChar(b[k]); k++ {
 		}
@@ -710,7 +765,7 @@ func namespaceDeclared(b []byte, k int) bool {
 		}
 		r, next := rune(b[k]), k+1
 		if b[k] == '&' {
-			if ref, end, ok := decodeReference(b, k); ok {
+			if ref, end, ok := decodeReference(b, k, w); ok {
 				r, next = ref, end
 			}
 		}
@@ -726,8 +781,9 @@ func namespaceDeclared(b []byte, k int) bool {
 // numeric reference's leading zeros are skipped however many; a reference
 // that names no character is not one (ok false). It reads only the
 // reference's own bytes.
-func decodeReference(b []byte, k int) (rune, int, bool) {
+func decodeReference(b []byte, k int, w *walk) (rune, int, bool) {
 	j := k + 1
+	defer func() { w.add(j - k) }()
 	if j < len(b) && b[j] == '#' {
 		j++
 		base := 10

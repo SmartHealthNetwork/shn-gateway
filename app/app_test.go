@@ -49,7 +49,7 @@ func env(m map[string]string) func(string) string {
 
 // No validator URL + no fake opt-in ⇒ error (FR-36 fail-closed) at every level
 // that checks; the refusal names both remedies, a validator or the level that
-// checks nothing. The unset default is none (D116), which checks nothing, so it
+// checks nothing. The unset default is none, which checks nothing, so it
 // is not among them (TestSelectValidator_NoneNeedsNoValidator).
 func TestSelectValidator_FailsClosed(t *testing.T) {
 	for _, level := range []engine.ConformanceEnforcement{engine.EnforcementObserve, engine.EnforcementStructural, engine.EnforcementStrict} {
@@ -251,7 +251,7 @@ func TestLoadConfigConformanceEnforcement(t *testing.T) {
 		env  string
 		want engine.ConformanceEnforcement
 	}{
-		// THE default: absent means none (D116). No payload check runs and
+		// THE default: absent means none. No payload check runs and
 		// nothing is recorded; a participant opts in to observe, structural or
 		// strict. Every SHN gateway pins its level explicitly instead
 		// (the platform invariant suite's TestInvariant_EveryGateRunsStrict and
@@ -732,9 +732,9 @@ func TestResolveDiscovery_ResolvesTrustPlanes(t *testing.T) {
 	}
 }
 
-// Whether the network's Hub reads the involved list is read from the
-// descriptor's hubAccepts: listed means on; absent, or another field only,
-// means off.
+// Whether the network's Hub reads the involved list, and a gateway's summary
+// of it, is read from the descriptor's hubAccepts, each field on its own:
+// listed means on; absent, or another field only, means off.
 func TestResolveDiscovery_HubAcceptsInvolved(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyBody := fmt.Sprintf(`{"pubkey":%q}`, base64.StdEncoding.EncodeToString(pub))
@@ -743,12 +743,15 @@ func TestResolveDiscovery_HubAcceptsInvolved(t *testing.T) {
 	}))
 	defer keys.Close()
 	for _, tc := range []struct {
-		hubAccepts string
-		want       bool
+		hubAccepts  string
+		want        bool
+		wantSummary bool
 	}{
-		{`,"hubAccepts":["involved"]`, true},
-		{``, false},
-		{`,"hubAccepts":["somethingElse"]`, false},
+		{`,"hubAccepts":["involved"]`, true, false},
+		{`,"hubAccepts":["involved","involved-summary"]`, true, true},
+		{`,"hubAccepts":["involved-summary"]`, false, true},
+		{``, false, false},
+		{`,"hubAccepts":["somethingElse"]`, false, false},
 	} {
 		disc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{`+acceptingWire+`"authzPublicKeyURL":%q,"hubTransportKeyURL":%q%s}`, keys.URL, keys.URL, tc.hubAccepts)
@@ -758,8 +761,9 @@ func TestResolveDiscovery_HubAcceptsInvolved(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveDiscovery: %v", err)
 		}
-		if ep.HubAcceptsInvolved != tc.want {
-			t.Fatalf("hubAccepts %q: HubAcceptsInvolved = %v, want %v", tc.hubAccepts, ep.HubAcceptsInvolved, tc.want)
+		if ep.HubAcceptsInvolved != tc.want || ep.HubAcceptsInvolvedSummary != tc.wantSummary {
+			t.Fatalf("hubAccepts %q: HubAcceptsInvolved = %v, HubAcceptsInvolvedSummary = %v, want %v and %v",
+				tc.hubAccepts, ep.HubAcceptsInvolved, ep.HubAcceptsInvolvedSummary, tc.want, tc.wantSummary)
 		}
 	}
 }

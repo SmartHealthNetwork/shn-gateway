@@ -16,7 +16,7 @@ import (
 )
 
 // The PAS profiles a payer's answer that declares none is judged against at
-// structural and strict (owner decision D47), without a version.
+// structural and strict, without a version.
 const (
 	pasResponseBundleProfile = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle"
 	pasClaimResponseProfile  = "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"

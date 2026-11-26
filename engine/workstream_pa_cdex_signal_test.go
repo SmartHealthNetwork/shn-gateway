@@ -271,8 +271,8 @@ func TestDeliveryHeaders(t *testing.T) {
 }
 
 // A request frame carries a notification's sealed endpoint and headers and
-// the notifier's stated base on a signal leg, the interaction and If-Match on
-// a subscribe leg alone, and the stated base on no other leg's request: a
+// the notifier's stated base on a signal leg, the interaction, If-Match and
+// Prefer on a subscribe leg alone, and the stated base on no other leg's request: a
 // frame naming one where the leg defines none is refused 400.
 func TestInboundFrameSubscription_TheSignalLegsHeaders(t *testing.T) {
 	frame := func(h map[string]string) []byte {
@@ -295,6 +295,8 @@ func TestInboundFrameSubscription_TheSignalLegsHeaders(t *testing.T) {
 		"a stated base on another leg":                 {"pas-claim", map[string]string{shnsdk.FrameHeaderStatedBase: "https://p.example/fhir"}},
 		"an interaction on the signal leg":             {legCDexTaskSignal, map[string]string{shnsdk.FrameHeaderSubscriptionRequest: "GET Subscription/s1"}},
 		"an If-Match on the signal leg":                {legCDexTaskSignal, map[string]string{shnsdk.FrameHeaderIfMatch: `W/"1"`}},
+		"a Prefer on the signal leg":                   {legCDexTaskSignal, map[string]string{shnsdk.FrameHeaderPrefer: "return=minimal"}},
+		"a Prefer on another leg":                      {"pas-claim", map[string]string{shnsdk.FrameHeaderPrefer: "return=minimal"}},
 		"a sealed endpoint on another leg":             {"pas-claim", map[string]string{shnsdk.FrameHeaderSubscriptionEndpoint: "e"}},
 	} {
 		if _, status, _ := inboundFrameSubscription(row.leg, frame(row.h)); status != http.StatusBadRequest {
@@ -303,7 +305,7 @@ func TestInboundFrameSubscription_TheSignalLegsHeaders(t *testing.T) {
 	}
 	// The subscribe leg keeps its own headers.
 	if _, status, _ := inboundFrameSubscription(legCDexTaskSubscribe, frame(map[string]string{shnsdk.FrameHeaderSubscriptionRequest: "GET Subscription/s1",
-		shnsdk.FrameHeaderSubscriptionEndpoint: "e", shnsdk.FrameHeaderIfMatch: `W/"1"`})); status != 0 {
+		shnsdk.FrameHeaderSubscriptionEndpoint: "e", shnsdk.FrameHeaderIfMatch: `W/"1"`, shnsdk.FrameHeaderPrefer: "return=minimal"})); status != 0 {
 		t.Fatalf("subscribe frame refused %d", status)
 	}
 }
@@ -514,7 +516,7 @@ func TestCDexSignal_ThePayersGatewaysChecks(t *testing.T) {
 			"another notifier's sealed values": {sealedAs("provider-y", payerEndpoint, []string{"Authorization: Bearer payer-secret"}), event, nil, http.StatusForbidden, RefusalAuthority, ""},
 			// A value another payer's gateway sealed, or this gateway sealed for
 			// another payer, opens for no one else: an address naming it that
-			// reached this payer is refused, never delivered (§7.2). The first
+			// reached this payer is refused, never delivered. The first
 			// is refused on its key id, which is not this gateway's; the second
 			// under this gateway's own key, on the seal's binding.
 			"another payer's sealed values":                        {sealedFor(foreignKeys(t), "payer-y"), event, nil, http.StatusForbidden, RefusalAuthority, ""},

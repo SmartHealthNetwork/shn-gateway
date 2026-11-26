@@ -11,7 +11,7 @@ import (
 	shnsdk "github.com/SmartHealthNetwork/shn-sdk"
 )
 
-// The PAS per-payer base on a provider gateway's Da Vinci ingress (D132):
+// The PAS per-payer base on a provider gateway's Da Vinci ingress:
 // [ingress base]/pas/payer/{payer} (pasroute.Base), at which the provider's
 // system sends Claim/$submit and Claim/$inquire for that payer, and discovers
 // this gateway's token endpoint (SMART App Launch has every FHIR base serve

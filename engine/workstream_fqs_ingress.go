@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -46,7 +47,7 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 	// (cdexTaskQuery), so consent is checked for the patient it discloses
 	// for. A Task that reads as no data request for one patient's named
 	// documents is refused here as the facility would refuse it: the network
-	// cannot check consent for a patient it cannot identify (D121), nor carry
+	// cannot check consent for a patient it cannot identify, nor carry
 	// a query its scope does not admit.
 	// Every member is read by its exact name: a Task a FHIR reader would read
 	// another way (a member repeated, or named only in another case) is not
@@ -78,7 +79,13 @@ func (g *Gateway) handleFederatedQueryIngress(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "federated query rejected: " + err.Error()})
 		return
 	}
-	pci, found, readErr := g.resolveSubjectPCI(r.Context(), member, task)
+	// A Task.for that names its Patient by an id that is not a FHIR id binds as
+	// written: whether to refuse it is the participant's conformance choice.
+	if _, conforms := taskForRead(task); !conforms && g.guard(r.Context(), KindContent, RuleRequestShape, task) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msgFederatedQueryPatientIDNotFHIRID})
+		return
+	}
+	pci, found, readErr := g.fqsIngressSubject(r.Context(), member, task)
 	if readErr != nil {
 		status, msg := subjectBindingFailure(r.Context(), readErr)
 		writeJSON(w, status, map[string]string{"error": msg})
@@ -275,4 +282,40 @@ func federatedAnswerOtherPatient(answer []byte, member string) string {
 		return err.Error()
 	}
 	return ""
+}
+
+// fqsSubjectResource is a federated-query Task's subject resource: the Patient the Task
+// contains that its Task.for names by "#<id>". A Task.for naming "Patient/<id>", the usual
+// form, names a Patient the Task does not carry: none.
+func fqsSubjectResource(task []byte) []byte {
+	var view struct {
+		For struct {
+			Reference string `json:"reference"`
+		} `json:"for"`
+		Contained []any `json:"contained"`
+	}
+	if json.Unmarshal(task, &view) != nil || len(view.For.Reference) < 2 || view.For.Reference[0] != '#' {
+		return nil
+	}
+	id := view.For.Reference[1:]
+	var found []map[string]any
+	for _, c := range containedObjects(view.Contained) {
+		if cid, _ := c["id"].(string); cid == id {
+			found = append(found, c)
+		}
+	}
+	if len(found) != 1 || found[0]["resourceType"] != "Patient" {
+		return nil
+	}
+	raw, err := json.Marshal(found[0])
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// fqsIngressSubject binds a federated-query Task's member on the requester's gateway from
+// its subject resource (fqsSubjectResource).
+func (g *Gateway) fqsIngressSubject(ctx context.Context, member string, task []byte) (pci string, found bool, readErr error) {
+	return g.resolveSubjectPCIFrom(ctx, member, task, fqsSubjectResource(task))
 }

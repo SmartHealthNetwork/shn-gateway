@@ -5,7 +5,8 @@ package engine
 // workstream_pa_cdex_request_test.go — the provider gateway's side of the
 // payer's attachment-request Task: with no Task endpoint configured for
 // the provider's own system and no module 1, the leg is refused as routing
-// (D120), at every conformance level, and never declared.
+// (on-behalf building is off unless the participant enables it), at every
+// conformance level, and never declared.
 
 import (
 	"bytes"

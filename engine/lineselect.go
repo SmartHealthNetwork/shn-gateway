@@ -275,6 +275,14 @@ func (g *Gateway) relayOriginationError(w http.ResponseWriter, err error) bool {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
 		return true
 	}
+	// The recipient's registered encryption key cannot be sealed to: refused
+	// on authentication, nothing sent. The answer states the rule and no
+	// cryptographic detail; the record's reason names the cause.
+	if errors.Is(err, errRecipientKeyNotUsable) {
+		exchangeOfWriter(w).refusedFor(RefusalAuthentication, reasonRecipientKeyNotUsable)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": msgRecipientKeyNotUsable, "rule": RefusalAuthentication})
+		return true
+	}
 	// The member's Coverage records do not name one payer: no one recipient
 	// to ask (memberRoutingCoverage).
 	if errors.Is(err, errAmbiguousCoverage) {
